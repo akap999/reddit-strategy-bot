@@ -27,6 +27,12 @@ from generators.comment_gen import CommentGenerator
 app = Flask(__name__)
 app.secret_key = SECRET_KEY or os.urandom(32)
 
+# --- Proxy / HTTPS support (Railway, Render, etc.) ---
+# Flask needs to know it's behind a reverse proxy serving HTTPS
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.config['PREFERRED_URL_SCHEME'] = 'https'
+
 # --- Session security ---
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'

@@ -630,7 +630,13 @@ Return JSON only:
         for attempt in range(max_retries):
             try:
                 clean_url = post_url.split("?")[0].rstrip("/")
-                json_url = f"{clean_url}.json"
+                # Route through proxy if reddit_base is set
+                if self.reddit_base and self.reddit_base != "https://www.reddit.com":
+                    from urllib.parse import urlparse
+                    parsed = urlparse(clean_url)
+                    json_url = f"{self.reddit_base}{parsed.path}.json"
+                else:
+                    json_url = f"{clean_url}.json"
 
                 response = requests.get(json_url, headers=self.headers, timeout=30)
 

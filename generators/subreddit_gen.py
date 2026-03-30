@@ -93,19 +93,44 @@ Return JSON only:
     ]
 }}"""
 
-        result = self.claude.call(prompt, max_tokens=1024, temperature=0.8)
-        if not result or "suggestions" not in result:
-            return []
+        # Generate extra names so we can filter to only available ones
+        generate_count = count * 2
+        prompt = prompt.replace(f"Generate {count} subreddit", f"Generate {generate_count} subreddit")
 
-        suggestions = result["suggestions"][:count]
+        available = []
+        seen_names = set()
+        max_rounds = 2
 
-        # Check availability for each suggestion
-        print("    Checking subreddit availability...")
-        for s in suggestions:
-            s["available"] = self.check_availability(s["name"])
-            time.sleep(0.5)  # Rate limit Reddit requests
+        for round_num in range(max_rounds):
+            if len(available) >= count:
+                break
 
-        return suggestions
+            if round_num > 0:
+                # Second round: ask for more, excluding already seen names
+                exclude_list = ", ".join(seen_names)
+                prompt_retry = prompt + f"\n\nDo NOT suggest any of these names (already tried): {exclude_list}"
+                result = self.claude.call(prompt_retry, max_tokens=1024, temperature=0.9)
+            else:
+                result = self.claude.call(prompt, max_tokens=1024, temperature=0.8)
+
+            if not result or "suggestions" not in result:
+                continue
+
+            candidates = result["suggestions"][:generate_count]
+
+            print(f"    Checking subreddit availability (round {round_num + 1}, {len(candidates)} candidates)...")
+            for s in candidates:
+                if s["name"] in seen_names:
+                    continue
+                seen_names.add(s["name"])
+                s["available"] = self.check_availability(s["name"])
+                time.sleep(0.5)
+                if s["available"] is True:
+                    available.append(s)
+                    if len(available) >= count:
+                        break
+
+        return available[:count]
 
     def generate_subreddit_info(self, name, domain):
         """Generate all metadata needed for creating a subreddit.

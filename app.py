@@ -905,7 +905,7 @@ def api_gen_subreddit_names():
         try:
             names = data.get("brand_names", [])
             contexts = data.get("brand_contexts", [])
-            count = data.get("count", 8)
+            count = data.get("count", 5)
             return sub_gen.generate_names(names, contexts, count)
         finally:
             db.close()
@@ -1317,6 +1317,81 @@ def api_export_brand(name):
 # Live Search — Search, Save, Generate, Manage
 # ---------------------------------------------------------------------------
 
+@app.route("/api/search/suggest-subreddits", methods=["POST"])
+def api_suggest_subreddits():
+    """Suggest active subreddits for a keyword/brand using Claude."""
+    data = request.json or {}
+    keyword = data.get("keyword", "").strip()
+    brand_name = data.get("brand_name", "").strip()
+    if not keyword and not brand_name:
+        return jsonify({"error": "keyword or brand_name required"}), 400
+
+    def task():
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = f"Suggest 5 active Reddit subreddits where someone could find posts related to: {keyword or brand_name}."
+        if brand_name:
+            prompt += f" The brand is '{brand_name}'."
+        prompt += "\nReturn ONLY a JSON array of objects with 'name' (without r/) and 'reason' (1 sentence why). No other text."
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip()
+        # Extract JSON from response
+        import re
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            suggestions = json.loads(match.group())
+        else:
+            suggestions = json.loads(text)
+        # Check availability via Reddit
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        for s in suggestions:
+            try:
+                r = _reddit_get(f"/r/{s['name']}/about.json")
+                if r.status_code == 200:
+                    data_r = r.json().get("data", {})
+                    s["subscribers"] = data_r.get("subscribers", 0)
+                    s["active"] = True
+                else:
+                    s["active"] = False
+                    s["subscribers"] = 0
+            except Exception:
+                s["active"] = None
+                s["subscribers"] = 0
+        return suggestions
+
+    tid = start_task("suggest-subreddits", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/search/check-subreddit", methods=["GET"])
+def api_check_subreddit():
+    """Check if a subreddit exists and is active on Reddit."""
+    name = request.args.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    try:
+        r = _reddit_get(f"/r/{name}/about.json")
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            return jsonify({
+                "exists": True,
+                "name": data.get("display_name", name),
+                "subscribers": data.get("subscribers", 0),
+                "active_accounts": data.get("accounts_active", 0),
+                "description": (data.get("public_description", "") or "")[:200],
+            })
+        return jsonify({"exists": False})
+    except Exception as e:
+        return jsonify({"exists": None, "error": str(e)})
+
+
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
     """Run a Reddit keyword search via RedditSearchBot (background task)."""
@@ -1333,11 +1408,15 @@ def api_search_reddit():
             keyword=keyword,
             subreddit=data.get("subreddit"),
             subreddits=data.get("subreddits"),
+            excluded_subreddits=data.get("excluded_subreddits"),
             min_comments=data.get("min_comments", 0),
             min_score=data.get("min_score", 0),
             max_days_old=data.get("max_days_old"),
             sort_by=data.get("sort_by", "relevance"),
+            sort_order=data.get("sort_order", "desc"),
             limit=min(data.get("limit", 50), 200),
+            nsfw=data.get("nsfw"),
+            min_upvote_ratio=data.get("min_upvote_ratio"),
         )
         return results
 
@@ -1443,7 +1522,7 @@ def api_generate_search_comments(pid):
     brand_name = brand["name"]
     brand_context = brand["context"]
     brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
-    num_comments = data.get("num_comments", 3)
+    num_comments = data.get("num_comments", 2)
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -1461,9 +1540,9 @@ def api_generate_search_comments(pid):
             if is_archived:
                 db2.update_search_post_status(pid, "saved")
                 raise ValueError("Post is archived — cannot comment")
-            if len(comments) < 3:
+            if len(comments) < 1:
                 db2.update_search_post_status(pid, "saved")
-                raise ValueError(f"Not enough comments ({len(comments)}) — need at least 3")
+                raise ValueError(f"No comments found on this post — cannot analyze tone/context")
 
             comment_stats = bot._compute_comment_stats(comments)
 
@@ -1590,16 +1669,40 @@ def api_delete_search_comment(cid):
 
 @app.route("/api/search/brands")
 def api_search_brands():
-    """List all brands across all subreddits for the search feature."""
+    """List all brands (including standalone) for the search feature."""
     db = get_db()
     try:
         rows = db.conn.execute("""
             SELECT b.*, s.name as subreddit_name
             FROM brands b
-            JOIN subreddits s ON b.subreddit_id = s.id
+            LEFT JOIN subreddits s ON b.subreddit_id = s.id
             ORDER BY b.name
         """).fetchall()
         return jsonify([dict(r) for r in rows])
+    finally:
+        db.close()
+
+
+@app.route("/api/search/brands", methods=["POST"])
+def api_create_standalone_brand():
+    """Create a brand without requiring a subreddit."""
+    db = get_db()
+    try:
+        data = request.json or {}
+        name = data.get("name", "").strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        context = data.get("context", "").strip() or name
+        domain_url = data.get("domain_url", "").strip()
+        keywords = json.dumps(data.get("keywords", []))
+        cur = db.conn.execute(
+            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords) VALUES (NULL, ?, ?, ?, ?)",
+            (name, domain_url, context, keywords)
+        )
+        db.conn.commit()
+        return jsonify({"id": cur.lastrowid, "name": name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
     finally:
         db.close()
 

@@ -271,7 +271,6 @@ async function showSubredditDetail(id) {
         <tr>
             <td class="font-medium">${b.name}</td>
             <td class="text-gray-400">${b.domain_url || '-'}</td>
-            <td class="text-gray-400 text-xs">${(b.context || '').substring(0, 80)}${b.context?.length > 80 ? '...' : ''}</td>
         </tr>
     `).join('');
 
@@ -311,7 +310,7 @@ async function showSubredditDetail(id) {
         ${rules.length ? `<div class="mb-4"><h4 class="text-sm font-bold text-gray-300 mb-2">Rules</h4><ol class="text-xs text-gray-400 list-decimal pl-4">${rulesHtml}</ol></div>` : ''}
 
         <h4 class="text-sm font-bold text-gray-300 mb-2">Brands (${brands.length})</h4>
-        ${brands.length ? `<table class="mb-4"><thead><tr><th>Name</th><th>Domain</th><th>Context</th></tr></thead><tbody>${brandRows}</tbody></table>` : '<p class="text-xs text-gray-500 mb-4">No brands yet.</p>'}
+        ${brands.length ? `<table class="mb-4"><thead><tr><th>Name</th><th>Domain</th></tr></thead><tbody>${brandRows}</tbody></table>` : '<p class="text-xs text-gray-500 mb-4">No brands yet.</p>'}
 
         <div class="flex gap-2">
             <button class="btn btn-primary btn-sm" onclick="closeModal();showAddBrandModal(${id})">+ Add Brand</button>
@@ -680,7 +679,7 @@ async function wizardStep2() {
     try {
         const { task_id } = await api('/api/generate/subreddit-names', {
             method: 'POST',
-            body: { brand_names: brandNames, brand_contexts: brandContexts, count: 8 }
+            body: { brand_names: brandNames, brand_contexts: brandContexts, count: 5 }
         });
 
         const poll = setInterval(async () => {
@@ -715,16 +714,40 @@ function renderWizardStep2() {
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Create Subreddit - Step 2</h3>
-        <p class="text-sm text-gray-400 mb-3">Select a name:</p>
+        <div class="flex justify-between items-center mb-3">
+            <p class="text-sm text-gray-400">Select an available name:</p>
+            <button class="btn btn-sm btn-secondary" onclick="wizardStep2()">Refresh Suggestions</button>
+        </div>
         <div class="space-y-1 mb-4 max-h-80 overflow-y-auto">${rows}</div>
-        <p class="text-xs text-gray-500 mb-3">Or enter custom name:</p>
-        <input id="wiz-custom-name" placeholder="CustomSubredditName">
+        <p class="text-xs text-gray-500 mb-2">Or enter custom name:</p>
+        <div class="flex gap-2 items-center">
+            <input id="wiz-custom-name" placeholder="CustomSubredditName" class="flex-1">
+            <button class="btn btn-sm btn-secondary" onclick="wizCheckCustomName()">Check</button>
+        </div>
+        <div id="wiz-custom-check" class="text-xs mt-1"></div>
         <div class="flex gap-2 mt-5">
             <button class="btn btn-primary" onclick="wizardStep3()">Generate Info</button>
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         </div>
     `);
     wizardState.selectedIdx = 0;
+}
+
+async function wizCheckCustomName() {
+    const name = document.getElementById('wiz-custom-name').value.trim();
+    if (!name) { toast('Enter a subreddit name', 'error'); return; }
+    const el = document.getElementById('wiz-custom-check');
+    el.innerHTML = '<span class="text-gray-400">Checking...</span>';
+    try {
+        const res = await api(`/api/search/check-subreddit?name=${encodeURIComponent(name)}`);
+        if (res.exists) {
+            el.innerHTML = `<span class="text-red-400">r/${res.name} is taken (${(res.subscribers||0).toLocaleString()} subscribers)</span>`;
+        } else if (res.exists === false) {
+            el.innerHTML = '<span class="text-green-400">Available!</span>';
+        } else {
+            el.innerHTML = '<span class="text-yellow-400">Could not verify — try again</span>';
+        }
+    } catch(e) { el.innerHTML = '<span class="text-red-400">Check failed</span>'; }
 }
 
 function wizardSelectName(idx) {
@@ -2524,6 +2547,8 @@ async function renderAccounts(el) {
             <div class="flex gap-2">
                 <button class="btn btn-primary" onclick="showAddAccountModal()">+ Add Account</button>
                 <button class="btn btn-secondary" onclick="showImportAccountsCsvModal()">Import CSV</button>
+                <button class="btn btn-secondary" onclick="refreshAllAccounts()">Refresh All</button>
+                <button class="btn btn-danger" onclick="deleteAllAccounts()">Delete All</button>
             </div>
         </div>
         <div class="flex gap-3 items-end mb-4 flex-wrap">
@@ -2797,6 +2822,45 @@ async function deleteAccountConfirm(username) {
     if (!confirm(`Delete account u/${username}? Existing comment assignments will be preserved.`)) return;
     await api(`/api/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
     toast(`Deleted u/${username}`, 'success');
+    renderAccounts(document.getElementById('app'));
+}
+
+async function refreshAllAccounts() {
+    if (!_accountsData.length) { toast('No accounts to refresh', 'error'); return; }
+    if (!confirm(`Refresh all ${_accountsData.length} accounts? This may take a while.`)) return;
+    toast(`Refreshing ${_accountsData.length} accounts...`, 'info');
+    let done = 0, failed = 0;
+    for (const a of _accountsData) {
+        try {
+            const { task_id } = await api(`/api/accounts/${encodeURIComponent(a.username)}/refresh`, { method: 'POST' });
+            // Wait for each to complete before starting next
+            await new Promise((resolve) => {
+                const poll = setInterval(async () => {
+                    try {
+                        const t = await api(`/api/tasks/${task_id}`);
+                        if (t.status === 'complete') { clearInterval(poll); done++; resolve(); }
+                        else if (t.status === 'error') { clearInterval(poll); failed++; resolve(); }
+                    } catch(e) { clearInterval(poll); failed++; resolve(); }
+                }, 1500);
+            });
+        } catch(e) { failed++; }
+    }
+    toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
+    renderAccounts(document.getElementById('app'));
+}
+
+async function deleteAllAccounts() {
+    if (!_accountsData.length) { toast('No accounts to delete', 'error'); return; }
+    if (!confirm(`Delete ALL ${_accountsData.length} accounts? This cannot be undone.`)) return;
+    if (!confirm('Are you sure? This will remove all accounts permanently.')) return;
+    let done = 0;
+    for (const a of _accountsData) {
+        try {
+            await api(`/api/accounts/${encodeURIComponent(a.username)}`, { method: 'DELETE' });
+            done++;
+        } catch(e) {}
+    }
+    toast(`Deleted ${done} accounts`, 'success');
     renderAccounts(document.getElementById('app'));
 }
 
@@ -3247,11 +3311,12 @@ let _lsSavedPosts = [];
 let _lsComments = [];
 
 async function renderLiveSearch(el) {
-    if (!_lsBrands.length) {
-        try { _lsBrands = await api('/api/search/brands'); } catch(e) { _lsBrands = []; }
-    }
+    try { _lsBrands = await api('/api/search/brands'); } catch(e) { _lsBrands = []; }
     el.innerHTML = `
-        <h2 class="text-2xl font-bold mb-4" style="color:#0079D3">Live Search</h2>
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold" style="color:#0079D3">Live Search</h2>
+            <button class="btn btn-primary btn-sm" onclick="lsShowAddBrand()">+ Add Brand</button>
+        </div>
         <div class="flex gap-1 mb-4" style="border-bottom:1px solid #343536">
             <div class="tab ${_lsTab==='search'?'active':''}" onclick="_lsTab='search';renderLsTabContent()">Search</div>
             <div class="tab ${_lsTab==='saved'?'active':''}" onclick="_lsTab='saved';renderLsTabContent()">Saved Posts</div>
@@ -3260,6 +3325,42 @@ async function renderLiveSearch(el) {
         <div id="ls-tab-content"></div>
     `;
     renderLsTabContent();
+}
+
+function lsShowAddBrand() {
+    showModal(`
+        <div class="p-5">
+            <h3 class="text-lg font-bold mb-3">Add Brand</h3>
+            <div class="space-y-3">
+                <div><label class="text-xs text-gray-400">Brand Name *</label><input id="ls-new-brand-name" placeholder="e.g. PeterMD"></div>
+                <div><label class="text-xs text-gray-400">Website URL</label><input id="ls-new-brand-url" placeholder="e.g. petermd.com"></div>
+                <div><label class="text-xs text-gray-400">Context</label><textarea id="ls-new-brand-ctx" rows="2" placeholder="What does the brand do?"></textarea></div>
+                <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="ls-new-brand-kw" placeholder="e.g. testosterone, TRT, hormone"></div>
+            </div>
+            <div class="flex justify-end gap-3 mt-4">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="lsCreateBrand()">Create Brand</button>
+            </div>
+        </div>
+    `);
+}
+
+async function lsCreateBrand() {
+    const name = document.getElementById('ls-new-brand-name').value.trim();
+    if (!name) { toast('Brand name is required', 'error'); return; }
+    const kwRaw = document.getElementById('ls-new-brand-kw').value.trim();
+    try {
+        await api('/api/search/brands', { method: 'POST', body: {
+            name,
+            domain_url: document.getElementById('ls-new-brand-url').value.trim(),
+            context: document.getElementById('ls-new-brand-ctx').value.trim(),
+            keywords: kwRaw ? kwRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
+        }});
+        closeModal();
+        toast('Brand created', 'success');
+        _lsBrands = await api('/api/search/brands');
+        renderLsTabContent();
+    } catch(e) { toast('Failed to create brand', 'error'); }
 }
 
 function renderLsTabContent() {
@@ -3286,11 +3387,15 @@ function renderLsSearch(c) {
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Subreddit (optional)</label>
-                    <input id="ls-subreddit" placeholder="e.g. testosterone">
+                    <div class="flex gap-1">
+                        <input id="ls-subreddit" placeholder="e.g. testosterone" class="flex-1">
+                        <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability">Check</button>
+                    </div>
+                    <div id="ls-sub-check" class="text-xs mt-1"></div>
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Brand (for saving)</label>
-                    <select id="ls-brand"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name} (r/${b.subreddit_name})</option>`).join('')}</select>
+                    <select id="ls-brand"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
                 </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
@@ -3300,26 +3405,94 @@ function renderLsSearch(c) {
                 <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
                 <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50"></div>
             </div>
-            <div class="flex gap-3">
+            <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
+                <div><label class="text-xs text-gray-400">Exclude Subreddits</label><input id="ls-exclude" placeholder="sub1, sub2, ..."></div>
+                <div><label class="text-xs text-gray-400">Sort Order</label><select id="ls-sortorder"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
+                <div><label class="text-xs text-gray-400">NSFW</label><select id="ls-nsfw"><option value="">Include All</option><option value="false">Exclude NSFW</option><option value="true">NSFW Only</option></select></div>
+                <div><label class="text-xs text-gray-400">Min Upvote Ratio</label><input id="ls-ratio" type="number" step="0.1" min="0" max="1" placeholder="e.g. 0.7"></div>
+            </div>
+            <div class="flex gap-3 items-center">
                 <button class="btn btn-accent" onclick="lsRunSearch()">Search Reddit</button>
+                <button class="btn btn-secondary" onclick="lsSuggestSubreddits()">Suggest Subreddits</button>
                 <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
             </div>
         </div>
+        <div id="ls-suggestions" class="mb-4"></div>
         <div id="ls-results"></div>
     `;
+}
+
+async function lsCheckSubreddit() {
+    const name = document.getElementById('ls-subreddit').value.trim();
+    if (!name) { toast('Enter a subreddit name', 'error'); return; }
+    const el = document.getElementById('ls-sub-check');
+    el.innerHTML = '<span class="text-gray-400">Checking...</span>';
+    try {
+        const res = await api(`/api/search/check-subreddit?name=${encodeURIComponent(name)}`);
+        if (res.exists) {
+            el.innerHTML = `<span class="text-green-400">r/${res.name} — ${(res.subscribers||0).toLocaleString()} subscribers, ${res.active_accounts||0} active</span>`;
+        } else {
+            el.innerHTML = '<span class="text-red-400">Subreddit not found or private</span>';
+        }
+    } catch(e) { el.innerHTML = '<span class="text-red-400">Check failed</span>'; }
+}
+
+async function lsSuggestSubreddits() {
+    const keyword = document.getElementById('ls-keyword').value.trim();
+    const brandId = document.getElementById('ls-brand').value;
+    const brand = _lsBrands.find(b => b.id == brandId);
+    if (!keyword && !brand) { toast('Enter a keyword or select a brand first', 'error'); return; }
+    const el = document.getElementById('ls-suggestions');
+    el.innerHTML = '<div class="card p-4"><div class="spinner mx-auto"></div><p class="text-center text-gray-400 text-sm mt-2">Finding relevant subreddits...</p></div>';
+    try {
+        const { task_id } = await api('/api/search/suggest-subreddits', {
+            method: 'POST',
+            body: { keyword, brand_name: brand?.name || '' }
+        });
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    const subs = t.result || [];
+                    el.innerHTML = `<div class="card p-4">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-sm font-bold text-gray-300">Suggested Subreddits</span>
+                            <button class="btn btn-sm btn-secondary" onclick="lsSuggestSubreddits()">Refresh</button>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            ${subs.map(s => `<button class="btn btn-sm ${s.active ? 'btn-accent' : 'btn-secondary'}" onclick="document.getElementById('ls-subreddit').value='${s.name}'" title="${s.reason || ''}${s.subscribers ? ' — '+s.subscribers.toLocaleString()+' subs' : ''}">
+                                r/${s.name} ${s.active ? '<span class="text-xs ml-1">(' + (s.subscribers||0).toLocaleString() + ')</span>' : '<span class="text-xs ml-1 text-red-400">(N/A)</span>'}
+                            </button>`).join('')}
+                        </div>
+                    </div>`;
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    el.innerHTML = `<p class="text-red-400 text-sm">${t.error}</p>`;
+                }
+            } catch(e) { clearInterval(poll); el.innerHTML = ''; }
+        }, 2000);
+    } catch(e) { el.innerHTML = ''; }
 }
 
 async function lsRunSearch() {
     const keyword = document.getElementById('ls-keyword').value.trim();
     if (!keyword) { toast('Enter a keyword', 'error'); return; }
+    const excludeRaw = document.getElementById('ls-exclude').value.trim();
+    const nsfwVal = document.getElementById('ls-nsfw').value;
+    const ratioVal = parseFloat(document.getElementById('ls-ratio').value);
     const body = {
         keyword,
         subreddit: document.getElementById('ls-subreddit').value.trim() || undefined,
+        excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,
         min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
         min_score: parseInt(document.getElementById('ls-minscore').value) || 0,
         max_days_old: parseInt(document.getElementById('ls-days').value) || undefined,
         sort_by: document.getElementById('ls-sort').value,
+        sort_order: document.getElementById('ls-sortorder').value,
         limit: parseInt(document.getElementById('ls-limit').value) || 50,
+        nsfw: nsfwVal === '' ? undefined : nsfwVal === 'true',
+        min_upvote_ratio: isNaN(ratioVal) ? undefined : ratioVal,
     };
     document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit...</p></div>';
     try {
@@ -3392,17 +3565,68 @@ async function lsSaveSelected() {
 }
 
 // --- Saved Posts Tab ---
+let _lsSavedFilter = { keyword: '', brand: '', status: '' };
+
 async function renderLsSaved(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
     try {
         _lsSavedPosts = await api('/api/search/posts');
     } catch(e) { _lsSavedPosts = []; }
     if (!_lsSavedPosts.length) { c.innerHTML = '<p class="text-gray-500 py-4">No saved posts yet. Use Search tab to find and save posts.</p>'; return; }
+
+    const brands = [...new Set(_lsSavedPosts.map(p => p.brand_name).filter(Boolean))];
     c.innerHTML = `
+        <div class="flex gap-3 mb-3 items-center flex-wrap">
+            <input id="ls-sp-keyword" placeholder="Filter by keyword..." value="${_lsSavedFilter.keyword}" oninput="_lsSavedFilter.keyword=this.value;lsRenderSavedTable()" class="w-48">
+            <select id="ls-sp-brand" onchange="_lsSavedFilter.brand=this.value;lsRenderSavedTable()" class="w-40">
+                <option value="">All Brands</option>
+                <option value="none" ${_lsSavedFilter.brand==='none'?'selected':''}>No Brand</option>
+                ${brands.map(b => `<option value="${b}" ${_lsSavedFilter.brand===b?'selected':''}>${b}</option>`).join('')}
+            </select>
+            <select id="ls-sp-status" onchange="_lsSavedFilter.status=this.value;lsRenderSavedTable()" class="w-32">
+                <option value="">All Status</option>
+                <option value="saved" ${_lsSavedFilter.status==='saved'?'selected':''}>Saved</option>
+                <option value="complete" ${_lsSavedFilter.status==='complete'?'selected':''}>Complete</option>
+                <option value="generating" ${_lsSavedFilter.status==='generating'?'selected':''}>Generating</option>
+            </select>
+            <label class="text-xs text-gray-400"><input type="checkbox" id="ls-sp-selectall" onchange="lsToggleSavedAll(this.checked)" class="mr-1"> Select All</label>
+            <div class="ml-auto flex gap-2">
+                <button class="btn btn-accent btn-sm" onclick="lsGenerateSelected()">Generate Selected</button>
+                <button class="btn btn-primary btn-sm" onclick="lsGenerateAll()">Generate All</button>
+            </div>
+        </div>
+        <div class="mb-2">
+            <label class="text-xs text-gray-400">Comments per post:</label>
+            <input id="ls-num-comments" type="number" value="2" min="1" max="5" class="w-16 text-sm ml-1">
+        </div>
+        <div id="ls-saved-table"></div>
+    `;
+    lsRenderSavedTable();
+}
+
+function lsGetFilteredSaved() {
+    let posts = [..._lsSavedPosts];
+    if (_lsSavedFilter.keyword) {
+        const kw = _lsSavedFilter.keyword.toLowerCase();
+        posts = posts.filter(p => (p.title||'').toLowerCase().includes(kw) || (p.subreddit||'').toLowerCase().includes(kw));
+    }
+    if (_lsSavedFilter.brand === 'none') posts = posts.filter(p => !p.brand_id);
+    else if (_lsSavedFilter.brand) posts = posts.filter(p => p.brand_name === _lsSavedFilter.brand);
+    if (_lsSavedFilter.status) posts = posts.filter(p => p.status === _lsSavedFilter.status);
+    return posts;
+}
+
+function lsRenderSavedTable() {
+    const el = document.getElementById('ls-saved-table');
+    if (!el) return;
+    const filtered = lsGetFilteredSaved();
+    if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
+    el.innerHTML = `
         <table>
-            <thead><tr><th>Title</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>${_lsSavedPosts.map(p => `
+            <thead><tr><th style="width:30px"></th><th>Title</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>${filtered.map(p => `
                 <tr>
+                    <td><input type="checkbox" class="ls-sp-check" data-id="${p.id}" ${!p.brand_id?'disabled title="Assign brand first"':''}></td>
                     <td><a href="${p.reddit_url}" target="_blank" class="hover:underline" style="color:#0079D3">${(p.title||'').substring(0,70)}${(p.title||'').length>70?'...':''}</a></td>
                     <td class="text-xs">r/${p.subreddit}</td>
                     <td>${p.score}</td>
@@ -3419,11 +3643,45 @@ async function renderLsSaved(c) {
     `;
 }
 
+function lsToggleSavedAll(checked) {
+    document.querySelectorAll('.ls-sp-check:not(:disabled)').forEach(cb => cb.checked = checked);
+}
+
+async function lsGenerateSelected() {
+    const checks = document.querySelectorAll('.ls-sp-check:checked');
+    if (!checks.length) { toast('Select at least one post', 'error'); return; }
+    const ids = [...checks].map(cb => parseInt(cb.dataset.id));
+    const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
+    toast(`Generating for ${ids.length} posts...`, 'info');
+    for (const id of ids) {
+        try {
+            await api(`/api/search/posts/${id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+        } catch(e) {}
+    }
+    toast('Generation tasks started', 'success');
+    renderLsTabContent();
+}
+
+async function lsGenerateAll() {
+    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating');
+    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating)', 'error'); return; }
+    if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
+    const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
+    toast(`Starting generation for ${filtered.length} posts...`, 'info');
+    for (const p of filtered) {
+        try {
+            await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+        } catch(e) {}
+    }
+    toast('All generation tasks started', 'success');
+    renderLsTabContent();
+}
+
 function lsSetBrand(postId) {
     showModal(`
         <div class="p-5">
             <h3 class="text-lg font-bold mb-3">Assign Brand</h3>
-            <select id="ls-brand-assign">${_lsBrands.map(b=>`<option value="${b.id}">${b.name} (r/${b.subreddit_name})</option>`).join('')}</select>
+            <select id="ls-brand-assign">${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
             <div class="flex justify-end gap-3 mt-4">
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="lsConfirmBrand(${postId})">Assign</button>
@@ -3444,9 +3702,10 @@ async function lsConfirmBrand(postId) {
 }
 
 async function lsGenerate(postId) {
+    const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     toast('Starting comment generation...', 'info');
     try {
-        const { task_id } = await api(`/api/search/posts/${postId}/generate`, { method: 'POST', body: { num_comments: 3 } });
+        const { task_id } = await api(`/api/search/posts/${postId}/generate`, { method: 'POST', body: { num_comments: numComments } });
         renderLsTabContent();
         const poll = setInterval(async () => {
             try {

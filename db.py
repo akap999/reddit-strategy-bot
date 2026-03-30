@@ -527,6 +527,28 @@ class Database:
         """)
         self.conn.commit()
 
+        # Migration: make brands.subreddit_id nullable (allow standalone brands)
+        brand_cols_info = self.conn.execute("PRAGMA table_info(brands)").fetchall()
+        for col_info in brand_cols_info:
+            if col_info[1] == 'subreddit_id' and col_info[3] == 1:  # notnull == 1
+                self.conn.execute("PRAGMA foreign_keys = OFF")
+                self.conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS brands_new (
+                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                        subreddit_id    INTEGER REFERENCES subreddits(id),
+                        name            TEXT NOT NULL,
+                        domain_url      TEXT,
+                        context         TEXT NOT NULL,
+                        keywords        TEXT,
+                        added_at        TEXT DEFAULT (datetime('now'))
+                    );
+                    INSERT INTO brands_new SELECT * FROM brands;
+                    DROP TABLE brands;
+                    ALTER TABLE brands_new RENAME TO brands;
+                """)
+                self.conn.execute("PRAGMA foreign_keys = ON")
+                break
+
         # Search comments table (Live Search feature)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS search_comments (

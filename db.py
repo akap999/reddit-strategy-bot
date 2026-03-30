@@ -493,6 +493,55 @@ class Database:
             self.conn.execute("ALTER TABLE posts ADD COLUMN owner_account TEXT DEFAULT ''")
             self.conn.commit()
 
+        # Tasks table (for durable background task tracking)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                result TEXT,
+                error TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self.conn.commit()
+
+    # --- Background Tasks ---
+
+    def create_task(self, task_id, task_type):
+        self.conn.execute(
+            "INSERT INTO tasks (id, type, status) VALUES (?, ?, 'running')",
+            (task_id, task_type)
+        )
+        self.conn.commit()
+
+    def update_task(self, task_id, status, result=None, error=None):
+        self.conn.execute(
+            "UPDATE tasks SET status=?, result=?, error=? WHERE id=?",
+            (status, json.dumps(result) if result is not None else None, error, task_id)
+        )
+        self.conn.commit()
+
+    def get_task(self, task_id):
+        row = self.conn.execute(
+            "SELECT id, type, status, result, error FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "status": row["status"],
+            "type": row["type"],
+            "result": json.loads(row["result"]) if row["result"] else None,
+            "error": row["error"]
+        }
+
+    def cleanup_old_tasks(self, hours=24):
+        self.conn.execute(
+            "DELETE FROM tasks WHERE created_at < datetime('now', ?)",
+            (f'-{hours} hours',)
+        )
+        self.conn.commit()
+
     def mark_comment_ours(self, comment_id, is_ours):
         self.conn.execute("UPDATE comments SET is_ours = ? WHERE id = ?", (1 if is_ours else 0, comment_id))
         self.conn.commit()

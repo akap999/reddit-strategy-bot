@@ -94,21 +94,27 @@ def get_db():
 # Background task system
 # ---------------------------------------------------------------------------
 
-tasks = {}  # {task_id: {status, result, error, type}}
-
 def run_task(task_id, func, *args, **kwargs):
-    """Run a function in background thread with its own DB connection."""
+    """Run a function in background thread, storing result in DB."""
     try:
         result = func(*args, **kwargs)
-        tasks[task_id]["status"] = "complete"
-        tasks[task_id]["result"] = result
+        task_db = Database(DB_PATH)
+        task_db.connect()
+        task_db.update_task(task_id, "complete", result=result)
+        task_db.close()
     except Exception as e:
-        tasks[task_id]["status"] = "error"
-        tasks[task_id]["error"] = str(e)
+        try:
+            task_db = Database(DB_PATH)
+            task_db.connect()
+            task_db.update_task(task_id, "error", error=str(e))
+            task_db.close()
+        except Exception:
+            pass
 
 def start_task(task_type, func, *args, **kwargs):
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {"status": "running", "type": task_type, "result": None, "error": None}
+    db = get_db()
+    db.create_task(task_id, task_type)
     t = threading.Thread(target=run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
     t.start()
     return task_id
@@ -1038,7 +1044,8 @@ def api_gen_live_comments():
 
 @app.route("/api/tasks/<task_id>")
 def api_task_status(task_id):
-    t = tasks.get(task_id)
+    db = get_db()
+    t = db.get_task(task_id)
     if not t:
         return jsonify({"error": "Task not found"}), 404
     return jsonify(t)
@@ -1584,6 +1591,8 @@ total_posts = sum(s["post_count"] for s in subs)
 total_comments = sum(s["comment_count"] for s in subs)
 print(f"Database: {DB_PATH}")
 print(f"  {len(subs)} subreddits | {total_posts} posts | {total_comments} comments")
+db.cleanup_old_tasks(24)
+print("  Cleaned up stale tasks")
 db.close()
 
 # ---------------------------------------------------------------------------

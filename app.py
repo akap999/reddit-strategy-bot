@@ -1298,11 +1298,60 @@ def api_export_brand(name):
         db.close()
 
 # ---------------------------------------------------------------------------
+# Debug: network diagnostic (remove after debugging)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/debug/network")
+def api_debug_network():
+    """Test outbound HTTP from this server."""
+    import requests as _requests
+    results = {}
+
+    # Test 1: Reddit API
+    try:
+        r = _requests.get(
+            "https://www.reddit.com/user/spez/about.json",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        results["reddit"] = {"status": r.status_code, "body_preview": r.text[:200]}
+    except Exception as e:
+        results["reddit"] = {"error": str(e)}
+
+    # Test 2: Generic HTTPS
+    try:
+        r = _requests.get("https://httpbin.org/ip", timeout=10)
+        results["httpbin"] = {"status": r.status_code, "body": r.text[:200]}
+    except Exception as e:
+        results["httpbin"] = {"error": str(e)}
+
+    # Test 3: Website fetch
+    try:
+        r = _requests.get(
+            "https://getpetermd.com/",
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        results["website"] = {"status": r.status_code, "body_len": len(r.text)}
+    except Exception as e:
+        results["website"] = {"error": str(e)}
+
+    # Test 4: Anthropic API (just check connectivity, don't make a real call)
+    try:
+        r = _requests.get("https://api.anthropic.com/v1/models", timeout=10,
+                          headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01"})
+        results["anthropic"] = {"status": r.status_code}
+    except Exception as e:
+        results["anthropic"] = {"error": str(e)}
+
+    return jsonify(results)
+
+# ---------------------------------------------------------------------------
 # Accounts
 # ---------------------------------------------------------------------------
 
 def _fetch_reddit_user_data(username):
-    """Fetch karma and account age from Reddit user API. Returns dict or None."""
+    """Fetch karma and account age from Reddit user API. Returns dict or None on failure."""
     import requests as _requests
     try:
         resp = _requests.get(
@@ -1319,10 +1368,11 @@ def _fetch_reddit_user_data(username):
                 "created_utc": data.get("created_utc"),
             }
         else:
-            print(f"[REDDIT] u/{username} response: {resp.text[:200]}", flush=True)
+            print(f"[REDDIT] u/{username} response: {resp.text[:300]}", flush=True)
+            return {"_error": f"Reddit returned status {resp.status_code}"}
     except Exception as e:
         print(f"[REDDIT] u/{username} error: {e}", flush=True)
-    return None
+        return {"_error": f"Request failed: {e}"}
 
 @app.route("/api/accounts")
 def api_list_accounts():
@@ -1370,7 +1420,7 @@ def api_create_account():
 
         # Fetch Reddit data synchronously (single call)
         reddit_data = _fetch_reddit_user_data(username)
-        if reddit_data:
+        if reddit_data and "_error" not in reddit_data:
             db.update_account_reddit_data(
                 username,
                 reddit_data["link_karma"],
@@ -1412,16 +1462,16 @@ def api_refresh_account(username):
         db2.initialize()
         try:
             reddit_data = _fetch_reddit_user_data(username)
-            if reddit_data:
-                db2.update_account_reddit_data(
-                    username,
-                    reddit_data["link_karma"],
-                    reddit_data["comment_karma"],
-                    reddit_data["created_utc"],
-                )
-                return {"ok": True, **reddit_data}
-            else:
-                raise Exception(f"Could not fetch data for u/{username}")
+            if not reddit_data or "_error" in reddit_data:
+                err = reddit_data.get("_error", "Unknown") if reddit_data else "No response"
+                raise Exception(f"Could not fetch data for u/{username}: {err}")
+            db2.update_account_reddit_data(
+                username,
+                reddit_data["link_karma"],
+                reddit_data["comment_karma"],
+                reddit_data["created_utc"],
+            )
+            return {"ok": True, **reddit_data}
         finally:
             db2.close()
 
@@ -1476,7 +1526,7 @@ def _run_accounts_import_task(parsed_rows):
                     continue
                 db2.create_account(username, reference=ref)
                 reddit_data = _fetch_reddit_user_data(username)
-                if reddit_data:
+                if reddit_data and "_error" not in reddit_data:
                     db2.update_account_reddit_data(
                         username,
                         reddit_data["link_karma"],

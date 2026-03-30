@@ -149,17 +149,28 @@ async function runTask(url, body, onComplete) {
     showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating... this may take 30-60 seconds.</p></div>`);
     try {
         const { task_id } = await api(url, { method: 'POST', body });
+        let retries = 0;
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                closeModal();
-                toast('Generation complete!', 'success');
-                if (onComplete) onComplete(t.result);
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                closeModal();
-                toast(`Error: ${t.error}`, 'error');
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                retries = 0;
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    closeModal();
+                    toast('Generation complete!', 'success');
+                    if (onComplete) onComplete(t.result);
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    closeModal();
+                    toast(`Error: ${t.error}`, 'error');
+                }
+            } catch (e) {
+                retries++;
+                if (retries > 5) {
+                    clearInterval(poll);
+                    closeModal();
+                    toast('Task lost — please try again', 'error');
+                }
             }
         }, 2000);
     } catch (e) {
@@ -1195,19 +1206,25 @@ async function refreshBrandLiveStats() {
 
     try {
         const { task_id } = await api('/api/comments/live-stats', { method: 'POST', body: { urls: urlItems } });
+        let _lsRetries = 0;
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                const stats = t.result || {};
-                _brandsViewState.liveStats = { ..._brandsViewState.liveStats, ...stats };
-                toast(`Updated live stats for ${Object.keys(stats).length} comments`, 'success');
-                if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
-                renderBrandCommentTable();
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                toast(`Stats fetch error: ${t.error}`, 'error');
-                if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                _lsRetries = 0;
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    const stats = t.result || {};
+                    _brandsViewState.liveStats = { ..._brandsViewState.liveStats, ...stats };
+                    toast(`Updated live stats for ${Object.keys(stats).length} comments`, 'success');
+                    if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+                    renderBrandCommentTable();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    toast(`Stats fetch error: ${t.error}`, 'error');
+                    if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+                }
+            } catch(e) {
+                if (++_lsRetries > 5) { clearInterval(poll); if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; } }
             }
         }, 2000);
     } catch(e) {
@@ -1671,28 +1688,34 @@ async function refreshLiveStats() {
 
     try {
         const { task_id } = await api('/api/comments/live-stats', { method: 'POST', body: { urls: urlItems } });
+        let _ls2Retries = 0;
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                const stats = t.result || {};
-                let updated = 0;
-                for (const c of _analysisComments) {
-                    const s = stats[String(c.id)];
-                    if (s) {
-                        c.score = s.score;
-                        if (s.author) c.author = s.author;
-                        c.num_replies = s.num_replies;
-                        if (s.permalink) c.permalink = s.permalink;
-                        if (s.created_utc) c.created_utc = s.created_utc;
-                        updated++;
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                _ls2Retries = 0;
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    const stats = t.result || {};
+                    let updated = 0;
+                    for (const c of _analysisComments) {
+                        const s = stats[String(c.id)];
+                        if (s) {
+                            c.score = s.score;
+                            if (s.author) c.author = s.author;
+                            c.num_replies = s.num_replies;
+                            if (s.permalink) c.permalink = s.permalink;
+                            if (s.created_utc) c.created_utc = s.created_utc;
+                            updated++;
+                        }
                     }
+                    toast(`Updated stats for ${updated}/${urlItems.length} comments`, 'success');
+                    showAnalysisResults();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    toast(`Stats fetch error: ${t.error}`, 'error');
                 }
-                toast(`Updated stats for ${updated}/${urlItems.length} comments`, 'success');
-                showAnalysisResults();
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                toast(`Stats fetch error: ${t.error}`, 'error');
+            } catch(e) {
+                if (++_ls2Retries > 5) { clearInterval(poll); toast('Task lost — please try again', 'error'); }
             }
         }, 2000);
     } catch(e) {
@@ -2705,18 +2728,24 @@ async function submitImportCsv() {
 
         showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p style="color:#818384">Importing accounts &amp; fetching Reddit data...<br>This may take a while for large lists.</p></div>`);
 
+        let _impRetries = 0;
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                closeModal();
-                const r = t.result;
-                toast(`Imported: ${r.imported}, Skipped: ${r.skipped}, Errors: ${r.errors}${r.error_usernames?.length ? ' (' + r.error_usernames.join(', ') + ')' : ''}`, r.errors ? 'info' : 'success');
-                renderAccounts(document.getElementById('app'));
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                closeModal();
-                toast(`Import failed: ${t.error}`, 'error');
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                _impRetries = 0;
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    closeModal();
+                    const r = t.result;
+                    toast(`Imported: ${r.imported}, Skipped: ${r.skipped}, Errors: ${r.errors}${r.error_usernames?.length ? ' (' + r.error_usernames.join(', ') + ')' : ''}`, r.errors ? 'info' : 'success');
+                    renderAccounts(document.getElementById('app'));
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    closeModal();
+                    toast(`Import failed: ${t.error}`, 'error');
+                }
+            } catch(e) {
+                if (++_impRetries > 5) { clearInterval(poll); closeModal(); toast('Task lost — please try again', 'error'); }
             }
         }, 2000);
     } catch(e) {
@@ -2730,16 +2759,22 @@ async function refreshAccountData(username) {
     if (btn) { btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span>'; btn.disabled = true; }
     try {
         const { task_id } = await api(`/api/accounts/${encodeURIComponent(username)}/refresh`, { method: 'POST' });
+        let _rRetries = 0;
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                toast(`Refreshed u/${username}`, 'success');
-                renderAccounts(document.getElementById('app'));
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                toast(`Refresh failed: ${t.error}`, 'error');
-                if (btn) { btn.innerHTML = 'Refresh'; btn.disabled = false; }
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                _rRetries = 0;
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    toast(`Refreshed u/${username}`, 'success');
+                    renderAccounts(document.getElementById('app'));
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    toast(`Refresh failed: ${t.error}`, 'error');
+                    if (btn) { btn.innerHTML = 'Refresh'; btn.disabled = false; }
+                }
+            } catch(e) {
+                if (++_rRetries > 5) { clearInterval(poll); if (btn) { btn.innerHTML = 'Refresh'; btn.disabled = false; } }
             }
         }, 2000);
     } catch(e) {

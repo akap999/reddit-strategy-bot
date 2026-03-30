@@ -103,18 +103,20 @@ def run_task(task_id, func, *args, **kwargs):
         task_db.update_task(task_id, "complete", result=result)
         task_db.close()
     except Exception as e:
+        print(f"[TASK ERROR] {task_id}: {e}", flush=True)
         try:
             task_db = Database(DB_PATH)
             task_db.connect()
             task_db.update_task(task_id, "error", error=str(e))
             task_db.close()
-        except Exception:
-            pass
+        except Exception as e2:
+            print(f"[TASK DB ERROR] {task_id}: {e2}", flush=True)
 
 def start_task(task_type, func, *args, **kwargs):
     task_id = str(uuid.uuid4())
     db = get_db()
     db.create_task(task_id, task_type)
+    db.close()
     t = threading.Thread(target=run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
     t.start()
     return task_id

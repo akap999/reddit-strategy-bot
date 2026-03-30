@@ -74,6 +74,8 @@
             <a onclick="navigate('posts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="posts">Posts</a>
             <a onclick="navigate('comments')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="comments">Comments</a>
             <a onclick="navigate('accounts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="accounts">Accounts</a>
+            <div style="border-top:1px solid #343536;margin:8px 16px"></div>
+            <a onclick="navigate('livesearch')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesearch" style="color:#0079D3">Live Search</a>
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
         </nav>
@@ -191,7 +193,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, analytics: renderAnalytics, export: renderExport };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport };
     (views[view] || views.dashboard)(app);
 }
 
@@ -3233,6 +3235,402 @@ function downloadExport(type) {
     const sid = document.getElementById('export-sub').value;
     window.location.href = `/api/export/${type}/${sid}`;
     toast('Download started', 'info');
+}
+
+// =========================================================================
+// LIVE SEARCH VIEW
+// =========================================================================
+let _lsTab = 'search';
+let _lsBrands = [];
+let _lsSearchResults = [];
+let _lsSavedPosts = [];
+let _lsComments = [];
+
+async function renderLiveSearch(el) {
+    if (!_lsBrands.length) {
+        try { _lsBrands = await api('/api/search/brands'); } catch(e) { _lsBrands = []; }
+    }
+    el.innerHTML = `
+        <h2 class="text-2xl font-bold mb-4" style="color:#0079D3">Live Search</h2>
+        <div class="flex gap-1 mb-4" style="border-bottom:1px solid #343536">
+            <div class="tab ${_lsTab==='search'?'active':''}" onclick="_lsTab='search';renderLsTabContent()">Search</div>
+            <div class="tab ${_lsTab==='saved'?'active':''}" onclick="_lsTab='saved';renderLsTabContent()">Saved Posts</div>
+            <div class="tab ${_lsTab==='comments'?'active':''}" onclick="_lsTab='comments';renderLsTabContent()">Comments</div>
+        </div>
+        <div id="ls-tab-content"></div>
+    `;
+    renderLsTabContent();
+}
+
+function renderLsTabContent() {
+    const c = document.getElementById('ls-tab-content');
+    if (!c) return;
+    // Update tab active states
+    c.parentElement.querySelectorAll('.tab').forEach((t,i) => {
+        const tabs = ['search','saved','comments'];
+        t.className = `tab ${_lsTab===tabs[i]?'active':''}`;
+    });
+    if (_lsTab === 'search') renderLsSearch(c);
+    else if (_lsTab === 'saved') renderLsSaved(c);
+    else if (_lsTab === 'comments') renderLsComments(c);
+}
+
+// --- Search Tab ---
+function renderLsSearch(c) {
+    c.innerHTML = `
+        <div class="card p-5 mb-4">
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+                <div class="col-span-2">
+                    <label class="text-xs text-gray-400">Keyword *</label>
+                    <input id="ls-keyword" placeholder="e.g. best testosterone clinic">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400">Subreddit (optional)</label>
+                    <input id="ls-subreddit" placeholder="e.g. testosterone">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400">Brand (for saving)</label>
+                    <select id="ls-brand"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name} (r/${b.subreddit_name})</option>`).join('')}</select>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
+                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="5"></div>
+                <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="3"></div>
+                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="30"></div>
+                <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
+                <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50"></div>
+            </div>
+            <div class="flex gap-3">
+                <button class="btn btn-accent" onclick="lsRunSearch()">Search Reddit</button>
+                <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
+            </div>
+        </div>
+        <div id="ls-results"></div>
+    `;
+}
+
+async function lsRunSearch() {
+    const keyword = document.getElementById('ls-keyword').value.trim();
+    if (!keyword) { toast('Enter a keyword', 'error'); return; }
+    const body = {
+        keyword,
+        subreddit: document.getElementById('ls-subreddit').value.trim() || undefined,
+        min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
+        min_score: parseInt(document.getElementById('ls-minscore').value) || 0,
+        max_days_old: parseInt(document.getElementById('ls-days').value) || undefined,
+        sort_by: document.getElementById('ls-sort').value,
+        limit: parseInt(document.getElementById('ls-limit').value) || 50,
+    };
+    document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit...</p></div>';
+    try {
+        const { task_id } = await api('/api/search/reddit', { method: 'POST', body });
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    _lsSearchResults = t.result || [];
+                    lsRenderResults();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    document.getElementById('ls-results').innerHTML = `<p class="text-red-400">Error: ${t.error}</p>`;
+                }
+            } catch(e) { clearInterval(poll); }
+        }, 2000);
+    } catch(e) { document.getElementById('ls-results').innerHTML = ''; }
+}
+
+function lsRenderResults() {
+    const el = document.getElementById('ls-results');
+    if (!_lsSearchResults.length) { el.innerHTML = '<p class="text-gray-500">No results found.</p>'; return; }
+    document.getElementById('ls-save-btn').style.display = '';
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-2">
+            <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
+            <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
+        </div>
+        <table>
+            <thead><tr><th style="width:30px"></th><th>Title</th><th>Subreddit</th><th>Score</th><th>Comments</th><th>Date</th><th>Author</th></tr></thead>
+            <tbody>${_lsSearchResults.map((r,i)=>`
+                <tr>
+                    <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
+                    <td><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${(r.title||'').substring(0,80)}${(r.title||'').length>80?'...':''}</a></td>
+                    <td class="text-xs">r/${r.subreddit}</td>
+                    <td>${r.score}</td>
+                    <td>${r.comments}</td>
+                    <td class="text-xs">${(r.date||'').substring(0,10)}</td>
+                    <td class="text-xs">u/${r.author}</td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
+}
+
+function lsToggleAll(checked) {
+    document.querySelectorAll('.ls-check').forEach(cb => cb.checked = checked);
+}
+
+async function lsSaveSelected() {
+    const brandId = document.getElementById('ls-brand').value;
+    const checks = document.querySelectorAll('.ls-check:checked');
+    if (!checks.length) { toast('Select at least one post', 'error'); return; }
+    const posts = [];
+    checks.forEach(cb => {
+        const r = _lsSearchResults[parseInt(cb.dataset.idx)];
+        posts.push({
+            reddit_url: r.url, title: r.title, subreddit: r.subreddit,
+            score: r.score, num_comments: r.comments, author: r.author,
+            post_date: r.date, body_preview: r.text || '',
+            brand_id: brandId ? parseInt(brandId) : null,
+        });
+    });
+    try {
+        const res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
+        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
+        _lsTab = 'saved'; renderLsTabContent();
+    } catch(e) {}
+}
+
+// --- Saved Posts Tab ---
+async function renderLsSaved(c) {
+    c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    try {
+        _lsSavedPosts = await api('/api/search/posts');
+    } catch(e) { _lsSavedPosts = []; }
+    if (!_lsSavedPosts.length) { c.innerHTML = '<p class="text-gray-500 py-4">No saved posts yet. Use Search tab to find and save posts.</p>'; return; }
+    c.innerHTML = `
+        <table>
+            <thead><tr><th>Title</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>${_lsSavedPosts.map(p => `
+                <tr>
+                    <td><a href="${p.reddit_url}" target="_blank" class="hover:underline" style="color:#0079D3">${(p.title||'').substring(0,70)}${(p.title||'').length>70?'...':''}</a></td>
+                    <td class="text-xs">r/${p.subreddit}</td>
+                    <td>${p.score}</td>
+                    <td>${p.brand_name ? `<span class="badge badge-brand">${p.brand_name}</span>` : '<span class="text-gray-500 text-xs">none</span>'}</td>
+                    <td>${p.comment_count || 0} gen</td>
+                    <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':'badge-draft'}">${p.status}</span></td>
+                    <td class="flex gap-2">
+                        ${p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
+                        <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
+                    </td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
+}
+
+function lsSetBrand(postId) {
+    showModal(`
+        <div class="p-5">
+            <h3 class="text-lg font-bold mb-3">Assign Brand</h3>
+            <select id="ls-brand-assign">${_lsBrands.map(b=>`<option value="${b.id}">${b.name} (r/${b.subreddit_name})</option>`).join('')}</select>
+            <div class="flex justify-end gap-3 mt-4">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="lsConfirmBrand(${postId})">Assign</button>
+            </div>
+        </div>
+    `);
+}
+
+async function lsConfirmBrand(postId) {
+    const brandId = document.getElementById('ls-brand-assign').value;
+    try {
+        // Update via a quick endpoint — reuse save with brand
+        await api(`/api/search/posts/${postId}/brand`, { method: 'PUT', body: { brand_id: parseInt(brandId) } });
+        closeModal();
+        toast('Brand assigned', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+async function lsGenerate(postId) {
+    toast('Starting comment generation...', 'info');
+    try {
+        const { task_id } = await api(`/api/search/posts/${postId}/generate`, { method: 'POST', body: { num_comments: 3 } });
+        renderLsTabContent();
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    toast(`Generated ${t.result.generated} comments (relevance: ${t.result.relevance_score}/10)`, 'success');
+                    renderLsTabContent();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    toast(`Generation failed: ${t.error}`, 'error');
+                    renderLsTabContent();
+                }
+            } catch(e) { clearInterval(poll); }
+        }, 3000);
+    } catch(e) {}
+}
+
+async function lsDeletePost(postId) {
+    if (!confirm('Delete this post and all its generated comments?')) return;
+    try {
+        await api(`/api/search/posts/${postId}`, { method: 'DELETE' });
+        toast('Post deleted', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+// --- Comments Tab ---
+async function renderLsComments(c) {
+    c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    try {
+        _lsComments = await api('/api/search/comments');
+    } catch(e) { _lsComments = []; }
+    const active = _lsComments.filter(c => c.status !== 'deleted');
+    if (!active.length) { c.innerHTML = '<p class="text-gray-500 py-4">No generated comments yet. Generate comments from the Saved Posts tab.</p>'; return; }
+
+    c.innerHTML = `
+        <div class="flex gap-3 mb-3 items-center">
+            <select id="ls-cf-post" onchange="lsFilterComments()" class="w-64">
+                <option value="">All Posts</option>
+                ${[...new Set(active.map(c=>JSON.stringify({id:c.search_post_id,title:c.post_title})))].map(s=>{const p=JSON.parse(s);return `<option value="${p.id}">${(p.title||'').substring(0,50)}</option>`;}).join('')}
+            </select>
+            <select id="ls-cf-status" onchange="lsFilterComments()" class="w-36">
+                <option value="">All Status</option>
+                <option value="draft">Draft</option>
+                <option value="assigned">Assigned</option>
+                <option value="deployed">Deployed</option>
+            </select>
+        </div>
+        <div id="ls-comments-list"></div>
+    `;
+    lsFilterComments();
+}
+
+function lsFilterComments() {
+    const postId = document.getElementById('ls-cf-post')?.value;
+    const status = document.getElementById('ls-cf-status')?.value;
+    let filtered = _lsComments.filter(c => c.status !== 'deleted');
+    if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
+    if (status) filtered = filtered.filter(c => c.status === status);
+
+    const el = document.getElementById('ls-comments-list');
+    if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No comments match filters.</p>'; return; }
+    el.innerHTML = `
+        <table>
+            <thead><tr><th>Post</th><th>Comment</th><th>Brand</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>${filtered.map(c => `
+                <tr>
+                    <td class="text-xs" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                        <a href="${c.post_url}" target="_blank" style="color:#0079D3">${(c.post_title||'').substring(0,40)}</a>
+                        <br><span class="text-gray-500">r/${c.post_subreddit}</span>
+                    </td>
+                    <td style="max-width:300px"><span class="text-sm">${(c.body||'').substring(0,120)}${(c.body||'').length>120?'...':''}</span>
+                        ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
+                        ${c.mentions_brand ? '<span class="badge" style="background:#3a1a00;color:#FF8b60;margin-left:4px">Brand</span>' : ''}
+                    </td>
+                    <td class="text-xs">${c.brand_name || '-'}</td>
+                    <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
+                    <td><span class="badge badge-${c.status}">${c.status}</span></td>
+                    <td>
+                        <div class="flex gap-1 flex-wrap">
+                            ${c.status === 'draft' ? `<button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
+                            ${c.status === 'assigned' ? `
+                                <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
+                                <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
+                            ` : ''}
+                            ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
+                            <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
+                            <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy to clipboard">Copy</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
+}
+
+async function lsAssignComment(cid) {
+    // Reuse the existing assignment modal pattern
+    let accounts;
+    try { accounts = await api('/api/accounts'); } catch(e) { return; }
+    showModal(`
+        <div class="p-5">
+            <h3 class="text-lg font-bold mb-3">Assign Account</h3>
+            <input id="ls-acct-search" placeholder="Search username..." oninput="lsFilterAccts()" class="mb-3">
+            <div style="max-height:300px;overflow-y:auto">
+                <table><thead><tr><th>Username</th><th>Karma</th><th>Age</th><th></th></tr></thead>
+                <tbody id="ls-acct-rows">${accounts.map(a => `
+                    <tr class="ls-acct-row">
+                        <td>u/${a.username}</td>
+                        <td>${(a.link_karma||0)+(a.comment_karma||0)}</td>
+                        <td class="text-xs">${a.created_utc ? Math.floor((Date.now()/1000 - a.created_utc)/86400) + 'd' : '?'}</td>
+                        <td><button class="btn btn-accent btn-sm" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
+                    </tr>
+                `).join('')}</tbody></table>
+            </div>
+            <div class="flex justify-end mt-3"><button class="btn btn-secondary" onclick="closeModal()">Cancel</button></div>
+        </div>
+    `);
+}
+
+function lsFilterAccts() {
+    const q = (document.getElementById('ls-acct-search')?.value || '').toLowerCase();
+    document.querySelectorAll('.ls-acct-row').forEach(r => {
+        r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+
+async function lsDoAssign(cid, username) {
+    try {
+        await api(`/api/search/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
+        closeModal();
+        toast(`Assigned to u/${username}`, 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+async function lsUnassignComment(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/unassign`, { method: 'POST' });
+        toast('Unassigned', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+async function lsDeployComment(cid) {
+    showModal(`
+        <div class="p-5">
+            <h3 class="text-lg font-bold mb-3">Mark as Deployed</h3>
+            <label class="text-xs text-gray-400">Reddit Comment URL</label>
+            <input id="ls-deploy-url" placeholder="https://www.reddit.com/r/.../comment/...">
+            <div class="flex justify-end gap-3 mt-4">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="lsDoDeployComment(${cid})">Deploy</button>
+            </div>
+        </div>
+    `);
+}
+
+async function lsDoDeployComment(cid) {
+    const url = document.getElementById('ls-deploy-url').value.trim();
+    if (!url) { toast('Enter the Reddit comment URL', 'error'); return; }
+    try {
+        await api(`/api/search/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url } });
+        closeModal();
+        toast('Marked as deployed', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+async function lsDeleteComment(cid) {
+    if (!confirm('Delete this comment?')) return;
+    try {
+        await api(`/api/search/comments/${cid}`, { method: 'DELETE' });
+        toast('Deleted', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+function lsCopyComment(cid) {
+    const c = _lsComments.find(x => x.id === cid);
+    if (c) {
+        navigator.clipboard.writeText(c.body).then(() => toast('Copied to clipboard', 'success'));
+    }
 }
 
 // =========================================================================

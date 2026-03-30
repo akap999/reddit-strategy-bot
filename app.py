@@ -1314,6 +1314,297 @@ def api_export_brand(name):
         db.close()
 
 # ---------------------------------------------------------------------------
+# Live Search — Search, Save, Generate, Manage
+# ---------------------------------------------------------------------------
+
+@app.route("/api/search/reddit", methods=["POST"])
+def api_search_reddit():
+    """Run a Reddit keyword search via RedditSearchBot (background task)."""
+    from search.reddit_bot import RedditSearchBot
+    data = request.json
+    keyword = data.get("keyword", "").strip()
+    if not keyword:
+        return jsonify({"error": "keyword is required"}), 400
+
+    def task():
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        bot = RedditSearchBot(reddit_base=proxy.rstrip("/") if proxy else None)
+        results = bot.search(
+            keyword=keyword,
+            subreddit=data.get("subreddit"),
+            subreddits=data.get("subreddits"),
+            min_comments=data.get("min_comments", 0),
+            min_score=data.get("min_score", 0),
+            max_days_old=data.get("max_days_old"),
+            sort_by=data.get("sort_by", "relevance"),
+            limit=min(data.get("limit", 50), 200),
+        )
+        return results
+
+    tid = start_task("search-reddit", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/search/posts", methods=["GET"])
+def api_list_search_posts():
+    db = get_db()
+    try:
+        brand_id = request.args.get("brand_id", type=int)
+        status = request.args.get("status")
+        posts = db.list_search_posts(brand_id=brand_id, status=status)
+        # Add comment counts
+        for p in posts:
+            row = db.conn.execute(
+                "SELECT COUNT(*) as cnt FROM search_comments WHERE search_post_id = ? AND status != 'deleted'",
+                (p["id"],)
+            ).fetchone()
+            p["comment_count"] = row["cnt"] if row else 0
+        return jsonify(posts)
+    finally:
+        db.close()
+
+
+@app.route("/api/search/posts", methods=["POST"])
+def api_save_search_post():
+    db = get_db()
+    try:
+        data = request.json
+        if not data.get("reddit_url"):
+            return jsonify({"error": "reddit_url is required"}), 400
+        pid = db.save_search_post(data)
+        if pid is None:
+            return jsonify({"error": "Post already saved"}), 409
+        return jsonify({"id": pid})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/posts/bulk", methods=["POST"])
+def api_save_search_posts_bulk():
+    db = get_db()
+    try:
+        items = request.json.get("posts", [])
+        saved = 0
+        dupes = 0
+        for item in items:
+            if not item.get("reddit_url"):
+                continue
+            pid = db.save_search_post(item)
+            if pid:
+                saved += 1
+            else:
+                dupes += 1
+        return jsonify({"saved": saved, "duplicates": dupes})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/posts/<int:pid>", methods=["DELETE"])
+def api_delete_search_post(pid):
+    db = get_db()
+    try:
+        db.delete_search_post(pid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/posts/<int:pid>/brand", methods=["PUT"])
+def api_update_search_post_brand(pid):
+    db = get_db()
+    try:
+        data = request.json or {}
+        brand_id = data.get("brand_id")
+        c = db.conn.cursor()
+        c.execute("UPDATE search_posts SET brand_id = ? WHERE id = ?", (brand_id, pid))
+        db.conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/posts/<int:pid>/generate", methods=["POST"])
+def api_generate_search_comments(pid):
+    """Generate comments for a saved search post (background task)."""
+    from generate.comment_generator import CommentGeneratorBot
+    data = request.json or {}
+
+    db_check = get_db()
+    post = db_check.get_search_post(pid)
+    if not post:
+        db_check.close()
+        return jsonify({"error": "Post not found"}), 404
+    brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
+    db_check.close()
+
+    if not brand:
+        return jsonify({"error": "Post must have a brand assigned"}), 400
+
+    brand_name = brand["name"]
+    brand_context = brand["context"]
+    brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+    num_comments = data.get("num_comments", 3)
+
+    def task():
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        bot = CommentGeneratorBot(api_key, reddit_base=proxy.rstrip("/") if proxy else None)
+
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        try:
+            db2.update_search_post_status(pid, "generating")
+
+            # Fetch comments from the Reddit post
+            comments, post_body, is_archived = bot.fetch_comments(post["reddit_url"], limit=20)
+            if is_archived:
+                db2.update_search_post_status(pid, "saved")
+                raise ValueError("Post is archived — cannot comment")
+            if len(comments) < 3:
+                db2.update_search_post_status(pid, "saved")
+                raise ValueError(f"Not enough comments ({len(comments)}) — need at least 3")
+
+            comment_stats = bot._compute_comment_stats(comments)
+
+            # Relevance check
+            relevance = bot.check_relevance(
+                post["title"], post_body, post["subreddit"],
+                comments, brand_name, brand_context, brand_keywords
+            )
+            rel_score = relevance.get("score", 0)
+
+            # Tone analysis
+            tone_analysis = bot.analyze_tone(
+                post["title"], post_body, post["subreddit"],
+                comments, comment_stats
+            )
+
+            # Reply targets
+            reply_targets = {}
+            if num_comments >= 3:
+                reply_target = bot._select_reply_target(comments, post["title"], brand_name, relevance)
+                if reply_target:
+                    reply_targets[2] = reply_target
+
+            # Generate
+            generation = bot.generate_comments(
+                post["title"], post_body, post["subreddit"],
+                comments, brand_name, brand_context,
+                num_comments=num_comments,
+                tone_analysis=tone_analysis,
+                comment_stats=comment_stats,
+                relevance=relevance,
+                reply_targets=reply_targets
+            )
+
+            generated = generation.get("generated_comments", [])
+            if not generated:
+                db2.update_search_post_status(pid, "saved")
+                raise ValueError("Comment generation failed")
+
+            # Store generated comments
+            stored = []
+            for idx, body in enumerate(generated):
+                is_reply = 1 if idx == 2 and reply_targets.get(2) else 0
+                reply_url = None
+                if is_reply and reply_targets.get(2):
+                    rt = reply_targets[2]
+                    reply_url = f"https://www.reddit.com{rt.get('permalink', '')}" if rt.get('permalink') else None
+
+                mentions = 1 if brand_name.lower() in body.lower() else 0
+                cid = db2.add_search_comment(
+                    search_post_id=pid, body=body, brand_id=post.get("brand_id"),
+                    persona_id=generation.get("config", {}).get(f"persona_{idx+1}"),
+                    is_reply=is_reply, reply_to_url=reply_url,
+                    mentions_brand=mentions, relevance_score=rel_score
+                )
+                stored.append({"id": cid, "body": body[:100]})
+
+            db2.update_search_post_status(pid, "complete")
+            return {"generated": len(stored), "comments": stored, "relevance_score": rel_score}
+        finally:
+            db2.close()
+
+    tid = start_task("generate-search-comments", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/search/comments")
+def api_list_search_comments():
+    db = get_db()
+    try:
+        search_post_id = request.args.get("search_post_id", type=int)
+        status = request.args.get("status")
+        comments = db.list_search_comments(search_post_id=search_post_id, status=status)
+        return jsonify(comments)
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/assign", methods=["POST"])
+def api_assign_search_comment(cid):
+    db = get_db()
+    try:
+        account_id = request.json.get("account_id")
+        if not account_id:
+            return jsonify({"error": "account_id required"}), 400
+        db.assign_search_comment(cid, account_id)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/unassign", methods=["POST"])
+def api_unassign_search_comment(cid):
+    db = get_db()
+    try:
+        db.unassign_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/deploy", methods=["POST"])
+def api_deploy_search_comment(cid):
+    db = get_db()
+    try:
+        url = request.json.get("reddit_comment_url", "")
+        if not url:
+            return jsonify({"error": "reddit_comment_url required"}), 400
+        db.deploy_search_comment(cid, url)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>", methods=["DELETE"])
+def api_delete_search_comment(cid):
+    db = get_db()
+    try:
+        db.delete_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/brands")
+def api_search_brands():
+    """List all brands across all subreddits for the search feature."""
+    db = get_db()
+    try:
+        rows = db.conn.execute("""
+            SELECT b.*, s.name as subreddit_name
+            FROM brands b
+            JOIN subreddits s ON b.subreddit_id = s.id
+            ORDER BY b.name
+        """).fetchall()
+        return jsonify([dict(r) for r in rows])
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Debug: network diagnostic (remove after debugging)
 # ---------------------------------------------------------------------------
 

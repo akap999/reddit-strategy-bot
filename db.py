@@ -508,6 +508,47 @@ class Database:
         """)
         self.conn.commit()
 
+        # Search posts table (Live Search feature)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS search_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reddit_url TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                subreddit TEXT NOT NULL,
+                score INTEGER DEFAULT 0,
+                num_comments INTEGER DEFAULT 0,
+                author TEXT DEFAULT '',
+                post_date TEXT,
+                body_preview TEXT DEFAULT '',
+                brand_id INTEGER REFERENCES brands(id),
+                status TEXT DEFAULT 'saved',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self.conn.commit()
+
+        # Search comments table (Live Search feature)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS search_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                search_post_id INTEGER NOT NULL REFERENCES search_posts(id),
+                brand_id INTEGER REFERENCES brands(id),
+                account_id TEXT,
+                body TEXT NOT NULL,
+                persona_id TEXT,
+                is_reply INTEGER DEFAULT 0,
+                reply_to_url TEXT,
+                mentions_brand INTEGER DEFAULT 0,
+                relevance_score REAL,
+                status TEXT DEFAULT 'draft',
+                reddit_comment_url TEXT,
+                deployed_at TEXT,
+                deleted_at TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self.conn.commit()
+
     # --- Background Tasks ---
 
     def create_task(self, task_id, task_type):
@@ -947,3 +988,107 @@ class Database:
             (username,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- Search Posts (Live Search) ---
+
+    def save_search_post(self, data):
+        try:
+            cur = self.conn.execute(
+                """INSERT INTO search_posts
+                   (reddit_url, title, subreddit, score, num_comments, author, post_date, body_preview, brand_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (data["reddit_url"], data["title"], data["subreddit"],
+                 data.get("score", 0), data.get("num_comments", 0),
+                 data.get("author", ""), data.get("post_date", ""),
+                 data.get("body_preview", "")[:500], data.get("brand_id"))
+            )
+            self.conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            return None  # duplicate URL
+
+    def list_search_posts(self, brand_id=None, status=None):
+        q = """SELECT sp.*, b.name as brand_name
+               FROM search_posts sp
+               LEFT JOIN brands b ON sp.brand_id = b.id
+               WHERE 1=1"""
+        params = []
+        if brand_id:
+            q += " AND sp.brand_id = ?"
+            params.append(brand_id)
+        if status:
+            q += " AND sp.status = ?"
+            params.append(status)
+        q += " ORDER BY sp.created_at DESC"
+        rows = self.conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_search_post(self, post_id):
+        row = self.conn.execute("SELECT * FROM search_posts WHERE id = ?", (post_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_search_post_status(self, post_id, status):
+        self.conn.execute("UPDATE search_posts SET status = ? WHERE id = ?", (status, post_id))
+        self.conn.commit()
+
+    def delete_search_post(self, post_id):
+        self.conn.execute("DELETE FROM search_comments WHERE search_post_id = ?", (post_id,))
+        self.conn.execute("DELETE FROM search_posts WHERE id = ?", (post_id,))
+        self.conn.commit()
+
+    # --- Search Comments (Live Search) ---
+
+    def add_search_comment(self, search_post_id, body, brand_id=None, persona_id=None,
+                           is_reply=0, reply_to_url=None, mentions_brand=0, relevance_score=None):
+        cur = self.conn.execute(
+            """INSERT INTO search_comments
+               (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url, mentions_brand, relevance_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url, mentions_brand, relevance_score)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def list_search_comments(self, search_post_id=None, status=None):
+        q = """SELECT sc.*, sp.title as post_title, sp.subreddit as post_subreddit,
+                      sp.reddit_url as post_url, b.name as brand_name
+               FROM search_comments sc
+               JOIN search_posts sp ON sc.search_post_id = sp.id
+               LEFT JOIN brands b ON sc.brand_id = b.id
+               WHERE 1=1"""
+        params = []
+        if search_post_id:
+            q += " AND sc.search_post_id = ?"
+            params.append(search_post_id)
+        if status:
+            q += " AND sc.status = ?"
+            params.append(status)
+        q += " ORDER BY sc.created_at DESC"
+        rows = self.conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def assign_search_comment(self, comment_id, account_id):
+        self.conn.execute(
+            "UPDATE search_comments SET account_id = ?, status = 'assigned' WHERE id = ?",
+            (account_id, comment_id))
+        self.conn.commit()
+
+    def unassign_search_comment(self, comment_id):
+        self.conn.execute(
+            "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE id = ?",
+            (comment_id,))
+        self.conn.commit()
+
+    def deploy_search_comment(self, comment_id, reddit_url):
+        deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.conn.execute(
+            "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed' WHERE id = ?",
+            (reddit_url, deployed_at, comment_id))
+        self.conn.commit()
+
+    def delete_search_comment(self, comment_id):
+        deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
+            (deleted_at, comment_id))
+        self.conn.commit()

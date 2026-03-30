@@ -26,7 +26,7 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 ALLOWED_EMAILS = [e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()]
 
 # --- Database ---
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_bot.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_bot.db"))
 
 # --- Prompt Versioning ---
 PROMPT_VERSION = "v1.0"

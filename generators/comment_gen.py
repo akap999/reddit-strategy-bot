@@ -23,11 +23,11 @@ from db import Database
 
 
 class CommentGenerator:
-    def __init__(self, claude: ClaudeClient, db: Database):
+    def __init__(self, claude: ClaudeClient, db: Database, reddit_base=None):
         self.claude = claude
         self.db = db
         self.pullpush_url = "https://api.pullpush.io/reddit/search/comment"
-        self.reddit_base = "https://www.reddit.com"
+        self.reddit_base = reddit_base or "https://www.reddit.com"
         self.headers = {"User-Agent": REDDIT_USER_AGENT}
         self._pattern_history = []
 

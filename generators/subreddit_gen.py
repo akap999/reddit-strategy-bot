@@ -7,8 +7,9 @@ from config import REDDIT_USER_AGENT
 
 
 class SubredditGenerator:
-    def __init__(self, claude: ClaudeClient):
+    def __init__(self, claude: ClaudeClient, reddit_base=None):
         self.claude = claude
+        self.reddit_base = reddit_base or "https://www.reddit.com"
         self.headers = {"User-Agent": REDDIT_USER_AGENT}
 
     def check_availability(self, name):
@@ -17,7 +18,7 @@ class SubredditGenerator:
         """
         try:
             resp = requests.get(
-                f"https://www.reddit.com/r/{name}/about.json",
+                f"{self.reddit_base}/r/{name}/about.json",
                 headers=self.headers,
                 timeout=10
             )

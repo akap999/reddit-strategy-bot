@@ -17,6 +17,7 @@ from authlib.integrations.flask_client import OAuth
 from config import (
     ANTHROPIC_API_KEY, DB_PATH, DEFAULT_BRAND_MENTION_RATIO,
     SECRET_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAILS,
+    REDDIT_PROXY_URL, REDDIT_USER_AGENT,
 )
 from db import Database
 from generators.base import ClaudeClient
@@ -91,6 +92,18 @@ def get_db():
     return db
 
 # ---------------------------------------------------------------------------
+# Reddit proxy helper
+# ---------------------------------------------------------------------------
+
+def _reddit_get(path, timeout=15):
+    """GET a Reddit API path, routing through Cloudflare proxy if configured.
+    path should start with / e.g. /user/spez/about.json
+    """
+    import requests as _requests
+    base = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else "https://www.reddit.com"
+    return _requests.get(f"{base}{path}", headers={"User-Agent": REDDIT_USER_AGENT}, timeout=timeout)
+
+# ---------------------------------------------------------------------------
 # Background task system
 # ---------------------------------------------------------------------------
 
@@ -124,13 +137,14 @@ def start_task(task_type, func, *args, **kwargs):
 def make_generators():
     """Create fresh DB + generators for a background thread."""
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    reddit_base = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else None
     db = Database(DB_PATH)
     db.connect()
     db.initialize()
     claude = ClaudeClient(api_key)
-    sub_gen = SubredditGenerator(claude)
+    sub_gen = SubredditGenerator(claude, reddit_base=reddit_base)
     post_gen = PostGenerator(claude, db)
-    comment_gen = CommentGenerator(claude, db)
+    comment_gen = CommentGenerator(claude, db, reddit_base=reddit_base)
     return db, claude, sub_gen, post_gen, comment_gen
 
 # ---------------------------------------------------------------------------
@@ -593,7 +607,6 @@ def api_all_comments(sid):
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
     import time as _time
-    import requests as _requests
 
     def task():
         db = Database(DB_PATH)
@@ -609,10 +622,10 @@ def api_check_live(sid):
                 checked += 1
                 url = item["reddit_comment_url"]
                 try:
-                    # Fetch the comment JSON from Reddit
+                    # Fetch the comment JSON from Reddit via proxy
                     clean = url.split("?")[0].rstrip("/")
-                    json_url = f"{clean}.json"
-                    resp = _requests.get(json_url, headers={"User-Agent": "RedditStrategyBot/1.0"}, timeout=15)
+                    path = clean.replace("https://www.reddit.com", "") + ".json"
+                    resp = _reddit_get(path)
                     if resp.status_code == 404:
                         db.mark_comment_deleted(item["id"])
                         dead += 1
@@ -678,7 +691,6 @@ def api_brand_deployed_comments(bid):
 def api_comments_live_stats():
     """Fetch live Reddit stats (upvotes, replies) for a list of comment URLs server-side."""
     import time as _time
-    import requests as _requests
 
     data = request.json
     urls = data.get("urls", [])  # list of {id, reddit_comment_url}
@@ -692,8 +704,8 @@ def api_comments_live_stats():
                 continue
             try:
                 clean = url.split("?")[0].rstrip("/")
-                json_url = f"{clean}.json"
-                resp = _requests.get(json_url, headers={"User-Agent": "RedditStrategyBot/1.0"}, timeout=15)
+                path = clean.replace("https://www.reddit.com", "") + ".json"
+                resp = _reddit_get(path)
                 if resp.status_code == 200:
                     rdata = resp.json()
                     if isinstance(rdata, list) and len(rdata) > 1:
@@ -1307,16 +1319,23 @@ def api_debug_network():
     import requests as _requests
     results = {}
 
-    # Test 1: Reddit API
+    # Test 1: Reddit direct (expected to 403 from cloud IPs)
     try:
         r = _requests.get(
             "https://www.reddit.com/user/spez/about.json",
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             timeout=10,
         )
-        results["reddit"] = {"status": r.status_code, "body_preview": r.text[:200]}
+        results["reddit_direct"] = {"status": r.status_code, "body_preview": r.text[:200]}
     except Exception as e:
-        results["reddit"] = {"error": str(e)}
+        results["reddit_direct"] = {"error": str(e)}
+
+    # Test 1b: Reddit via proxy
+    try:
+        r = _reddit_get("/user/spez/about.json", timeout=10)
+        results["reddit_proxy"] = {"status": r.status_code, "body_preview": r.text[:200]}
+    except Exception as e:
+        results["reddit_proxy"] = {"error": str(e)}
 
     # Test 2: Generic HTTPS
     try:
@@ -1352,13 +1371,8 @@ def api_debug_network():
 
 def _fetch_reddit_user_data(username):
     """Fetch karma and account age from Reddit user API. Returns dict or None on failure."""
-    import requests as _requests
     try:
-        resp = _requests.get(
-            f"https://www.reddit.com/user/{username}/about.json",
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-            timeout=15,
-        )
+        resp = _reddit_get(f"/user/{username}/about.json")
         print(f"[REDDIT] u/{username} → status {resp.status_code}", flush=True)
         if resp.status_code == 200:
             data = resp.json().get("data", {})

@@ -62,3 +62,4 @@ FILLER_LEAD_DAYS = 3      # filler posts lead brand posts by this many days
 
 # --- Reddit ---
 REDDIT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+REDDIT_PROXY_URL = os.environ.get("REDDIT_PROXY_URL", "")  # Cloudflare Worker URL for Reddit proxy

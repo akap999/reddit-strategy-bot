@@ -1559,29 +1559,32 @@ def api_filtered_usernames():
         db.close()
 
 # ---------------------------------------------------------------------------
+# Startup logging (runs under both Gunicorn and direct python)
+# ---------------------------------------------------------------------------
+
+print("=" * 50)
+print("Reddit Strategy Bot — Starting up")
+print(f"  Auth enabled: {_auth_enabled}")
+print(f"  GOOGLE_CLIENT_ID set: {bool(GOOGLE_CLIENT_ID)}")
+print(f"  GOOGLE_CLIENT_SECRET set: {bool(GOOGLE_CLIENT_SECRET)}")
+print(f"  ALLOWED_EMAILS: {ALLOWED_EMAILS or '(none)'}")
+print(f"  SECRET_KEY set: {bool(SECRET_KEY)}")
+print("=" * 50)
+
+# Ensure DB exists
+db = get_db()
+subs = db.list_subreddits()
+total_posts = sum(s["post_count"] for s in subs)
+total_comments = sum(s["comment_count"] for s in subs)
+print(f"Database: {DB_PATH}")
+print(f"  {len(subs)} subreddits | {total_posts} posts | {total_comments} comments")
+db.close()
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("Warning: ANTHROPIC_API_KEY not set. Generation features will not work.")
-        print("Set it with: export ANTHROPIC_API_KEY=your-key-here")
-
-    if not _auth_enabled:
-        print("Warning: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set. Auth disabled (dev mode).")
-    else:
-        print(f"Auth enabled. Allowed emails: {', '.join(ALLOWED_EMAILS) or 'NONE (set ALLOWED_EMAILS)'}")
-
-    # Ensure DB exists
-    db = get_db()
-    subs = db.list_subreddits()
-    total_posts = sum(s["post_count"] for s in subs)
-    total_comments = sum(s["comment_count"] for s in subs)
-    print(f"Database: {DB_PATH}")
-    print(f"  {len(subs)} subreddits | {total_posts} posts | {total_comments} comments")
-    db.close()
-
     port = int(os.environ.get("PORT", 5001))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     print(f"\nStarting web dashboard at http://localhost:{port}")

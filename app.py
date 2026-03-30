@@ -100,9 +100,11 @@ def _reddit_get(path, timeout=15):
     path should start with / e.g. /user/spez/about.json
     """
     import requests as _requests
-    base = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else "https://www.reddit.com"
+    # Check both config and env directly (env var may be set after config import)
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
     url = f"{base}{path}"
-    print(f"[REDDIT_GET] {url} (proxy={'yes' if REDDIT_PROXY_URL else 'no'})", flush=True)
+    print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'})", flush=True)
     return _requests.get(url, headers={"User-Agent": REDDIT_USER_AGENT}, timeout=timeout)
 
 # ---------------------------------------------------------------------------
@@ -1654,6 +1656,7 @@ print(f"  GOOGLE_CLIENT_SECRET set: {bool(GOOGLE_CLIENT_SECRET)}")
 print(f"  ALLOWED_EMAILS: {ALLOWED_EMAILS or '(none)'}")
 print(f"  SECRET_KEY set: {bool(SECRET_KEY)}")
 print(f"  REDDIT_PROXY_URL: {REDDIT_PROXY_URL or '(not set)'}")
+print(f"  REDDIT_PROXY_URL (env): {os.environ.get('REDDIT_PROXY_URL', '(not in env)')}")
 print("=" * 50)
 
 # Ensure DB exists

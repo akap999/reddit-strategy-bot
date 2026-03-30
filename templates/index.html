@@ -1,0 +1,3209 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reddit Strategy Bot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #030303; color: #D7DADC; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        .sidebar { width: 240px; min-height: 100vh; }
+        .main { margin-left: 240px; min-height: 100vh; }
+        .nav-item { transition: background 0.15s; }
+        .nav-item:hover { background: rgba(255,69,0,0.12); }
+        .nav-item.active { background: rgba(255,69,0,0.2); border-right: 3px solid #FF4500; }
+        .stat-card { background: #1A1A1B; border-radius: 12px; border: 1px solid #343536; }
+        .card { background: #1A1A1B; border-radius: 8px; border: 1px solid #343536; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
+        .badge-draft { background: #2D2D2E; color: #818384; }
+        .badge-complete { background: #1a3a4a; color: #46d160; }
+        .badge-published { background: #1a3320; color: #46d160; }
+        .badge-brand { background: #3a1a00; color: #FF8b60; }
+        .badge-filler { background: #2D2D2E; color: #818384; }
+        .badge-available { background: #1a3320; color: #46d160; }
+        .badge-taken { background: #4a1a1a; color: #ff6b6b; }
+        .badge-assigned { background: #3a2a00; color: #FFD635; }
+        .badge-deployed { background: #1a3320; color: #46d160; }
+        .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
+        .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
+        .bar-fill { height: 20px; border-radius: 4px; transition: width 0.5s; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 50; display: flex; align-items: center; justify-content: center; }
+        .modal-box { background: #1A1A1B; border: 1px solid #343536; border-radius: 12px; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; }
+        .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 100; display: flex; flex-direction: column; gap: 8px; }
+        .toast { padding: 12px 20px; border-radius: 8px; font-size: 0.875rem; animation: slideIn 0.3s; }
+        .toast-success { background: #1a3320; color: #46d160; }
+        .toast-error { background: #4a1a1a; color: #ff6b6b; }
+        .toast-info { background: #0045AC; color: #7AAFFF; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .tree-indent { border-left: 2px solid #343536; margin-left: 16px; padding-left: 16px; }
+        .spinner { border: 3px solid #343536; border-top: 3px solid #FF4500; border-radius: 50%; width: 24px; height: 24px; animation: spin 0.8s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        input, select, textarea { background: #272729; border: 1px solid #343536; color: #D7DADC; border-radius: 6px; padding: 8px 12px; width: 100%; }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: #FF4500; }
+        button { cursor: pointer; }
+        .btn { padding: 8px 16px; border-radius: 6px; font-size: 0.875rem; font-weight: 500; transition: background 0.15s; }
+        .btn-primary { background: #FF4500; color: white; }
+        .btn-primary:hover { background: #CC3700; }
+        .btn-danger { background: #991b1b; color: white; }
+        .btn-danger:hover { background: #7f1d1d; }
+        .btn-accent { background: #0079D3; color: white; }
+        .btn-accent:hover { background: #0060A8; }
+        .btn-secondary { background: #272729; color: #D7DADC; border: 1px solid #343536; }
+        .btn-secondary:hover { background: #343536; }
+        .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 10px 12px; font-size: 0.75rem; text-transform: uppercase; color: #818384; border-bottom: 1px solid #343536; }
+        td { padding: 10px 12px; border-bottom: 1px solid #272729; font-size: 0.875rem; }
+        tr:hover td { background: rgba(255,69,0,0.05); }
+        .tab { padding: 8px 16px; border-bottom: 2px solid transparent; cursor: pointer; font-size: 0.875rem; color: #818384; }
+        .tab.active { color: #D7DADC; border-bottom-color: #FF4500; }
+        .tab:hover { color: #D7DADC; }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar fixed left-0 top-0 flex flex-col" style="background:#1A1A1B;border-right:1px solid #343536">
+        <div class="p-5" style="border-bottom:1px solid #343536">
+            <h1 class="text-lg font-bold" style="color:#FF4500">Reddit Strategy Bot</h1>
+            <p class="text-xs mt-1" style="color:#818384">Content Dashboard</p>
+        </div>
+        <nav class="flex-1 py-3">
+            <a onclick="navigate('dashboard')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="dashboard">Dashboard</a>
+            <a onclick="navigate('subreddits')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="subreddits">Subreddits</a>
+            <a onclick="navigate('brands')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="brands">Brands</a>
+            <a onclick="navigate('posts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="posts">Posts</a>
+            <a onclick="navigate('comments')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="comments">Comments</a>
+            <a onclick="navigate('accounts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="accounts">Accounts</a>
+            <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
+            <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
+        </nav>
+        <div class="p-4 text-xs" style="border-top:1px solid #343536;color:#818384">
+            CLI: python3 bot.py
+        </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="main p-8" id="app"></div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toasts"></div>
+
+    <!-- Modal container -->
+    <div id="modal-root"></div>
+
+<script>
+// =========================================================================
+// State
+// =========================================================================
+let currentView = 'dashboard';
+let subredditsCache = null;
+
+// =========================================================================
+// API helper
+// =========================================================================
+async function api(url, opts = {}) {
+    try {
+        const resp = await fetch(url, {
+            headers: { 'Content-Type': 'application/json', ...opts.headers },
+            ...opts,
+            body: opts.body ? JSON.stringify(opts.body) : undefined,
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: resp.statusText }));
+            throw new Error(err.error || resp.statusText);
+        }
+        if (resp.headers.get('content-type')?.includes('json')) return resp.json();
+        return resp;
+    } catch (e) {
+        toast(e.message, 'error');
+        throw e;
+    }
+}
+
+// =========================================================================
+// Toast
+// =========================================================================
+function toast(msg, type = 'info') {
+    const el = document.createElement('div');
+    el.className = `toast toast-${type}`;
+    el.textContent = msg;
+    document.getElementById('toasts').appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+}
+
+// =========================================================================
+// Modal
+// =========================================================================
+function showModal(html) {
+    document.getElementById('modal-root').innerHTML = `
+        <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+            <div class="modal-box p-6">${html}</div>
+        </div>`;
+}
+function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
+
+// =========================================================================
+// Task polling
+// =========================================================================
+async function runTask(url, body, onComplete) {
+    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating... this may take 30-60 seconds.</p></div>`);
+    try {
+        const { task_id } = await api(url, { method: 'POST', body });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                closeModal();
+                toast('Generation complete!', 'success');
+                if (onComplete) onComplete(t.result);
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                closeModal();
+                toast(`Error: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch (e) {
+        closeModal();
+    }
+}
+
+// =========================================================================
+// Navigation
+// =========================================================================
+function navigate(view) {
+    currentView = view;
+    document.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.view === view);
+    });
+    renderView(view);
+}
+
+function renderView(view) {
+    const app = document.getElementById('app');
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, analytics: renderAnalytics, export: renderExport };
+    (views[view] || views.dashboard)(app);
+}
+
+// =========================================================================
+// DASHBOARD VIEW
+// =========================================================================
+async function renderDashboard(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const data = await api('/api/dashboard');
+    el.innerHTML = `
+        <h2 class="text-2xl font-bold mb-6">Dashboard</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div class="stat-card p-5">
+                <p class="text-3xl font-bold" style="color:#FF4500">${data.subreddits}</p>
+                <p class="text-sm mt-1" style="color:#818384">Subreddits</p>
+            </div>
+            <div class="stat-card p-5">
+                <p class="text-3xl font-bold" style="color:#FF8b60">${data.brands}</p>
+                <p class="text-sm mt-1" style="color:#818384">Brands</p>
+            </div>
+            <div class="stat-card p-5">
+                <p class="text-3xl font-bold" style="color:#0079D3">${data.posts}</p>
+                <p class="text-sm mt-1" style="color:#818384">Posts</p>
+            </div>
+            <div class="stat-card p-5">
+                <p class="text-3xl font-bold" style="color:#46d160">${data.comments}</p>
+                <p class="text-sm mt-1" style="color:#818384">Comments</p>
+            </div>
+        </div>
+        <div class="flex gap-3 mb-8">
+            <button class="btn btn-primary" onclick="navigate('subreddits')">Manage Subreddits</button>
+            <button class="btn btn-secondary" onclick="navigate('posts')">Manage Posts</button>
+            <button class="btn btn-secondary" onclick="navigate('comments')">Manage Comments</button>
+        </div>
+    `;
+}
+
+// =========================================================================
+// SUBREDDITS VIEW
+// =========================================================================
+async function renderSubreddits(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const subs = await api('/api/subreddits');
+    subredditsCache = subs;
+
+    let cards = subs.map(s => `
+        <div class="card p-5 cursor-pointer hover:border-orange-500" onclick="showSubredditDetail(${s.id})">
+            <h3 class="font-bold text-orange-500 mb-2">r/${s.name}</h3>
+            <p class="text-sm text-gray-400 mb-3">${s.domain || ''}</p>
+            <div class="flex gap-4 text-xs text-gray-500">
+                <span>${s.brand_count} brands</span>
+                <span>${s.post_count} posts</span>
+                <span>${s.comment_count} comments</span>
+            </div>
+        </div>
+    `).join('');
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">Subreddits</h2>
+            <button class="btn btn-primary" onclick="showCreateSubredditModal()">+ Create Subreddit</button>
+        </div>
+        ${subs.length ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>` : '<p class="text-gray-500">No subreddits yet. Create one to get started.</p>'}
+    `;
+}
+
+async function showSubredditDetail(id) {
+    const sub = await api(`/api/subreddits/${id}`);
+    const brands = sub.brands || [];
+    const stats = sub.stats || {};
+    const postStats = stats.posts || {};
+    const commentStats = stats.comments || {};
+
+    let brandRows = brands.map(b => `
+        <tr>
+            <td class="font-medium">${b.name}</td>
+            <td class="text-gray-400">${b.domain_url || '-'}</td>
+            <td class="text-gray-400 text-xs">${(b.context || '').substring(0, 80)}${b.context?.length > 80 ? '...' : ''}</td>
+        </tr>
+    `).join('');
+
+    let rules = [];
+    try { rules = JSON.parse(sub.rules || '[]'); } catch(e) {}
+    let rulesHtml = rules.map(r => `<li class="mb-1"><strong>${r.title || r}</strong>${r.description ? ': ' + r.description : ''}</li>`).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold text-orange-500 mb-1">r/${sub.name}</h3>
+        <p class="text-sm text-gray-400 mb-4">${sub.domain || ''}</p>
+        <p class="text-sm text-gray-300 mb-4">${sub.description || ''}</p>
+
+        <div class="flex items-center gap-2 mb-4">
+            <span class="text-xs text-gray-500">Owner:</span>
+            ${sub.owner_account
+                ? `<span class="text-sm text-yellow-400 font-medium">u/${sub.owner_account}</span>
+                   <button class="btn btn-sm btn-secondary" onclick="assignSubredditOwner(${id})">Change</button>
+                   <button class="btn btn-sm btn-secondary" onclick="removeSubredditOwner(${id})">Remove</button>`
+                : `<button class="btn btn-sm btn-secondary" onclick="assignSubredditOwner(${id})">Assign Owner</button>`}
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 mb-5">
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold">${postStats.total_posts || 0}</p>
+                <p class="text-xs text-gray-500">Posts</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold">${commentStats.total_comments || 0}</p>
+                <p class="text-xs text-gray-500">Comments</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold">${commentStats.brand_mentions || 0}</p>
+                <p class="text-xs text-gray-500">Brand Mentions</p>
+            </div>
+        </div>
+
+        ${rules.length ? `<div class="mb-4"><h4 class="text-sm font-bold text-gray-300 mb-2">Rules</h4><ol class="text-xs text-gray-400 list-decimal pl-4">${rulesHtml}</ol></div>` : ''}
+
+        <h4 class="text-sm font-bold text-gray-300 mb-2">Brands (${brands.length})</h4>
+        ${brands.length ? `<table class="mb-4"><thead><tr><th>Name</th><th>Domain</th><th>Context</th></tr></thead><tbody>${brandRows}</tbody></table>` : '<p class="text-xs text-gray-500 mb-4">No brands yet.</p>'}
+
+        <div class="flex gap-2">
+            <button class="btn btn-primary btn-sm" onclick="closeModal();showAddBrandModal(${id})">+ Add Brand</button>
+            <button class="btn btn-sm btn-secondary" onclick="generateWelcomePost(${id})">Generate Welcome Post</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+            <button class="btn btn-sm btn-danger ml-auto" onclick="deleteSubredditConfirm(${id}, '${sub.name.replace(/'/g, "\\'")}')">Delete Subreddit</button>
+        </div>
+    `);
+}
+
+async function deleteSubredditConfirm(sid, name) {
+    if (!confirm('Delete r/' + name + ' and ALL its brands, posts, and comments? This cannot be undone.')) return;
+    if (!confirm('Are you sure? This will permanently delete everything under r/' + name + '.')) return;
+    await api('/api/subreddits/' + sid, { method: 'DELETE' });
+    toast('Subreddit r/' + name + ' deleted', 'success');
+    closeModal();
+    subredditsCache = null;
+    navigate('subreddits');
+}
+
+async function assignSubredditOwner(sid) {
+    const accounts = await api('/api/accounts');
+    let opts = accounts.map(a => `<option value="${a.username}">${a.username} (${(a.link_karma||0)+(a.comment_karma||0)} karma)</option>`).join('');
+    showModal(`
+        <h3 class="text-lg font-bold text-orange-500 mb-3">Assign Subreddit Owner</h3>
+        <select id="sub-owner-select" class="w-full mb-4 bg-gray-800 text-white border border-gray-600 rounded px-3 py-2">
+            <option value="">-- Select Account --</option>
+            ${opts}
+        </select>
+        <div class="flex gap-2">
+            <button class="btn btn-primary btn-sm" onclick="submitSubredditOwner(${sid})">Assign</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+async function submitSubredditOwner(sid) {
+    const username = document.getElementById('sub-owner-select').value;
+    if (!username) { toast('Select an account', 'error'); return; }
+    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username}) });
+    toast('Owner assigned', 'success');
+    closeModal();
+    showSubredditDetail(sid);
+}
+async function removeSubredditOwner(sid) {
+    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username: ''}) });
+    toast('Owner removed', 'success');
+    closeModal();
+    showSubredditDetail(sid);
+}
+
+async function showAddBrandModal(subId) {
+    let allBrands = [];
+    try { allBrands = await api('/api/brands/all'); } catch(e) {}
+
+    // Deduplicate by name
+    const brandMap = {};
+    allBrands.forEach(eb => {
+        const key = eb.name.toLowerCase();
+        if (!brandMap[key]) {
+            brandMap[key] = { ...eb, subreddits: [eb.subreddit_name] };
+        } else {
+            if (!brandMap[key].subreddits.includes(eb.subreddit_name)) {
+                brandMap[key].subreddits.push(eb.subreddit_name);
+            }
+        }
+    });
+    const uniqueBrands = Object.values(brandMap);
+
+    const dropdownHtml = uniqueBrands.length > 0 ? `
+        <div class="mb-3">
+            <label class="text-xs text-gray-400">Select Existing Brand</label>
+            <select id="brand-existing-select" onchange="selectExistingBrandInModal()" class="w-full">
+                <option value="">-- New Custom Brand --</option>
+                ${uniqueBrands.map(eb => `<option value="${eb.id}">${eb.name} (r/${eb.subreddits.join(', r/')})</option>`).join('')}
+            </select>
+        </div>` : '';
+
+    // Store allBrands on window for the modal select handler
+    window._modalAllBrands = allBrands;
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Add Brand</h3>
+        ${dropdownHtml}
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Website URL</label>
+                <div class="flex gap-2">
+                    <input id="brand-url" placeholder="e.g. petermd.com" class="flex-1">
+                    <button class="btn btn-sm btn-secondary" id="brand-analyze-btn" onclick="analyzeAddBrandUrl()">Auto-analyze</button>
+                </div>
+            </div>
+            <div><label class="text-xs text-gray-400">Brand Name</label><input id="brand-name" placeholder="e.g. PeterMD"></div>
+            <div><label class="text-xs text-gray-400">Context</label><textarea id="brand-context" rows="3" placeholder="What does this brand do?"></textarea></div>
+            <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="brand-keywords" placeholder="trt, testosterone, clinic"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitAddBrand(${subId})">Add Brand</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+function selectExistingBrandInModal() {
+    const sel = document.getElementById('brand-existing-select');
+    const brandId = sel ? sel.value : '';
+    const nameEl = document.getElementById('brand-name');
+    const urlEl = document.getElementById('brand-url');
+    const ctxEl = document.getElementById('brand-context');
+    const kwEl = document.getElementById('brand-keywords');
+    const analyzeBtn = document.getElementById('brand-analyze-btn');
+
+    if (!brandId) {
+        // Clear to custom mode
+        nameEl.value = ''; urlEl.value = ''; ctxEl.value = ''; kwEl.value = '';
+        [nameEl, urlEl, ctxEl, kwEl].forEach(el => { el.readOnly = false; el.style.opacity = '1'; el.style.cursor = ''; });
+        if (analyzeBtn) { analyzeBtn.style.display = ''; }
+        return;
+    }
+
+    const allBrands = window._modalAllBrands || [];
+    const brand = allBrands.find(b => b.id == brandId);
+    if (brand) {
+        let kw = [];
+        try { kw = JSON.parse(brand.keywords || '[]'); } catch(e) {}
+        nameEl.value = brand.name || '';
+        urlEl.value = brand.domain_url || '';
+        ctxEl.value = brand.context || '';
+        kwEl.value = kw.join(', ');
+        [nameEl, urlEl, ctxEl, kwEl].forEach(el => { el.readOnly = true; el.style.opacity = '0.6'; el.style.cursor = 'not-allowed'; });
+        if (analyzeBtn) { analyzeBtn.style.display = 'none'; }
+    }
+}
+
+async function analyzeAddBrandUrl() {
+    const url = document.getElementById('brand-url').value;
+    if (!url) { toast('Enter a website URL first', 'error'); return; }
+    const btn = document.getElementById('brand-analyze-btn');
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>'; btn.disabled = true;
+
+    try {
+        const { task_id } = await api('/api/analyze-brand', { method: 'POST', body: { domain_url: url } });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                const info = t.result;
+                document.getElementById('brand-name').value = info.brand_name || '';
+                document.getElementById('brand-context').value = info.brand_context || '';
+                document.getElementById('brand-keywords').value = (info.brand_keywords || []).join(', ');
+                btn.innerHTML = 'Auto-analyze'; btn.disabled = false;
+                toast(`Analyzed: ${info.brand_name}`, 'success');
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                btn.innerHTML = 'Auto-analyze'; btn.disabled = false;
+                toast(`Could not analyze: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) { btn.innerHTML = 'Auto-analyze'; btn.disabled = false; }
+}
+
+async function submitAddBrand(subId) {
+    const kw = document.getElementById('brand-keywords').value;
+    await api(`/api/subreddits/${subId}/brands`, {
+        method: 'POST',
+        body: {
+            name: document.getElementById('brand-name').value,
+            domain_url: document.getElementById('brand-url').value,
+            context: document.getElementById('brand-context').value,
+            keywords: kw ? kw.split(',').map(s => s.trim()) : [],
+        }
+    });
+    toast('Brand added!', 'success');
+    closeModal();
+    navigate('subreddits');
+}
+
+async function generateWelcomePost(subId) {
+    closeModal();
+    runTask('/api/generate/welcome-post', { subreddit_id: subId }, (result) => {
+        toast(`Welcome post created: "${result.title}"`, 'success');
+    });
+}
+
+// --- Create Subreddit Wizard ---
+
+let wizardState = {};
+
+async function showCreateSubredditModal() {
+    wizardState = { step: 1, brands: [{ name: '', domain_url: '', context: '', keywords: [], analyzed: false, selectedBrandId: '' }], allBrands: [] };
+    try {
+        wizardState.allBrands = await api('/api/brands/all');
+    } catch(e) { wizardState.allBrands = []; }
+    renderWizardStep1();
+}
+
+function renderWizardStep1() {
+    const existingBrands = wizardState.allBrands || [];
+    // Deduplicate brands by name — show each unique brand once with subreddit list
+    const brandMap = {};
+    existingBrands.forEach(eb => {
+        const key = eb.name.toLowerCase();
+        if (!brandMap[key]) {
+            brandMap[key] = { ...eb, subreddits: [eb.subreddit_name] };
+        } else {
+            if (!brandMap[key].subreddits.includes(eb.subreddit_name)) {
+                brandMap[key].subreddits.push(eb.subreddit_name);
+            }
+        }
+    });
+    const uniqueBrands = Object.values(brandMap);
+
+    const brandsHtml = wizardState.brands.map((b, i) => {
+        const isFromExisting = !!b.selectedBrandId;
+        const readonlyAttr = isFromExisting ? 'readonly style="opacity:0.6;cursor:not-allowed"' : '';
+        const dropdownOptions = uniqueBrands.map(eb =>
+            `<option value="${eb.id}" ${b.selectedBrandId == eb.id ? 'selected' : ''}>${eb.name} (r/${eb.subreddits.join(', r/')})</option>`
+        ).join('');
+        return `
+        <div class="card p-4 mb-3" id="wiz-brand-${i}">
+            <div class="flex justify-between items-center mb-2">
+                <span class="text-sm font-bold text-gray-300">Brand ${i + 1}</span>
+                <div class="flex gap-2">
+                    ${!isFromExisting && !b.analyzed ? `<button class="btn btn-sm btn-secondary" onclick="analyzeBrandUrl(${i})" id="wiz-analyze-btn-${i}">Auto-analyze from URL</button>` : ''}
+                    ${isFromExisting ? '<span class="text-xs text-green-400">From existing</span>' : (b.analyzed ? '<span class="text-xs text-green-400">Auto-analyzed</span>' : '')}
+                    ${wizardState.brands.length > 1 ? `<button class="btn btn-sm btn-danger" onclick="removeBrandRow(${i})">Remove</button>` : ''}
+                </div>
+            </div>
+            ${uniqueBrands.length > 0 ? `
+            <div class="mb-3">
+                <label class="text-xs text-gray-400">Select Existing Brand</label>
+                <select id="wiz-existing-${i}" onchange="selectExistingBrand(${i}, this.value)" class="w-full">
+                    <option value="">-- New Custom Brand --</option>
+                    ${dropdownOptions}
+                </select>
+            </div>` : ''}
+            <div class="space-y-2">
+                <div><label class="text-xs text-gray-400">Website URL</label><input id="wiz-url-${i}" value="${b.domain_url}" placeholder="e.g. petermd.com" onchange="wizardState.brands[${i}].domain_url=this.value" ${readonlyAttr}></div>
+                <div><label class="text-xs text-gray-400">Brand Name ${b.analyzed || isFromExisting ? '' : '(or auto-filled from URL)'}</label><input id="wiz-name-${i}" value="${b.name}" placeholder="e.g. PeterMD" onchange="wizardState.brands[${i}].name=this.value" ${readonlyAttr}></div>
+                <div><label class="text-xs text-gray-400">Context <span class="text-gray-600">(optional if URL provided)</span></label><textarea id="wiz-ctx-${i}" rows="2" placeholder="What does the brand do?" onchange="wizardState.brands[${i}].context=this.value" ${readonlyAttr}>${b.context}</textarea></div>
+            </div>
+        </div>
+    `}).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Create Subreddit - Step 1: Brands</h3>
+        <p class="text-sm text-gray-400 mb-4">Add one or more brands. Provide a website URL to auto-extract brand info, or fill in manually.</p>
+        ${brandsHtml}
+        <button class="btn btn-sm btn-secondary mb-4" onclick="addBrandRow()">+ Add Another Brand</button>
+        <div class="border-t border-gray-700 pt-4 mt-2">
+            <div><label class="text-xs text-gray-400">Domain / Topic Area <span class="text-gray-600">(optional — auto-derived from brands if blank)</span></label><input id="wiz-domain" value="${wizardState.domain || ''}" placeholder="e.g. men's telehealth, hormone therapy"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="wizardStep2()">Generate Names</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+function selectExistingBrand(idx, brandId) {
+    syncBrandFields();
+    if (!brandId) {
+        // Switch back to custom
+        wizardState.brands[idx] = { name: '', domain_url: '', context: '', keywords: [], analyzed: false, selectedBrandId: '' };
+    } else {
+        const allBrands = wizardState.allBrands || [];
+        const brand = allBrands.find(b => b.id == brandId);
+        if (brand) {
+            let kw = [];
+            try { kw = JSON.parse(brand.keywords || '[]'); } catch(e) {}
+            wizardState.brands[idx] = {
+                name: brand.name,
+                domain_url: brand.domain_url || '',
+                context: brand.context || '',
+                keywords: kw,
+                analyzed: true,
+                selectedBrandId: brandId
+            };
+        }
+    }
+    renderWizardStep1();
+}
+
+function addBrandRow() {
+    // Save current field values first
+    syncBrandFields();
+    wizardState.brands.push({ name: '', domain_url: '', context: '', keywords: [], analyzed: false, selectedBrandId: '' });
+    renderWizardStep1();
+}
+
+function removeBrandRow(idx) {
+    syncBrandFields();
+    wizardState.brands.splice(idx, 1);
+    renderWizardStep1();
+}
+
+function syncBrandFields() {
+    wizardState.brands.forEach((b, i) => {
+        const nameEl = document.getElementById(`wiz-name-${i}`);
+        const urlEl = document.getElementById(`wiz-url-${i}`);
+        const ctxEl = document.getElementById(`wiz-ctx-${i}`);
+        if (nameEl) b.name = nameEl.value;
+        if (urlEl) b.domain_url = urlEl.value;
+        if (ctxEl) b.context = ctxEl.value;
+    });
+    const domainEl = document.getElementById('wiz-domain');
+    if (domainEl) wizardState.domain = domainEl.value;
+}
+
+async function analyzeBrandUrl(idx) {
+    syncBrandFields();
+    const url = wizardState.brands[idx].domain_url;
+    if (!url) { toast('Enter a website URL first', 'error'); return; }
+
+    const btn = document.getElementById(`wiz-analyze-btn-${idx}`);
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Analyzing...'; btn.disabled = true; }
+
+    try {
+        const { task_id } = await api('/api/analyze-brand', { method: 'POST', body: { domain_url: url } });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                const info = t.result;
+                wizardState.brands[idx].name = info.brand_name || wizardState.brands[idx].name;
+                wizardState.brands[idx].context = info.brand_context || wizardState.brands[idx].context;
+                wizardState.brands[idx].keywords = info.brand_keywords || [];
+                wizardState.brands[idx].analyzed = true;
+                toast(`Analyzed: ${info.brand_name}`, 'success');
+                renderWizardStep1();
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                toast(`Could not analyze URL: ${t.error}`, 'error');
+                if (btn) { btn.innerHTML = 'Auto-analyze from URL'; btn.disabled = false; }
+            }
+        }, 2000);
+    } catch(e) {
+        if (btn) { btn.innerHTML = 'Auto-analyze from URL'; btn.disabled = false; }
+    }
+}
+
+async function wizardStep2() {
+    syncBrandFields();
+
+    // Validate: at least one brand with a name or URL
+    const validBrands = wizardState.brands.filter(b => b.name || b.domain_url);
+    if (!validBrands.length) {
+        toast('Add at least one brand (name or URL)', 'error');
+        return;
+    }
+
+    // Auto-derive domain from brand contexts if not specified
+    if (!wizardState.domain) {
+        const contexts = validBrands.map(b => b.context).filter(Boolean);
+        if (contexts.length) {
+            wizardState.domain = contexts[0].split('.')[0]; // rough fallback
+        }
+    }
+
+    // Build names/contexts for generation
+    const brandNames = validBrands.map(b => b.name || b.domain_url);
+    const brandContexts = validBrands.map(b => b.context || `Brand at ${b.domain_url}`);
+    wizardState.validBrands = validBrands;
+
+    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating name suggestions & checking availability...</p><p class="text-xs text-gray-600 mt-2">This may take 30-60 seconds</p></div>`);
+
+    try {
+        const { task_id } = await api('/api/generate/subreddit-names', {
+            method: 'POST',
+            body: { brand_names: brandNames, brand_contexts: brandContexts, count: 8 }
+        });
+
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                wizardState.suggestions = t.result;
+                renderWizardStep2();
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                closeModal();
+                toast(`Error: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) { closeModal(); }
+}
+
+function renderWizardStep2() {
+    const names = wizardState.suggestions || [];
+    let rows = names.map((s, i) => `
+        <div class="flex items-center gap-3 p-3 rounded cursor-pointer hover:bg-gray-700" onclick="wizardSelectName(${i})">
+            <input type="radio" name="subname" value="${i}" ${i===0?'checked':''}>
+            <div class="flex-1">
+                <span class="font-medium">${s.name}</span>
+                <span class="badge ${s.available === true ? 'badge-available' : s.available === false ? 'badge-taken' : 'badge-draft'} ml-2">
+                    ${s.available === true ? 'AVAILABLE' : s.available === false ? 'TAKEN' : 'UNKNOWN'}
+                </span>
+                <p class="text-xs text-gray-400 mt-1">${s.description || ''}</p>
+            </div>
+        </div>
+    `).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Create Subreddit - Step 2</h3>
+        <p class="text-sm text-gray-400 mb-3">Select a name:</p>
+        <div class="space-y-1 mb-4 max-h-80 overflow-y-auto">${rows}</div>
+        <p class="text-xs text-gray-500 mb-3">Or enter custom name:</p>
+        <input id="wiz-custom-name" placeholder="CustomSubredditName">
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="wizardStep3()">Generate Info</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    wizardState.selectedIdx = 0;
+}
+
+function wizardSelectName(idx) {
+    wizardState.selectedIdx = idx;
+    document.querySelectorAll('input[name=subname]').forEach((el, i) => el.checked = i === idx);
+}
+
+async function wizardStep3() {
+    const custom = document.getElementById('wiz-custom-name').value.trim();
+    const chosenName = custom || (wizardState.suggestions[wizardState.selectedIdx]?.name || '');
+
+    if (!chosenName) { toast('Select or enter a name', 'error'); return; }
+    wizardState.chosenName = chosenName;
+
+    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating subreddit info for r/${chosenName}...</p></div>`);
+
+    try {
+        const { task_id } = await api('/api/generate/subreddit-info', {
+            method: 'POST',
+            body: { name: chosenName, domain: wizardState.domain }
+        });
+
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                wizardState.info = t.result;
+                renderWizardStep3();
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                closeModal();
+                toast(`Error: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) { closeModal(); }
+}
+
+function renderWizardStep3() {
+    const info = wizardState.info || {};
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Create Subreddit - Step 3</h3>
+        <p class="text-sm text-gray-400 mb-3">Review info for <strong class="text-orange-500">r/${wizardState.chosenName}</strong>:</p>
+        <div class="space-y-3 text-sm">
+            <div><label class="text-xs text-gray-400">Description</label><textarea id="wiz-desc" rows="2">${info.description || ''}</textarea></div>
+            <div><label class="text-xs text-gray-400">Sidebar</label><textarea id="wiz-sidebar" rows="3">${info.sidebar || ''}</textarea></div>
+            <div><label class="text-xs text-gray-400">Welcome Message</label><textarea id="wiz-welcome" rows="2">${info.welcome_message || ''}</textarea></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="wizardFinish()">Create Subreddit</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function wizardFinish() {
+    const info = wizardState.info || {};
+    const resp = await api('/api/subreddits', {
+        method: 'POST',
+        body: {
+            name: wizardState.chosenName,
+            domain: wizardState.domain || '',
+            description: document.getElementById('wiz-desc').value,
+            rules: info.rules_json || JSON.stringify(info.rules || []),
+            sidebar: document.getElementById('wiz-sidebar').value,
+            welcome_message: document.getElementById('wiz-welcome').value,
+        }
+    });
+
+    const subId = resp.id;
+
+    // Add all brands
+    const brands = wizardState.validBrands || wizardState.brands || [];
+    for (const b of brands) {
+        if (!b.name && !b.domain_url) continue;
+        await api(`/api/subreddits/${subId}/brands`, {
+            method: 'POST',
+            body: {
+                name: b.name || b.domain_url,
+                domain_url: b.domain_url || '',
+                context: b.context || '',
+                keywords: b.keywords || [],
+            }
+        });
+    }
+
+    const brandCount = brands.filter(b => b.name || b.domain_url).length;
+    toast(`Subreddit created with ${brandCount} brand${brandCount !== 1 ? 's' : ''}!`, 'success');
+
+    // Auto-generate welcome post for the new subreddit
+    try {
+        const { task_id } = await api('/api/generate/welcome-post', { method: 'POST', body: { subreddit_id: subId } });
+        toast('Generating welcome post...', 'info');
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                toast(`Welcome post created: "${t.result.title}"`, 'success');
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                toast(`Welcome post failed: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) { /* non-critical */ }
+
+    closeModal();
+    navigate('subreddits');
+}
+
+// =========================================================================
+// BRANDS VIEW
+// =========================================================================
+let _brandsViewState = { selectedBrand: null, dateFrom: '', dateTo: '', data: null, commentFilter: 'all', subFilter: 'all', oursFilter: 'all', liveStats: {} };
+
+async function renderBrands(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const brands = await api('/api/brands/unique');
+
+    let brandCards = brands.map(b => `
+        <div class="card p-5 cursor-pointer hover:border-orange-500" onclick="showBrandAnalytics('${b.name.replace(/'/g, "\\'")}')">
+            <h3 class="font-bold text-orange-500 mb-1">${b.name}</h3>
+            <p class="text-xs text-gray-500 mb-2">${b.domain_url || ''}</p>
+            <p class="text-sm text-gray-400 mb-3">${(b.context || '').substring(0, 100)}${(b.context || '').length > 100 ? '...' : ''}</p>
+            <div class="flex gap-3 text-xs text-gray-500">
+                <span>${b.num_subreddits} subreddit${b.num_subreddits > 1 ? 's' : ''}</span>
+                <span class="text-gray-600">${b.subreddit_names ? b.subreddit_names.split(',').map(s => 'r/' + s.trim()).join(', ') : ''}</span>
+            </div>
+        </div>
+    `).join('');
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">Brands</h2>
+            <button class="btn btn-primary" onclick="showAddBrandStandalone()">+ Add Brand</button>
+        </div>
+        ${brands.length ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="brands-grid">${brandCards}</div>` : '<p class="text-gray-500">No brands yet. Click + Add Brand to get started.</p>'}
+        <div id="brand-detail-area" class="mt-6"></div>
+    `;
+}
+
+async function showAddBrandStandalone() {
+    const subs = subredditsCache || await api('/api/subreddits');
+    if (!subs.length) { toast('Create a subreddit first', 'error'); return; }
+
+    let allBrands = [];
+    try { allBrands = await api('/api/brands/all'); } catch(e) {}
+    const brandMap = {};
+    allBrands.forEach(eb => {
+        const key = eb.name.toLowerCase();
+        if (!brandMap[key]) brandMap[key] = { ...eb, subreddits: [eb.subreddit_name] };
+        else if (!brandMap[key].subreddits.includes(eb.subreddit_name)) brandMap[key].subreddits.push(eb.subreddit_name);
+    });
+    const uniqueBrands = Object.values(brandMap);
+    window._modalAllBrands = allBrands;
+
+    const dropdownHtml = uniqueBrands.length > 0 ? `
+        <div class="mb-3">
+            <label class="text-xs text-gray-400">Select Existing Brand</label>
+            <select id="brand-existing-select" onchange="selectExistingBrandInModal()" class="w-full">
+                <option value="">-- New Custom Brand --</option>
+                ${uniqueBrands.map(eb => `<option value="${eb.id}">${eb.name} (r/${eb.subreddits.join(', r/')})</option>`).join('')}
+            </select>
+        </div>` : '';
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Add Brand</h3>
+        <div class="mb-3">
+            <label class="text-xs text-gray-400">Subreddit</label>
+            <select id="brand-standalone-sub" class="w-full">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+        </div>
+        ${dropdownHtml}
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Website URL</label>
+                <div class="flex gap-2">
+                    <input id="brand-url" placeholder="e.g. petermd.com" class="flex-1">
+                    <button class="btn btn-sm btn-secondary" onclick="analyzeAddBrandUrl()">Auto-analyze</button>
+                </div>
+            </div>
+            <div><label class="text-xs text-gray-400">Brand Name</label><input id="brand-name" placeholder="e.g. PeterMD"></div>
+            <div><label class="text-xs text-gray-400">Context</label><textarea id="brand-context" rows="3" placeholder="What does this brand do?"></textarea></div>
+            <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="brand-keywords" placeholder="trt, testosterone, clinic"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitAddBrandStandalone()">Add Brand</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitAddBrandStandalone() {
+    const subId = document.getElementById('brand-standalone-sub').value;
+    const name = document.getElementById('brand-name').value.trim();
+    if (!name) { toast('Enter a brand name', 'error'); return; }
+    const kw = document.getElementById('brand-keywords').value;
+    await api(`/api/subreddits/${subId}/brands`, {
+        method: 'POST',
+        body: {
+            name,
+            domain_url: document.getElementById('brand-url').value.trim(),
+            context: document.getElementById('brand-context').value.trim(),
+            keywords: kw ? kw.split(',').map(s => s.trim()) : [],
+        }
+    });
+    toast('Brand added!', 'success');
+    closeModal();
+    renderBrands(document.getElementById('app'));
+}
+
+async function showBrandAnalytics(brandName) {
+    _brandsViewState.selectedBrand = brandName;
+    _brandsViewState.commentFilter = 'all';
+    _brandsViewState.subFilter = 'all';
+    _brandsViewState.oursFilter = 'all';
+    _brandsViewState.liveStats = {};
+    await loadBrandAnalytics();
+}
+
+async function loadBrandAnalytics() {
+    const name = _brandsViewState.selectedBrand;
+    if (!name) return;
+
+    const area = document.getElementById('brand-detail-area');
+    if (!area) return;
+    area.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+
+    let url = `/api/brands/${encodeURIComponent(name)}/full-analytics`;
+    const params = [];
+    if (_brandsViewState.dateFrom) params.push(`date_from=${_brandsViewState.dateFrom}`);
+    if (_brandsViewState.dateTo) params.push(`date_to=${_brandsViewState.dateTo}`);
+    if (params.length) url += '?' + params.join('&');
+
+    const data = await api(url);
+    _brandsViewState.data = data;
+    renderBrandDetail(data);
+}
+
+function renderBrandDetail(data) {
+    const area = document.getElementById('brand-detail-area');
+    if (!area) return;
+
+    const o = data.overview || {};
+    const subStats = data.subreddit_stats || [];
+    const comments = data.comments || [];
+    const name = data.brand_name;
+
+    // Subreddit stats rows
+    const subRows = subStats.map(s => `
+        <tr class="cursor-pointer hover:bg-gray-800" onclick="_brandsViewState.subFilter='${s.subreddit_name}';renderBrandCommentTable()">
+            <td class="font-medium text-orange-500">r/${s.subreddit_name}</td>
+            <td>${s.total}</td>
+            <td><span class="text-green-400">${s.deployed}</span></td>
+            <td>${s.assigned}</td>
+            <td>${s.complete}</td>
+            <td><span class="text-red-400">${s.deleted}</span></td>
+            <td><span class="text-blue-400">${s.mentions_brand}</span></td>
+            <td>${s.ours}</td>
+        </tr>
+    `).join('');
+
+    area.innerHTML = `
+        <div class="border-t border-gray-700 pt-6">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold text-orange-500">${name}</h3>
+                <button class="btn btn-sm btn-secondary" onclick="_brandsViewState.selectedBrand=null;document.getElementById('brand-detail-area').innerHTML=''">Close</button>
+            </div>
+
+            <!-- Date filter -->
+            <div class="flex gap-3 items-end mb-5 flex-wrap">
+                <div>
+                    <label class="text-xs text-gray-400 block">From</label>
+                    <input type="date" id="brand-date-from" value="${_brandsViewState.dateFrom}" class="text-sm" onchange="_brandsViewState.dateFrom=this.value">
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400 block">To</label>
+                    <input type="date" id="brand-date-to" value="${_brandsViewState.dateTo}" class="text-sm" onchange="_brandsViewState.dateTo=this.value">
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="loadBrandAnalytics()">Apply Filter</button>
+                <button class="btn btn-sm btn-secondary" onclick="_brandsViewState.dateFrom='';_brandsViewState.dateTo='';loadBrandAnalytics()">Clear Dates</button>
+                <button class="btn btn-sm btn-secondary" onclick="exportBrandCSV('${name.replace(/'/g, "\\'")}')">Export CSV</button>
+            </div>
+
+            <!-- Overview stats -->
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold">${o.total_comments || 0}</p>
+                    <p class="text-xs text-gray-500">Total Comments</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold text-green-400">${o.deployed || 0}</p>
+                    <p class="text-xs text-gray-500">Deployed</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold text-yellow-400">${o.assigned || 0}</p>
+                    <p class="text-xs text-gray-500">Assigned</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold text-blue-400">${o.complete || 0}</p>
+                    <p class="text-xs text-gray-500">Complete</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold text-red-400">${o.deleted || 0}</p>
+                    <p class="text-xs text-gray-500">Deleted</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold text-blue-400">${o.mentions_brand || 0}</p>
+                    <p class="text-xs text-gray-500">Brand Mentions</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold">${o.ours || 0}</p>
+                    <p class="text-xs text-gray-500">Ours</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-xl font-bold">${o.num_subreddits || 0}</p>
+                    <p class="text-xs text-gray-500">Subreddits</p>
+                </div>
+            </div>
+
+            <!-- Subreddit breakdown -->
+            <h4 class="text-sm font-bold text-gray-300 mb-2">Subreddit Breakdown <span class="text-xs text-gray-500 font-normal">(click a row to filter comments)</span></h4>
+            ${subStats.length ? `
+            <div class="overflow-x-auto mb-6">
+                <table class="text-sm">
+                    <thead><tr>
+                        <th>Subreddit</th><th>Total</th><th>Deployed</th><th>Assigned</th><th>Complete</th><th>Deleted</th><th>Brand Mentions</th><th>Ours</th>
+                    </tr></thead>
+                    <tbody>${subRows}</tbody>
+                </table>
+            </div>` : '<p class="text-xs text-gray-500 mb-6">No comments found for this date range.</p>'}
+
+            <!-- Comments table with filters -->
+            <div class="flex gap-3 items-end mb-3 flex-wrap">
+                <h4 class="text-sm font-bold text-gray-300">Comments</h4>
+                <select id="brand-comment-status-filter" onchange="_brandsViewState.commentFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                    <option value="all">All Statuses</option>
+                    <option value="complete">Complete</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="deployed">Deployed</option>
+                    <option value="deleted">Deleted</option>
+                </select>
+                <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                    <option value="all">All Subreddits</option>
+                    ${subStats.map(s => `<option value="${s.subreddit_name}" ${_brandsViewState.subFilter === s.subreddit_name ? 'selected' : ''}>r/${s.subreddit_name}</option>`).join('')}
+                </select>
+                <select id="brand-comment-ours-filter" onchange="_brandsViewState.oursFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                    <option value="all">All Comments</option>
+                    <option value="ours">Ours Only</option>
+                    <option value="not_ours">Not Ours</option>
+                </select>
+                <button class="btn btn-sm btn-secondary" onclick="refreshBrandLiveStats()" id="brand-refresh-stats-btn">Refresh Live Stats</button>
+                <span class="text-xs text-gray-500" id="brand-comment-count"></span>
+            </div>
+            <div id="brand-comments-table"></div>
+        </div>
+    `;
+
+    // Restore filter selects
+    const statusSel = document.getElementById('brand-comment-status-filter');
+    if (statusSel) statusSel.value = _brandsViewState.commentFilter;
+    const oursSel = document.getElementById('brand-comment-ours-filter');
+    if (oursSel) oursSel.value = _brandsViewState.oursFilter;
+
+    renderBrandCommentTable();
+}
+
+function renderBrandCommentTable() {
+    const container = document.getElementById('brand-comments-table');
+    const countEl = document.getElementById('brand-comment-count');
+    if (!container || !_brandsViewState.data) return;
+
+    let comments = _brandsViewState.data.comments || [];
+
+    // Apply filters
+    if (_brandsViewState.commentFilter !== 'all') {
+        comments = comments.filter(c => c.status === _brandsViewState.commentFilter);
+    }
+    if (_brandsViewState.subFilter !== 'all') {
+        comments = comments.filter(c => c.subreddit_name === _brandsViewState.subFilter);
+    }
+    if (_brandsViewState.oursFilter === 'ours') {
+        comments = comments.filter(c => c.is_ours);
+    } else if (_brandsViewState.oursFilter === 'not_ours') {
+        comments = comments.filter(c => !c.is_ours);
+    }
+
+    // Compute summary with live stats
+    const liveStats = _brandsViewState.liveStats || {};
+    let totalUpvotes = 0, totalReplies = 0, statsLoaded = 0;
+    comments.forEach(c => {
+        const s = liveStats[String(c.id)];
+        if (s) { totalUpvotes += (s.score || 0); totalReplies += (s.num_replies || 0); statsLoaded++; }
+    });
+
+    const statsText = statsLoaded > 0 ? ` | ${totalUpvotes} upvotes | ${totalReplies} replies (${statsLoaded} with live stats)` : '';
+    if (countEl) countEl.textContent = `${comments.length} comment${comments.length !== 1 ? 's' : ''}${statsText}`;
+
+    if (!comments.length) {
+        container.innerHTML = '<p class="text-xs text-gray-500 py-4">No comments match the current filters.</p>';
+        return;
+    }
+
+    const statusBadge = (s) => {
+        const map = { complete: 'badge-complete', assigned: 'badge-assigned', deployed: 'badge-deployed', deleted: 'badge-deleted', draft: 'badge-draft' };
+        return `<span class="badge ${map[s] || 'badge-draft'}">${s}</span>`;
+    };
+
+    const spinnerHtml = '<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span>';
+
+    const rows = comments.map(c => {
+        let kw = [];
+        try { kw = JSON.parse(c.matched_keywords || '[]'); } catch(e) {}
+        const kwBadges = kw.map(k => `<span class="badge badge-keyword">${k}</span>`).join(' ');
+        const preview = (c.body || '').substring(0, 120) + ((c.body || '').length > 120 ? '...' : '');
+        const postLink = c.post_reddit_url ? `<a href="${c.post_reddit_url}" target="_blank" class="text-orange-500 hover:underline">${(c.post_title || '').substring(0, 50)}</a>` : (c.post_title || '').substring(0, 50);
+        const commentLink = c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline text-xs">view</a>` : '';
+        const deployedDate = c.deployed_at ? new Date(c.deployed_at).toLocaleDateString() : '';
+        const createdDate = c.created_at ? new Date(c.created_at).toLocaleDateString() : '';
+
+        // Live stats
+        const ls = liveStats[String(c.id)];
+        const hasUrl = !!c.reddit_comment_url;
+        let upvoteCell, replyCell;
+        if (ls) {
+            const scoreColor = ls.score > 0 ? 'text-green-400' : ls.score < 0 ? 'text-red-400' : 'text-gray-400';
+            upvoteCell = `<span class="${scoreColor}">${ls.score > 0 ? '+' : ''}${ls.score}</span>`;
+            replyCell = `<span class="text-gray-300">${ls.num_replies}</span>`;
+        } else if (hasUrl) {
+            upvoteCell = `<span class="text-gray-600">—</span>`;
+            replyCell = `<span class="text-gray-600">—</span>`;
+        } else {
+            upvoteCell = `<span class="text-gray-700">n/a</span>`;
+            replyCell = `<span class="text-gray-700">n/a</span>`;
+        }
+
+        return `<tr>
+            <td class="text-xs text-gray-400">r/${c.subreddit_name || ''}</td>
+            <td class="text-xs">${postLink}</td>
+            <td class="text-xs text-gray-300" title="${(c.body || '').replace(/"/g, '&quot;')}">${preview}</td>
+            <td>${statusBadge(c.status)}</td>
+            <td class="text-center text-xs">${upvoteCell}</td>
+            <td class="text-center text-xs">${replyCell}</td>
+            <td class="text-xs">${c.is_ours ? '<span class="text-green-400">Yes</span>' : '<span class="text-gray-600">No</span>'}</td>
+            <td class="text-xs">${c.mentions_brand ? '<span class="text-blue-400">Yes</span>' : '<span class="text-gray-600">No</span>'}</td>
+            <td class="text-xs">${kwBadges}</td>
+            <td class="text-xs text-gray-400">${c.account_id || ''}</td>
+            <td class="text-xs text-gray-500">${deployedDate}</td>
+            <td class="text-xs text-gray-500">${createdDate}</td>
+            <td class="text-xs">${commentLink}</td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="overflow-x-auto">
+            <table class="text-sm">
+                <thead><tr>
+                    <th>Subreddit</th><th>Post</th><th>Comment</th><th>Status</th><th>Upvotes</th><th>Replies</th><th>Ours</th><th>Brand Mention</th><th>Keywords</th><th>Account</th><th>Deployed</th><th>Created</th><th>Link</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+async function refreshBrandLiveStats() {
+    if (!_brandsViewState.data) return;
+    const comments = _brandsViewState.data.comments || [];
+
+    // Collect all comments with reddit_comment_url
+    const urlItems = comments
+        .filter(c => c.reddit_comment_url)
+        .map(c => ({ id: c.id, reddit_comment_url: c.reddit_comment_url }));
+
+    if (!urlItems.length) {
+        toast('No deployed comments with Reddit URLs to check', 'info');
+        return;
+    }
+
+    const btn = document.getElementById('brand-refresh-stats-btn');
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block"></span> Fetching...'; btn.disabled = true; }
+
+    toast(`Fetching live stats for ${urlItems.length} comments...`, 'info');
+
+    try {
+        const { task_id } = await api('/api/comments/live-stats', { method: 'POST', body: { urls: urlItems } });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                const stats = t.result || {};
+                _brandsViewState.liveStats = { ..._brandsViewState.liveStats, ...stats };
+                toast(`Updated live stats for ${Object.keys(stats).length} comments`, 'success');
+                if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+                renderBrandCommentTable();
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                toast(`Stats fetch error: ${t.error}`, 'error');
+                if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+            }
+        }, 2000);
+    } catch(e) {
+        toast(`Failed: ${e.message}`, 'error');
+        if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
+    }
+}
+
+function exportBrandCSV(brandName) {
+    const liveStats = _brandsViewState.liveStats || {};
+    const hasLiveStats = Object.keys(liveStats).length > 0;
+
+    // If we have live stats loaded, do client-side export to include them
+    if (hasLiveStats && _brandsViewState.data) {
+        let comments = _brandsViewState.data.comments || [];
+        if (_brandsViewState.commentFilter !== 'all') comments = comments.filter(c => c.status === _brandsViewState.commentFilter);
+        if (_brandsViewState.subFilter !== 'all') comments = comments.filter(c => c.subreddit_name === _brandsViewState.subFilter);
+        if (_brandsViewState.oursFilter === 'ours') comments = comments.filter(c => c.is_ours);
+        else if (_brandsViewState.oursFilter === 'not_ours') comments = comments.filter(c => !c.is_ours);
+
+        const esc = (v) => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        const header = ['comment_id','subreddit','post_title','post_link','comment_body','comment_link','status','deployed_at','account_id','is_ours','mentions_brand','matched_keywords','upvotes','replies','created_at'];
+        const rows = comments.map(c => {
+            let kw = '';
+            try { kw = JSON.parse(c.matched_keywords || '[]').join(', '); } catch(e) {}
+            const ls = liveStats[String(c.id)];
+            return [c.id, c.subreddit_name||'', c.post_title||'', c.post_reddit_url||'', c.body||'', c.reddit_comment_url||'', c.status, c.deployed_at||'', c.account_id||'', c.is_ours?'Yes':'No', c.mentions_brand?'Yes':'No', kw, ls?ls.score:'', ls?ls.num_replies:'', c.created_at||''].map(esc).join(',');
+        });
+        const csv = [header.join(','), ...rows].join('\n');
+        const blob = new Blob([csv], {type:'text/csv'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${brandName.replace(/\s+/g,'_').toLowerCase()}_brand_comments.csv`;
+        a.click();
+        return;
+    }
+
+    // Fallback to server-side export (no live stats)
+    let url = `/api/export/brand/${encodeURIComponent(brandName)}`;
+    const params = [];
+    if (_brandsViewState.dateFrom) params.push(`date_from=${_brandsViewState.dateFrom}`);
+    if (_brandsViewState.dateTo) params.push(`date_to=${_brandsViewState.dateTo}`);
+    if (_brandsViewState.commentFilter !== 'all') params.push(`status=${_brandsViewState.commentFilter}`);
+    if (params.length) url += '?' + params.join('&');
+    window.location.href = url;
+}
+
+// =========================================================================
+// POSTS VIEW
+// =========================================================================
+async function renderPosts(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const subs = await api('/api/subreddits');
+    subredditsCache = subs;
+
+    if (!subs.length) {
+        el.innerHTML = '<h2 class="text-2xl font-bold mb-4">Posts</h2><p class="text-gray-500">Create a subreddit first.</p>';
+        return;
+    }
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold">Posts</h2>
+            <div class="flex gap-2">
+                <button class="btn btn-primary" onclick="showGenPostsModal()">Generate Posts</button>
+                <button class="btn btn-secondary" onclick="showGenFillerModal()">Generate Filler</button>
+            </div>
+        </div>
+        <div class="flex gap-3 mb-4 items-center">
+            <select id="posts-sub-filter" onchange="loadPosts()" class="w-48">
+                ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
+            </select>
+            <select id="posts-status-filter" onchange="loadPosts()" class="w-32">
+                <option value="all">All Status</option>
+                <option value="draft">Draft</option>
+                <option value="complete">Complete</option>
+                <option value="published">Published</option>
+            </select>
+        </div>
+        <div id="posts-table"></div>
+    `;
+    loadPosts();
+}
+
+async function loadPosts() {
+    const sid = document.getElementById('posts-sub-filter').value;
+    const status = document.getElementById('posts-status-filter').value;
+    const container = document.getElementById('posts-table');
+    container.innerHTML = '<div class="spinner"></div>';
+
+    const posts = await api(`/api/subreddits/${sid}/posts`);
+    const filtered = status === 'all' ? posts : posts.filter(p => p.status === status);
+
+    if (!filtered.length) {
+        container.innerHTML = '<p class="text-gray-500 mt-4">No posts found.</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table>
+            <thead><tr><th>Day</th><th>Title</th><th>Type</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th>Comments</th><th>Actions</th></tr></thead>
+            <tbody>${filtered.map(p => `
+                <tr>
+                    <td>${p.suggested_post_day}</td>
+                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : 'Brand'}</span></td>
+                    <td class="text-gray-400">${p.storyline}</td>
+                    <td>${p.ai_query_score || '-'}</td>
+                    <td><span class="badge badge-${p.status}">${p.status}</span></td>
+                    <td class="text-xs text-yellow-400">${p.owner_account || '-'}</td>
+                    <td>${p.comment_count || 0}</td>
+                    <td class="flex gap-1">
+                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Publish</button>` : ''}
+                        <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
+                    </td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
+}
+
+async function showPostDetail(pid) {
+    const post = await api(`/api/posts/${pid}`);
+    showModal(`
+        <h3 class="text-lg font-bold mb-1">${post.title}</h3>
+        <div class="flex gap-2 mb-3">
+            <span class="badge badge-${post.status}">${post.status}</span>
+            <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
+            <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
+        </div>
+        <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
+        ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
+        ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3">Reddit: ${post.reddit_url}</p>` : ''}
+        <p class="text-xs text-gray-500">${post.comment_count} comments</p>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+        </div>
+    `);
+}
+
+async function publishPost(pid) {
+    const accounts = await api('/api/accounts');
+    let acctOpts = accounts.map(a => `<option value="${a.username}">${a.username}</option>`).join('');
+    showModal(`
+        <h3 class="text-lg font-bold mb-4">Publish Post</h3>
+        <p class="text-sm text-gray-400 mb-3">Paste the Reddit URL after manually posting:</p>
+        <input id="publish-url" placeholder="https://reddit.com/r/...">
+        <label class="text-xs text-gray-400 mt-3 block">Owner Account</label>
+        <select id="publish-owner" class="w-full mb-2 bg-gray-800 text-white border border-gray-600 rounded px-3 py-2">
+            <option value="">-- No Owner --</option>
+            ${acctOpts}
+        </select>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" onclick="submitPublish(${pid})">Mark Published</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitPublish(pid) {
+    const url = document.getElementById('publish-url').value;
+    const ownerAcct = document.getElementById('publish-owner').value;
+    await api(`/api/posts/${pid}/publish`, { method: 'POST', body: { reddit_url: url, owner_account: ownerAcct } });
+    toast('Post marked as published', 'success');
+    closeModal();
+    loadPosts();
+}
+
+async function deletePost(pid) {
+    if (!confirm('Delete this post and all its comments?')) return;
+    await api(`/api/posts/${pid}`, { method: 'DELETE' });
+    toast('Post deleted', 'success');
+    loadPosts();
+}
+
+function showGenPostsModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate Brand Posts</h3>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Subreddit</label>
+                <select id="gen-posts-sub" onchange="loadBrandsForGen()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+            </div>
+            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-posts-brand"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Number of posts</label><input id="gen-posts-count" type="number" value="3" min="1" max="10"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitGenPosts()">Generate</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    loadBrandsForGen();
+}
+
+async function loadBrandsForGen() {
+    const sid = document.getElementById('gen-posts-sub').value;
+    const brands = await api(`/api/subreddits/${sid}/brands`);
+    const sel = document.getElementById('gen-posts-brand');
+    sel.innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+}
+
+async function submitGenPosts() {
+    const sid = parseInt(document.getElementById('gen-posts-sub').value);
+    const bid = parseInt(document.getElementById('gen-posts-brand').value);
+    const count = parseInt(document.getElementById('gen-posts-count').value);
+    if (!bid) { toast('Select a brand', 'error'); return; }
+    closeModal();
+    runTask('/api/generate/posts', { subreddit_id: sid, brand_id: bid, count }, () => loadPosts());
+}
+
+function showGenFillerModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate Filler Posts</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-filler-sub">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
+            <div><label class="text-xs text-gray-400">Number of posts</label><input id="gen-filler-count" type="number" value="3" min="1" max="10"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitGenFiller()">Generate</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitGenFiller() {
+    const sid = parseInt(document.getElementById('gen-filler-sub').value);
+    const count = parseInt(document.getElementById('gen-filler-count').value);
+    closeModal();
+    runTask('/api/generate/filler-posts', { subreddit_id: sid, count }, () => loadPosts());
+}
+
+// =========================================================================
+// COMMENTS VIEW
+// =========================================================================
+async function renderComments(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const subs = await api('/api/subreddits');
+    subredditsCache = subs;
+
+    if (!subs.length) {
+        el.innerHTML = '<h2 class="text-2xl font-bold mb-4">Comments</h2><p class="text-gray-500">Create a subreddit first.</p>';
+        return;
+    }
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold">Comments</h2>
+            <div class="flex gap-2">
+                <button class="btn btn-primary" onclick="showGenCommentsModal()">Generate Comments</button>
+                <button class="btn btn-accent" onclick="showGenHQCommentModal()">Generate HQ Comment</button>
+                <button class="btn btn-secondary" onclick="showGenLiveCommentsModal()">Generate for Live Post</button>
+            </div>
+        </div>
+        <div class="flex gap-1 mb-4 border-b border-gray-700">
+            <div class="tab ${commentsTab==='tree'?'active':''}" onclick="commentsTab='tree';renderCommentsTabContent()">Comment Trees</div>
+            <div class="tab ${commentsTab==='analysis'?'active':''}" onclick="commentsTab='analysis';renderCommentsTabContent()">Comment Analysis</div>
+            <div class="tab ${commentsTab==='manage'?'active':''}" onclick="commentsTab='manage';renderCommentsTabContent()">Management</div>
+            <div class="tab ${commentsTab==='assigned-accounts'?'active':''}" onclick="commentsTab='assigned-accounts';renderCommentsTabContent()">Assigned Accounts</div>
+        </div>
+        <div id="comments-tab-content"></div>
+    `;
+    renderCommentsTabContent();
+}
+
+let commentsTab = 'tree';
+
+function renderCommentsTabContent() {
+    const container = document.getElementById('comments-tab-content');
+    if (!container) return;
+
+    // Update tab active states
+    document.querySelectorAll('.tab').forEach(t => {
+        if (t.textContent === 'Comment Trees') t.classList.toggle('active', commentsTab === 'tree');
+        if (t.textContent === 'Comment Analysis') t.classList.toggle('active', commentsTab === 'analysis');
+        if (t.textContent === 'Management') t.classList.toggle('active', commentsTab === 'manage');
+        if (t.textContent === 'Assigned Accounts') t.classList.toggle('active', commentsTab === 'assigned-accounts');
+    });
+
+    if (commentsTab === 'tree') {
+        renderCommentTreeTab(container);
+    } else if (commentsTab === 'analysis') {
+        renderCommentAnalysisTab(container);
+    } else if (commentsTab === 'manage') {
+        renderCommentManagementTab(container);
+    } else if (commentsTab === 'assigned-accounts') {
+        renderAssignedAccountsTab(container);
+    }
+}
+
+function renderCommentTreeTab(container) {
+    const subs = subredditsCache || [];
+    container.innerHTML = `
+        <div class="flex gap-3 mb-4 items-center">
+            <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+            <select id="comments-brand-filter" onchange="filterPostsByBrand()" class="w-44"><option value="">All Brands</option></select>
+            <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">Select a post...</option></select>
+        </div>
+        <div id="comment-tree"></div>
+    `;
+    loadBrandsAndPostsForComments();
+}
+
+let _commentsPosts = []; // cached for brand filtering
+
+async function loadBrandsAndPostsForComments() {
+    const sid = document.getElementById('comments-sub-filter').value;
+    const [posts, brands] = await Promise.all([
+        api(`/api/subreddits/${sid}/posts`),
+        api(`/api/subreddits/${sid}/brands`),
+    ]);
+    _commentsPosts = posts;
+
+    // Populate brand filter
+    const brandSel = document.getElementById('comments-brand-filter');
+    brandSel.innerHTML = '<option value="">All Brands</option>' + brands.map(b =>
+        `<option value="${b.id}">${b.name}</option>`
+    ).join('');
+
+    filterPostsByBrand();
+}
+
+function filterPostsByBrand() {
+    const brandId = document.getElementById('comments-brand-filter').value;
+    const filtered = brandId ? _commentsPosts.filter(p => p.brand_id == brandId) : _commentsPosts;
+    const sel = document.getElementById('comments-post-filter');
+    sel.innerHTML = '<option value="">Select a post...</option>' + filtered.map(p =>
+        `<option value="${p.id}">[Day ${p.suggested_post_day}] ${p.title.substring(0, 60)}</option>`
+    ).join('');
+    document.getElementById('comment-tree').innerHTML = '';
+}
+
+// --- Comment Analysis Tab ---
+let _analysisComments = [];
+let _analysisMode = 'post'; // 'post' or 'brand'
+
+async function renderCommentAnalysisTab(container) {
+    const subs = subredditsCache || [];
+    const brands = await api('/api/brands/all');
+    container.innerHTML = `
+        <div class="flex gap-3 mb-4 items-center flex-wrap">
+            <select id="analysis-mode" onchange="toggleAnalysisMode()" class="w-40">
+                <option value="post" ${_analysisMode==='post'?'selected':''}>By Post</option>
+                <option value="brand" ${_analysisMode==='brand'?'selected':''}>By Brand</option>
+            </select>
+            <div id="analysis-post-controls" class="flex gap-3 items-center" ${_analysisMode==='brand'?'style="display:none"':''}>
+                <select id="analysis-sub-filter" onchange="loadAnalysisPosts()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+                <select id="analysis-post-filter" class="w-64"><option value="">Select a published post...</option></select>
+                <button class="btn btn-primary btn-sm" onclick="fetchLiveComments()">Fetch Live Data</button>
+            </div>
+            <div id="analysis-brand-controls" class="flex gap-3 items-center" ${_analysisMode==='post'?'style="display:none"':''}>
+                <select id="analysis-brand-filter" class="w-48">
+                    <option value="">Select brand...</option>
+                    ${brands.map(b => `<option value="${b.id}">${b.name} (r/${b.subreddit_name})</option>`).join('')}
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="fetchBrandDeployedComments()">Load Deployed</button>
+            </div>
+        </div>
+        <div id="analysis-filter-row" class="flex gap-3 mb-4 items-center" style="display:none">
+            <select id="analysis-ownership-filter" onchange="renderAnalysisTable()" class="w-40">
+                <option value="all">Show All</option>
+                <option value="ours">Ours Only</option>
+                <option value="organic">Organic Only</option>
+            </select>
+            <span id="analysis-summary" class="text-sm text-gray-400"></span>
+            <button class="btn btn-sm btn-secondary ml-auto" onclick="refreshLiveStats()">Refresh Stats</button>
+            <button class="btn btn-sm btn-primary" onclick="exportAnalysisCSV()">Export CSV</button>
+        </div>
+        <div id="analysis-results"></div>
+    `;
+    if (_analysisMode === 'post') loadAnalysisPosts();
+}
+
+function toggleAnalysisMode() {
+    _analysisMode = document.getElementById('analysis-mode').value;
+    document.getElementById('analysis-post-controls').style.display = _analysisMode === 'post' ? 'flex' : 'none';
+    document.getElementById('analysis-brand-controls').style.display = _analysisMode === 'brand' ? 'flex' : 'none';
+    document.getElementById('analysis-filter-row').style.display = 'none';
+    document.getElementById('analysis-results').innerHTML = '';
+    _analysisComments = [];
+}
+
+async function loadAnalysisPosts() {
+    const sid = document.getElementById('analysis-sub-filter')?.value;
+    if (!sid) return;
+    const posts = await api(`/api/subreddits/${sid}/published-posts`);
+    const sel = document.getElementById('analysis-post-filter');
+    sel.innerHTML = '<option value="">Select a published post...</option>' + posts.map(p =>
+        `<option value="${p.id}">[Day ${p.suggested_post_day}] ${p.title.substring(0, 55)}</option>`
+    ).join('');
+    document.getElementById('analysis-results').innerHTML = '';
+    document.getElementById('analysis-filter-row').style.display = 'none';
+}
+
+async function fetchLiveComments() {
+    const pid = document.getElementById('analysis-post-filter').value;
+    if (!pid) { toast('Select a published post first', 'error'); return; }
+
+    const container = document.getElementById('analysis-results');
+    container.innerHTML = '<div class="spinner mx-auto"></div><p class="text-center text-gray-400 mt-2">Fetching live data from Reddit...</p>';
+
+    try {
+        const data = await api(`/api/posts/${pid}/live-comments`);
+        _analysisComments = (data.comments || []).map(c => ({ ...c, _source: 'live' }));
+        showAnalysisResults();
+    } catch(e) {
+        container.innerHTML = `<p class="text-red-400">Failed to fetch: ${e.message}</p>`;
+    }
+}
+
+async function fetchBrandDeployedComments() {
+    const bid = document.getElementById('analysis-brand-filter').value;
+    if (!bid) { toast('Select a brand first', 'error'); return; }
+
+    const container = document.getElementById('analysis-results');
+    container.innerHTML = '<div class="spinner mx-auto"></div><p class="text-center text-gray-400 mt-2">Loading deployed comments...</p>';
+
+    try {
+        const comments = await api(`/api/brands/${bid}/deployed-comments`);
+        _analysisComments = comments.map(c => {
+            let kws = [];
+            try { kws = c.matched_keywords ? JSON.parse(c.matched_keywords) : []; } catch(e) {}
+            return {
+                id: c.id,
+                body: c.body,
+                score: null,
+                author: c.account_id || '?',
+                permalink: '',
+                num_replies: null,
+                is_ours: true,
+                our_comment_id: c.id,
+                reddit_comment_url: c.reddit_comment_url || '',
+                post_title: c.post_title || '',
+                post_reddit_url: c.post_reddit_url || '',
+                deployed_at: c.deployed_at || '',
+                matched_keywords: kws,
+                _source: 'db',
+            };
+        });
+        showAnalysisResults();
+        // Auto-fetch live stats
+        await refreshLiveStats();
+    } catch(e) {
+        container.innerHTML = `<p class="text-red-400">Failed: ${e.message}</p>`;
+    }
+}
+
+async function refreshLiveStats() {
+    // Collect all comments with Reddit URLs that need stats
+    const urlItems = _analysisComments
+        .filter(c => c.reddit_comment_url || c.permalink)
+        .map(c => ({
+            id: c.id,
+            reddit_comment_url: c.reddit_comment_url || (`https://www.reddit.com${c.permalink}`)
+        }));
+
+    if (!urlItems.length) { toast('No deployed comments with URLs to check', 'info'); return; }
+
+    toast(`Fetching live stats for ${urlItems.length} comments...`, 'info');
+
+    try {
+        const { task_id } = await api('/api/comments/live-stats', { method: 'POST', body: { urls: urlItems } });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                const stats = t.result || {};
+                let updated = 0;
+                for (const c of _analysisComments) {
+                    const s = stats[String(c.id)];
+                    if (s) {
+                        c.score = s.score;
+                        if (s.author) c.author = s.author;
+                        c.num_replies = s.num_replies;
+                        if (s.permalink) c.permalink = s.permalink;
+                        if (s.created_utc) c.created_utc = s.created_utc;
+                        updated++;
+                    }
+                }
+                toast(`Updated stats for ${updated}/${urlItems.length} comments`, 'success');
+                showAnalysisResults();
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                toast(`Stats fetch error: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) {
+        toast(`Failed to fetch stats: ${e.message}`, 'error');
+    }
+}
+
+function showAnalysisResults() {
+    document.getElementById('analysis-filter-row').style.display = 'flex';
+    const oursCount = _analysisComments.filter(c => c.is_ours).length;
+    const totalUp = _analysisComments.reduce((s, c) => s + (c.score || 0), 0);
+    document.getElementById('analysis-summary').textContent =
+        `${_analysisComments.length} comments | ${oursCount} ours | ${_analysisComments.length - oursCount} organic | Total upvotes: ${totalUp}`;
+    renderAnalysisTable();
+}
+
+function renderAnalysisTable() {
+    const filter = document.getElementById('analysis-ownership-filter').value;
+    let filtered = _analysisComments;
+    if (filter === 'ours') filtered = _analysisComments.filter(c => c.is_ours);
+    else if (filter === 'organic') filtered = _analysisComments.filter(c => !c.is_ours);
+
+    const container = document.getElementById('analysis-results');
+    if (!filtered.length) {
+        container.innerHTML = '<p class="text-gray-500 mt-4">No comments match this filter.</p>';
+        return;
+    }
+
+    const isBrandMode = _analysisMode === 'brand';
+    container.innerHTML = `
+        <table>
+            <thead><tr>
+                ${isBrandMode ? '<th>Post</th>' : ''}
+                <th>Comment</th>
+                <th>Author</th>
+                <th>Upvotes</th>
+                <th>Replies</th>
+                <th>Date</th>
+                ${isBrandMode ? '<th>Keywords</th>' : ''}
+                <th>Link</th>
+                <th>Ours?</th>
+            </tr></thead>
+            <tbody>${filtered.map(c => {
+                const link = c.reddit_comment_url
+                    ? c.reddit_comment_url
+                    : (c.permalink ? `https://reddit.com${c.permalink}` : '');
+                const kwHtml = (c.matched_keywords || []).map(k => `<span class="badge badge-keyword">${k}</span>`).join(' ');
+                // Date: use deployed_at for brand mode, or created_utc from Reddit for post mode
+                let dateStr = '-';
+                if (c.deployed_at) {
+                    dateStr = c.deployed_at.substring(0, 10);
+                } else if (c.created_utc) {
+                    dateStr = new Date(c.created_utc * 1000).toISOString().substring(0, 10);
+                }
+                return `<tr class="${c.is_ours ? 'border-l-2 border-orange-500' : ''}">
+                    ${isBrandMode ? `<td class="text-xs text-gray-400 max-w-[140px] truncate">${c.post_title || '-'}</td>` : ''}
+                    <td class="max-w-md"><p class="text-sm text-gray-300 truncate">${c.body.substring(0, 120)}${c.body.length > 120 ? '...' : ''}</p></td>
+                    <td class="text-gray-400 text-sm">${c.author ? (c.author.startsWith('u/') ? c.author : 'u/' + c.author) : '-'}</td>
+                    <td class="text-center">
+                        ${c.score !== null && c.score !== undefined ? `<span class="${c.score > 0 ? 'text-green-400' : c.score < 0 ? 'text-red-400' : 'text-gray-400'}">${c.score > 0 ? '+' : ''}${c.score}</span>` : '<span class="text-gray-600 spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span>'}
+                    </td>
+                    <td class="text-center text-gray-400">${c.num_replies !== null && c.num_replies !== undefined ? c.num_replies : '<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span>'}</td>
+                    <td class="text-xs text-gray-400">${dateStr}</td>
+                    ${isBrandMode ? `<td>${kwHtml}</td>` : ''}
+                    <td>${link ? `<a href="${link}" target="_blank" class="text-orange-500 text-xs hover:underline">view</a>` : '-'}</td>
+                    <td class="text-center">
+                        ${c.is_ours
+                            ? `<button class="btn btn-sm bg-orange-600 text-white" onclick="toggleOurs('${c.id}', ${c.our_comment_id}, false)">Ours</button>`
+                            : `<button class="btn btn-sm btn-secondary" onclick="toggleOurs('${c.id}', ${c.our_comment_id || 'null'}, true)">Mark Ours</button>`
+                        }
+                    </td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>
+    `;
+}
+
+async function toggleOurs(liveId, ourCommentId, setOurs) {
+    const c = _analysisComments.find(c => String(c.id) === String(liveId));
+
+    if (!ourCommentId && setOurs) {
+        // Organic comment — save to DB first
+        if (!c) { toast('Comment not found', 'error'); return; }
+
+        // Determine post_id from context
+        let postId = null;
+        if (_analysisMode === 'post') {
+            const sel = document.getElementById('analysis-post-filter');
+            postId = sel ? sel.value : null;
+        }
+        if (!postId && c.post_id) postId = c.post_id;
+        if (!postId) { toast('Cannot determine post — select a post first', 'error'); return; }
+
+        const redditUrl = c.reddit_comment_url || (c.permalink ? `https://www.reddit.com${c.permalink}` : '');
+        try {
+            const result = await api('/api/comments/save-organic', {
+                method: 'POST',
+                body: {
+                    post_id: parseInt(postId),
+                    body: c.body || '',
+                    author: c.author || '',
+                    permalink: c.permalink || '',
+                    reddit_comment_url: redditUrl,
+                }
+            });
+            // Update local state with the new DB comment ID
+            c.is_ours = true;
+            c.our_comment_id = result.comment_id;
+            showAnalysisResults();
+            toast('Organic comment saved & marked as ours', 'success');
+        } catch(e) {
+            toast(`Failed to save: ${e.message}`, 'error');
+        }
+        return;
+    }
+
+    await api(`/api/comments/${ourCommentId}/mark-ours`, { method: 'POST', body: { is_ours: setOurs } });
+    if (c) c.is_ours = setOurs;
+    showAnalysisResults();
+    toast(setOurs ? 'Marked as ours' : 'Unmarked', 'success');
+}
+
+function exportAnalysisCSV() {
+    const filter = document.getElementById('analysis-ownership-filter').value;
+    let data = _analysisComments;
+    if (filter === 'ours') data = data.filter(c => c.is_ours);
+    else if (filter === 'organic') data = data.filter(c => !c.is_ours);
+
+    if (!data.length) { toast('No data to export', 'error'); return; }
+
+    const isBrandMode = _analysisMode === 'brand';
+    const headers = isBrandMode
+        ? ['Post', 'Comment', 'Author', 'Upvotes', 'Replies', 'Date', 'Keywords', 'Ours', 'Link']
+        : ['Comment', 'Author', 'Upvotes', 'Replies', 'Date', 'Ours', 'Link'];
+
+    const escCSV = (s) => '"' + String(s || '').replace(/"/g, '""') + '"';
+    let csv = headers.join(',') + '\n';
+    for (const c of data) {
+        const link = c.reddit_comment_url || (c.permalink ? `https://reddit.com${c.permalink}` : '');
+        let dateStr = '';
+        if (c.deployed_at) dateStr = c.deployed_at.substring(0, 10);
+        else if (c.created_utc) dateStr = new Date(c.created_utc * 1000).toISOString().substring(0, 10);
+        const row = [];
+        if (isBrandMode) row.push(escCSV(c.post_title));
+        row.push(escCSV(c.body.substring(0, 200)));
+        row.push(escCSV(c.author));
+        row.push(c.score !== null && c.score !== undefined ? c.score : '');
+        row.push(c.num_replies !== null && c.num_replies !== undefined ? c.num_replies : '');
+        row.push(escCSV(dateStr));
+        if (isBrandMode) row.push(escCSV((c.matched_keywords || []).join(', ')));
+        row.push(c.is_ours ? 'Yes' : 'No');
+        row.push(escCSV(link));
+        csv += row.join(',') + '\n';
+    }
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `comment_analysis_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('CSV downloaded', 'success');
+}
+
+async function loadCommentTree() {
+    const pid = document.getElementById('comments-post-filter').value;
+    const container = document.getElementById('comment-tree');
+    if (!pid) { container.innerHTML = ''; return; }
+
+    container.innerHTML = '<div class="spinner"></div>';
+    const tree = await api(`/api/posts/${pid}/comments`);
+
+    if (!tree.length) {
+        container.innerHTML = '<p class="text-gray-500 mt-4">No comments for this post.</p>';
+        return;
+    }
+
+    container.innerHTML = tree.map(c => renderCommentNode(c, 0)).join('');
+}
+
+function renderCommentNode(c, depth) {
+    const indent = depth > 0 ? 'tree-indent' : '';
+    const replies = (c.replies || []).map(r => renderCommentNode(r, depth + 1)).join('');
+    let kwPills = '';
+    try {
+        const kws = c.matched_keywords ? JSON.parse(c.matched_keywords) : [];
+        kwPills = kws.map(k => `<span class="badge badge-keyword">${k}</span>`).join('');
+    } catch(e) {}
+
+    // Status-dependent action buttons
+    let actionBtns = '';
+    if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Mark Deleted</button>`;
+
+    return `
+        <div class="${indent} mb-3">
+            <div class="card p-3">
+                <div class="flex gap-2 items-center mb-2 flex-wrap">
+                    <span class="text-xs text-gray-600">#${c.id}</span>
+                    ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0079D3;color:white">HQ</span>' : ''}
+                    ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
+                    ${c.is_reply && c.parent_comment_id ? `<span class="text-xs text-gray-500">→ #${c.parent_comment_id}</span>` : ''}
+                    ${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}
+                    ${c.persona_id ? `<span class="badge badge-draft">${c.persona_id}</span>` : ''}
+                    ${c.structure_id ? `<span class="badge badge-draft">${c.structure_id}</span>` : ''}
+                    ${kwPills}
+                    <span class="badge badge-${c.status}">${c.status}</span>
+                    ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
+                    <span class="text-xs text-gray-500">Day ${c.suggested_post_day}</span>
+                    ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
+                    ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-orange-500 hover:underline">reddit</a>` : ''}
+                    <span class="ml-auto flex gap-1">
+                        ${actionBtns}
+                        <button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>
+                    </span>
+                </div>
+                <p class="text-sm text-gray-300 whitespace-pre-wrap">${c.body}</p>
+            </div>
+            ${replies}
+        </div>
+    `;
+}
+
+async function assignCommentPrompt(cid) {
+    showAssignmentModal(cid, () => loadCommentTree());
+}
+
+async function unassignComment(cid) {
+    if (!confirm('Unassign this comment from its account?')) return;
+    await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
+    toast('Comment unassigned', 'success');
+    loadCommentTree();
+}
+
+function deployCommentModal(cid) {
+    showModal(`
+        <h3 class="text-lg font-bold mb-4">Deploy Comment</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Reddit Comment URL</label><input id="deploy-url" placeholder="https://reddit.com/r/.../comments/.../..."></div>
+            <div><label class="text-xs text-gray-400">Deploy Date (optional)</label><input id="deploy-date" type="date"></div>
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" onclick="submitDeployComment(${cid})">Mark Deployed</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitDeployComment(cid) {
+    const url = document.getElementById('deploy-url').value;
+    const date = document.getElementById('deploy-date').value;
+    if (!url) { toast('Enter the Reddit comment URL', 'error'); return; }
+    await api(`/api/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url, deployed_at: date || undefined } });
+    toast('Comment marked as deployed', 'success');
+    closeModal();
+    loadCommentTree();
+}
+
+async function markCommentDeleted(cid) {
+    if (!confirm('Mark this comment as deleted from Reddit?')) return;
+    await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
+    toast('Comment marked as deleted', 'success');
+    loadCommentTree();
+}
+
+async function deleteComment(cid) {
+    if (!confirm('Delete this comment and its replies from DB?')) return;
+    await api(`/api/comments/${cid}`, { method: 'DELETE' });
+    toast('Comment deleted', 'success');
+    loadCommentTree();
+}
+
+function showGenCommentsModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate Comment Tree</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-cmt-sub" onchange="loadPostsAndBrandsForCmt()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
+            <div><label class="text-xs text-gray-400">Post</label><select id="gen-cmt-post"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-cmt-brand"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Number of comments</label><input id="gen-cmt-count" type="number" value="5" min="1" max="20"></div>
+            <div><label class="text-xs text-gray-400">Brand mention ratio</label><input id="gen-cmt-ratio" type="number" value="0.3" min="0" max="1" step="0.1"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitGenComments()">Generate</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    loadPostsAndBrandsForCmt();
+}
+
+function showGenHQCommentModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate HQ Comment Thread</h3>
+        <p class="text-xs text-gray-400 mb-3">Generates 1 brand-mention comment + 5 relevant nested replies. The main comment always mentions the brand.</p>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-hq-sub" onchange="loadPostsAndBrandsForHQ()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
+            <div><label class="text-xs text-gray-400">Post</label><select id="gen-hq-post"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-hq-brand"><option value="">Loading...</option></select></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-accent" onclick="submitGenHQComment()">Generate HQ Thread</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    loadPostsAndBrandsForHQ();
+}
+
+async function loadPostsAndBrandsForHQ() {
+    const sid = document.getElementById('gen-hq-sub').value;
+    const [posts, brands] = await Promise.all([
+        api(`/api/subreddits/${sid}/posts`),
+        api(`/api/subreddits/${sid}/brands`),
+    ]);
+    document.getElementById('gen-hq-post').innerHTML = posts.map(p => `<option value="${p.id}">${p.title.substring(0, 60)}</option>`).join('');
+    document.getElementById('gen-hq-brand').innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+}
+
+async function submitGenHQComment() {
+    const pid = parseInt(document.getElementById('gen-hq-post').value);
+    const bid = parseInt(document.getElementById('gen-hq-brand').value);
+    if (!pid || !bid) { toast('Select post and brand', 'error'); return; }
+    closeModal();
+    runTask('/api/generate/hq-comment', { post_id: pid, brand_id: bid }, () => {
+        if (currentView === 'comments') loadCommentTree();
+    });
+}
+
+async function loadPostsAndBrandsForCmt() {
+    const sid = document.getElementById('gen-cmt-sub').value;
+    const [posts, brands] = await Promise.all([
+        api(`/api/subreddits/${sid}/posts`),
+        api(`/api/subreddits/${sid}/brands`),
+    ]);
+    document.getElementById('gen-cmt-post').innerHTML = posts.map(p => `<option value="${p.id}">${p.title.substring(0, 60)}</option>`).join('');
+    document.getElementById('gen-cmt-brand').innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+}
+
+async function submitGenComments() {
+    const pid = parseInt(document.getElementById('gen-cmt-post').value);
+    const bid = parseInt(document.getElementById('gen-cmt-brand').value);
+    const count = parseInt(document.getElementById('gen-cmt-count').value);
+    const ratio = parseFloat(document.getElementById('gen-cmt-ratio').value);
+    if (!pid || !bid) { toast('Select post and brand', 'error'); return; }
+    closeModal();
+    runTask('/api/generate/comments', { post_id: pid, brand_id: bid, count, brand_mention_ratio: ratio }, () => {
+        if (currentView === 'comments') loadCommentTree();
+    });
+}
+
+function showGenLiveCommentsModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate for Live Post</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Reddit URL</label><input id="gen-live-url" placeholder="https://reddit.com/r/.../comments/..."></div>
+            <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-live-sub" onchange="loadBrandsForLive()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
+            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-live-brand"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Number of comments</label><input id="gen-live-count" type="number" value="5" min="1" max="20"></div>
+            <div><label class="text-xs text-gray-400">Brand mention ratio</label><input id="gen-live-ratio" type="number" value="0.3" min="0" max="1" step="0.1"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitGenLiveComments()">Generate</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    loadBrandsForLive();
+}
+
+async function loadBrandsForLive() {
+    const sid = document.getElementById('gen-live-sub').value;
+    const brands = await api(`/api/subreddits/${sid}/brands`);
+    document.getElementById('gen-live-brand').innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+}
+
+async function submitGenLiveComments() {
+    const url = document.getElementById('gen-live-url').value;
+    const sid = parseInt(document.getElementById('gen-live-sub').value);
+    const bid = parseInt(document.getElementById('gen-live-brand').value);
+    const count = parseInt(document.getElementById('gen-live-count').value);
+    const ratio = parseFloat(document.getElementById('gen-live-ratio').value);
+    if (!url || !bid) { toast('Enter URL and select brand', 'error'); return; }
+    closeModal();
+    runTask('/api/generate/live-comments', { reddit_url: url, subreddit_id: sid, brand_id: bid, count, brand_mention_ratio: ratio }, () => {
+        toast('Live comments generated!', 'success');
+    });
+}
+
+// --- Comment Management Tab ---
+async function renderCommentManagementTab(container) {
+    const subs = subredditsCache || [];
+    container.innerHTML = `
+        <div class="flex gap-3 mb-4 items-center flex-wrap">
+            <select id="mgmt-sub-filter" onchange="loadManagedComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+            <select id="mgmt-status-filter" onchange="loadManagedComments()" class="w-36">
+                <option value="">All Status</option>
+                <option value="complete">Complete</option>
+                <option value="assigned">Assigned</option>
+                <option value="deployed">Deployed</option>
+                <option value="deleted">Deleted</option>
+            </select>
+            <select id="mgmt-brand-filter" onchange="loadManagedComments()" class="w-40">
+                <option value="">All Comments</option>
+                <option value="1">Brand Mention</option>
+                <option value="0">No Brand</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" onclick="checkLiveComments()">Check Live</button>
+            <button class="btn btn-secondary btn-sm" onclick="backfillKeywords()">Backfill Keywords</button>
+            <button class="btn btn-primary btn-sm" onclick="exportFilteredComments()">Export CSV</button>
+        </div>
+        <div id="mgmt-results"></div>
+    `;
+    loadManagedComments();
+}
+
+async function loadManagedComments() {
+    const sid = document.getElementById('mgmt-sub-filter').value;
+    const status = document.getElementById('mgmt-status-filter').value;
+    const mb = document.getElementById('mgmt-brand-filter').value;
+    const container = document.getElementById('mgmt-results');
+    container.innerHTML = '<div class="spinner"></div>';
+
+    let url = `/api/subreddits/${sid}/all-comments?`;
+    if (status) url += `status=${status}&`;
+    if (mb) url += `mentions_brand=${mb}&`;
+
+    const comments = await api(url);
+    if (!comments.length) {
+        container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <p class="text-xs text-gray-500 mb-3">${comments.length} comments</p>
+        <table>
+            <thead><tr>
+                <th>Post</th><th>Comment</th><th>Tags</th><th>Status</th><th>Account</th><th>Keywords</th><th>Deployed</th><th>Links</th><th>Actions</th>
+            </tr></thead>
+            <tbody>${comments.map(c => {
+                let kws = '';
+                try { kws = c.matched_keywords ? JSON.parse(c.matched_keywords).map(k => `<span class="badge badge-keyword">${k}</span>`).join(' ') : ''; } catch(e) {}
+
+                let actions = '';
+                if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
+                else if (c.status === 'assigned') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
+                else if (c.status === 'deployed') actions = `<button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+
+                return `<tr>
+                    <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
+                    <td class="max-w-xs"><p class="text-sm text-gray-300 truncate">${c.body.substring(0, 80)}</p></td>
+                    <td class="text-xs">${c.comment_type === 'hq' ? '<span class="badge mr-1" style="background:#0079D3;color:white">HQ</span>' : ''}${c.is_reply ? '<span class="badge mr-1" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge mr-1" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}</td>
+                    <td><span class="badge badge-${c.status}">${c.status}</span></td>
+                    <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
+                    <td>${kws}</td>
+                    <td class="text-xs text-gray-400">${c.deployed_at || '-'}</td>
+                    <td class="text-xs">
+                        ${c.post_reddit_url ? `<a href="${c.post_reddit_url}" target="_blank" class="text-orange-500 hover:underline mr-1">post</a>` : ''}
+                        ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">comment</a>` : ''}
+                    </td>
+                    <td>${actions}</td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>
+    `;
+}
+
+async function assignCommentPromptMgmt(cid) {
+    showAssignmentModal(cid, () => loadManagedComments());
+}
+
+async function unassignCommentMgmt(cid) {
+    if (!confirm('Unassign this comment from its account?')) return;
+    await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
+    toast('Comment unassigned', 'success');
+    loadManagedComments();
+}
+
+async function markCommentDeletedMgmt(cid) {
+    if (!confirm('Mark this comment as deleted?')) return;
+    await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
+    toast('Marked deleted', 'success');
+    loadManagedComments();
+}
+
+async function checkLiveComments() {
+    const sid = document.getElementById('mgmt-sub-filter').value;
+    runTask(`/api/subreddits/${sid}/check-live`, {}, (result) => {
+        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
+        loadManagedComments();
+    });
+}
+
+async function backfillKeywords() {
+    const sid = document.getElementById('mgmt-sub-filter').value;
+    runTask(`/api/subreddits/${sid}/backfill-keywords`, {}, (result) => {
+        toast(`Processed ${result.processed} comments, ${result.with_keywords} had keywords`, 'success');
+        loadManagedComments();
+    });
+}
+
+function exportFilteredComments() {
+    const sid = document.getElementById('mgmt-sub-filter').value;
+    const status = document.getElementById('mgmt-status-filter').value;
+    const mb = document.getElementById('mgmt-brand-filter').value;
+    let url = `/api/export/comments/${sid}?`;
+    if (status) url += `status=${status}&`;
+    if (mb) url += `mentions_brand=${mb}&`;
+    window.location.href = url;
+    toast('Download started', 'info');
+}
+
+// --- Assigned Accounts Tab (in Comments) ---
+
+let _assignedAcctSort = { col: 'username', dir: 'asc' };
+let _assignedAcctFilter = { search: '', status: '' };
+let _assignedAcctData = [];
+let _aaFilteredUsernames = null; // null = no filter active
+
+async function renderAssignedAccountsTab(container) {
+    container.innerHTML = '<div class="spinner mx-auto"></div>';
+    _assignedAcctData = await api('/api/accounts/assignment-status');
+    _aaFilteredUsernames = null;
+
+    if (!_assignedAcctData.length) {
+        container.innerHTML = '<p class="text-sm" style="color:#818384">No accounts yet. Add accounts in the Accounts tab.</p>';
+        return;
+    }
+
+    const subs = subredditsCache || await api('/api/subreddits');
+    let allBrands = [];
+    try { allBrands = await api('/api/brands/all'); } catch(e) {}
+    const brandMap = {};
+    allBrands.forEach(b => { if (!brandMap[b.name.toLowerCase()]) brandMap[b.name.toLowerCase()] = b; });
+    const uniqueBrands = Object.values(brandMap);
+
+    const subOpts = subs.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    const brandOpts = uniqueBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+
+    container.innerHTML = `
+        <div class="flex gap-3 items-end mb-4 flex-wrap">
+            <div>
+                <label class="text-xs block" style="color:#818384">Search</label>
+                <input type="text" id="aa-filter-search" placeholder="Username or reference..." class="w-48 text-sm" oninput="renderAssignedAccountsTable()">
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Status</label>
+                <select id="aa-filter-status" class="w-36 text-sm" onchange="renderAssignedAccountsTable()">
+                    <option value="">All</option>
+                    <option value="assigned">Has Pending</option>
+                    <option value="deployed">Has Deployed</option>
+                    <option value="none">No Assignments</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Subreddit</label>
+                <select id="aa-filter-subreddit" class="w-44 text-sm" onchange="onAaSubredditFilterChange()">
+                    <option value="">All Subreddits</option>
+                    ${subOpts}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Brand</label>
+                <select id="aa-filter-brand" class="w-44 text-sm" onchange="applyAssignedAcctFilters()">
+                    <option value="">All Brands</option>
+                    ${brandOpts}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Post</label>
+                <select id="aa-filter-post" class="w-52 text-sm" onchange="applyAssignedAcctFilters()">
+                    <option value="">All Posts</option>
+                </select>
+            </div>
+        </div>
+        <div id="aa-table-area"></div>
+    `;
+    renderAssignedAccountsTable();
+}
+
+async function onAaSubredditFilterChange() {
+    const sid = document.getElementById('aa-filter-subreddit')?.value;
+    const postSelect = document.getElementById('aa-filter-post');
+    if (postSelect) {
+        if (sid) {
+            const posts = await api('/api/subreddits/' + sid + '/posts');
+            postSelect.innerHTML = '<option value="">All Posts</option>' + posts.map(p => `<option value="${p.id}">${p.title.substring(0,60)}</option>`).join('');
+        } else {
+            postSelect.innerHTML = '<option value="">All Posts</option>';
+        }
+    }
+    applyAssignedAcctFilters();
+}
+
+async function applyAssignedAcctFilters() {
+    const sid = document.getElementById('aa-filter-subreddit')?.value || '';
+    const bid = document.getElementById('aa-filter-brand')?.value || '';
+    const pid = document.getElementById('aa-filter-post')?.value || '';
+
+    if (!sid && !bid && !pid) {
+        _aaFilteredUsernames = null;
+    } else {
+        let params = [];
+        if (sid) params.push('subreddit_id=' + sid);
+        if (bid) params.push('brand_id=' + bid);
+        if (pid) params.push('post_id=' + pid);
+        const usernames = await api('/api/accounts/filtered-usernames?' + params.join('&'));
+        _aaFilteredUsernames = new Set(usernames);
+    }
+    renderAssignedAccountsTable();
+}
+
+function renderAssignedAccountsTable() {
+    const container = document.getElementById('aa-table-area');
+    if (!container) return;
+
+    const search = (document.getElementById('aa-filter-search')?.value || '').toLowerCase();
+    const status = document.getElementById('aa-filter-status')?.value || '';
+
+    let filtered = _assignedAcctData.filter(a => {
+        if (search && !a.username.toLowerCase().includes(search) && !(a.reference || '').toLowerCase().includes(search)) return false;
+        if (status === 'assigned' && !(a.pending > 0)) return false;
+        if (status === 'deployed' && !(a.deployed > 0)) return false;
+        if (status === 'none' && (a.total_assigned || 0) > 0) return false;
+        if (_aaFilteredUsernames !== null && !_aaFilteredUsernames.has(a.username)) return false;
+        return true;
+    });
+
+    // Sort
+    const { col, dir } = _assignedAcctSort;
+    filtered.sort((a, b) => {
+        let va, vb;
+        if (col === 'username') { va = a.username.toLowerCase(); vb = b.username.toLowerCase(); }
+        else if (col === 'total_karma') { va = (a.link_karma||0)+(a.comment_karma||0); vb = (b.link_karma||0)+(b.comment_karma||0); }
+        else if (col === 'age') { va = a.created_utc||Infinity; vb = b.created_utc||Infinity; }
+        else if (col === 'pending') { va = a.pending||0; vb = b.pending||0; }
+        else if (col === 'deployed') { va = a.deployed||0; vb = b.deployed||0; }
+        else if (col === 'total') { va = a.total_assigned||0; vb = b.total_assigned||0; }
+        else { va = a[col]||0; vb = b[col]||0; }
+        if (va < vb) return dir === 'asc' ? -1 : 1;
+        if (va > vb) return dir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    const sortIcon = (c) => _assignedAcctSort.col === c ? (_assignedAcctSort.dir === 'asc' ? ' ↑' : ' ↓') : '';
+    const sortClick = (c) => `onclick="toggleAssignedAcctSort('${c}')"`;
+
+    const rows = filtered.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        const total = a.total_assigned || 0;
+        const pending = a.pending || 0;
+        const deployed = a.deployed || 0;
+        const deleted = a.deleted || 0;
+        const rowStyle = total === 0 ? 'opacity:0.5' : '';
+        return `<tr style="${rowStyle}" class="cursor-pointer hover:bg-gray-800" onclick="toggleAccountComments('${a.username}', this)">
+            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline" onclick="event.stopPropagation()">${a.username}</a></td>
+            <td class="text-sm text-gray-400">${(a.link_karma || 0).toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${(a.comment_karma || 0).toLocaleString()}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center"><span class="badge badge-assigned">${pending}</span></td>
+            <td class="text-sm text-center"><span class="badge badge-deployed">${deployed}</span></td>
+            <td class="text-sm text-center"><span class="badge badge-deleted">${deleted}</span></td>
+            <td class="text-sm text-center font-medium">${total}</td>
+            <td class="text-sm">${(a.owned_subreddits||0) > 0 || (a.owned_posts||0) > 0 ? `<span class="badge" style="background:#0079D3;color:white">Owner: ${a.owned_subreddits||0} subs, ${a.owned_posts||0} posts</span>` : ''}</td>
+        </tr>
+        <tr id="aa-comments-${a.username}" style="display:none"><td colspan="11" class="p-0"></td></tr>`;
+    }).join('');
+
+    container.innerHTML = `
+        <p class="text-xs mb-2" style="color:#818384">${filtered.length} accounts — click a row to see comments</p>
+        <div class="overflow-x-auto">
+            <table class="text-sm">
+                <thead><tr>
+                    <th class="cursor-pointer" ${sortClick('username')}>Username${sortIcon('username')}</th>
+                    <th class="cursor-pointer" ${sortClick('link_karma')}>Link Karma${sortIcon('link_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('comment_karma')}>Comment Karma${sortIcon('comment_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('total_karma')}>Total Karma${sortIcon('total_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('age')}>Age${sortIcon('age')}</th><th>Reference</th>
+                    <th class="cursor-pointer" ${sortClick('pending')}>Pending${sortIcon('pending')}</th>
+                    <th class="cursor-pointer" ${sortClick('deployed')}>Deployed${sortIcon('deployed')}</th>
+                    <th>Deleted</th>
+                    <th class="cursor-pointer" ${sortClick('total')}>Total${sortIcon('total')}</th>
+                    <th>Owner</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function toggleAssignedAcctSort(col) {
+    if (_assignedAcctSort.col === col) _assignedAcctSort.dir = _assignedAcctSort.dir === 'asc' ? 'desc' : 'asc';
+    else { _assignedAcctSort.col = col; _assignedAcctSort.dir = 'asc'; }
+    renderAssignedAccountsTable();
+}
+
+let _acctCommentsCache = {};
+
+async function toggleAccountComments(username, rowEl) {
+    const detailRow = document.getElementById(`aa-comments-${username}`);
+    if (!detailRow) return;
+    if (detailRow.style.display !== 'none') {
+        detailRow.style.display = 'none';
+        return;
+    }
+    const cell = detailRow.querySelector('td');
+    cell.innerHTML = '<div class="p-3"><div class="spinner mx-auto"></div></div>';
+    detailRow.style.display = '';
+
+    const comments = await api(`/api/accounts/${username}/comments`);
+    _acctCommentsCache[username] = comments;
+    renderAccountCommentsPanel(username, cell, comments);
+}
+
+function renderAccountCommentsPanel(username, cell, allComments) {
+    if (!allComments.length) {
+        cell.innerHTML = '<div class="p-3 text-sm text-gray-500">No comments assigned to this account.</div>';
+        return;
+    }
+
+    const filterId = `aa-cmt-filter-${username}`;
+    const currentFilter = document.getElementById(filterId)?.value || '';
+
+    const filtered = currentFilter ? allComments.filter(c => c.status === currentFilter) : allComments;
+
+    const commentRows = filtered.map(c => {
+        const tags = [
+            c.comment_type === 'hq' ? '<span class="badge mr-1" style="background:#0079D3;color:white">HQ</span>' : '',
+            c.is_reply ? '<span class="badge mr-1" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge mr-1" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>',
+            c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : '',
+        ].join('');
+        return `<tr>
+            <td class="text-xs text-gray-400">${c.subreddit_name ? 'r/' + c.subreddit_name : '-'}</td>
+            <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
+            <td class="text-xs text-gray-400">${c.brand_name || '-'}</td>
+            <td class="max-w-xs"><p class="text-xs text-gray-300 truncate">${(c.body || '').substring(0, 80)}</p></td>
+            <td class="text-xs">${tags}</td>
+            <td><span class="badge badge-${c.status}">${c.status}</span></td>
+            <td class="text-xs text-gray-400">${c.deployed_at || '-'}</td>
+            <td class="text-xs">
+                ${c.post_reddit_url ? `<a href="${c.post_reddit_url}" target="_blank" class="text-orange-500 hover:underline mr-1">post</a>` : ''}
+                ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">comment</a>` : '-'}
+            </td>
+        </tr>`;
+    }).join('');
+
+    cell.innerHTML = `
+        <div class="p-3" style="background:#1A1A1B">
+            <div class="flex gap-3 items-center mb-2">
+                <p class="text-xs" style="color:#818384">${filtered.length} of ${allComments.length} comments for ${username}</p>
+                <select id="${filterId}" class="text-xs w-32" onchange="filterAccountComments('${username}')">
+                    <option value="" ${!currentFilter ? 'selected' : ''}>All Status</option>
+                    <option value="assigned" ${currentFilter==='assigned' ? 'selected' : ''}>Assigned</option>
+                    <option value="deployed" ${currentFilter==='deployed' ? 'selected' : ''}>Deployed</option>
+                    <option value="complete" ${currentFilter==='complete' ? 'selected' : ''}>Complete</option>
+                    <option value="deleted" ${currentFilter==='deleted' ? 'selected' : ''}>Deleted</option>
+                </select>
+            </div>
+            <table class="text-xs">
+                <thead><tr><th>Subreddit</th><th>Post</th><th>Brand</th><th>Comment</th><th>Tags</th><th>Status</th><th>Deployed</th><th>Links</th></tr></thead>
+                <tbody>${commentRows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function filterAccountComments(username) {
+    const cell = document.getElementById(`aa-comments-${username}`)?.querySelector('td');
+    if (!cell || !_acctCommentsCache[username]) return;
+    renderAccountCommentsPanel(username, cell, _acctCommentsCache[username]);
+}
+
+// =========================================================================
+// ACCOUNTS VIEW
+// =========================================================================
+
+let _accountsFilterState = { min_karma: '', min_age_days: '', reference: '' };
+let _accountsSort = { col: 'username', dir: 'asc' };
+let _accountsData = [];
+
+function formatAccountAge(created_utc) {
+    if (!created_utc) return '—';
+    const now = Date.now() / 1000;
+    const days = Math.floor((now - created_utc) / 86400);
+    if (days < 30) return `${days}d`;
+    if (days < 365) return `${Math.floor(days / 30)}mo`;
+    const yrs = Math.floor(days / 365);
+    const mo = Math.floor((days % 365) / 30);
+    return mo > 0 ? `${yrs}y ${mo}mo` : `${yrs}y`;
+}
+
+async function renderAccounts(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const accounts = await loadAccountsList();
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">Reddit Accounts</h2>
+            <div class="flex gap-2">
+                <button class="btn btn-primary" onclick="showAddAccountModal()">+ Add Account</button>
+                <button class="btn btn-secondary" onclick="showImportAccountsCsvModal()">Import CSV</button>
+            </div>
+        </div>
+        <div class="flex gap-3 items-end mb-4 flex-wrap">
+            <div>
+                <label class="text-xs block" style="color:#818384">Min Karma</label>
+                <input type="number" id="acct-filter-karma" value="${_accountsFilterState.min_karma}" placeholder="e.g. 100" class="w-28 text-sm">
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Min Age (days)</label>
+                <input type="number" id="acct-filter-age" value="${_accountsFilterState.min_age_days}" placeholder="e.g. 365" class="w-28 text-sm">
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Reference</label>
+                <input type="text" id="acct-filter-ref" value="${_accountsFilterState.reference}" placeholder="Search..." class="w-40 text-sm">
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="applyAccountFilters()">Apply</button>
+            <button class="btn btn-sm btn-secondary" onclick="_accountsFilterState={min_karma:'',min_age_days:'',reference:''};renderAccounts(document.getElementById('app'))">Clear</button>
+            <span class="text-xs" style="color:#818384" id="acct-count">${accounts.length} accounts</span>
+        </div>
+        <div id="accounts-table-area"></div>
+    `;
+    _accountsData = accounts;
+    renderAccountsTable();
+}
+
+async function loadAccountsList() {
+    const params = [];
+    if (_accountsFilterState.min_karma) params.push(`min_karma=${_accountsFilterState.min_karma}`);
+    if (_accountsFilterState.min_age_days) params.push(`min_age_days=${_accountsFilterState.min_age_days}`);
+    if (_accountsFilterState.reference) params.push(`reference=${encodeURIComponent(_accountsFilterState.reference)}`);
+    const url = '/api/accounts' + (params.length ? '?' + params.join('&') : '');
+    return await api(url);
+}
+
+function applyAccountFilters() {
+    _accountsFilterState.min_karma = document.getElementById('acct-filter-karma')?.value || '';
+    _accountsFilterState.min_age_days = document.getElementById('acct-filter-age')?.value || '';
+    _accountsFilterState.reference = document.getElementById('acct-filter-ref')?.value || '';
+    renderAccounts(document.getElementById('app'));
+}
+
+function renderAccountsTable() {
+    const container = document.getElementById('accounts-table-area');
+    if (!container) return;
+
+    if (!_accountsData.length) {
+        container.innerHTML = '<p class="text-sm" style="color:#818384">No accounts found. Add one or import from CSV.</p>';
+        return;
+    }
+
+    // Sort
+    const sorted = [..._accountsData];
+    const { col, dir } = _accountsSort;
+    sorted.sort((a, b) => {
+        let va, vb;
+        if (col === 'username') { va = a.username.toLowerCase(); vb = b.username.toLowerCase(); }
+        else if (col === 'total_karma') { va = (a.link_karma||0)+(a.comment_karma||0); vb = (b.link_karma||0)+(b.comment_karma||0); }
+        else if (col === 'age') { va = a.created_utc||Infinity; vb = b.created_utc||Infinity; }
+        else if (col === 'assigned') { va = a.assignment_count||0; vb = b.assignment_count||0; }
+        else { va = a[col]||0; vb = b[col]||0; }
+        if (va < vb) return dir === 'asc' ? -1 : 1;
+        if (va > vb) return dir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    const sortIcon = (c) => _accountsSort.col === c ? (_accountsSort.dir === 'asc' ? ' ↑' : ' ↓') : '';
+    const sortClick = (c) => `onclick="toggleAccountsSort('${c}')"`;
+
+    const rows = sorted.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        const refreshed = a.last_refreshed ? new Date(a.last_refreshed + 'Z').toLocaleDateString() : '—';
+        return `<tr>
+            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline">${a.username}</a></td>
+            <td class="text-sm text-gray-400">${(a.link_karma || 0).toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${(a.comment_karma || 0).toLocaleString()}</td>
+            <td class="text-sm font-medium">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.assignment_count || 0}</td>
+            <td class="text-xs text-gray-500">${refreshed}</td>
+            <td class="text-sm">${(a.owned_subreddits||0) > 0 || (a.owned_posts||0) > 0 ? `<span class="badge" style="background:#0079D3;color:white">Owner: ${a.owned_subreddits||0} subs, ${a.owned_posts||0} posts</span>` : ''}</td>
+            <td class="text-xs">
+                <div class="flex gap-1">
+                    <button class="btn btn-sm btn-secondary" onclick="refreshAccountData('${a.username}')" id="refresh-btn-${a.username}">Refresh</button>
+                    <button class="btn btn-sm btn-secondary" onclick="editAccountRef('${a.username}', '${(a.reference || '').replace(/'/g, "\\'")}')">Edit Ref</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteAccountConfirm('${a.username}')">Del</button>
+                </div>
+            </td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="overflow-x-auto">
+            <table class="text-sm">
+                <thead><tr>
+                    <th class="cursor-pointer" ${sortClick('username')}>Username${sortIcon('username')}</th>
+                    <th class="cursor-pointer" ${sortClick('link_karma')}>Link Karma${sortIcon('link_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('comment_karma')}>Comment Karma${sortIcon('comment_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('total_karma')}>Total${sortIcon('total_karma')}</th>
+                    <th class="cursor-pointer" ${sortClick('age')}>Age${sortIcon('age')}</th><th>Reference</th>
+                    <th class="cursor-pointer" ${sortClick('assigned')}>Assigned${sortIcon('assigned')}</th>
+                    <th>Refreshed</th><th>Owner</th><th>Actions</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function toggleAccountsSort(col) {
+    if (_accountsSort.col === col) _accountsSort.dir = _accountsSort.dir === 'asc' ? 'desc' : 'asc';
+    else { _accountsSort.col = col; _accountsSort.dir = 'asc'; }
+    renderAccountsTable();
+}
+
+function showAddAccountModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Add Reddit Account</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs" style="color:#818384">Username</label><input id="new-acct-username" placeholder="e.g. spez (without u/)"></div>
+            <div><label class="text-xs" style="color:#818384">Reference / Contact</label><input id="new-acct-ref" placeholder="e.g. John Smith"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" id="add-acct-btn" onclick="submitAddAccount()">Add Account</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitAddAccount() {
+    const username = document.getElementById('new-acct-username').value.trim();
+    if (!username) { toast('Enter a username', 'error'); return; }
+    const reference = document.getElementById('new-acct-ref').value.trim();
+    const btn = document.getElementById('add-acct-btn');
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Fetching...'; btn.disabled = true; }
+    try {
+        const result = await api('/api/accounts', { method: 'POST', body: { username, reference } });
+        toast(`Added u/${result.username} — ${(result.link_karma||0)+(result.comment_karma||0)} karma`, 'success');
+        closeModal();
+        renderAccounts(document.getElementById('app'));
+    } catch(e) {
+        if (btn) { btn.innerHTML = 'Add Account'; btn.disabled = false; }
+    }
+}
+
+function showImportAccountsCsvModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Import Accounts</h3>
+        <p class="text-sm mb-4" style="color:#818384">Must have a <strong>Username</strong> column. Optional <strong>Ref</strong> column for reference/contact. Duplicates are automatically skipped.</p>
+
+        <div class="mb-4">
+            <label class="text-xs font-bold block mb-1" style="color:#818384">Option 1: Upload CSV File</label>
+            <input type="file" id="acct-csv-file" accept=".csv" class="text-sm">
+        </div>
+
+        <div class="mb-4" style="border-top:1px solid #343536;padding-top:12px">
+            <label class="text-xs font-bold block mb-1" style="color:#818384">Option 2: Google Sheets Link</label>
+            <input type="text" id="acct-gsheet-url" placeholder="https://docs.google.com/spreadsheets/d/..." class="text-sm">
+            <p class="text-xs mt-1" style="color:#818384">Sheet must be publicly accessible (Share → Anyone with link)</p>
+        </div>
+
+        <div class="flex gap-2">
+            <button class="btn btn-primary" id="import-csv-btn" onclick="submitImportCsv()">Import</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitImportCsv() {
+    const fileInput = document.getElementById('acct-csv-file');
+    const gsheetUrl = (document.getElementById('acct-gsheet-url')?.value || '').trim();
+    const hasFile = fileInput && fileInput.files.length > 0;
+
+    if (!hasFile && !gsheetUrl) {
+        toast('Upload a CSV file or paste a Google Sheets link', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('import-csv-btn');
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Importing...'; btn.disabled = true; }
+
+    try {
+        let resp;
+        if (gsheetUrl) {
+            // Google Sheets URL import — send as JSON
+            resp = await fetch('/api/accounts/import-csv', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: gsheetUrl })
+            });
+        } else {
+            // File upload
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            resp = await fetch('/api/accounts/import-csv', { method: 'POST', body: formData });
+        }
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || resp.statusText);
+        }
+        const { task_id } = await resp.json();
+
+        showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p style="color:#818384">Importing accounts &amp; fetching Reddit data...<br>This may take a while for large lists.</p></div>`);
+
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                closeModal();
+                const r = t.result;
+                toast(`Imported: ${r.imported}, Skipped: ${r.skipped}, Errors: ${r.errors}${r.error_usernames?.length ? ' (' + r.error_usernames.join(', ') + ')' : ''}`, r.errors ? 'info' : 'success');
+                renderAccounts(document.getElementById('app'));
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                closeModal();
+                toast(`Import failed: ${t.error}`, 'error');
+            }
+        }, 2000);
+    } catch(e) {
+        closeModal();
+        toast(`Import failed: ${e.message}`, 'error');
+    }
+}
+
+async function refreshAccountData(username) {
+    const btn = document.getElementById(`refresh-btn-${username}`);
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span>'; btn.disabled = true; }
+    try {
+        const { task_id } = await api(`/api/accounts/${encodeURIComponent(username)}/refresh`, { method: 'POST' });
+        const poll = setInterval(async () => {
+            const t = await api(`/api/tasks/${task_id}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                toast(`Refreshed u/${username}`, 'success');
+                renderAccounts(document.getElementById('app'));
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                toast(`Refresh failed: ${t.error}`, 'error');
+                if (btn) { btn.innerHTML = 'Refresh'; btn.disabled = false; }
+            }
+        }, 2000);
+    } catch(e) {
+        if (btn) { btn.innerHTML = 'Refresh'; btn.disabled = false; }
+    }
+}
+
+function editAccountRef(username, currentRef) {
+    const newRef = prompt('Reference / Contact name:', currentRef);
+    if (newRef === null) return;
+    api(`/api/accounts/${encodeURIComponent(username)}`, { method: 'PUT', body: { reference: newRef } }).then(() => {
+        toast('Reference updated', 'success');
+        renderAccounts(document.getElementById('app'));
+    });
+}
+
+async function deleteAccountConfirm(username) {
+    if (!confirm(`Delete account u/${username}? Existing comment assignments will be preserved.`)) return;
+    await api(`/api/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    toast(`Deleted u/${username}`, 'success');
+    renderAccounts(document.getElementById('app'));
+}
+
+// --- Assignment Modal (shared by tree + management tabs) ---
+
+async function showAssignmentModal(cid, onSuccess) {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+
+    const [accounts, ctx] = await Promise.all([
+        api('/api/accounts'),
+        api(`/api/comments/${cid}/context`)
+    ]);
+
+    // Fetch accounts that have assignments in this subreddit and brand
+    let subAccts = new Set(), brandAccts = new Set();
+    if (ctx.subreddit_id) {
+        const names = await api(`/api/accounts/filtered-usernames?subreddit_id=${ctx.subreddit_id}`);
+        subAccts = new Set(names);
+    }
+    if (ctx.brand_id) {
+        const names = await api(`/api/accounts/filtered-usernames?brand_id=${ctx.brand_id}`);
+        brandAccts = new Set(names);
+    }
+
+    window._assignAccounts = accounts;
+    window._assignCid = cid;
+    window._assignOnSuccess = onSuccess;
+    window._assignCtx = ctx;
+    window._assignSubAccts = subAccts;
+    window._assignBrandAccts = brandAccts;
+    renderAssignmentModalContent(accounts);
+}
+
+function _assignAccountRow(a) {
+    const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+    const age = formatAccountAge(a.created_utc);
+    return `<tr>
+        <td class="text-sm text-orange-500">${a.username}</td>
+        <td class="text-sm">${totalKarma.toLocaleString()}</td>
+        <td class="text-sm text-gray-400">${age}</td>
+        <td class="text-sm text-gray-300">${a.reference || ''}</td>
+        <td class="text-sm text-center">${a.assignment_count || 0}</td>
+        <td><button class="btn btn-sm btn-primary" onclick="selectAccountForAssignment('${a.username}')">Select</button></td>
+    </tr>`;
+}
+
+function _buildGroupedRows(accounts) {
+    const ctx = window._assignCtx || {};
+    const subAccts = window._assignSubAccts || new Set();
+    const brandAccts = window._assignBrandAccts || new Set();
+
+    const inSub = [], inBrand = [], others = [];
+    accounts.forEach(a => {
+        if (subAccts.has(a.username)) inSub.push(a);
+        else if (brandAccts.has(a.username)) inBrand.push(a);
+        else others.push(a);
+    });
+
+    let html = '';
+    if (inSub.length) {
+        html += `<tr><td colspan="6" class="text-xs font-bold pt-3 pb-1" style="color:#FF4500;border-bottom:1px solid #343536">Assigned in r/${ctx.subreddit_name || 'this subreddit'} (${inSub.length})</td></tr>`;
+        html += inSub.map(_assignAccountRow).join('');
+    }
+    if (inBrand.length) {
+        html += `<tr><td colspan="6" class="text-xs font-bold pt-3 pb-1" style="color:#0079D3;border-bottom:1px solid #343536">Assigned to ${ctx.brand_name || 'this brand'} (${inBrand.length})</td></tr>`;
+        html += inBrand.map(_assignAccountRow).join('');
+    }
+    if (others.length) {
+        html += `<tr><td colspan="6" class="text-xs font-bold pt-3 pb-1" style="color:#818384;border-bottom:1px solid #343536">Other Accounts (${others.length})</td></tr>`;
+        html += others.map(_assignAccountRow).join('');
+    }
+    return html;
+}
+
+function renderAssignmentModalContent(accounts) {
+    const cid = window._assignCid;
+    const rows = _buildGroupedRows(accounts);
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Assign Comment to Account</h3>
+        <div class="mb-3">
+            <input id="assign-search" placeholder="Search username or reference..." class="text-sm" oninput="filterAssignmentModal(this.value)">
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="assign-accounts-table">
+                <thead><tr><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Assigned</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts yet.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="quickAddAccountInModal()">+ Quick Add Account</button>
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+function filterAssignmentModal(query) {
+    const q = query.toLowerCase();
+    const all = window._assignAccounts || [];
+    const filtered = q ? all.filter(a => a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q)) : all;
+    const tbody = document.querySelector('#assign-accounts-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = _buildGroupedRows(filtered);
+}
+
+async function selectAccountForAssignment(username) {
+    const cid = window._assignCid;
+    await api(`/api/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
+    toast(`Assigned to u/${username}`, 'success');
+    closeModal();
+    if (window._assignOnSuccess) window._assignOnSuccess();
+}
+
+async function quickAddAccountInModal() {
+    const username = prompt('Reddit username (without u/):');
+    if (!username) return;
+    const reference = prompt('Reference / Contact name (optional):') || '';
+    try {
+        await api('/api/accounts', { method: 'POST', body: { username, reference } });
+        toast(`Added u/${username}`, 'success');
+        // Reload accounts and re-render modal
+        const accounts = await api('/api/accounts');
+        window._assignAccounts = accounts;
+        renderAssignmentModalContent(accounts);
+    } catch(e) {}
+}
+
+// =========================================================================
+// ANALYTICS VIEW
+// =========================================================================
+let analyticsTab = 'overview';
+
+async function renderAnalytics(el) {
+    const subs = await api('/api/subreddits');
+    subredditsCache = subs;
+
+    if (!subs.length) {
+        el.innerHTML = '<h2 class="text-2xl font-bold mb-4">Analytics</h2><p class="text-gray-500">No data yet.</p>';
+        return;
+    }
+
+    el.innerHTML = `
+        <h2 class="text-2xl font-bold mb-4">Analytics</h2>
+        <div class="flex gap-1 mb-4 border-b border-gray-700">
+            <div class="tab ${analyticsTab==='overview'?'active':''}" onclick="analyticsTab='overview';renderAnalyticsTab()">Overview</div>
+            <div class="tab ${analyticsTab==='brand'?'active':''}" onclick="analyticsTab='brand';renderAnalyticsTab()">Brand Performance</div>
+            <div class="tab ${analyticsTab==='health'?'active':''}" onclick="analyticsTab='health';renderAnalyticsTab()">Content Health</div>
+            <div class="tab ${analyticsTab==='schedule'?'active':''}" onclick="analyticsTab='schedule';renderAnalyticsTab()">Schedule</div>
+        </div>
+        <div class="mb-3">
+            <select id="analytics-sub" onchange="renderAnalyticsTab()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+        </div>
+        <div id="analytics-content"></div>
+    `;
+    renderAnalyticsTab();
+}
+
+async function renderAnalyticsTab() {
+    const container = document.getElementById('analytics-content');
+    if (!container) return;
+
+    // Update tab active states
+    document.querySelectorAll('.tab').forEach(t => {
+        t.classList.toggle('active', t.textContent.toLowerCase().includes(
+            analyticsTab === 'overview' ? 'overview' : analyticsTab === 'brand' ? 'brand' : analyticsTab === 'health' ? 'health' : 'schedule'
+        ));
+    });
+
+    container.innerHTML = '<div class="spinner"></div>';
+    const sid = document.getElementById('analytics-sub').value;
+
+    if (analyticsTab === 'overview') await renderOverviewTab(container, sid);
+    else if (analyticsTab === 'brand') await renderBrandTab(container, sid);
+    else if (analyticsTab === 'health') await renderHealthTab(container, sid);
+    else if (analyticsTab === 'schedule') await renderScheduleTab(container, sid);
+}
+
+async function renderOverviewTab(container, sid) {
+    const [sub, storylines] = await Promise.all([
+        api(`/api/subreddits/${sid}`),
+        api(`/api/subreddits/${sid}/storylines`),
+    ]);
+    const stats = sub.stats || {};
+    const ps = stats.posts || {};
+    const cs = stats.comments || {};
+    const mentionPct = cs.total_comments > 0 ? Math.round((cs.brand_mentions || 0) / cs.total_comments * 100) : 0;
+    const avgScore = cs.avg_validation_score ? cs.avg_validation_score.toFixed(1) : 'N/A';
+
+    const allTypes = ['question', 'experience', 'comparison', 'complaint', 'discovery', 'psa'];
+    const maxStoryline = Math.max(...allTypes.map(t => storylines[t] || 0), 1);
+    const bars = allTypes.map(t => {
+        const val = storylines[t] || 0;
+        const pct = Math.round(val / maxStoryline * 100);
+        return `<div class="flex items-center gap-3 mb-2">
+            <span class="w-24 text-xs text-gray-400">${t}</span>
+            <div class="flex-1 bg-gray-700 rounded h-5"><div class="bar-fill bg-orange-500" style="width:${pct}%"></div></div>
+            <span class="text-xs text-gray-500 w-6 text-right">${val}</span>
+        </div>`;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${ps.total_posts || 0}</p><p class="text-xs text-gray-500">Total Posts</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${ps.brand_posts || 0} / ${ps.filler_posts || 0}</p><p class="text-xs text-gray-500">Brand / Filler</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${cs.total_comments || 0}</p><p class="text-xs text-gray-500">Comments (${mentionPct}% brand)</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${avgScore}</p><p class="text-xs text-gray-500">Avg Validation Score</p></div>
+        </div>
+        <div class="stat-card p-4">
+            <div class="flex justify-between items-center mb-2">
+                <p class="text-sm text-gray-300">Published: ${ps.published_posts || 0} | Ready: ${ps.complete_posts || 0} | Draft: ${ps.draft_posts || 0}</p>
+            </div>
+        </div>
+        <div class="card p-5 mt-4">
+            <h4 class="text-sm font-bold text-gray-300 mb-3">Storyline Distribution</h4>
+            ${bars}
+        </div>
+    `;
+}
+
+async function renderBrandTab(container, sid) {
+    const brands = await api(`/api/subreddits/${sid}/brands`);
+    if (!brands.length) {
+        container.innerHTML = '<p class="text-gray-500">No brands in this subreddit.</p>';
+        return;
+    }
+
+    let html = '';
+    for (const b of brands) {
+        const perf = await api(`/api/brands/${encodeURIComponent(b.name)}/performance`);
+        const ratio = perf.mention_ratio || {};
+        const pct = Math.round((ratio.ratio || 0) * 100);
+        const personas = perf.personas || {};
+        const personaCount = Object.keys(personas).length;
+        const topPersonas = Object.entries(personas).sort((a,b) => b[1]-a[1]).slice(0, 5);
+
+        // Target gauge
+        const gaugeColor = Math.abs(pct - 30) <= 5 ? 'bg-green-500' : pct < 25 ? 'bg-yellow-500' : 'bg-red-500';
+        const targetStatus = Math.abs(pct - 30) <= 5 ? 'On Target' : pct < 30 ? 'Below Target' : 'Above Target';
+
+        html += `
+            <div class="card p-5 mb-4">
+                <h4 class="font-bold text-orange-500 mb-3">${b.name}</h4>
+                <div class="grid grid-cols-3 gap-4 mb-4">
+                    <div><p class="text-xl font-bold">${perf.total_posts}</p><p class="text-xs text-gray-500">Posts</p></div>
+                    <div><p class="text-xl font-bold">${ratio.with_brand || 0} / ${ratio.total || 0}</p><p class="text-xs text-gray-500">Brand Mentions</p></div>
+                    <div><p class="text-xl font-bold">${personaCount} / 20</p><p class="text-xs text-gray-500">Personas Used</p></div>
+                </div>
+                <div class="mb-3">
+                    <div class="flex justify-between text-xs text-gray-400 mb-1"><span>Brand Mention Rate: ${pct}%</span><span>${targetStatus}</span></div>
+                    <div class="bg-gray-700 rounded h-4 relative">
+                        <div class="bar-fill ${gaugeColor} h-4" style="width:${Math.min(pct, 100)}%"></div>
+                        <div class="absolute top-0 h-4 w-0.5 bg-white" style="left:30%"></div>
+                    </div>
+                    <p class="text-xs text-gray-600 mt-1">Target: 30%</p>
+                </div>
+                ${topPersonas.length ? `<p class="text-xs text-gray-400">Top personas: ${topPersonas.map(([p,c]) => `${p}(${c})`).join(', ')}</p>` : ''}
+            </div>
+        `;
+    }
+    container.innerHTML = html;
+}
+
+async function renderHealthTab(container, sid) {
+    const health = await api(`/api/subreddits/${sid}/health`);
+
+    if (!health.total_comments) {
+        container.innerHTML = '<p class="text-gray-500">No comments to analyze.</p>';
+        return;
+    }
+
+    const dupOk = !health.duplicate_openings.length;
+    const consOk = health.max_consecutive_persona <= 3;
+    const qualOk = !health.low_quality.length;
+    const lenOk = health.avg_length >= 40 && health.avg_length <= 150;
+    const bp = health.brand_placement || {};
+    const bpTotal = (bp.early||0) + (bp.mid||0) + (bp.late||0);
+
+    container.innerHTML = `
+        <div class="card p-5 mb-4">
+            <h4 class="font-bold text-gray-300 mb-4">Content Health Checks</h4>
+            <div class="space-y-3">
+                <div class="flex items-center gap-3">
+                    <span class="text-lg">${dupOk ? '&#10003;' : '&#9888;'}</span>
+                    <span class="text-sm ${dupOk ? 'text-green-400' : 'text-yellow-400'}">Duplicate opening phrases: ${health.duplicate_openings.length}</span>
+                </div>
+                ${health.duplicate_openings.map(d => `<p class="text-xs text-gray-500 ml-8">"${d.text}..." used ${d.count}x</p>`).join('')}
+
+                <div class="flex items-center gap-3">
+                    <span class="text-lg">${consOk ? '&#10003;' : '&#9888;'}</span>
+                    <span class="text-sm ${consOk ? 'text-green-400' : 'text-yellow-400'}">Max consecutive same persona: ${health.max_consecutive_persona} ${consOk ? '(OK)' : '(above 3!)'}</span>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <span class="text-lg">${qualOk ? '&#10003;' : '&#9888;'}</span>
+                    <span class="text-sm ${qualOk ? 'text-green-400' : 'text-yellow-400'}">Comments below threshold (&lt;6): ${health.low_quality.length}</span>
+                </div>
+                ${health.low_quality.map(q => `<p class="text-xs text-gray-500 ml-8">Comment #${q.id} (score ${q.score}): "${q.preview}..."</p>`).join('')}
+
+                <div class="flex items-center gap-3">
+                    <span class="text-lg">${lenOk ? '&#10003;' : '&#9888;'}</span>
+                    <span class="text-sm ${lenOk ? 'text-green-400' : 'text-yellow-400'}">Avg comment length: ${health.avg_length} words (target: 40-150)</span>
+                </div>
+            </div>
+        </div>
+
+        ${bpTotal > 0 ? `
+        <div class="card p-5">
+            <h4 class="font-bold text-gray-300 mb-3">Brand Mention Placement</h4>
+            <div class="space-y-2">
+                <div class="flex items-center gap-3">
+                    <span class="w-20 text-xs text-gray-400">Early</span>
+                    <div class="flex-1 bg-gray-700 rounded h-4"><div class="bar-fill bg-blue-500 h-4" style="width:${Math.round((bp.early||0)/bpTotal*100)}%"></div></div>
+                    <span class="text-xs text-gray-500 w-16 text-right">${bp.early||0} (${Math.round((bp.early||0)/bpTotal*100)}%)</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="w-20 text-xs text-gray-400">Middle</span>
+                    <div class="flex-1 bg-gray-700 rounded h-4"><div class="bar-fill bg-orange-500 h-4" style="width:${Math.round((bp.mid||0)/bpTotal*100)}%"></div></div>
+                    <span class="text-xs text-gray-500 w-16 text-right">${bp.mid||0} (${Math.round((bp.mid||0)/bpTotal*100)}%)</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="w-20 text-xs text-gray-400">Late</span>
+                    <div class="flex-1 bg-gray-700 rounded h-4"><div class="bar-fill bg-purple-500 h-4" style="width:${Math.round((bp.late||0)/bpTotal*100)}%"></div></div>
+                    <span class="text-xs text-gray-500 w-16 text-right">${bp.late||0} (${Math.round((bp.late||0)/bpTotal*100)}%)</span>
+                </div>
+            </div>
+        </div>` : ''}
+    `;
+}
+
+async function renderScheduleTab(container, sid) {
+    const schedule = await api(`/api/subreddits/${sid}/schedule`);
+    const days = Object.keys(schedule).sort((a,b) => parseInt(a) - parseInt(b));
+
+    if (!days.length) {
+        container.innerHTML = '<p class="text-gray-500">No scheduled content.</p>';
+        return;
+    }
+
+    let html = '';
+    for (const day of days) {
+        const entries = schedule[day];
+        const posts = entries.posts || [];
+        const comments = entries.comments || [];
+        const brandComments = comments.filter(c => c.mentions_brand);
+
+        let items = '';
+        for (const p of posts) {
+            const status = p.status;
+            const filler = p.is_filler ? 'Filler' : 'Brand';
+            items += `<div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-${status} text-xs">${status}</span>
+                <span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'} text-xs">${filler}</span>
+                <span class="text-sm text-gray-300">${p.title.substring(0, 50)}</span>
+            </div>`;
+        }
+        if (comments.length) {
+            items += `<div class="text-xs text-gray-500 mt-1">${comments.length} comments scheduled (${brandComments.length} with brand mention)</div>`;
+        }
+
+        html += `
+            <div class="card p-4 mb-2">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-sm font-bold text-orange-500 w-16">Day ${day}</span>
+                </div>
+                ${items}
+            </div>
+        `;
+    }
+    container.innerHTML = html;
+}
+
+// =========================================================================
+// EXPORT VIEW
+// =========================================================================
+async function renderExport(el) {
+    const subs = await api('/api/subreddits');
+    subredditsCache = subs;
+
+    el.innerHTML = `
+        <h2 class="text-2xl font-bold mb-6">Export</h2>
+        ${!subs.length ? '<p class="text-gray-500">No subreddits to export.</p>' : `
+        <div class="card p-5 mb-4">
+            <h4 class="text-sm font-bold text-gray-300 mb-3">Full Export</h4>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-gray-400">Subreddit</label>
+                    <select id="export-sub">${subs.map(s => `<option value="${s.id}">r/${s.name} (${s.post_count} posts, ${s.comment_count} comments)</option>`).join('')}</select>
+                </div>
+                <div class="flex gap-3">
+                    <button class="btn btn-primary" onclick="downloadExport('subreddit')">Export All Data (CSV)</button>
+                    <button class="btn btn-secondary" onclick="downloadExport('schedule')">Export Schedule (CSV)</button>
+                </div>
+            </div>
+        </div>
+        <div class="card p-5">
+            <h4 class="text-sm font-bold text-gray-300 mb-3">Comment Export (Filtered)</h4>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-gray-400">Subreddit</label>
+                    <select id="export-cmt-sub">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+                </div>
+                <div class="flex gap-3 items-center">
+                    <select id="export-cmt-status" class="w-36">
+                        <option value="">All Status</option>
+                        <option value="complete">Complete</option>
+                        <option value="assigned">Assigned</option>
+                        <option value="deployed">Deployed</option>
+                        <option value="deleted">Deleted</option>
+                    </select>
+                    <select id="export-cmt-brand" class="w-40">
+                        <option value="">All Comments</option>
+                        <option value="1">Brand Mention</option>
+                        <option value="0">No Brand</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="downloadCommentExport()">Export Comments (CSV)</button>
+                </div>
+                <p class="text-xs text-gray-500">CSV includes: post link, comment link, deploy date, keywords, account, status</p>
+            </div>
+        </div>`}
+    `;
+}
+
+function downloadCommentExport() {
+    const sid = document.getElementById('export-cmt-sub').value;
+    const status = document.getElementById('export-cmt-status').value;
+    const mb = document.getElementById('export-cmt-brand').value;
+    let url = `/api/export/comments/${sid}?`;
+    if (status) url += `status=${status}&`;
+    if (mb) url += `mentions_brand=${mb}&`;
+    window.location.href = url;
+    toast('Download started', 'info');
+}
+
+function downloadExport(type) {
+    const sid = document.getElementById('export-sub').value;
+    window.location.href = `/api/export/${type}/${sid}`;
+    toast('Download started', 'info');
+}
+
+// =========================================================================
+// Initialize
+// =========================================================================
+navigate('dashboard');
+</script>
+</body>
+</html>

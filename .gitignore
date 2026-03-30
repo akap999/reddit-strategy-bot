@@ -1,0 +1,6 @@
+.env
+strategy_bot.db
+__pycache__/
+*.pyc
+.claude/
+*.db-journal

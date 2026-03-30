@@ -101,7 +101,9 @@ def _reddit_get(path, timeout=15):
     """
     import requests as _requests
     base = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else "https://www.reddit.com"
-    return _requests.get(f"{base}{path}", headers={"User-Agent": REDDIT_USER_AGENT}, timeout=timeout)
+    url = f"{base}{path}"
+    print(f"[REDDIT_GET] {url} (proxy={'yes' if REDDIT_PROXY_URL else 'no'})", flush=True)
+    return _requests.get(url, headers={"User-Agent": REDDIT_USER_AGENT}, timeout=timeout)
 
 # ---------------------------------------------------------------------------
 # Background task system
@@ -1651,6 +1653,7 @@ print(f"  GOOGLE_CLIENT_ID set: {bool(GOOGLE_CLIENT_ID)}")
 print(f"  GOOGLE_CLIENT_SECRET set: {bool(GOOGLE_CLIENT_SECRET)}")
 print(f"  ALLOWED_EMAILS: {ALLOWED_EMAILS or '(none)'}")
 print(f"  SECRET_KEY set: {bool(SECRET_KEY)}")
+print(f"  REDDIT_PROXY_URL: {REDDIT_PROXY_URL or '(not set)'}")
 print("=" * 50)
 
 # Ensure DB exists

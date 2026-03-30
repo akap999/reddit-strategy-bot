@@ -1307,9 +1307,10 @@ def _fetch_reddit_user_data(username):
     try:
         resp = _requests.get(
             f"https://www.reddit.com/user/{username}/about.json",
-            headers={"User-Agent": "RedditStrategyBot/1.0"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
             timeout=15,
         )
+        print(f"[REDDIT] u/{username} → status {resp.status_code}", flush=True)
         if resp.status_code == 200:
             data = resp.json().get("data", {})
             return {
@@ -1317,8 +1318,10 @@ def _fetch_reddit_user_data(username):
                 "comment_karma": data.get("comment_karma", 0),
                 "created_utc": data.get("created_utc"),
             }
-    except Exception:
-        pass
+        else:
+            print(f"[REDDIT] u/{username} response: {resp.text[:200]}", flush=True)
+    except Exception as e:
+        print(f"[REDDIT] u/{username} error: {e}", flush=True)
     return None
 
 @app.route("/api/accounts")

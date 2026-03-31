@@ -58,6 +58,19 @@
         .tab { padding: 8px 16px; border-bottom: 2px solid transparent; cursor: pointer; font-size: 0.875rem; color: #818384; }
         .tab.active { color: #D7DADC; border-bottom-color: #FF4500; }
         .tab:hover { color: #D7DADC; }
+        .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+        .cal-header { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; margin-bottom: 4px; }
+        .cal-header span { font-size: 0.7rem; color: #818384; text-transform: uppercase; padding: 4px; }
+        .cal-cell { background: #1A1A1B; border: 1px solid #272729; min-height: 80px; padding: 6px; cursor: pointer; border-radius: 4px; transition: border-color 0.15s; }
+        .cal-cell:hover { border-color: #FF4500; }
+        .cal-cell.selected { border-color: #FF4500; background: rgba(255,69,0,0.08); }
+        .cal-cell.today { border-color: #0079D3; }
+        .cal-cell.other-month { opacity: 0.3; }
+        .cal-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin: 1px; }
+        .cal-dot-post { background: #FF4500; }
+        .cal-dot-deployed { background: #46d160; }
+        .cal-dot-assigned { background: #FFD635; }
+        .cal-count { font-size: 0.65rem; color: #818384; margin-top: 2px; }
     </style>
 </head>
 <body>
@@ -78,6 +91,7 @@
             <a onclick="navigate('livesearch')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesearch" style="color:#0079D3">Live Search</a>
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
+            <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
         </nav>
         <div class="p-4 text-xs" style="border-top:1px solid #343536;color:#818384">
             CLI: python3 bot.py
@@ -193,7 +207,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
     (views[view] || views.dashboard)(app);
 }
 
@@ -4218,6 +4232,343 @@ async function lsToggleAccountDetail(username) {
             </table>
         `;
     } catch(e) { content.innerHTML = '<p class="text-xs text-red-400">Failed to load comments.</p>'; }
+}
+
+// =========================================================================
+// CALENDAR VIEW
+// =========================================================================
+
+let _calYear = new Date().getFullYear();
+let _calMonth = new Date().getMonth();
+let _calEvents = [];
+let _calSelectedDate = null;
+let _calFilters = { brand: '', subreddit_id: '', account_id: '', status: '', event_type: '' };
+let _calBrands = [];
+let _calSubs = [];
+let _calAccounts = [];
+
+async function renderCalendar(el) {
+    el.innerHTML = '<div class="spinner mx-auto"></div>';
+    const [brands, subs, accounts] = await Promise.all([
+        api('/api/brands/all'),
+        api('/api/subreddits'),
+        api('/api/accounts'),
+    ]);
+    _calBrands = brands;
+    _calSubs = subs;
+    _calAccounts = accounts;
+
+    // Deduplicate brands by name
+    const brandMap = {};
+    brands.forEach(b => { if (!brandMap[b.name.toLowerCase()]) brandMap[b.name.toLowerCase()] = b; });
+    const uniqueBrands = Object.values(brandMap);
+
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold">Calendar</h2>
+            <div class="flex items-center gap-3">
+                <button class="btn btn-sm btn-secondary" onclick="calPrevMonth()">&larr;</button>
+                <span id="cal-month-label" class="text-lg font-medium" style="min-width:180px;text-align:center">${monthNames[_calMonth]} ${_calYear}</span>
+                <button class="btn btn-sm btn-secondary" onclick="calNextMonth()">&rarr;</button>
+                <button class="btn btn-sm btn-secondary" onclick="calGoToday()">Today</button>
+            </div>
+        </div>
+        <div class="flex gap-3 mb-4 items-center flex-wrap">
+            <div>
+                <label class="text-xs block" style="color:#818384">Brand</label>
+                <select id="cal-brand-filter" class="w-40 text-sm" onchange="onCalBrandChange()">
+                    <option value="">All Brands</option>
+                    ${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Subreddit</label>
+                <select id="cal-sub-filter" class="w-40 text-sm" onchange="onCalFilterChange()">
+                    <option value="">All Subreddits</option>
+                    ${subs.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Account</label>
+                <select id="cal-acct-filter" class="w-40 text-sm" onchange="onCalFilterChange()">
+                    <option value="">All Accounts</option>
+                    ${accounts.map(a => `<option value="${a.username}">${a.username}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Status</label>
+                <select id="cal-status-filter" class="w-32 text-sm" onchange="onCalFilterChange()">
+                    <option value="">All</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="deployed">Deployed</option>
+                    <option value="published">Published</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Type</label>
+                <select id="cal-type-filter" class="w-32 text-sm" onchange="onCalFilterChange()">
+                    <option value="">All</option>
+                    <option value="post">Posts</option>
+                    <option value="comment">Comments</option>
+                    <option value="search_comment">Search Comments</option>
+                </select>
+            </div>
+        </div>
+        <div id="cal-grid-area"></div>
+        <div id="cal-day-detail" class="mt-4"></div>
+    `;
+    loadCalendarEvents();
+}
+
+function onCalBrandChange() {
+    const brandName = document.getElementById('cal-brand-filter').value;
+    const subFilter = document.getElementById('cal-sub-filter');
+    if (!brandName) {
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + _calSubs.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    } else {
+        const brandSubIds = _calBrands.filter(b => b.name === brandName).map(b => b.subreddit_id).filter(Boolean);
+        const filtered = _calSubs.filter(s => brandSubIds.includes(s.id));
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + filtered.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    }
+    onCalFilterChange();
+}
+
+function onCalFilterChange() {
+    loadCalendarEvents();
+}
+
+async function loadCalendarEvents() {
+    // Calculate date range for current month
+    const firstDay = `${_calYear}-${String(_calMonth + 1).padStart(2, '0')}-01`;
+    const lastDate = new Date(_calYear, _calMonth + 1, 0).getDate();
+    const lastDay = `${_calYear}-${String(_calMonth + 1).padStart(2, '0')}-${String(lastDate).padStart(2, '0')}`;
+
+    let params = [`date_from=${firstDay}`, `date_to=${lastDay}`];
+
+    const brandName = document.getElementById('cal-brand-filter')?.value;
+    const subId = document.getElementById('cal-sub-filter')?.value;
+    const acctId = document.getElementById('cal-acct-filter')?.value;
+    const status = document.getElementById('cal-status-filter')?.value;
+    const evType = document.getElementById('cal-type-filter')?.value;
+
+    if (brandName) {
+        const match = _calBrands.find(b => b.name === brandName);
+        if (match) params.push('brand_id=' + match.id);
+    }
+    if (subId) params.push('subreddit_id=' + subId);
+    if (acctId) params.push('account_id=' + encodeURIComponent(acctId));
+    if (status) params.push('status=' + status);
+    if (evType) params.push('event_type=' + evType);
+
+    try {
+        _calEvents = await api('/api/calendar/events?' + params.join('&'));
+    } catch(e) {
+        _calEvents = [];
+    }
+    renderCalendarGrid();
+    if (_calSelectedDate) renderCalendarDayDetail(_calSelectedDate);
+    else document.getElementById('cal-day-detail').innerHTML = '';
+}
+
+function renderCalendarGrid() {
+    const container = document.getElementById('cal-grid-area');
+    if (!container) return;
+
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+
+    // Build event counts by date
+    const dateCounts = {};
+    _calEvents.forEach(ev => {
+        const d = (ev.event_date || '').substring(0, 10);
+        if (!d) return;
+        if (!dateCounts[d]) dateCounts[d] = { posts: 0, assigned: 0, deployed: 0, total: 0 };
+        if (ev.event_type === 'post') dateCounts[d].posts++;
+        else if (ev.status === 'assigned') dateCounts[d].assigned++;
+        else dateCounts[d].deployed++;
+        dateCounts[d].total++;
+    });
+
+    // Calendar grid: first day of month, days in month
+    const firstOfMonth = new Date(_calYear, _calMonth, 1);
+    const startDay = firstOfMonth.getDay(); // 0=Sun
+    const daysInMonth = new Date(_calYear, _calMonth + 1, 0).getDate();
+
+    // Previous month trailing days
+    const prevMonthDays = new Date(_calYear, _calMonth, 0).getDate();
+
+    let cells = '';
+
+    // Day headers
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+    // Leading cells from previous month
+    for (let i = 0; i < startDay; i++) {
+        const d = prevMonthDays - startDay + 1 + i;
+        cells += `<div class="cal-cell other-month"><span class="text-xs text-gray-600">${d}</span></div>`;
+    }
+
+    // Current month days
+    for (let d = 1; d <= daysInMonth; d++) {
+        const dateStr = `${_calYear}-${String(_calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        const counts = dateCounts[dateStr] || { posts: 0, assigned: 0, deployed: 0, total: 0 };
+        const isToday = dateStr === todayStr;
+        const isSelected = dateStr === _calSelectedDate;
+
+        let dots = '';
+        if (counts.posts > 0) dots += `<span class="cal-dot cal-dot-post" title="${counts.posts} post(s)"></span>`;
+        if (counts.deployed > 0) dots += `<span class="cal-dot cal-dot-deployed" title="${counts.deployed} deployed"></span>`;
+        if (counts.assigned > 0) dots += `<span class="cal-dot cal-dot-assigned" title="${counts.assigned} assigned"></span>`;
+
+        let countLabel = counts.total > 0 ? `<div class="cal-count">${counts.total} event${counts.total > 1 ? 's' : ''}</div>` : '';
+
+        cells += `<div class="cal-cell${isToday ? ' today' : ''}${isSelected ? ' selected' : ''}" onclick="selectCalendarDay('${dateStr}')">
+            <div class="text-xs ${isToday ? 'font-bold text-blue-400' : 'text-gray-400'}">${d}</div>
+            <div class="mt-1">${dots}</div>
+            ${countLabel}
+        </div>`;
+    }
+
+    // Trailing cells
+    const totalCells = startDay + daysInMonth;
+    const remaining = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
+    for (let i = 1; i <= remaining; i++) {
+        cells += `<div class="cal-cell other-month"><span class="text-xs text-gray-600">${i}</span></div>`;
+    }
+
+    container.innerHTML = `
+        <div class="cal-header">${dayNames.map(d => `<span>${d}</span>`).join('')}</div>
+        <div class="cal-grid">${cells}</div>
+        <div class="flex gap-4 mt-2 text-xs text-gray-500">
+            <span><span class="cal-dot cal-dot-post"></span> Posts</span>
+            <span><span class="cal-dot cal-dot-deployed"></span> Deployed</span>
+            <span><span class="cal-dot cal-dot-assigned"></span> Assigned</span>
+            <span class="ml-auto">${_calEvents.length} total events this month</span>
+        </div>
+    `;
+}
+
+function selectCalendarDay(dateStr) {
+    _calSelectedDate = (_calSelectedDate === dateStr) ? null : dateStr;
+    renderCalendarGrid();
+    if (_calSelectedDate) {
+        renderCalendarDayDetail(dateStr);
+    } else {
+        document.getElementById('cal-day-detail').innerHTML = '';
+    }
+}
+
+function renderCalendarDayDetail(dateStr) {
+    const container = document.getElementById('cal-day-detail');
+    if (!container) return;
+
+    const dayEvents = _calEvents.filter(ev => (ev.event_date || '').substring(0, 10) === dateStr);
+
+    if (!dayEvents.length) {
+        container.innerHTML = `<p class="text-sm text-gray-500 mt-2">No events on ${dateStr}</p>`;
+        return;
+    }
+
+    const dateLabel = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    const cards = dayEvents.map(ev => {
+        const typeBadge = ev.event_type === 'post'
+            ? '<span class="badge" style="background:#FF4500;color:white">Post</span>'
+            : ev.event_type === 'search_comment'
+            ? '<span class="badge" style="background:#0079D3;color:white">Search Comment</span>'
+            : '<span class="badge" style="background:#0079D3;color:white">Comment</span>';
+
+        const statusBadge = `<span class="badge badge-${ev.status === 'published' ? 'deployed' : ev.status}">${ev.status}</span>`;
+
+        const mentionBadge = ev.mentions_brand ? '<span class="badge badge-brand">brand mention</span>' : '<span class="badge badge-draft">general</span>';
+
+        const replyBadge = ev.event_type !== 'post'
+            ? (ev.is_reply
+                ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>'
+                : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>')
+            : '';
+
+        const time = ev.event_date ? ev.event_date.substring(11, 16) : '';
+
+        const bodyPreview = ev.event_type === 'post'
+            ? `<p class="text-sm font-medium mb-1">${ev.title || ''}</p><p class="text-xs text-gray-400 mb-2">${(ev.body || '').substring(0, 200)}${(ev.body || '').length > 200 ? '...' : ''}</p>`
+            : `<p class="text-sm font-medium mb-1">${ev.title || ''}</p><p class="text-xs text-gray-300 mb-2 whitespace-pre-wrap">${(ev.body || '').substring(0, 300)}${(ev.body || '').length > 300 ? '...' : ''}</p>`;
+
+        const copyBtn = (ev.event_type !== 'post' && ev.status === 'assigned')
+            ? `<button class="btn btn-sm btn-primary" onclick="copyCalendarMessage(${ev.event_id}, '${ev.event_type}')">Copy Message</button>`
+            : '';
+
+        const links = [];
+        if (ev.reddit_url) links.push(`<a href="${ev.reddit_url}" target="_blank" class="text-orange-500 hover:underline text-xs">post link</a>`);
+        if (ev.reddit_comment_url) links.push(`<a href="${ev.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline text-xs">comment link</a>`);
+
+        return `
+        <div class="card p-4 mb-3">
+            <div class="flex gap-2 items-center mb-2 flex-wrap">
+                ${typeBadge} ${statusBadge} ${mentionBadge} ${replyBadge}
+                <span class="text-xs text-gray-500 ml-auto">${time}</span>
+            </div>
+            ${bodyPreview}
+            <div class="flex gap-3 items-center text-xs flex-wrap">
+                ${ev.brand_name ? `<span style="color:#FF8b60">${ev.brand_name}</span>` : ''}
+                ${ev.subreddit_name ? `<span style="color:#818384">r/${ev.subreddit_name}</span>` : ''}
+                ${ev.account_id ? `<span style="color:#FFD635">u/${ev.account_id}</span>` : '<span class="text-gray-600 italic">no account</span>'}
+                ${links.join(' ')}
+                <span class="ml-auto flex gap-1">${copyBtn}</span>
+            </div>
+        </div>`;
+    }).join('');
+
+    container.innerHTML = `
+        <h3 class="text-lg font-bold mb-3">${dateLabel} <span class="text-sm font-normal text-gray-500">(${dayEvents.length} event${dayEvents.length > 1 ? 's' : ''})</span></h3>
+        ${cards}
+    `;
+}
+
+function copyCalendarMessage(eventId, eventType) {
+    const ev = _calEvents.find(e => e.event_id === eventId && e.event_type === eventType);
+    if (!ev) { toast('Event not found', 'error'); return; }
+
+    const mentionType = ev.mentions_brand ? 'Brand Mention' : 'General';
+    const replyType = ev.is_reply ? 'Reply' : 'Direct';
+    const link = ev.reddit_url || '';
+
+    const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${ev.account_id || ''}\n\nPost/Comment Link - \n${link}\n\n Comment (${replyType}) - \n${ev.body || ''}\n\nPlease share the comment link :)`;
+
+    navigator.clipboard.writeText(message).then(() => toast('Message copied to clipboard', 'success'));
+}
+
+function calPrevMonth() {
+    _calMonth--;
+    if (_calMonth < 0) { _calMonth = 11; _calYear--; }
+    _calSelectedDate = null;
+    updateCalMonthLabel();
+    loadCalendarEvents();
+}
+
+function calNextMonth() {
+    _calMonth++;
+    if (_calMonth > 11) { _calMonth = 0; _calYear++; }
+    _calSelectedDate = null;
+    updateCalMonthLabel();
+    loadCalendarEvents();
+}
+
+function calGoToday() {
+    const now = new Date();
+    _calYear = now.getFullYear();
+    _calMonth = now.getMonth();
+    _calSelectedDate = `${_calYear}-${String(_calMonth+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    updateCalMonthLabel();
+    loadCalendarEvents();
+}
+
+function updateCalMonthLabel() {
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const label = document.getElementById('cal-month-label');
+    if (label) label.textContent = `${monthNames[_calMonth]} ${_calYear}`;
 }
 
 // =========================================================================

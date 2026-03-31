@@ -1092,6 +1092,149 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    # --- Calendar Events ---
+
+    def get_calendar_events(self, date_from=None, date_to=None, brand_id=None,
+                            subreddit_id=None, account_id=None, status=None,
+                            event_type=None):
+        """Get unified calendar events: published posts + assigned/deployed comments."""
+        queries = []
+        all_params = []
+
+        # --- Query 1: Published Posts ---
+        has_posts = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_urls'").fetchone()
+        if has_posts and (not event_type or event_type == 'post'):
+            q1 = """SELECT 'post' as event_type, p.id as event_id,
+                           pu.added_at as event_date,
+                           p.title as title, p.body as body,
+                           b.name as brand_name, b.id as brand_id,
+                           s.name as subreddit_name, s.id as subreddit_id,
+                           p.owner_account as account_id,
+                           'published' as status,
+                           pu.reddit_url as reddit_url,
+                           NULL as reddit_comment_url,
+                           0 as is_reply, 0 as mentions_brand,
+                           NULL as reply_to_url
+                    FROM posts p
+                    JOIN post_urls pu ON pu.post_id = p.id
+                    JOIN subreddits s ON p.subreddit_id = s.id
+                    LEFT JOIN brands b ON p.brand_id = b.id
+                    WHERE pu.added_at IS NOT NULL"""
+            p1 = []
+            if date_from:
+                q1 += " AND pu.added_at >= ?"
+                p1.append(date_from)
+            if date_to:
+                q1 += " AND pu.added_at <= ?"
+                p1.append(date_to + " 23:59:59")
+            if brand_id:
+                q1 += " AND b.id = ?"
+                p1.append(brand_id)
+            if subreddit_id:
+                q1 += " AND s.id = ?"
+                p1.append(subreddit_id)
+            if account_id:
+                q1 += " AND p.owner_account = ?"
+                p1.append(account_id)
+            if status and status != 'published':
+                pass  # skip posts if filtering for non-published status
+            else:
+                queries.append(q1)
+                all_params.extend(p1)
+
+        # --- Query 2: Comments (assigned/deployed) ---
+        has_comments = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'").fetchone()
+        if has_comments and (not event_type or event_type in ('comment', 'search_comment')):
+            if not event_type or event_type != 'search_comment':
+                q2 = """SELECT 'comment' as event_type, c.id as event_id,
+                               COALESCE(c.deployed_at, c.created_at) as event_date,
+                               p.title as title, c.body as body,
+                               b.name as brand_name, b.id as brand_id,
+                               s.name as subreddit_name, s.id as subreddit_id,
+                               c.account_id as account_id,
+                               c.status as status,
+                               pu.reddit_url as reddit_url,
+                               c.reddit_comment_url as reddit_comment_url,
+                               c.is_reply as is_reply, c.mentions_brand as mentions_brand,
+                               NULL as reply_to_url
+                        FROM comments c
+                        JOIN posts p ON c.post_id = p.id
+                        JOIN subreddits s ON p.subreddit_id = s.id
+                        LEFT JOIN brands b ON c.brand_id = b.id
+                        LEFT JOIN post_urls pu ON pu.post_id = p.id
+                        WHERE c.status IN ('assigned', 'deployed')"""
+                p2 = []
+                if date_from:
+                    q2 += " AND COALESCE(c.deployed_at, c.created_at) >= ?"
+                    p2.append(date_from)
+                if date_to:
+                    q2 += " AND COALESCE(c.deployed_at, c.created_at) <= ?"
+                    p2.append(date_to + " 23:59:59")
+                if brand_id:
+                    q2 += " AND b.id = ?"
+                    p2.append(brand_id)
+                if subreddit_id:
+                    q2 += " AND s.id = ?"
+                    p2.append(subreddit_id)
+                if account_id:
+                    q2 += " AND c.account_id = ?"
+                    p2.append(account_id)
+                if status:
+                    q2 += " AND c.status = ?"
+                    p2.append(status)
+                queries.append(q2)
+                all_params.extend(p2)
+
+        # --- Query 3: Search Comments (assigned/deployed) ---
+        # Check if search_comments table exists
+        has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
+        if has_sc and (not event_type or event_type in ('comment', 'search_comment')):
+            if not event_type or event_type != 'comment':
+                q3 = """SELECT 'search_comment' as event_type, sc.id as event_id,
+                               COALESCE(sc.deployed_at, sc.created_at) as event_date,
+                               sp.title as title, sc.body as body,
+                               b.name as brand_name, b.id as brand_id,
+                               sp.subreddit as subreddit_name, NULL as subreddit_id,
+                               sc.account_id as account_id,
+                               sc.status as status,
+                               sp.reddit_url as reddit_url,
+                               sc.reddit_comment_url as reddit_comment_url,
+                               sc.is_reply as is_reply, sc.mentions_brand as mentions_brand,
+                               sc.reply_to_url as reply_to_url
+                        FROM search_comments sc
+                        JOIN search_posts sp ON sc.search_post_id = sp.id
+                        LEFT JOIN brands b ON sc.brand_id = b.id
+                        WHERE sc.status IN ('assigned', 'deployed')"""
+                p3 = []
+                if date_from:
+                    q3 += " AND COALESCE(sc.deployed_at, sc.created_at) >= ?"
+                    p3.append(date_from)
+                if date_to:
+                    q3 += " AND COALESCE(sc.deployed_at, sc.created_at) <= ?"
+                    p3.append(date_to + " 23:59:59")
+                if brand_id:
+                    q3 += " AND b.id = ?"
+                    p3.append(brand_id)
+                if subreddit_id:
+                    # search_posts store subreddit as text name — resolve via subquery
+                    q3 += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"
+                    p3.append(subreddit_id)
+                if account_id:
+                    q3 += " AND sc.account_id = ?"
+                    p3.append(account_id)
+                if status:
+                    q3 += " AND sc.status = ?"
+                    p3.append(status)
+                queries.append(q3)
+                all_params.extend(p3)
+
+        if not queries:
+            return []
+
+        full_query = " UNION ALL ".join(queries) + " ORDER BY event_date DESC"
+        rows = self.conn.execute(full_query, all_params).fetchall()
+        return [dict(r) for r in rows]
+
     # --- Search Posts (Live Search) ---
 
     def save_search_post(self, data):

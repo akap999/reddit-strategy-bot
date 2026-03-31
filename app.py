@@ -701,6 +701,24 @@ def api_brand_deployed_comments(bid):
     finally:
         db.close()
 
+@app.route("/api/calendar/events")
+def api_calendar_events():
+    """Get unified calendar events: published posts + assigned/deployed comments."""
+    db = get_db()
+    try:
+        events = db.get_calendar_events(
+            date_from=request.args.get("date_from"),
+            date_to=request.args.get("date_to"),
+            brand_id=request.args.get("brand_id") or None,
+            subreddit_id=request.args.get("subreddit_id") or None,
+            account_id=request.args.get("account_id") or None,
+            status=request.args.get("status") or None,
+            event_type=request.args.get("event_type") or None,
+        )
+        return jsonify(events)
+    finally:
+        db.close()
+
 @app.route("/api/comments/live-stats", methods=["POST"])
 def api_comments_live_stats():
     """Fetch live Reddit stats (upvotes, replies) for a list of comment URLs server-side."""

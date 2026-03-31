@@ -38,7 +38,7 @@ class SubredditGenerator:
             # 403 = private/quarantined = taken
             if resp.status_code == 403:
                 return False
-            return True  # assume available on other status codes
+            return None  # unknown status — don't assume available
         except requests.exceptions.RequestException:
             return None  # unknown, couldn't check
 
@@ -161,12 +161,17 @@ Return JSON only:
     "welcome_message": "Welcome message for new members (friendly, sets expectations, encourages participation)"
 }}
 
+IMPORTANT — The DOMAIN field above may contain brand-specific text. You MUST ignore any company names, locations, brand descriptions, or service-specific details. Extract ONLY the broad topic area (e.g., "men's health", "hormone therapy", "online therapy") and base all content on that.
+
 GUIDELINES:
 - Generate 5-7 rules covering: civility, no spam, no medical advice disclaimers, stay on topic, no self-promotion, search before posting
 - Description should be warm and inclusive
 - Sidebar should feel established and helpful
 - Welcome message should be brief and encouraging
-- Do NOT mention any specific brand names
+- Do NOT mention any specific brand names, company names, or brand descriptions
+- Do NOT include specific locations, cities, states, or geographic references
+- Do NOT include details about specific companies, their services, or features
+- Keep ALL content generic to the broad topic/domain — focus on the community, not any business
 - Make it feel like a real community, not a marketing vehicle"""
 
         result = self.claude.call(prompt, max_tokens=1500, temperature=0.7)

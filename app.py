@@ -1389,15 +1389,41 @@ def api_check_subreddit():
     try:
         r = _reddit_get(f"/r/{name}/about.json")
         if r.status_code == 200:
-            data = r.json().get("data", {})
+            try:
+                json_data = r.json()
+            except Exception:
+                return jsonify({"exists": None, "error": "Invalid JSON response"})
+
+            # Reddit returns kind=t5 for real subreddits
+            data = {}
+            if json_data.get("kind") == "t5":
+                data = json_data.get("data", {})
+            elif isinstance(json_data.get("data"), dict):
+                data = json_data["data"]
+
+            if data.get("display_name"):
+                return jsonify({
+                    "exists": True,
+                    "name": data.get("display_name", name),
+                    "subscribers": data.get("subscribers", 0),
+                    "active_accounts": data.get("accounts_active", 0),
+                    "description": (data.get("public_description", "") or "")[:200],
+                })
+            # 200 but not a real subreddit (search/redirect page)
+            return jsonify({"exists": False})
+        elif r.status_code == 404:
+            return jsonify({"exists": False})
+        elif r.status_code == 403:
+            # Private or quarantined — still taken
             return jsonify({
                 "exists": True,
-                "name": data.get("display_name", name),
-                "subscribers": data.get("subscribers", 0),
-                "active_accounts": data.get("accounts_active", 0),
-                "description": (data.get("public_description", "") or "")[:200],
+                "name": name,
+                "subscribers": 0,
+                "active_accounts": 0,
+                "description": "(Private or quarantined subreddit)",
             })
-        return jsonify({"exists": False})
+        else:
+            return jsonify({"exists": None, "error": f"Reddit returned status {r.status_code}"})
     except Exception as e:
         return jsonify({"exists": None, "error": str(e)})
 

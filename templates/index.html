@@ -349,13 +349,13 @@ async function assignSubredditOwner(sid) {
 async function submitSubredditOwner(sid) {
     const username = document.getElementById('sub-owner-select').value;
     if (!username) { toast('Select an account', 'error'); return; }
-    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username}) });
+    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', body: {username} });
     toast('Owner assigned', 'success');
     closeModal();
     showSubredditDetail(sid);
 }
 async function removeSubredditOwner(sid) {
-    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({username: ''}) });
+    await api('/api/subreddits/' + sid + '/owner', { method: 'PUT', body: {username: ''} });
     toast('Owner removed', 'success');
     closeModal();
     showSubredditDetail(sid);
@@ -564,6 +564,49 @@ function renderWizardStep1() {
         </div>
         <div class="flex gap-2 mt-5">
             <button class="btn btn-primary" onclick="wizardStep2()">Generate Names</button>
+            <button class="btn btn-secondary" onclick="skipToCustomName()">Use Custom Name</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+function skipToCustomName() {
+    syncBrandFields();
+    // Validate: at least one brand with a name or URL
+    const validBrands = wizardState.brands.filter(b => b.name || b.domain_url);
+    if (!validBrands.length) {
+        toast('Add at least one brand (name or URL)', 'error');
+        return;
+    }
+    // Auto-derive domain from brand contexts if not specified
+    if (!wizardState.domain) {
+        const contexts = validBrands.map(b => b.context).filter(Boolean);
+        if (contexts.length) {
+            let raw = contexts[0].split('.')[0];
+            raw = raw.replace(/\b(based|located|headquartered|founded|operating)\s+(in|at|from)\s+[^,.]*/gi, '');
+            raw = raw.replace(/\b(online|digital|virtual)\s+(platform|provider|company|service|startup|business)\b/gi, '');
+            raw = raw.replace(/\b(provider|company|startup|business|clinic|brand|platform)\b/gi, '');
+            raw = raw.replace(/\bfor\b/gi, ',');
+            raw = raw.replace(/\s{2,}/g, ' ').trim();
+            wizardState.domain = raw || 'general health and wellness';
+        }
+    }
+    wizardState.validBrands = validBrands;
+    wizardState.suggestions = [];
+    wizardState.selectedIdx = -1;
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Create Subreddit - Custom Name</h3>
+        <p class="text-sm text-gray-400 mb-4">Enter your subreddit name and check availability:</p>
+        <div class="flex gap-2 items-center mb-2">
+            <span class="text-gray-400 text-lg">r/</span>
+            <input id="wiz-custom-name" placeholder="YourSubredditName" class="flex-1">
+            <button class="btn btn-sm btn-secondary" onclick="wizCheckCustomName()">Check Availability</button>
+        </div>
+        <div id="wiz-custom-check" class="text-xs mt-1 mb-4"></div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="wizardStep3()">Generate Info</button>
+            <button class="btn btn-secondary" onclick="renderWizardStep1()">Back</button>
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         </div>
     `);
@@ -662,10 +705,20 @@ async function wizardStep2() {
     }
 
     // Auto-derive domain from brand contexts if not specified
+    // Extract only generic topic keywords — strip brand-specific details like locations, company names
     if (!wizardState.domain) {
         const contexts = validBrands.map(b => b.context).filter(Boolean);
         if (contexts.length) {
-            wizardState.domain = contexts[0].split('.')[0]; // rough fallback
+            // Take first context, remove location-like phrases and company-specific details
+            let raw = contexts[0].split('.')[0]; // first sentence
+            // Strip common brand-specific patterns: "based in X", "located in X", "in City/State"
+            raw = raw.replace(/\b(based|located|headquartered|founded|operating)\s+(in|at|from)\s+[^,.]*/gi, '');
+            raw = raw.replace(/\b(online|digital|virtual)\s+(platform|provider|company|service|startup|business)\b/gi, '');
+            raw = raw.replace(/\b(provider|company|startup|business|clinic|brand|platform)\b/gi, '');
+            raw = raw.replace(/\bfor\b/gi, ','); // split "for X" into keywords
+            raw = raw.replace(/\s{2,}/g, ' ').trim();
+            // Keep only meaningful topic words
+            wizardState.domain = raw || 'general health and wellness';
         }
     }
 
@@ -1597,10 +1650,25 @@ function renderCommentsTabContent() {
     }
 }
 
-function renderCommentTreeTab(container) {
+let _ctAllBrands = []; // all brands for comment tree cascade
+let _ctAllSubs = []; // all subs for restoring dropdown
+
+async function renderCommentTreeTab(container) {
     const subs = subredditsCache || [];
+    _ctAllSubs = subs;
+    try { _ctAllBrands = await api('/api/brands/all'); } catch(e) { _ctAllBrands = []; }
+
+    // Deduplicate brands by name for the top-level filter
+    const brandMap = {};
+    _ctAllBrands.forEach(b => { if (!brandMap[b.name.toLowerCase()]) brandMap[b.name.toLowerCase()] = b; });
+    const uniqueBrands = Object.values(brandMap);
+
     container.innerHTML = `
         <div class="flex gap-3 mb-4 items-center">
+            <select id="comments-brand-top-filter" onchange="onCtBrandFilterChange()" class="w-44">
+                <option value="">All Brands</option>
+                ${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}
+            </select>
             <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
             <select id="comments-brand-filter" onchange="filterPostsByBrand()" class="w-44"><option value="">All Brands</option></select>
             <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">Select a post...</option></select>
@@ -1610,21 +1678,50 @@ function renderCommentTreeTab(container) {
     loadBrandsAndPostsForComments();
 }
 
+function onCtBrandFilterChange() {
+    const brandName = document.getElementById('comments-brand-top-filter').value;
+    const subFilter = document.getElementById('comments-sub-filter');
+
+    if (!brandName) {
+        // Show all subreddits
+        subFilter.innerHTML = _ctAllSubs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+    } else {
+        // Filter to subreddits that have this brand
+        const brandSubIds = _ctAllBrands.filter(b => b.name === brandName).map(b => b.subreddit_id).filter(Boolean);
+        const filtered = _ctAllSubs.filter(s => brandSubIds.includes(s.id));
+        subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+    }
+    loadBrandsAndPostsForComments();
+}
+
 let _commentsPosts = []; // cached for brand filtering
 
 async function loadBrandsAndPostsForComments() {
     const sid = document.getElementById('comments-sub-filter').value;
+    if (!sid) {
+        document.getElementById('comments-brand-filter').innerHTML = '<option value="">All Brands</option>';
+        document.getElementById('comments-post-filter').innerHTML = '<option value="">Select a post...</option>';
+        document.getElementById('comment-tree').innerHTML = '';
+        return;
+    }
     const [posts, brands] = await Promise.all([
         api(`/api/subreddits/${sid}/posts`),
         api(`/api/subreddits/${sid}/brands`),
     ]);
     _commentsPosts = posts;
 
-    // Populate brand filter
+    // Populate brand filter for this subreddit
     const brandSel = document.getElementById('comments-brand-filter');
     brandSel.innerHTML = '<option value="">All Brands</option>' + brands.map(b =>
         `<option value="${b.id}">${b.name}</option>`
     ).join('');
+
+    // If top-level brand filter is set, auto-select matching brand in sub-level filter
+    const topBrand = document.getElementById('comments-brand-top-filter')?.value;
+    if (topBrand) {
+        const match = brands.find(b => b.name === topBrand);
+        if (match) brandSel.value = match.id;
+    }
 
     filterPostsByBrand();
 }
@@ -2317,6 +2414,8 @@ let _assignedAcctSort = { col: 'username', dir: 'asc' };
 let _assignedAcctFilter = { search: '', status: '' };
 let _assignedAcctData = [];
 let _aaFilteredUsernames = null; // null = no filter active
+let _aaBrands = []; // all brands for cascade filtering
+let _aaAllSubs = []; // all subreddits for restoring dropdown
 
 async function renderAssignedAccountsTab(container) {
     container.innerHTML = '<div class="spinner mx-auto"></div>';
@@ -2329,14 +2428,16 @@ async function renderAssignedAccountsTab(container) {
     }
 
     const subs = subredditsCache || await api('/api/subreddits');
+    _aaAllSubs = subs;
     let allBrands = [];
     try { allBrands = await api('/api/brands/all'); } catch(e) {}
+    _aaBrands = allBrands;
     const brandMap = {};
     allBrands.forEach(b => { if (!brandMap[b.name.toLowerCase()]) brandMap[b.name.toLowerCase()] = b; });
     const uniqueBrands = Object.values(brandMap);
 
     const subOpts = subs.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-    const brandOpts = uniqueBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    const brandOpts = uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
 
     container.innerHTML = `
         <div class="flex gap-3 items-end mb-4 flex-wrap">
@@ -2362,7 +2463,7 @@ async function renderAssignedAccountsTab(container) {
             </div>
             <div>
                 <label class="text-xs block" style="color:#818384">Brand</label>
-                <select id="aa-filter-brand" class="w-44 text-sm" onchange="applyAssignedAcctFilters()">
+                <select id="aa-filter-brand" class="w-44 text-sm" onchange="onAaBrandFilterChange()">
                     <option value="">All Brands</option>
                     ${brandOpts}
                 </select>
@@ -2393,12 +2494,39 @@ async function onAaSubredditFilterChange() {
     applyAssignedAcctFilters();
 }
 
+function onAaBrandFilterChange() {
+    const brandName = document.getElementById('aa-filter-brand').value;
+    const subFilter = document.getElementById('aa-filter-subreddit');
+
+    if (!brandName) {
+        // Show all subreddits
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + _aaAllSubs.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    } else {
+        // Filter to subreddits that have this brand
+        const brandSubIds = _aaBrands.filter(b => b.name === brandName).map(b => b.subreddit_id).filter(Boolean);
+        const filtered = _aaAllSubs.filter(s => brandSubIds.includes(s.id));
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + filtered.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    }
+    onAaSubredditFilterChange();
+}
+
 async function applyAssignedAcctFilters() {
     const sid = document.getElementById('aa-filter-subreddit')?.value || '';
-    const bid = document.getElementById('aa-filter-brand')?.value || '';
+    const brandName = document.getElementById('aa-filter-brand')?.value || '';
     const pid = document.getElementById('aa-filter-post')?.value || '';
 
-    if (!sid && !bid && !pid) {
+    // Resolve brand name to brand_id(s) — may match multiple brands (one per subreddit)
+    let bid = '';
+    if (brandName && sid) {
+        const match = _aaBrands.find(b => b.name === brandName && b.subreddit_id == sid);
+        if (match) bid = match.id;
+    } else if (brandName) {
+        // No sub selected — use first matching brand id
+        const match = _aaBrands.find(b => b.name === brandName);
+        if (match) bid = match.id;
+    }
+
+    if (!sid && !brandName && !pid) {
         _aaFilteredUsernames = null;
     } else {
         let params = [];

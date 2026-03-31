@@ -271,6 +271,22 @@ class Database:
             self.conn.execute(f"DELETE FROM posts WHERE subreddit_id = ?", (subreddit_id,))
         # Delete post_urls linked by subreddit_id (those without post_id)
         self.conn.execute("DELETE FROM post_urls WHERE subreddit_id = ?", (subreddit_id,))
+
+        # NULL out brand_id references in search tables before deleting brands
+        brand_ids = [r[0] for r in self.conn.execute(
+            "SELECT id FROM brands WHERE subreddit_id = ?", (subreddit_id,)
+        ).fetchall()]
+        if brand_ids:
+            ph = ",".join("?" * len(brand_ids))
+            # Guard: search tables may not exist in older databases
+            for tbl in ("search_comments", "search_posts"):
+                if self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+                ).fetchone():
+                    self.conn.execute(
+                        f"UPDATE {tbl} SET brand_id = NULL WHERE brand_id IN ({ph})", brand_ids
+                    )
+
         self.conn.execute("DELETE FROM brands WHERE subreddit_id = ?", (subreddit_id,))
         self.conn.execute("DELETE FROM subreddits WHERE id = ?", (subreddit_id,))
         self.conn.commit()

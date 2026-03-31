@@ -248,12 +248,59 @@ async function renderDashboard(el) {
 // =========================================================================
 // SUBREDDITS VIEW
 // =========================================================================
+let _subsBrands = [];
+let _subsData = [];
+
 async function renderSubreddits(el) {
     el.innerHTML = '<div class="spinner"></div>';
-    const subs = await api('/api/subreddits');
+    const [subs, brands] = await Promise.all([api('/api/subreddits'), api('/api/brands/all')]);
     subredditsCache = subs;
+    _subsData = subs;
+    _subsBrands = brands;
 
-    let cards = subs.map(s => `
+    // Deduplicate brands by name
+    const brandMap = {};
+    brands.forEach(b => { if (!brandMap[b.name.toLowerCase()]) brandMap[b.name.toLowerCase()] = b; });
+    const uniqueBrands = Object.values(brandMap);
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold">Subreddits</h2>
+            <button class="btn btn-primary" onclick="showCreateSubredditModal()">+ Create Subreddit</button>
+        </div>
+        <div class="flex gap-3 mb-4 items-center">
+            <select id="subs-brand-filter" class="w-48 text-sm" onchange="filterSubreddits()">
+                <option value="">All Brands</option>
+                ${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}
+            </select>
+            <span id="subs-count" class="text-xs text-gray-500">${subs.length} subreddits</span>
+        </div>
+        <div id="subs-grid"></div>
+    `;
+    filterSubreddits();
+}
+
+function filterSubreddits() {
+    const brandName = document.getElementById('subs-brand-filter')?.value;
+    let filtered = _subsData;
+
+    if (brandName) {
+        const subIds = _subsBrands.filter(b => b.name === brandName).map(b => b.subreddit_id).filter(Boolean);
+        filtered = _subsData.filter(s => subIds.includes(s.id));
+    }
+
+    const countEl = document.getElementById('subs-count');
+    if (countEl) countEl.textContent = `${filtered.length} subreddit${filtered.length !== 1 ? 's' : ''}`;
+
+    const grid = document.getElementById('subs-grid');
+    if (!grid) return;
+
+    if (!filtered.length) {
+        grid.innerHTML = '<p class="text-gray-500">No subreddits match this filter.</p>';
+        return;
+    }
+
+    grid.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${filtered.map(s => `
         <div class="card p-5 cursor-pointer hover:border-orange-500" onclick="showSubredditDetail(${s.id})">
             <h3 class="font-bold text-orange-500 mb-2">r/${s.name}</h3>
             <p class="text-sm text-gray-400 mb-3">${s.domain || ''}</p>
@@ -263,15 +310,7 @@ async function renderSubreddits(el) {
                 <span>${s.comment_count} comments</span>
             </div>
         </div>
-    `).join('');
-
-    el.innerHTML = `
-        <div class="flex justify-between items-center mb-6">
-            <h2 class="text-2xl font-bold">Subreddits</h2>
-            <button class="btn btn-primary" onclick="showCreateSubredditModal()">+ Create Subreddit</button>
-        </div>
-        ${subs.length ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>` : '<p class="text-gray-500">No subreddits yet. Create one to get started.</p>'}
-    `;
+    `).join('')}</div>`;
 }
 
 async function showSubredditDetail(id) {

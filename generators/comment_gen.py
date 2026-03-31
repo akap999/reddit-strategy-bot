@@ -156,73 +156,148 @@ class CommentGenerator:
 
         return comments, post_body, is_archived
 
-    def extract_brand_info(self, domain):
-        """Fetch a domain's homepage and use Claude to extract brand info."""
-        url = domain if domain.startswith("http") else f"https://{domain}"
-        print(f"    Fetching {url}...")
+    def _fetch_url(self, url):
+        """Fetch a URL with browser headers, curl fallback, and www prefix retry."""
+        import subprocess
         browser_headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         }
-        response = None
+
+        # Step 1: Try requests library
         try:
             session = requests.Session()
-            response = session.get(url, headers=browser_headers, timeout=15, allow_redirects=True)
-            response.raise_for_status()
+            resp = session.get(url, headers=browser_headers, timeout=15, allow_redirects=True)
+            resp.raise_for_status()
+            if len(resp.text) > 200:
+                print(f"    [requests] OK: {url} ({len(resp.text)} bytes)")
+                return resp.text
         except requests.exceptions.RequestException as e:
-            # Fallback: try subprocess curl which handles Cloudflare better
-            print(f"    Direct fetch failed ({e}), trying curl fallback...")
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ["curl", "-sL", "-m", "15", url],
-                    capture_output=True, text=True, timeout=20
-                )
-                if result.returncode == 0 and len(result.stdout) > 100:
-                    class CurlResponse:
-                        text = result.stdout
-                        status_code = 200
-                    response = CurlResponse()
-                else:
-                    print(f"    Curl fallback also failed")
-                    return None
-            except Exception:
-                print(f"    Failed to fetch domain")
-                return None
+            print(f"    [requests] Failed for {url}: {e}")
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        # Step 2: Try curl with full browser headers
+        try:
+            result = subprocess.run(
+                ["curl", "-sL", "-m", "20",
+                 "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                 "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                 "-H", "Accept-Language: en-US,en;q=0.9",
+                 "--compressed",
+                 url],
+                capture_output=True, text=True, timeout=25
+            )
+            if result.returncode == 0 and len(result.stdout) > 200:
+                print(f"    [curl] OK: {url} ({len(result.stdout)} bytes)")
+                return result.stdout
+        except Exception as e:
+            print(f"    [curl] Failed for {url}: {e}")
+
+        return None
+
+    def _extract_page_content(self, html):
+        """Extract title, meta description, headings, and paragraphs from HTML."""
+        soup = BeautifulSoup(html, "html.parser")
         title = soup.title.string.strip() if soup.title and soup.title.string else ""
         meta_desc = ""
-        meta_tag = soup.find("meta", attrs={"name": "description"})
-        if not meta_tag:
-            meta_tag = soup.find("meta", attrs={"property": "og:description"})
-        if meta_tag:
-            meta_desc = meta_tag.get("content", "")
+        for attr in [{"name": "description"}, {"property": "og:description"}, {"name": "twitter:description"}]:
+            meta_tag = soup.find("meta", attrs=attr)
+            if meta_tag and meta_tag.get("content"):
+                meta_desc = meta_tag["content"]
+                break
 
-        headings = [h.get_text(strip=True) for h in soup.find_all(["h1", "h2"])[:8]]
-        paragraphs = [p.get_text(strip=True) for p in soup.find_all("p")[:5] if len(p.get_text(strip=True)) > 20]
-        first_paragraphs = " ".join(paragraphs)[:800]
+        headings = [h.get_text(strip=True) for h in soup.find_all(["h1", "h2", "h3"])[:10]]
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all("p")[:10] if len(p.get_text(strip=True)) > 20]
+        first_paragraphs = " ".join(paragraphs)[:1200]
 
-        if not title and not meta_desc and not headings:
-            print(f"    Page has minimal content")
-            return None
+        # Also try extracting from structured data (JSON-LD)
+        json_ld_text = ""
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json as _json
+                ld = _json.loads(script.string)
+                if isinstance(ld, dict):
+                    json_ld_text = ld.get("description", "") or ld.get("name", "")
+                elif isinstance(ld, list) and ld:
+                    json_ld_text = ld[0].get("description", "") or ld[0].get("name", "")
+            except Exception:
+                pass
 
-        print(f"    Analyzing brand info...")
+        return {
+            "title": title,
+            "meta_desc": meta_desc,
+            "headings": headings,
+            "paragraphs": first_paragraphs,
+            "json_ld": json_ld_text[:300],
+            "has_content": bool(title or meta_desc or headings),
+        }
+
+    def extract_brand_info(self, domain):
+        """Fetch a domain's homepage and use Claude to extract brand info."""
+        # Normalize URL
+        raw_domain = domain.strip().rstrip("/")
+        if raw_domain.startswith("http"):
+            url = raw_domain
+        else:
+            url = f"https://{raw_domain}"
+
+        print(f"    Fetching {url}...")
+
+        # Try fetching the URL (with www. prefix fallback)
+        html = self._fetch_url(url)
+        if not html:
+            # Try with www. prefix
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if not parsed.hostname.startswith("www."):
+                www_url = f"{parsed.scheme}://www.{parsed.hostname}{parsed.path or '/'}"
+                print(f"    Retrying with www prefix: {www_url}")
+                html = self._fetch_url(www_url)
+
+        if not html:
+            # Last resort: ask Claude to infer from domain name alone
+            print(f"    All fetch attempts failed. Inferring from domain name...")
+            return self._infer_brand_from_domain(raw_domain)
+
+        # Extract content from homepage
+        content = self._extract_page_content(html)
+
+        # If homepage has minimal content, try /about pages
+        if not content["has_content"]:
+            for about_path in ["/about", "/about-us", "/company"]:
+                about_url = url.rstrip("/") + about_path
+                print(f"    Homepage empty, trying {about_url}...")
+                about_html = self._fetch_url(about_url)
+                if about_html:
+                    about_content = self._extract_page_content(about_html)
+                    if about_content["has_content"]:
+                        # Merge: use about content but keep homepage title if available
+                        if content["title"] and not about_content["title"]:
+                            about_content["title"] = content["title"]
+                        content = about_content
+                        break
+
+        if not content["has_content"]:
+            print(f"    Page has minimal content, inferring from domain name...")
+            return self._infer_brand_from_domain(raw_domain)
+
+        print(f"    Analyzing brand info (title: {content['title'][:60]}...)")
+        json_ld_line = f"\nSTRUCTURED DATA: {content['json_ld']}" if content["json_ld"] else ""
         prompt = f"""Analyze this website and extract brand information.
 
-DOMAIN: {domain}
-PAGE TITLE: {title}
-META DESCRIPTION: {meta_desc}
-HEADINGS: {', '.join(headings)}
-PAGE CONTENT: {first_paragraphs}
+DOMAIN: {raw_domain}
+PAGE TITLE: {content['title']}
+META DESCRIPTION: {content['meta_desc']}
+HEADINGS: {', '.join(content['headings'])}
+PAGE CONTENT: {content['paragraphs']}{json_ld_line}
 
 Return JSON only:
 {{
@@ -233,6 +308,27 @@ Return JSON only:
 
         result = self.claude.call(prompt, max_tokens=512, temperature=0.3)
         if result and result.get("brand_name") and result.get("brand_context"):
+            return result
+
+        # If Claude couldn't extract, try inferring from domain
+        return self._infer_brand_from_domain(raw_domain)
+
+    def _infer_brand_from_domain(self, domain):
+        """Last resort: ask Claude to infer brand info from just the domain name."""
+        clean = domain.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+        print(f"    Inferring brand from domain name: {clean}")
+        prompt = f"""Based solely on the domain name "{clean}", infer the likely brand information.
+Use your knowledge of known brands and common domain naming patterns.
+
+Return JSON only:
+{{
+    "brand_name": "the likely brand name (extract from domain, e.g. 'getpetermd.com' → 'PeterMD')",
+    "brand_context": "your best guess at what this brand does based on the domain name (1-2 sentences). If uncertain, provide a general description.",
+    "brand_keywords": ["keyword1", "keyword2", "keyword3"]
+}}"""
+
+        result = self.claude.call(prompt, max_tokens=512, temperature=0.3)
+        if result and result.get("brand_name"):
             return result
         return None
 

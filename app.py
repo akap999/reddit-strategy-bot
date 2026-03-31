@@ -591,6 +591,16 @@ def api_mark_comment_deleted(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/mark-paid", methods=["POST"])
+def api_mark_comment_paid(cid):
+    db = get_db()
+    try:
+        db.mark_comment_paid(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/all-comments")
 def api_all_comments(sid):
     db = get_db()
@@ -1582,6 +1592,28 @@ def api_generate_search_comments(pid):
                 db2.update_search_post_status(pid, "saved")
                 raise ValueError("Comment generation failed")
 
+            # Brand mention enforcement — retry once if any comment misses the brand
+            missing = [i+1 for i, c in enumerate(generated) if brand_name.lower() not in c.lower()]
+            if missing:
+                feedback = f"Comment(s) {missing} don't mention '{brand_name}'. Naturally weave in a mention."
+                retry_gen = bot.generate_comments(
+                    post["title"], post_body, post["subreddit"],
+                    comments, brand_name, brand_context,
+                    num_comments=num_comments,
+                    tone_analysis=tone_analysis,
+                    comment_stats=comment_stats,
+                    retry_feedback=feedback,
+                    relevance=relevance,
+                    reply_targets=reply_targets
+                )
+                retry_comments = retry_gen.get("generated_comments", [])
+                if retry_comments:
+                    # Use retry if it has more brand mentions
+                    retry_missing = [i for i, c in enumerate(retry_comments) if brand_name.lower() not in c.lower()]
+                    if len(retry_missing) < len(missing):
+                        generated = retry_comments
+                        generation = retry_gen
+
             # Store generated comments
             stored = []
             for idx, body in enumerate(generated):
@@ -1663,6 +1695,43 @@ def api_delete_search_comment(cid):
     try:
         db.delete_search_comment(cid)
         return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/mark-paid", methods=["POST"])
+def api_mark_search_comment_paid(cid):
+    db = get_db()
+    try:
+        db.mark_search_comment_paid(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/accounts/search-assignment-status")
+def api_accounts_search_assignment_status():
+    db = get_db()
+    try:
+        return jsonify(db.get_accounts_with_search_assignment_counts())
+    finally:
+        db.close()
+
+
+@app.route("/api/accounts/<username>/search-comments")
+def api_account_search_comments(username):
+    db = get_db()
+    try:
+        return jsonify(db.get_search_comments_for_account(username))
+    finally:
+        db.close()
+
+
+@app.route("/api/due-payments")
+def api_due_payments():
+    db = get_db()
+    try:
+        return jsonify(db.get_due_payments())
     finally:
         db.close()
 

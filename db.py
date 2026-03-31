@@ -477,6 +477,7 @@ class Database:
             "deployed_at": "ALTER TABLE comments ADD COLUMN deployed_at TEXT",
             "deleted_at": "ALTER TABLE comments ADD COLUMN deleted_at TEXT",
             "comment_type": "ALTER TABLE comments ADD COLUMN comment_type TEXT DEFAULT ''",
+            "paid_at": "ALTER TABLE comments ADD COLUMN paid_at TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -570,6 +571,12 @@ class Database:
             )
         """)
         self.conn.commit()
+
+        # paid_at migration for search_comments
+        sc_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(search_comments)").fetchall()]
+        if "paid_at" not in sc_cols:
+            self.conn.execute("ALTER TABLE search_comments ADD COLUMN paid_at TEXT")
+            self.conn.commit()
 
     # --- Background Tasks ---
 
@@ -961,6 +968,8 @@ class Database:
                       SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as pending,
                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
+                      SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
+                      SUM(CASE WHEN c.status = 'deployed' AND c.deployed_at < datetime('now', '-4 days') AND c.paid_at IS NULL AND c.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment,
                       (SELECT COUNT(*) FROM subreddits WHERE owner_account = a.username) as owned_subreddits,
                       (SELECT COUNT(*) FROM posts WHERE owner_account = a.username) as owned_posts
                FROM accounts a
@@ -1008,6 +1017,78 @@ class Database:
                WHERE c.account_id = ?
                ORDER BY c.created_at DESC""",
             (username,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_accounts_with_search_assignment_counts(self):
+        rows = self.conn.execute(
+            """SELECT a.*,
+                      COUNT(sc.id) as total_assigned,
+                      SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as pending,
+                      SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
+                      SUM(CASE WHEN sc.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
+                      SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
+                      SUM(CASE WHEN sc.status = 'deployed' AND sc.deployed_at < datetime('now', '-4 days') AND sc.paid_at IS NULL AND sc.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment
+               FROM accounts a
+               LEFT JOIN search_comments sc ON sc.account_id = a.username
+               GROUP BY a.id
+               ORDER BY a.username"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_search_comments_for_account(self, username):
+        rows = self.conn.execute(
+            """SELECT sc.id, sc.body, sc.status, sc.is_reply, sc.mentions_brand,
+                      sc.deployed_at, sc.reddit_comment_url, sc.reply_to_url,
+                      sc.paid_at, sc.deleted_at,
+                      sp.title as post_title, sp.reddit_url as post_reddit_url,
+                      sp.subreddit as subreddit_name,
+                      b.name as brand_name
+               FROM search_comments sc
+               LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+               LEFT JOIN brands b ON sc.brand_id = b.id
+               WHERE sc.account_id = ?
+               ORDER BY sc.created_at DESC""",
+            (username,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_comment_paid(self, comment_id):
+        self.conn.execute(
+            "UPDATE comments SET paid_at = datetime('now') WHERE id = ?",
+            (comment_id,)
+        )
+        self.conn.commit()
+
+    def mark_search_comment_paid(self, comment_id):
+        self.conn.execute(
+            "UPDATE search_comments SET paid_at = datetime('now') WHERE id = ?",
+            (comment_id,)
+        )
+        self.conn.commit()
+
+    def get_due_payments(self):
+        rows = self.conn.execute(
+            """SELECT 'comment' as source, c.id, c.body, c.account_id, c.deployed_at,
+                      p.title as post_title, b.name as brand_name
+               FROM comments c
+               LEFT JOIN posts p ON c.post_id = p.id
+               LEFT JOIN brands b ON c.brand_id = b.id
+               WHERE c.status = 'deployed'
+                 AND c.deployed_at < datetime('now', '-4 days')
+                 AND c.paid_at IS NULL
+                 AND c.deleted_at IS NULL
+               UNION ALL
+               SELECT 'search_comment' as source, sc.id, sc.body, sc.account_id, sc.deployed_at,
+                      sp.title as post_title, b.name as brand_name
+               FROM search_comments sc
+               LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+               LEFT JOIN brands b ON sc.brand_id = b.id
+               WHERE sc.status = 'deployed'
+                 AND sc.deployed_at < datetime('now', '-4 days')
+                 AND sc.paid_at IS NULL
+                 AND sc.deleted_at IS NULL
+               ORDER BY deployed_at ASC"""
         ).fetchall()
         return [dict(r) for r in rows]
 

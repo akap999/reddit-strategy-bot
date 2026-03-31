@@ -1300,15 +1300,26 @@ function exportBrandCSV(brandName) {
 // =========================================================================
 // POSTS VIEW
 // =========================================================================
+let _postsBrands = [];
+
 async function renderPosts(el) {
     el.innerHTML = '<div class="spinner"></div>';
-    const subs = await api('/api/subreddits');
+    const [subs, brands] = await Promise.all([api('/api/subreddits'), api('/api/brands/all')]);
     subredditsCache = subs;
+    _postsBrands = brands;
 
     if (!subs.length) {
         el.innerHTML = '<h2 class="text-2xl font-bold mb-4">Posts</h2><p class="text-gray-500">Create a subreddit first.</p>';
         return;
     }
+
+    // Deduplicate brands by name for the filter
+    const brandMap = {};
+    brands.forEach(b => {
+        if (!brandMap[b.name]) brandMap[b.name] = { name: b.name, ids: [b.id], sub_ids: [b.subreddit_id] };
+        else { brandMap[b.name].ids.push(b.id); brandMap[b.name].sub_ids.push(b.subreddit_id); }
+    });
+    const uniqueBrands = Object.values(brandMap);
 
     el.innerHTML = `
         <div class="flex justify-between items-center mb-4">
@@ -1319,6 +1330,10 @@ async function renderPosts(el) {
             </div>
         </div>
         <div class="flex gap-3 mb-4 items-center">
+            <select id="posts-brand-filter" onchange="onPostsBrandChange()" class="w-48">
+                <option value="">All Brands</option>
+                ${uniqueBrands.map(b => `<option value="${b.name}" data-sub-ids="${b.sub_ids.join(',')}">${b.name}</option>`).join('')}
+            </select>
             <select id="posts-sub-filter" onchange="loadPosts()" class="w-48">
                 ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
             </select>
@@ -1334,13 +1349,38 @@ async function renderPosts(el) {
     loadPosts();
 }
 
+function onPostsBrandChange() {
+    const brandName = document.getElementById('posts-brand-filter').value;
+    const subFilter = document.getElementById('posts-sub-filter');
+    const subs = subredditsCache || [];
+
+    if (!brandName) {
+        // Show all subreddits
+        subFilter.innerHTML = subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+    } else {
+        // Filter to subreddits that have this brand
+        const brandSubs = _postsBrands.filter(b => b.name === brandName).map(b => b.subreddit_id);
+        const filtered = subs.filter(s => brandSubs.includes(s.id));
+        subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+    }
+    loadPosts();
+}
+
 async function loadPosts() {
     const sid = document.getElementById('posts-sub-filter').value;
+    if (!sid) { document.getElementById('posts-table').innerHTML = '<p class="text-gray-500">No subreddit selected.</p>'; return; }
     const status = document.getElementById('posts-status-filter').value;
+    const brandName = document.getElementById('posts-brand-filter')?.value;
     const container = document.getElementById('posts-table');
     container.innerHTML = '<div class="spinner"></div>';
 
-    const posts = await api(`/api/subreddits/${sid}/posts`);
+    let url = `/api/subreddits/${sid}/posts`;
+    // If brand selected, find the brand_id for this subreddit
+    if (brandName) {
+        const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
+        if (brand) url += `?brand_id=${brand.id}`;
+    }
+    const posts = await api(url);
     const filtered = status === 'all' ? posts : posts.filter(p => p.status === status);
 
     if (!filtered.length) {
@@ -1427,14 +1467,25 @@ async function deletePost(pid) {
 
 function showGenPostsModal() {
     const subs = subredditsCache || [];
+    // Deduplicate brands by name
+    const brandMap = {};
+    _postsBrands.forEach(b => {
+        if (!brandMap[b.name]) brandMap[b.name] = { name: b.name, entries: [b] };
+        else brandMap[b.name].entries.push(b);
+    });
+    const uniqueBrands = Object.values(brandMap);
+
     showModal(`
         <h3 class="text-xl font-bold mb-4">Generate Brand Posts</h3>
         <div class="space-y-3">
             <div>
-                <label class="text-xs text-gray-400">Subreddit</label>
-                <select id="gen-posts-sub" onchange="loadBrandsForGen()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+                <label class="text-xs text-gray-400">Brand</label>
+                <select id="gen-posts-brand" onchange="onGenPostsBrandChange()">${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}</select>
             </div>
-            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-posts-brand"><option value="">Loading...</option></select></div>
+            <div>
+                <label class="text-xs text-gray-400">Subreddit</label>
+                <select id="gen-posts-sub"></select>
+            </div>
             <div><label class="text-xs text-gray-400">Number of posts</label><input id="gen-posts-count" type="number" value="3" min="1" max="10"></div>
         </div>
         <div class="flex gap-2 mt-5">
@@ -1442,23 +1493,28 @@ function showGenPostsModal() {
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         </div>
     `);
-    loadBrandsForGen();
+    onGenPostsBrandChange();
 }
 
-async function loadBrandsForGen() {
-    const sid = document.getElementById('gen-posts-sub').value;
-    const brands = await api(`/api/subreddits/${sid}/brands`);
-    const sel = document.getElementById('gen-posts-brand');
-    sel.innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+function onGenPostsBrandChange() {
+    const brandName = document.getElementById('gen-posts-brand').value;
+    const subSel = document.getElementById('gen-posts-sub');
+    const subs = subredditsCache || [];
+    // Filter subreddits to those that have this brand
+    const brandSubs = _postsBrands.filter(b => b.name === brandName).map(b => b.subreddit_id);
+    const filtered = subs.filter(s => brandSubs.includes(s.id));
+    subSel.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
 }
 
 async function submitGenPosts() {
     const sid = parseInt(document.getElementById('gen-posts-sub').value);
-    const bid = parseInt(document.getElementById('gen-posts-brand').value);
+    const brandName = document.getElementById('gen-posts-brand').value;
     const count = parseInt(document.getElementById('gen-posts-count').value);
-    if (!bid) { toast('Select a brand', 'error'); return; }
+    // Find the brand_id for this brand+subreddit combo
+    const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
+    if (!brand) { toast('Select a valid brand and subreddit', 'error'); return; }
     closeModal();
-    runTask('/api/generate/posts', { subreddit_id: sid, brand_id: bid, count }, () => loadPosts());
+    runTask('/api/generate/posts', { subreddit_id: sid, brand_id: brand.id, count }, () => loadPosts());
 }
 
 function showGenFillerModal() {
@@ -3321,6 +3377,7 @@ async function renderLiveSearch(el) {
             <div class="tab ${_lsTab==='search'?'active':''}" onclick="_lsTab='search';renderLsTabContent()">Search</div>
             <div class="tab ${_lsTab==='saved'?'active':''}" onclick="_lsTab='saved';renderLsTabContent()">Saved Posts</div>
             <div class="tab ${_lsTab==='comments'?'active':''}" onclick="_lsTab='comments';renderLsTabContent()">Comments</div>
+            <div class="tab ${_lsTab==='assigned'?'active':''}" onclick="_lsTab='assigned';renderLsTabContent()">Assigned Accounts</div>
         </div>
         <div id="ls-tab-content"></div>
     `;
@@ -3368,12 +3425,13 @@ function renderLsTabContent() {
     if (!c) return;
     // Update tab active states
     c.parentElement.querySelectorAll('.tab').forEach((t,i) => {
-        const tabs = ['search','saved','comments'];
+        const tabs = ['search','saved','comments','assigned'];
         t.className = `tab ${_lsTab===tabs[i]?'active':''}`;
     });
     if (_lsTab === 'search') renderLsSearch(c);
     else if (_lsTab === 'saved') renderLsSaved(c);
     else if (_lsTab === 'comments') renderLsComments(c);
+    else if (_lsTab === 'assigned') renderLsAssignedAccounts(c);
 }
 
 // --- Search Tab ---
@@ -3769,38 +3827,63 @@ function lsFilterComments() {
 
     const el = document.getElementById('ls-comments-list');
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No comments match filters.</p>'; return; }
-    el.innerHTML = `
-        <table>
-            <thead><tr><th>Post</th><th>Comment</th><th>Brand</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>${filtered.map(c => `
-                <tr>
-                    <td class="text-xs" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                        <a href="${c.post_url}" target="_blank" style="color:#0079D3">${(c.post_title||'').substring(0,40)}</a>
-                        <br><span class="text-gray-500">r/${c.post_subreddit}</span>
-                    </td>
-                    <td style="max-width:300px"><span class="text-sm">${(c.body||'').substring(0,120)}${(c.body||'').length>120?'...':''}</span>
-                        ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
-                        ${c.mentions_brand ? '<span class="badge" style="background:#3a1a00;color:#FF8b60;margin-left:4px">Brand</span>' : ''}
-                    </td>
-                    <td class="text-xs">${c.brand_name || '-'}</td>
-                    <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
-                    <td><span class="badge badge-${c.status}">${c.status}</span></td>
-                    <td>
-                        <div class="flex gap-1 flex-wrap">
-                            ${c.status === 'draft' ? `<button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
-                            ${c.status === 'assigned' ? `
-                                <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
-                                <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
-                            ` : ''}
-                            ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
-                            <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
-                            <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy to clipboard">Copy</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('')}</tbody>
-        </table>
-    `;
+
+    // Group by post
+    const groups = {};
+    filtered.forEach(c => {
+        const key = c.search_post_id;
+        if (!groups[key]) groups[key] = { title: c.post_title, subreddit: c.post_subreddit, url: c.post_url, brand: c.brand_name, comments: [] };
+        groups[key].comments.push(c);
+    });
+
+    el.innerHTML = Object.entries(groups).map(([pid, g]) => `
+        <div class="card p-4 mb-4">
+            <div class="flex justify-between items-center mb-3" style="border-bottom:1px solid #343536;padding-bottom:8px">
+                <div>
+                    <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
+                    <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
+                    ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
+                </div>
+                <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
+            </div>
+            <table>
+                <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${g.comments.map(c => `
+                    <tr>
+                        <td style="max-width:400px"><span class="text-sm">${(c.body||'').substring(0,150)}${(c.body||'').length>150?'...':''}</span>
+                            ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
+                            ${c.mentions_brand ? '<span class="badge" style="background:#3a1a00;color:#FF8b60;margin-left:4px">Brand</span>' : ''}
+                        </td>
+                        <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
+                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                        <td>
+                            <div class="flex gap-1 flex-wrap">
+                                ${c.status === 'draft' ? `<button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
+                                ${c.status === 'assigned' ? `
+                                    <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
+                                ` : ''}
+                                ${c.status === 'deployed' ? `
+                                    <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
+                                    ${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                                ` : ''}
+                                <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
+                                <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy">Copy</button>
+                            </div>
+                        </td>
+                    </tr>
+                `).join('')}</tbody>
+            </table>
+        </div>
+    `).join('');
+}
+
+async function lsMarkPaid(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/mark-paid`, { method: 'POST' });
+        toast('Marked as paid', 'success');
+        renderLsTabContent();
+    } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
 async function lsAssignComment(cid) {
@@ -3890,6 +3973,123 @@ function lsCopyComment(cid) {
     if (c) {
         navigator.clipboard.writeText(c.body).then(() => toast('Copied to clipboard', 'success'));
     }
+}
+
+// --- Assigned Accounts Tab (Live Search) ---
+let _lsAssignedAccounts = [];
+let _lsAssignedExpanded = null;
+
+async function renderLsAssignedAccounts(c) {
+    c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    let duePayments = [];
+    try {
+        [_lsAssignedAccounts, duePayments] = await Promise.all([
+            api('/api/accounts/search-assignment-status'),
+            api('/api/due-payments')
+        ]);
+    } catch(e) { _lsAssignedAccounts = []; duePayments = []; }
+
+    // Filter to only accounts with assignments
+    const withAssign = _lsAssignedAccounts.filter(a => a.total_assigned > 0);
+    const searchDue = duePayments.filter(d => d.source === 'search_comment');
+
+    let dueHtml = '';
+    if (searchDue.length) {
+        dueHtml = `
+            <div class="card p-4 mb-4" style="border-left:3px solid #FF4500">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="font-bold" style="color:#FF4500">Due Payments (${searchDue.length})</span>
+                    <span class="text-xs text-gray-500">Deployed > 4 days ago, not paid or removed</span>
+                </div>
+                <table>
+                    <thead><tr><th>Account</th><th>Post</th><th>Comment</th><th>Brand</th><th>Deployed</th><th>Actions</th></tr></thead>
+                    <tbody>${searchDue.map(d => `
+                        <tr>
+                            <td class="text-sm" style="color:#FFD635">u/${d.account_id}</td>
+                            <td class="text-xs">${(d.post_title||'').substring(0,40)}</td>
+                            <td class="text-xs">${(d.body||'').substring(0,60)}...</td>
+                            <td class="text-xs">${d.brand_name || '-'}</td>
+                            <td class="text-xs">${d.deployed_at ? new Date(d.deployed_at+'Z').toLocaleDateString() : '-'}</td>
+                            <td><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${d.id})">Mark Paid</button></td>
+                        </tr>
+                    `).join('')}</tbody>
+                </table>
+            </div>`;
+    }
+
+    if (!withAssign.length && !searchDue.length) {
+        c.innerHTML = '<p class="text-gray-500 py-4">No accounts assigned to search comments yet.</p>';
+        return;
+    }
+
+    c.innerHTML = `
+        ${dueHtml}
+        <table>
+            <thead><tr>
+                <th>Username</th><th>Karma</th><th>Age</th><th>Reference</th>
+                <th>Pending</th><th>Deployed</th><th>Paid</th><th>Deleted</th><th>Due</th><th>Total</th>
+            </tr></thead>
+            <tbody>${withAssign.map(a => {
+                const totalKarma = (a.link_karma||0) + (a.comment_karma||0);
+                const age = a.created_utc ? Math.floor((Date.now()/1000 - a.created_utc)/86400) + 'd' : '?';
+                return `
+                <tr class="cursor-pointer hover:bg-gray-800" onclick="lsToggleAccountDetail('${a.username}')">
+                    <td class="text-sm"><span style="color:#FF4500">u/${a.username}</span></td>
+                    <td class="text-sm">${totalKarma.toLocaleString()}</td>
+                    <td class="text-xs text-gray-400">${age}</td>
+                    <td class="text-xs text-gray-400">${a.reference || ''}</td>
+                    <td>${a.pending ? `<span class="badge badge-assigned">${a.pending}</span>` : '0'}</td>
+                    <td>${a.deployed ? `<span class="badge badge-deployed">${a.deployed}</span>` : '0'}</td>
+                    <td>${a.paid ? `<span class="badge" style="background:#00A86B;color:white">${a.paid}</span>` : '0'}</td>
+                    <td>${a.deleted ? `<span class="badge badge-deleted">${a.deleted}</span>` : '0'}</td>
+                    <td>${a.due_payment ? `<span class="badge" style="background:#FF4500;color:white">${a.due_payment}</span>` : '0'}</td>
+                    <td class="text-sm font-medium">${a.total_assigned}</td>
+                </tr>
+                <tr id="ls-acct-detail-${a.username}" style="display:none"><td colspan="10"><div class="p-3" style="background:#1a1a1b" id="ls-acct-detail-content-${a.username}"></div></td></tr>
+            `}).join('')}</tbody>
+        </table>
+    `;
+}
+
+async function lsToggleAccountDetail(username) {
+    const row = document.getElementById(`ls-acct-detail-${username}`);
+    if (!row) return;
+    if (row.style.display !== 'none') {
+        row.style.display = 'none';
+        _lsAssignedExpanded = null;
+        return;
+    }
+    // Collapse previously expanded
+    if (_lsAssignedExpanded && _lsAssignedExpanded !== username) {
+        const prev = document.getElementById(`ls-acct-detail-${_lsAssignedExpanded}`);
+        if (prev) prev.style.display = 'none';
+    }
+    _lsAssignedExpanded = username;
+    row.style.display = '';
+    const content = document.getElementById(`ls-acct-detail-content-${username}`);
+    content.innerHTML = '<div class="spinner mx-auto"></div>';
+    try {
+        const comments = await api(`/api/accounts/${encodeURIComponent(username)}/search-comments`);
+        if (!comments.length) { content.innerHTML = '<p class="text-xs text-gray-500">No comments assigned.</p>'; return; }
+        content.innerHTML = `
+            <table class="text-xs">
+                <thead><tr><th>Post</th><th>Comment</th><th>Brand</th><th>Status</th><th>Deployed</th><th>Actions</th></tr></thead>
+                <tbody>${comments.map(c => `
+                    <tr>
+                        <td><a href="${c.post_reddit_url}" target="_blank" style="color:#0079D3">${(c.post_title||'').substring(0,40)}</a><br><span class="text-gray-500">r/${c.subreddit_name}</span></td>
+                        <td style="max-width:250px">${(c.body||'').substring(0,100)}...</td>
+                        <td>${c.brand_name || '-'}</td>
+                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                        <td>${c.deployed_at ? new Date(c.deployed_at+'Z').toLocaleDateString() : '-'}</td>
+                        <td>
+                            ${c.status === 'deployed' && !c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                            ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
+                        </td>
+                    </tr>
+                `).join('')}</tbody>
+            </table>
+        `;
+    } catch(e) { content.innerHTML = '<p class="text-xs text-red-400">Failed to load comments.</p>'; }
 }
 
 // =========================================================================

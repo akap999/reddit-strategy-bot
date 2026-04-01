@@ -2391,7 +2391,7 @@ async function loadCommentTree() {
         }
         return false;
     }
-    if (autoBtn) autoBtn.style.display = hasStatus(tree, ['draft']) ? 'inline-block' : 'none';
+    if (autoBtn) autoBtn.style.display = hasStatus(tree, ['draft', 'complete']) ? 'inline-block' : 'none';
     if (removeAllBtn) removeAllBtn.style.display = (hasStatus(tree, ['assigned']) || post.owner_account) ? 'inline-block' : 'none';
 
     if (!tree.length) {

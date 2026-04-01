@@ -1178,7 +1178,7 @@ class Database:
 
         draft_comments = [dict(r) for r in self.conn.execute(
             """SELECT * FROM comments
-               WHERE post_id = ? AND status = 'draft'
+               WHERE post_id = ? AND status IN ('draft', 'complete') AND (account_id IS NULL OR account_id = '')
                ORDER BY comment_type = 'op_reply' DESC, mentions_brand DESC, suggested_post_day, suggested_order""",
             (post_id,)
         ).fetchall()]

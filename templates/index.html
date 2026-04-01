@@ -1590,7 +1590,7 @@ async function loadPosts() {
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td>${p.comment_count || 0}</td>
                     <td class="flex gap-1 flex-wrap">
-                        ${p.owner_account ? `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
+                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy Message</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Publish</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </td>
@@ -1722,6 +1722,15 @@ async function unassignPostOwner(pid) {
     await api(`/api/posts/${pid}/unassign-owner`, { method: 'POST', body: {} });
     toast('Post owner removed', 'success');
     loadPosts();
+}
+
+async function copyPostMessage(pid) {
+    const post = await api(`/api/posts/${pid}`);
+    if (!post) { toast('Post not found', 'error'); return; }
+    const subSelect = document.getElementById('posts-sub-filter');
+    const subName = subSelect?.options[subSelect.selectedIndex]?.text?.replace('r/', '') || '';
+    const message = `SubReddit Post! Please follow the subReddit before posting. \nUsername - \n${post.owner_account || ''}\n\nSubreddit Link - \nhttps://reddit.com/r/${subName}\n\nPost Heading -\n${post.title || ''}\n\nPost Description -\n${post.body || ''}\n\nPlease share the post link :)`;
+    navigator.clipboard.writeText(message).then(() => toast('Post message copied to clipboard', 'success'));
 }
 
 // --- Auto Assign Posts (bulk for subreddit) ---

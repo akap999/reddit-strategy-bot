@@ -7,6 +7,7 @@ relevance check, validation, anti-detection, pattern fingerprinting.
 import random
 import time
 import json
+import re
 import requests
 from collections import Counter
 from bs4 import BeautifulSoup
@@ -818,6 +819,7 @@ COMMENT QUALITY RULES:
 - Do NOT open two comments the same way
 - Vary punctuation naturally
 - Write like a casual Reddit user — ramble, incomplete thoughts, not too polished
+- NEVER use dashes (-), em-dashes (—), or double-dashes (--) anywhere in the comment. Use commas, periods, or restructure the sentence instead.
 {retry_section}
 
 {few_shot_text}
@@ -910,6 +912,11 @@ Return JSON only:
                 ev["marketing_phrases_found"] = found
                 ev["pass"] = False
                 ev["feedback"] = f"Marketing phrases detected: {found}. " + ev.get("feedback", "")
+
+            # Dash check — no dashes of any kind allowed
+            if re.search(r'[\u2013\u2014]| - |--', generated_comments[ev_idx]):
+                ev["pass"] = False
+                ev["feedback"] = "Contains dashes (-, —, --). Rewrite without any dashes. " + ev.get("feedback", "")
 
             # Brand sentence ratio check
             if brand_lower in comment_lower:

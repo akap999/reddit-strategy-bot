@@ -1087,6 +1087,7 @@ def api_gen_comments():
                     post, None, num_comments,
                     post_day_offset=post.get("suggested_post_day", 0),
                     brands_config=brands_config,
+                    op_reply_count=data.get("op_reply_count", 0),
                 )
             else:
                 # Single-brand backward compat
@@ -1098,6 +1099,7 @@ def api_gen_comments():
                     post, brand, num_comments,
                     brand_mention_ratio=ratio,
                     post_day_offset=post.get("suggested_post_day", 0),
+                    op_reply_count=data.get("op_reply_count", 0),
                 )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:

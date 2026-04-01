@@ -2362,6 +2362,10 @@ function showGenCommentsModal() {
                 <div id="gen-cmt-brands" class="max-h-40 overflow-y-auto border border-gray-600 rounded p-2 space-y-1"></div>
                 <p id="gen-cmt-mention-summary" class="text-xs text-gray-500 mt-1"></p>
             </div>
+            <div>
+                <label class="text-xs text-gray-400">OP Replies (post author replies to comments)</label>
+                <input id="gen-cmt-op-replies" type="number" value="0" min="0" max="10" onchange="updateMentionSummary()">
+            </div>
         </div>
         <div class="flex gap-2 mt-5">
             <button class="btn btn-primary" onclick="submitGenComments()">Generate</button>
@@ -2478,18 +2482,23 @@ function updateBrandMentionDefaults() {
 
 function updateMentionSummary() {
     const count = parseInt(document.getElementById('gen-cmt-count')?.value || 5);
+    const opReplies = parseInt(document.getElementById('gen-cmt-op-replies')?.value || 0);
     const rows = document.querySelectorAll('.gen-cmt-brand-cb:checked');
-    let total = 0;
+    let totalMentions = 0;
     rows.forEach(cb => {
         const bid = cb.dataset.brandId;
         const numEl = document.querySelector(`.gen-cmt-brand-count[data-brand-id="${bid}"]`);
-        total += parseInt(numEl?.value || 0);
+        totalMentions += parseInt(numEl?.value || 0);
     });
     const el = document.getElementById('gen-cmt-mention-summary');
     if (el) {
-        const organic = count - total;
-        el.textContent = `${total} brand mention${total !== 1 ? 's' : ''} + ${organic} organic = ${count} total`;
-        el.className = total > count ? 'text-xs text-red-400 mt-1' : 'text-xs text-gray-500 mt-1';
+        const organic = count - totalMentions - opReplies;
+        const parts = [];
+        if (totalMentions > 0) parts.push(`${totalMentions} brand mention${totalMentions !== 1 ? 's' : ''}`);
+        if (opReplies > 0) parts.push(`${opReplies} OP repl${opReplies !== 1 ? 'ies' : 'y'}`);
+        parts.push(`${organic} organic`);
+        el.textContent = parts.join(' + ') + ` = ${count} total`;
+        el.className = (totalMentions + opReplies) > count ? 'text-xs text-red-400 mt-1' : 'text-xs text-gray-500 mt-1';
     }
 }
 
@@ -2512,10 +2521,11 @@ async function submitGenComments() {
     if (!brandsConfig.length) { toast('Select at least one brand with mentions', 'error'); return; }
 
     const totalMentions = brandsConfig.reduce((s, bc) => s + bc.mention_count, 0);
-    if (totalMentions > count) { toast('Total mentions exceed comment count', 'error'); return; }
+    const opReplyCount = parseInt(document.getElementById('gen-cmt-op-replies').value || 0);
+    if (totalMentions + opReplyCount > count) { toast('Total brand mentions + OP replies exceed comment count', 'error'); return; }
 
     closeModal();
-    runTask('/api/generate/comments', { post_id: pid, brands_config: brandsConfig, count }, () => {
+    runTask('/api/generate/comments', { post_id: pid, brands_config: brandsConfig, count, op_reply_count: opReplyCount }, () => {
         if (currentView === 'comments') loadCommentTree();
     });
 }

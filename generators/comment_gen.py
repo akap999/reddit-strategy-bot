@@ -973,16 +973,17 @@ Return JSON only:
 
     def generate_comment_tree(self, post, brand_or_brands, num_comments,
                                brand_mention_ratio=None, post_day_offset=0,
-                               brands_config=None):
+                               brands_config=None, op_reply_count=0):
         """Generate a full comment tree for a fresh post (no existing Reddit comments).
 
         Args:
             post: post dict from DB
             brand_or_brands: single brand dict (backward compat) OR ignored if brands_config given
-            num_comments: total number of comments (top-level + replies)
+            num_comments: total number of comments (top-level + replies + OP replies)
             brand_mention_ratio: fraction of comments that mention brand (single-brand mode)
             post_day_offset: the day the post is scheduled for
             brands_config: list of {"brand": brand_dict, "mention_count": int} for multi-brand
+            op_reply_count: number of OP replies to include in the tree
 
         Returns:
             list of saved comment dicts with IDs and tree structure
@@ -1014,9 +1015,10 @@ Return JSON only:
         primary_brand = brands_config[0]["brand"]
         all_brand_names = list(set(bc["brand"]["name"] for bc in brands_config))
 
-        # Determine tree shape: ~80% top-level, ~20% replies
-        num_top = max(1, int(num_comments * 0.8))
-        num_replies = num_comments - num_top
+        # Determine tree shape: ~80% top-level, ~20% replies (minus OP replies)
+        non_op_count = num_comments - op_reply_count
+        num_top = max(1, int(non_op_count * 0.8))
+        num_replies = non_op_count - num_top
 
         # Build mention flags (True/False for legacy generate_comments compatibility)
         mention_flags = [ma is not None for ma in mention_assignments]
@@ -1212,6 +1214,15 @@ Return JSON only:
 
             if replies_generated:
                 print(f"    Generated {replies_generated} replies (of {num_replies} slots)")
+
+        # Generate OP replies if requested
+        if op_reply_count > 0 and top_comments:
+            print(f"    Generating {op_reply_count} OP replies...")
+            op_saved = self.generate_op_replies(
+                post, primary_brand, num_replies=op_reply_count,
+                post_day_offset=post_day_offset,
+            )
+            saved.extend(op_saved)
 
         return saved
 

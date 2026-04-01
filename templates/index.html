@@ -1572,11 +1572,12 @@ async function loadPosts() {
 
     container.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Title</th><th>Type</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th>Comments</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th>Comments</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => `
                 <tr>
                     <td>${p.suggested_post_day}</td>
                     <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                    <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
                     <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : 'Brand'}</span></td>
                     <td class="text-gray-400">${p.storyline}</td>
                     <td>${p.ai_query_score || '-'}</td>
@@ -1597,9 +1598,10 @@ async function showPostDetail(pid) {
     const post = await api(`/api/posts/${pid}`);
     showModal(`
         <h3 class="text-lg font-bold mb-1">${post.title}</h3>
-        <div class="flex gap-2 mb-3">
+        <div class="flex gap-2 mb-3 flex-wrap">
             <span class="badge badge-${post.status}">${post.status}</span>
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
+            ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
             <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
         </div>
         <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
@@ -1649,24 +1651,16 @@ async function deletePost(pid) {
 
 function showGenPostsModal() {
     const subs = subredditsCache || [];
-    // Deduplicate brands by name
-    const brandMap = {};
-    _postsBrands.forEach(b => {
-        if (!brandMap[b.name]) brandMap[b.name] = { name: b.name, entries: [b] };
-        else brandMap[b.name].entries.push(b);
-    });
-    const uniqueBrands = Object.values(brandMap);
-
     showModal(`
         <h3 class="text-xl font-bold mb-4">Generate Brand Posts</h3>
         <div class="space-y-3">
             <div>
-                <label class="text-xs text-gray-400">Brand</label>
-                <select id="gen-posts-brand" onchange="onGenPostsBrandChange()">${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}</select>
+                <label class="text-xs text-gray-400">Subreddit</label>
+                <select id="gen-posts-sub" onchange="onGenPostsSubChange()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
             </div>
             <div>
-                <label class="text-xs text-gray-400">Subreddit</label>
-                <select id="gen-posts-sub"></select>
+                <label class="text-xs text-gray-400">Brands (select one or more)</label>
+                <div id="gen-posts-brands" class="max-h-40 overflow-y-auto border border-gray-600 rounded p-2 space-y-1"></div>
             </div>
             <div><label class="text-xs text-gray-400">Number of posts</label><input id="gen-posts-count" type="number" value="3" min="1" max="10"></div>
         </div>
@@ -1675,28 +1669,29 @@ function showGenPostsModal() {
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
         </div>
     `);
-    onGenPostsBrandChange();
+    onGenPostsSubChange();
 }
 
-function onGenPostsBrandChange() {
-    const brandName = document.getElementById('gen-posts-brand').value;
-    const subSel = document.getElementById('gen-posts-sub');
-    const subs = subredditsCache || [];
-    // Filter subreddits to those that have this brand
-    const brandSubs = _postsBrands.filter(b => b.name === brandName).map(b => b.subreddit_id);
-    const filtered = subs.filter(s => brandSubs.includes(s.id));
-    subSel.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+async function onGenPostsSubChange() {
+    const sid = document.getElementById('gen-posts-sub').value;
+    const brands = await api(`/api/subreddits/${sid}/brands`);
+    const container = document.getElementById('gen-posts-brands');
+    container.innerHTML = brands.map(b => `
+        <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="checkbox" checked value="${b.id}" class="gen-posts-brand-cb">
+            <span>${b.name}</span>
+        </label>
+    `).join('');
 }
 
 async function submitGenPosts() {
     const sid = parseInt(document.getElementById('gen-posts-sub').value);
-    const brandName = document.getElementById('gen-posts-brand').value;
     const count = parseInt(document.getElementById('gen-posts-count').value);
-    // Find the brand_id for this brand+subreddit combo
-    const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
-    if (!brand) { toast('Select a valid brand and subreddit', 'error'); return; }
+    const checked = [...document.querySelectorAll('.gen-posts-brand-cb:checked')];
+    const brandIds = checked.map(cb => parseInt(cb.value));
+    if (!brandIds.length) { toast('Select at least one brand', 'error'); return; }
     closeModal();
-    runTask('/api/generate/posts', { subreddit_id: sid, brand_id: brand.id, count }, () => loadPosts());
+    runTask('/api/generate/posts', { subreddit_id: sid, brand_ids: brandIds, count }, () => loadPosts());
 }
 
 function showGenFillerModal() {
@@ -2304,9 +2299,12 @@ function showGenCommentsModal() {
         <div class="space-y-3">
             <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-cmt-sub" onchange="loadPostsAndBrandsForCmt()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
             <div><label class="text-xs text-gray-400">Post</label><select id="gen-cmt-post"><option value="">Loading...</option></select></div>
-            <div><label class="text-xs text-gray-400">Brand</label><select id="gen-cmt-brand"><option value="">Loading...</option></select></div>
-            <div><label class="text-xs text-gray-400">Number of comments</label><input id="gen-cmt-count" type="number" value="5" min="1" max="20"></div>
-            <div><label class="text-xs text-gray-400">Brand mention ratio</label><input id="gen-cmt-ratio" type="number" value="0.3" min="0" max="1" step="0.1"></div>
+            <div><label class="text-xs text-gray-400">Number of comments</label><input id="gen-cmt-count" type="number" value="5" min="1" max="20" onchange="updateBrandMentionDefaults()"></div>
+            <div>
+                <label class="text-xs text-gray-400">Brand mentions (per brand)</label>
+                <div id="gen-cmt-brands" class="max-h-40 overflow-y-auto border border-gray-600 rounded p-2 space-y-1"></div>
+                <p id="gen-cmt-mention-summary" class="text-xs text-gray-500 mt-1"></p>
+            </div>
         </div>
         <div class="flex gap-2 mt-5">
             <button class="btn btn-primary" onclick="submitGenComments()">Generate</button>
@@ -2354,6 +2352,7 @@ async function submitGenHQComment() {
     });
 }
 
+let _genCmtBrands = [];
 async function loadPostsAndBrandsForCmt() {
     const sid = document.getElementById('gen-cmt-sub').value;
     const [posts, brands] = await Promise.all([
@@ -2361,17 +2360,68 @@ async function loadPostsAndBrandsForCmt() {
         api(`/api/subreddits/${sid}/brands`),
     ]);
     document.getElementById('gen-cmt-post').innerHTML = posts.map(p => `<option value="${p.id}">${p.title.substring(0, 60)}</option>`).join('');
-    document.getElementById('gen-cmt-brand').innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    _genCmtBrands = brands;
+    updateBrandMentionDefaults();
+}
+
+function updateBrandMentionDefaults() {
+    const container = document.getElementById('gen-cmt-brands');
+    if (!container) return;
+    const count = parseInt(document.getElementById('gen-cmt-count')?.value || 5);
+    const totalMentions = Math.max(1, Math.round(count * 0.3));
+    const perBrand = _genCmtBrands.length > 0 ? Math.max(1, Math.floor(totalMentions / _genCmtBrands.length)) : 1;
+    container.innerHTML = _genCmtBrands.map((b, i) => `
+        <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked data-brand-id="${b.id}" class="gen-cmt-brand-cb" onchange="updateMentionSummary()">
+            <span class="flex-1">${b.name}</span>
+            <input type="number" value="${i === 0 ? perBrand + (totalMentions - perBrand * _genCmtBrands.length) : perBrand}" min="0" max="${count}"
+                   class="w-14 text-center gen-cmt-brand-count" data-brand-id="${b.id}" onchange="updateMentionSummary()">
+            <span class="text-xs text-gray-500">mentions</span>
+        </label>
+    `).join('');
+    updateMentionSummary();
+}
+
+function updateMentionSummary() {
+    const count = parseInt(document.getElementById('gen-cmt-count')?.value || 5);
+    const rows = document.querySelectorAll('.gen-cmt-brand-cb:checked');
+    let total = 0;
+    rows.forEach(cb => {
+        const bid = cb.dataset.brandId;
+        const numEl = document.querySelector(`.gen-cmt-brand-count[data-brand-id="${bid}"]`);
+        total += parseInt(numEl?.value || 0);
+    });
+    const el = document.getElementById('gen-cmt-mention-summary');
+    if (el) {
+        const organic = count - total;
+        el.textContent = `${total} brand mention${total !== 1 ? 's' : ''} + ${organic} organic = ${count} total`;
+        el.className = total > count ? 'text-xs text-red-400 mt-1' : 'text-xs text-gray-500 mt-1';
+    }
 }
 
 async function submitGenComments() {
     const pid = parseInt(document.getElementById('gen-cmt-post').value);
-    const bid = parseInt(document.getElementById('gen-cmt-brand').value);
     const count = parseInt(document.getElementById('gen-cmt-count').value);
-    const ratio = parseFloat(document.getElementById('gen-cmt-ratio').value);
-    if (!pid || !bid) { toast('Select post and brand', 'error'); return; }
+    if (!pid) { toast('Select a post', 'error'); return; }
+
+    // Build brands_config from checked brands
+    const brandsConfig = [];
+    document.querySelectorAll('.gen-cmt-brand-cb:checked').forEach(cb => {
+        const bid = parseInt(cb.dataset.brandId);
+        const numEl = document.querySelector(`.gen-cmt-brand-count[data-brand-id="${bid}"]`);
+        const mentionCount = parseInt(numEl?.value || 0);
+        if (mentionCount > 0) {
+            brandsConfig.push({ brand_id: bid, mention_count: mentionCount });
+        }
+    });
+
+    if (!brandsConfig.length) { toast('Select at least one brand with mentions', 'error'); return; }
+
+    const totalMentions = brandsConfig.reduce((s, bc) => s + bc.mention_count, 0);
+    if (totalMentions > count) { toast('Total mentions exceed comment count', 'error'); return; }
+
     closeModal();
-    runTask('/api/generate/comments', { post_id: pid, brand_id: bid, count, brand_mention_ratio: ratio }, () => {
+    runTask('/api/generate/comments', { post_id: pid, brands_config: brandsConfig, count }, () => {
         if (currentView === 'comments') loadCommentTree();
     });
 }

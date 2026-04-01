@@ -341,11 +341,14 @@ def api_list_posts(sid):
         brand_id = request.args.get("brand_id", type=int)
         include_filler = request.args.get("include_filler", "true") == "true"
         posts = db.get_posts(sid, brand_id=brand_id, include_filler=include_filler, limit=200)
-        # Attach comment count to each post
+        # Attach comment count and brand info to each post
         for p in posts:
             comments = db.get_comments(p["id"])
             p["comment_count"] = len(comments)
             p["reddit_url"] = db.get_url_for_post(p["id"])
+            brands = db.get_brands_for_post(p["id"])
+            p["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
+            p["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""
         return jsonify(posts)
     finally:
         db.close()
@@ -359,6 +362,9 @@ def api_get_post(pid):
             return jsonify({"error": "Not found"}), 404
         post["reddit_url"] = db.get_url_for_post(pid)
         post["comment_count"] = len(db.get_comments(pid))
+        brands = db.get_brands_for_post(pid)
+        post["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
+        post["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""
         return jsonify(post)
     finally:
         db.close()
@@ -998,10 +1004,13 @@ def api_gen_posts():
         db, claude, _, post_gen, _ = make_generators()
         try:
             sub = db.get_subreddit(data["subreddit_id"])
-            brand = db.get_brand(data["brand_id"])
-            if not sub or not brand:
-                raise ValueError("Subreddit or brand not found")
-            posts = post_gen.generate_posts(sub, brand, data.get("count", 3))
+            # Support multi-brand: brand_ids list OR single brand_id
+            brand_ids = data.get("brand_ids") or ([data["brand_id"]] if data.get("brand_id") else [])
+            brands = [db.get_brand(bid) for bid in brand_ids]
+            brands = [b for b in brands if b]  # filter None
+            if not sub or not brands:
+                raise ValueError("Subreddit or brand(s) not found")
+            posts = post_gen.generate_posts(sub, brands, data.get("count", 3))
             return [{"id": p["id"], "title": p["title"], "storyline": p.get("storyline", "")} for p in posts]
         finally:
             db.close()
@@ -1035,15 +1044,37 @@ def api_gen_comments():
         db, claude, _, _, comment_gen = make_generators()
         try:
             post = db.get_post(data["post_id"])
-            brand = db.get_brand(data["brand_id"])
-            if not post or not brand:
-                raise ValueError("Post or brand not found")
-            ratio = data.get("brand_mention_ratio", DEFAULT_BRAND_MENTION_RATIO)
-            comments = comment_gen.generate_comment_tree(
-                post, brand, data.get("count", 5),
-                brand_mention_ratio=ratio,
-                post_day_offset=post.get("suggested_post_day", 0),
-            )
+            if not post:
+                raise ValueError("Post not found")
+            num_comments = data.get("count", 5)
+
+            # Support multi-brand: brands_config OR single brand_id
+            brands_config_raw = data.get("brands_config", [])
+            if brands_config_raw:
+                # Multi-brand mode: [{brand_id: 1, mention_count: 2}, ...]
+                brands_config = []
+                for bc in brands_config_raw:
+                    brand = db.get_brand(bc["brand_id"])
+                    if brand:
+                        brands_config.append({"brand": brand, "mention_count": bc.get("mention_count", 1)})
+                if not brands_config:
+                    raise ValueError("No valid brands found in brands_config")
+                comments = comment_gen.generate_comment_tree(
+                    post, None, num_comments,
+                    post_day_offset=post.get("suggested_post_day", 0),
+                    brands_config=brands_config,
+                )
+            else:
+                # Single-brand backward compat
+                brand = db.get_brand(data["brand_id"])
+                if not brand:
+                    raise ValueError("Brand not found")
+                ratio = data.get("brand_mention_ratio", DEFAULT_BRAND_MENTION_RATIO)
+                comments = comment_gen.generate_comment_tree(
+                    post, brand, num_comments,
+                    brand_mention_ratio=ratio,
+                    post_day_offset=post.get("suggested_post_day", 0),
+                )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:
             db.close()

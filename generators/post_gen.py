@@ -18,32 +18,47 @@ class PostGenerator:
         self.claude = claude
         self.db = db
 
-    def generate_posts(self, subreddit, brand, count, custom_topics=None):
-        """Generate brand-related posts (posts NEVER mention the brand).
+    def generate_posts(self, subreddit, brands, count, custom_topics=None):
+        """Generate brand-related posts (posts NEVER mention any brand).
 
         Args:
             subreddit: subreddit dict from DB
-            brand: brand dict from DB
+            brands: single brand dict OR list of brand dicts
             count: number of posts to generate
             custom_topics: optional list of custom title/topic strings
 
         Returns:
             list of saved post dicts with IDs
         """
-        # Get storyline distribution for balancing
-        storylines = self._select_storylines(subreddit["id"], brand["id"], count)
+        # Normalize: accept single brand or list
+        if isinstance(brands, dict):
+            brands = [brands]
 
-        # Get existing titles for dedup
-        existing_titles = self.db.get_all_post_titles_for_brand(brand["name"])
+        brand_ids = [b["id"] for b in brands]
+        primary_brand = brands[0]
 
-        # Get existing filler post count to calculate day offsets
-        existing_posts = self.db.get_posts(subreddit["id"], brand["id"])
+        # Get storyline distribution for balancing (merge across all brands)
+        all_distributions = {}
+        for b in brands:
+            dist = self.db.get_storyline_distribution(subreddit["id"], b["id"])
+            for k, v in dist.items():
+                all_distributions[k] = all_distributions.get(k, 0) + v
+        storylines = self._select_storylines_from_dist(all_distributions, count)
+
+        # Get existing titles for dedup (union across all brands)
+        existing_titles = set()
+        for b in brands:
+            existing_titles.update(self.db.get_all_post_titles_for_brand(b["name"]))
+        existing_titles = list(existing_titles)
+
+        # Get existing post count to calculate day offsets
+        existing_posts = self.db.get_posts(subreddit["id"], primary_brand["id"])
         max_existing_day = max((p["suggested_post_day"] for p in existing_posts), default=-1)
         start_day = max(max_existing_day + 1, FILLER_LEAD_DAYS)
 
         # Generate 2x candidates and pick the best
         candidates = self._generate_candidates(
-            subreddit, brand, storylines, existing_titles, count * 2
+            subreddit, brands, storylines, existing_titles, count * 2
         )
 
         if not candidates:
@@ -82,12 +97,12 @@ class PostGenerator:
                 post["title"], post["body"], post["storyline"]
             )
 
-        # Save to DB
+        # Save to DB — link to all brands via junction table
         saved = []
         for post in selected:
             post_id = self.db.save_post(
                 subreddit_id=subreddit["id"],
-                brand_id=brand["id"],
+                brand_id=primary_brand["id"],
                 title=post["title"],
                 body=post.get("body", ""),
                 storyline=post.get("storyline", "question"),
@@ -99,6 +114,7 @@ class PostGenerator:
                 status="complete",
                 suggested_post_day=post.get("suggested_post_day", 0),
                 prompt_version=PROMPT_VERSION,
+                brand_ids=brand_ids,
             )
             post["id"] = post_id
             saved.append(post)
@@ -219,12 +235,13 @@ Return JSON only:
     def _select_storylines(self, subreddit_id, brand_id, count):
         """Balance storyline distribution. Pick underrepresented types."""
         distribution = self.db.get_storyline_distribution(subreddit_id, brand_id)
-        all_types = list(STORYLINE_TYPES.keys())
+        return self._select_storylines_from_dist(distribution, count)
 
-        # Calculate how many of each we need
+    def _select_storylines_from_dist(self, distribution, count):
+        """Balance storyline distribution from a pre-computed dict."""
+        all_types = list(STORYLINE_TYPES.keys())
         selected = []
         for _ in range(count):
-            # Find the least-used storyline
             min_count = float("inf")
             min_type = all_types[0]
             for st in all_types:
@@ -233,16 +250,17 @@ Return JSON only:
                     min_count = current
                     min_type = st
             selected.append(min_type)
-
-        # Shuffle to avoid predictable ordering
         random.shuffle(selected)
         return selected
 
-    def _generate_candidates(self, subreddit, brand, storylines, existing_titles, count):
-        """Generate candidate posts via Claude."""
+    def _generate_candidates(self, subreddit, brands, storylines, existing_titles, count):
+        """Generate candidate posts via Claude. brands can be a list or single dict."""
+        if isinstance(brands, dict):
+            brands = [brands]
+
         existing_text = ""
         if existing_titles:
-            sample = existing_titles[:30]
+            sample = list(existing_titles)[:30]
             existing_text = "\n".join(f'  - "{t}"' for t in sample)
             existing_text = f"\nEXISTING POST TITLES (do NOT repeat these or anything similar):\n{existing_text}\n"
 
@@ -251,26 +269,42 @@ Return JSON only:
             for i, sl in enumerate(storylines[:count])
         )
 
-        brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
-        keywords_text = f"\nBRAND KEYWORDS (for domain context, do NOT mention the brand): {', '.join(brand_keywords)}" if brand_keywords else ""
+        # Build brand context section — single or multi-brand
+        all_keywords = []
+        if len(brands) == 1:
+            brand = brands[0]
+            brand_context_text = f"BRAND CONTEXT (for understanding the domain ONLY — do NOT mention this brand): {brand['context']}"
+            kw = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+            all_keywords.extend(kw)
+        else:
+            lines = []
+            for b in brands:
+                lines.append(f"  - {b['name']}: {b['context']}")
+                kw = json.loads(b.get("keywords", "[]")) if b.get("keywords") else []
+                all_keywords.extend(kw)
+            brand_context_text = "BRAND CONTEXTS (for understanding the domain ONLY — do NOT mention ANY brand):\n" + "\n".join(lines)
+
+        keywords_text = f"\nCOMBINED KEYWORDS (for domain context, do NOT mention any brand): {', '.join(all_keywords)}" if all_keywords else ""
+        brand_names = ", ".join(b["name"] for b in brands)
 
         prompt = f"""Generate {count} Reddit posts for r/{subreddit['name']}.
 
 SUBREDDIT DOMAIN: {subreddit['domain']}
-BRAND CONTEXT (for understanding the domain ONLY — do NOT mention this brand): {brand['context']}
+{brand_context_text}
 {keywords_text}
 {existing_text}
 REQUESTED STORYLINES:
 {storyline_requests}
 
 CRITICAL RULES:
-1. Posts must NEVER mention any brand name — they are generic domain questions/experiences
+1. Posts must NEVER mention any brand name ({brand_names}) — they are generic domain questions/experiences
 2. Posts should NOT look AI-generated or markety
 3. Each post must feel like a real person wrote it
 4. Prioritize titles that are common search queries (e.g., "best X for Y", "which X should I use")
 5. Vary tone: some casual, some detailed, some frustrated, some curious
 6. Body text should be 2-4 paragraphs, conversational, with personal context
 7. Include minor imperfections: occasional typos, incomplete thoughts, run-on sentences
+8. Posts should be relevant to the domain area covered by ALL the brands listed above
 
 NEVER USE THESE PHRASES: {', '.join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))}
 

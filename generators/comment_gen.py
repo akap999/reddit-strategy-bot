@@ -662,8 +662,14 @@ Return JSON only:
     def generate_comments(self, post_title, post_body, subreddit, comments,
                           brand_name, brand_context, best_angle="", num_comments=2,
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
-                          relevance=None, reply_targets=None, mention_brand_flags=None):
-        """Generate comments. mention_brand_flags is a list of bools per comment index."""
+                          relevance=None, reply_targets=None, mention_brand_flags=None,
+                          brand_assignments=None, all_brand_names=None):
+        """Generate comments. mention_brand_flags is a list of bools per comment index.
+
+        For multi-brand: brand_assignments is a list where each element is None (organic)
+        or a brand dict (mention that specific brand). all_brand_names lists all brand
+        names to avoid in organic comments.
+        """
 
         if not comments and not post_body:
             return {"generated_comments": [], "strategies_used": [], "_personas": [], "_structures": []}
@@ -686,6 +692,9 @@ Return JSON only:
         if mention_brand_flags is None:
             mention_brand_flags = [True] * num_comments
 
+        # Build the "do not mention" brand list
+        avoid_brands = ", ".join(all_brand_names) if all_brand_names else brand_name
+
         reply_targets = reply_targets or {}
         comment_instructions = []
         for idx in range(num_comments):
@@ -703,13 +712,25 @@ Return JSON only:
                     f"\n    Write as if you clicked 'reply' on their comment. Respond to what THEY said specifically."
                 )
 
+            # Multi-brand: use per-comment brand assignment if available
+            assigned = None
+            if brand_assignments and idx < len(brand_assignments):
+                assigned = brand_assignments[idx]
+
             brand_line = ""
-            if should_mention:
+            if should_mention and assigned:
+                # Multi-brand: mention the specific assigned brand
+                brand_line = f"\n    BRAND: Mention {assigned['name']} exactly once as a brief aside."
+                ctx = assigned.get("context", "")
+                if ctx:
+                    brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {ctx}"
+            elif should_mention:
+                # Single-brand fallback
                 brand_line = f"\n    BRAND: Mention {brand_name} exactly once as a brief aside."
                 if brand_context:
                     brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {brand_context}"
             else:
-                brand_line = f"\n    BRAND: Do NOT mention {brand_name} or any brand in this comment."
+                brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 
             comment_instructions.append(
                 f"  Comment {idx+1}:\n"
@@ -943,40 +964,55 @@ Return JSON only:
     # NEW: Comment tree generation for fresh posts
     # ------------------------------------------------------------------
 
-    def generate_comment_tree(self, post, brand, num_comments,
-                               brand_mention_ratio=None, post_day_offset=0):
+    def generate_comment_tree(self, post, brand_or_brands, num_comments,
+                               brand_mention_ratio=None, post_day_offset=0,
+                               brands_config=None):
         """Generate a full comment tree for a fresh post (no existing Reddit comments).
 
         Args:
             post: post dict from DB
-            brand: brand dict from DB
+            brand_or_brands: single brand dict (backward compat) OR ignored if brands_config given
             num_comments: total number of comments (top-level + replies)
-            brand_mention_ratio: fraction of comments that mention brand (default 0.3)
+            brand_mention_ratio: fraction of comments that mention brand (single-brand mode)
             post_day_offset: the day the post is scheduled for
+            brands_config: list of {"brand": brand_dict, "mention_count": int} for multi-brand
 
         Returns:
             list of saved comment dicts with IDs and tree structure
         """
-        if brand_mention_ratio is None:
-            brand_mention_ratio = DEFAULT_BRAND_MENTION_RATIO
+        # Normalize into brands_config format
+        if brands_config is None:
+            # Single-brand backward compat
+            brand = brand_or_brands
+            if brand_mention_ratio is None:
+                brand_mention_ratio = DEFAULT_BRAND_MENTION_RATIO
+            mention_count = max(1, round(num_comments * brand_mention_ratio))
+            brands_config = [{"brand": brand, "mention_count": mention_count}]
+
+        # Build per-comment brand assignments: None = organic, brand_dict = mention that brand
+        mention_assignments = [None] * num_comments
+        brand_slots = []
+        for bc in brands_config:
+            for _ in range(bc["mention_count"]):
+                brand_slots.append(bc["brand"])
+
+        # Assign brand slots to random comment indices (skip index 0 — too obvious)
+        available = list(range(1, num_comments)) if num_comments > 1 else [0]
+        random.shuffle(available)
+        for i, assigned_brand in enumerate(brand_slots):
+            if i < len(available):
+                mention_assignments[available[i]] = assigned_brand
+
+        # Primary brand for fallback/dedup (first in config)
+        primary_brand = brands_config[0]["brand"]
+        all_brand_names = list(set(bc["brand"]["name"] for bc in brands_config))
 
         # Determine tree shape: ~80% top-level, ~20% replies
         num_top = max(1, int(num_comments * 0.8))
         num_replies = num_comments - num_top
 
-        # Determine which comments mention brand
-        num_brand_mentions = max(1, round(num_comments * brand_mention_ratio))
-        brand_indices = set(random.sample(range(num_comments), min(num_brand_mentions, num_comments)))
-
-        # Ensure no brand mention in first comment (too obvious)
-        if 0 in brand_indices and num_comments > 1:
-            brand_indices.discard(0)
-            alternatives = [i for i in range(1, num_comments) if i not in brand_indices]
-            if alternatives:
-                brand_indices.add(random.choice(alternatives))
-
-        # Build mention flags
-        mention_flags = [i in brand_indices for i in range(num_comments)]
+        # Build mention flags (True/False for legacy generate_comments compatibility)
+        mention_flags = [ma is not None for ma in mention_assignments]
 
         # Generate tone analysis from subreddit description as context
         subreddit = self.db.get_subreddit(post["subreddit_id"])
@@ -994,8 +1030,10 @@ Return JSON only:
 
         mock_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250, "min_chars": 50, "max_chars": 600}
 
-        # Get existing comment bodies for dedup
-        existing_bodies = self.db.get_all_comment_bodies_for_brand(brand["name"], limit=100)
+        # Get existing comment bodies for dedup (union across all brands)
+        existing_bodies = []
+        for bname in all_brand_names:
+            existing_bodies.extend(self.db.get_all_comment_bodies_for_brand(bname, limit=50))
         dedup_text = ""
         if existing_bodies:
             sample = existing_bodies[:20]
@@ -1004,18 +1042,21 @@ Return JSON only:
 
         # Generate top-level comments
         print(f"    Generating {num_top} top-level comments...")
+        top_assignments = mention_assignments[:num_top]
         top_level_result = self.generate_comments(
             post_title=post["title"],
             post_body=post["body"],
             subreddit=subreddit["name"],
             comments=[],  # no existing comments
-            brand_name=brand["name"],
-            brand_context=brand["context"],
+            brand_name=primary_brand["name"],
+            brand_context=primary_brand["context"],
             num_comments=num_top,
             tone_analysis=mock_tone,
             comment_stats=mock_stats,
             mention_brand_flags=mention_flags[:num_top],
             relevance={"best_angle": "general discussion", "natural_fit": 2},
+            brand_assignments=top_assignments,
+            all_brand_names=all_brand_names,
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -1029,7 +1070,14 @@ Return JSON only:
         saved = []
         top_ids = []
         for i, body in enumerate(top_comments):
-            mentions = mention_flags[i] and brand["name"].lower() in body.lower()
+            assigned = top_assignments[i] if i < len(top_assignments) else None
+            if assigned:
+                mentions = assigned["name"].lower() in body.lower()
+                comment_brand_id = assigned["id"]
+            else:
+                mentions = False
+                comment_brand_id = primary_brand["id"]
+
             # Schedule: first 1-2 comments on post day, rest spread across days
             if i < 2:
                 comment_day = post_day_offset
@@ -1042,7 +1090,7 @@ Return JSON only:
 
             comment_id = self.db.save_comment(
                 post_id=post["id"],
-                brand_id=brand["id"],
+                brand_id=comment_brand_id,
                 body=body,
                 persona_id=top_personas[i] if i < len(top_personas) else None,
                 structure_id=top_structures[i] if i < len(top_structures) else None,
@@ -1054,13 +1102,15 @@ Return JSON only:
                 suggested_order=i,
                 prompt_version=PROMPT_VERSION,
             )
-            self._detect_and_store_keywords(comment_id, body, brand, mentions)
+            if assigned:
+                self._detect_and_store_keywords(comment_id, body, assigned, mentions)
             saved.append({"id": comment_id, "body": body, "is_reply": False, "mentions_brand": mentions, "day": comment_day})
             top_ids.append(comment_id)
 
             # Track pattern
+            brand_name_for_fp = assigned["name"] if assigned else primary_brand["name"]
             fp = self._extract_pattern_fingerprint(
-                body, brand["name"],
+                body, brand_name_for_fp,
                 top_personas[i] if i < len(top_personas) else "unknown",
                 top_structures[i] if i < len(top_structures) else "unknown"
             )
@@ -1068,6 +1118,7 @@ Return JSON only:
 
         # Generate replies — only reply to existing comments if relevant
         if num_replies > 0:
+            reply_assignments = mention_assignments[num_top:num_top + num_replies]
             reply_mention_flags = mention_flags[num_top:num_top + num_replies]
 
             # Check if post is published and has live comments worth replying to
@@ -1079,14 +1130,16 @@ Return JSON only:
 
             replies_generated = 0
             for r_idx in range(num_replies):
-                should_mention = reply_mention_flags[r_idx] if r_idx < len(reply_mention_flags) else False
+                r_assigned = reply_assignments[r_idx] if r_idx < len(reply_assignments) else None
+                should_mention = r_assigned is not None
+                reply_brand = r_assigned if r_assigned else primary_brand
                 target = None
                 parent_comment_id = None
                 parent_day = post_day_offset
 
                 # Only reply to live comments if a relevant one exists (min_score=10)
                 if live_comments:
-                    target = self._select_reply_target(live_comments, post["title"], brand["name"],
+                    target = self._select_reply_target(live_comments, post["title"], reply_brand["name"],
                         {"best_angle": "general", "natural_fit": 2}, min_score=10)
 
                 # Fall back to generated comments if no relevant live target
@@ -1107,28 +1160,30 @@ Return JSON only:
                     post_body=post["body"],
                     subreddit=subreddit["name"],
                     comments=[target],
-                    brand_name=brand["name"],
-                    brand_context=brand["context"],
+                    brand_name=reply_brand["name"],
+                    brand_context=reply_brand.get("context", ""),
                     num_comments=1,
                     tone_analysis=mock_tone,
                     comment_stats=mock_stats,
                     mention_brand_flags=[should_mention],
                     reply_targets={0: target},
                     relevance={"best_angle": "replying to comment", "natural_fit": 2},
+                    brand_assignments=[r_assigned],
+                    all_brand_names=all_brand_names,
                 )
 
                 reply_comments = reply_result.get("generated_comments", [])
                 if reply_comments:
                     replies_generated += 1
                     reply_body = reply_comments[0]
-                    mentions = should_mention and brand["name"].lower() in reply_body.lower()
+                    mentions = should_mention and reply_brand["name"].lower() in reply_body.lower()
 
                     reply_personas = reply_result.get("_personas", [])
                     reply_structures = reply_result.get("_structures", [])
 
                     comment_id = self.db.save_comment(
                         post_id=post["id"],
-                        brand_id=brand["id"],
+                        brand_id=reply_brand["id"],
                         body=reply_body,
                         persona_id=reply_personas[0] if reply_personas else None,
                         structure_id=reply_structures[0] if reply_structures else None,
@@ -1140,11 +1195,12 @@ Return JSON only:
                         suggested_order=r_idx,
                         prompt_version=PROMPT_VERSION,
                     )
-                    self._detect_and_store_keywords(comment_id, reply_body, brand, mentions)
+                    if r_assigned:
+                        self._detect_and_store_keywords(comment_id, reply_body, r_assigned, mentions)
                     saved.append({"id": comment_id, "body": reply_body, "is_reply": True, "mentions_brand": mentions, "day": reply_day, "parent_id": parent_comment_id, "reply_to": target.get("author", "")})
 
                     if reply_personas:
-                        fp = self._extract_pattern_fingerprint(reply_body, brand["name"], reply_personas[0], reply_structures[0] if reply_structures else "unknown")
+                        fp = self._extract_pattern_fingerprint(reply_body, reply_brand["name"], reply_personas[0], reply_structures[0] if reply_structures else "unknown")
                         self._pattern_history.append(fp)
 
             if replies_generated:

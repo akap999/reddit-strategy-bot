@@ -114,6 +114,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_comments_status ON comments(status);
             CREATE INDEX IF NOT EXISTS idx_post_urls_sub ON post_urls(subreddit_id);
             CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
+
+            CREATE TABLE IF NOT EXISTS post_brands (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id  INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                brand_id INTEGER NOT NULL REFERENCES brands(id),
+                UNIQUE(post_id, brand_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_post_brands_post ON post_brands(post_id);
+            CREATE INDEX IF NOT EXISTS idx_post_brands_brand ON post_brands(brand_id);
         """)
         self.conn.commit()
         self._run_migrations()
@@ -238,12 +247,34 @@ class Database:
             )
         self.conn.commit()
 
+    # --- Post-Brand Junction ---
+
+    def add_post_brands(self, post_id, brand_ids):
+        """Link a post to multiple brands via the junction table."""
+        for bid in brand_ids:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO post_brands (post_id, brand_id) VALUES (?, ?)",
+                (post_id, bid)
+            )
+        self.conn.commit()
+
+    def get_brands_for_post(self, post_id):
+        """Return list of brand dicts associated with a post."""
+        rows = self.conn.execute(
+            """SELECT b.* FROM brands b
+               JOIN post_brands pb ON pb.brand_id = b.id
+               WHERE pb.post_id = ?
+               ORDER BY b.name""",
+            (post_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # --- Posts ---
 
     def save_post(self, subreddit_id, brand_id, title, body, storyline,
                   image_prompt=None, image_url=None, ai_query_score=0,
                   is_custom=0, is_filler=0, status="draft",
-                  suggested_post_day=0, prompt_version=None):
+                  suggested_post_day=0, prompt_version=None, brand_ids=None):
         cur = self.conn.execute(
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
@@ -253,15 +284,23 @@ class Database:
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
              status, suggested_post_day, prompt_version)
         )
+        post_id = cur.lastrowid
+        # Populate junction table
+        ids = brand_ids or ([brand_id] if brand_id else [])
+        if ids:
+            self.add_post_brands(post_id, ids)
         self.conn.commit()
-        return cur.lastrowid
+        return post_id
 
     def get_posts(self, subreddit_id, brand_id=None, limit=50, include_filler=True):
-        query = "SELECT * FROM posts WHERE subreddit_id = ?"
-        params = [subreddit_id]
         if brand_id is not None:
-            query += " AND brand_id = ?"
-            params.append(brand_id)
+            query = """SELECT DISTINCT p.* FROM posts p
+                       JOIN post_brands pb ON pb.post_id = p.id
+                       WHERE p.subreddit_id = ? AND pb.brand_id = ?"""
+            params = [subreddit_id, brand_id]
+        else:
+            query = "SELECT * FROM posts WHERE subreddit_id = ?"
+            params = [subreddit_id]
         if not include_filler:
             query += " AND is_filler = 0"
         query += " ORDER BY suggested_post_day ASC, created_at DESC LIMIT ?"
@@ -287,6 +326,7 @@ class Database:
             placeholders = ",".join("?" * len(post_ids))
             self.conn.execute(f"DELETE FROM comments WHERE post_id IN ({placeholders})", post_ids)
             self.conn.execute(f"DELETE FROM post_urls WHERE post_id IN ({placeholders})", post_ids)
+            self.conn.execute(f"DELETE FROM post_brands WHERE post_id IN ({placeholders})", post_ids)
             self.conn.execute(f"DELETE FROM posts WHERE subreddit_id = ?", (subreddit_id,))
         # Delete post_urls linked by subreddit_id (those without post_id)
         self.conn.execute("DELETE FROM post_urls WHERE subreddit_id = ?", (subreddit_id,))
@@ -313,24 +353,29 @@ class Database:
     def delete_post(self, post_id):
         self.conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
         self.conn.execute("DELETE FROM post_urls WHERE post_id = ?", (post_id,))
+        self.conn.execute("DELETE FROM post_brands WHERE post_id = ?", (post_id,))
         self.conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         self.conn.commit()
 
     def get_storyline_distribution(self, subreddit_id, brand_id=None):
-        query = "SELECT storyline, COUNT(*) as cnt FROM posts WHERE subreddit_id = ?"
-        params = [subreddit_id]
         if brand_id is not None:
-            query += " AND brand_id = ?"
-            params.append(brand_id)
-        query += " GROUP BY storyline"
+            query = """SELECT p.storyline, COUNT(*) as cnt FROM posts p
+                       JOIN post_brands pb ON pb.post_id = p.id
+                       WHERE p.subreddit_id = ? AND pb.brand_id = ?
+                       GROUP BY p.storyline"""
+            params = [subreddit_id, brand_id]
+        else:
+            query = "SELECT storyline, COUNT(*) as cnt FROM posts WHERE subreddit_id = ? GROUP BY storyline"
+            params = [subreddit_id]
         rows = self.conn.execute(query, params).fetchall()
         return {r["storyline"]: r["cnt"] for r in rows}
 
     def get_all_post_titles_for_brand(self, brand_name):
         """Returns all post titles across ALL subreddits for any brand with this name."""
         rows = self.conn.execute(
-            """SELECT p.title FROM posts p
-               JOIN brands b ON p.brand_id = b.id
+            """SELECT DISTINCT p.title FROM posts p
+               JOIN post_brands pb ON pb.post_id = p.id
+               JOIN brands b ON pb.brand_id = b.id
                WHERE LOWER(b.name) = LOWER(?)""",
             (brand_name,)
         ).fetchall()
@@ -612,6 +657,16 @@ class Database:
         if "paid_at" not in sc_cols:
             self.conn.execute("ALTER TABLE search_comments ADD COLUMN paid_at TEXT")
             self.conn.commit()
+
+        # Backfill post_brands from posts.brand_id for existing data
+        if self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_brands'").fetchone():
+            existing = self.conn.execute("SELECT COUNT(*) as c FROM post_brands").fetchone()["c"]
+            if existing == 0:
+                self.conn.execute("""
+                    INSERT OR IGNORE INTO post_brands (post_id, brand_id)
+                    SELECT id, brand_id FROM posts WHERE brand_id IS NOT NULL
+                """)
+                self.conn.commit()
 
     # --- Background Tasks ---
 

@@ -2482,6 +2482,7 @@ async function showAutoAssignModal() {
             <td class="text-sm text-gray-400">${age}</td>
             <td class="text-sm text-gray-300">${a.reference || ''}</td>
             <td class="text-sm text-center">${a.pending || 0}</td>
+            <td class="text-sm text-center">${a.total_assigned || 0}</td>
         </tr>`;
     }).join('');
 
@@ -2496,7 +2497,7 @@ async function showAutoAssignModal() {
         ${accounts.length ? `
         <div class="overflow-y-auto" style="max-height:50vh">
             <table class="text-sm" id="aa-accounts-table">
-                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th></tr></thead>
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th><th>Total</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
@@ -2526,6 +2527,7 @@ function filterAutoAssignAccounts(query) {
             <td class="text-sm text-gray-400">${age}</td>
             <td class="text-sm text-gray-300">${a.reference || ''}</td>
             <td class="text-sm text-center">${a.pending || 0}</td>
+            <td class="text-sm text-center">${a.total_assigned || 0}</td>
         </tr>`;
     }).join('');
 }
@@ -3607,13 +3609,13 @@ async function deleteAccountConfirm(username) {
 
 async function refreshAllAccounts() {
     if (!_accountsData.length) { toast('No accounts to refresh', 'error'); return; }
-    if (!confirm(`Refresh all ${_accountsData.length} accounts? This may take a while.`)) return;
-    toast(`Refreshing ${_accountsData.length} accounts...`, 'info');
+    const total = _accountsData.length;
+    if (!confirm(`Refresh all ${total} accounts? This will take ~${Math.ceil(total * 2 / 60)} minutes.`)) return;
+    showModal(`<h3 class="text-lg font-bold mb-3">Refreshing Accounts</h3><p id="refresh-progress" class="text-gray-300">0 / ${total} ...</p><p class="text-xs text-gray-500 mt-2">Please wait, ~2s per account to avoid Reddit rate limits.</p>`);
     let done = 0, failed = 0;
     for (const a of _accountsData) {
         try {
             const { task_id } = await api(`/api/accounts/${encodeURIComponent(a.username)}/refresh`, { method: 'POST' });
-            // Wait for each to complete before starting next
             await new Promise((resolve) => {
                 const poll = setInterval(async () => {
                     try {
@@ -3624,7 +3626,12 @@ async function refreshAllAccounts() {
                 }, 1500);
             });
         } catch(e) { failed++; }
+        const el = document.getElementById('refresh-progress');
+        if (el) el.textContent = `${done + failed} / ${total} (${done} ok, ${failed} failed)`;
+        // 2s delay between requests to avoid Reddit rate limiting
+        await new Promise(r => setTimeout(r, 2000));
     }
+    closeModal();
     toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
     renderAccounts(document.getElementById('app'));
 }

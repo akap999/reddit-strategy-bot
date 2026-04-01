@@ -343,8 +343,9 @@ def api_list_posts(sid):
         posts = db.get_posts(sid, brand_id=brand_id, include_filler=include_filler, limit=200)
         # Attach comment count and brand info to each post
         for p in posts:
-            comments = db.get_comments(p["id"])
-            p["comment_count"] = len(comments)
+            p["comment_count"] = db.conn.execute(
+                "SELECT COUNT(*) FROM comments WHERE post_id = ? AND status = 'deployed'", (p["id"],)
+            ).fetchone()[0]
             p["reddit_url"] = db.get_url_for_post(p["id"])
             brands = db.get_brands_for_post(p["id"])
             p["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
@@ -361,7 +362,9 @@ def api_get_post(pid):
         if not post:
             return jsonify({"error": "Not found"}), 404
         post["reddit_url"] = db.get_url_for_post(pid)
-        post["comment_count"] = len(db.get_comments(pid))
+        post["comment_count"] = db.conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE post_id = ? AND status = 'deployed'", (pid,)
+        ).fetchone()[0]
         brands = db.get_brands_for_post(pid)
         post["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
         post["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""

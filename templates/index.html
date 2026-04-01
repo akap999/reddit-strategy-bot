@@ -1512,6 +1512,7 @@ async function renderPosts(el) {
             <div class="flex gap-2">
                 <button class="btn btn-primary" onclick="showGenPostsModal()">Generate Posts</button>
                 <button class="btn btn-secondary" onclick="showGenFillerModal()">Generate Filler</button>
+                <button class="btn btn-secondary" onclick="showAddCustomPostModal()">+ Custom Post</button>
             </div>
         </div>
         <div class="flex gap-3 mb-4 items-center">
@@ -1732,19 +1733,9 @@ async function showAutoAssignPostsModal() {
     const accounts = await api('/api/accounts/assignment-status');
     window._autoAssignPostsSubId = parseInt(sid);
     window._autoAssignPostsAccounts = accounts;
+    window._aapChecked = new Set(accounts.map(a => a.username));
 
-    const rows = accounts.map(a => {
-        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
-        const age = formatAccountAge(a.created_utc);
-        return `<tr>
-            <td class="text-center"><input type="checkbox" checked data-username="${a.username}" class="aap-acct-cb"></td>
-            <td class="text-sm text-orange-500">${a.username}</td>
-            <td class="text-sm">${totalKarma.toLocaleString()}</td>
-            <td class="text-sm text-gray-400">${age}</td>
-            <td class="text-sm text-gray-300">${a.reference || ''}</td>
-            <td class="text-sm text-center">${a.owned_posts || 0}</td>
-        </tr>`;
-    }).join('');
+    const rows = accounts.map(a => _aapAccountRow(a)).join('');
 
     showModal(`
         <h3 class="text-xl font-bold mb-3">Auto Assign Posts</h3>
@@ -1768,37 +1759,47 @@ async function showAutoAssignPostsModal() {
     `);
 }
 
+function _aapAccountRow(a) {
+    const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+    const age = formatAccountAge(a.created_utc);
+    const checked = window._aapChecked && window._aapChecked.has(a.username);
+    return `<tr>
+        <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aap-acct-cb" onchange="onAapCheckChange(this)"></td>
+        <td class="text-sm text-orange-500">${a.username}</td>
+        <td class="text-sm">${totalKarma.toLocaleString()}</td>
+        <td class="text-sm text-gray-400">${age}</td>
+        <td class="text-sm text-gray-300">${a.reference || ''}</td>
+        <td class="text-sm text-center">${a.owned_posts || 0}</td>
+    </tr>`;
+}
+
+function onAapCheckChange(cb) {
+    if (cb.checked) window._aapChecked.add(cb.dataset.username);
+    else window._aapChecked.delete(cb.dataset.username);
+}
+
 function filterAutoAssignPostsAccounts(query) {
     const q = query.toLowerCase();
     const accounts = window._autoAssignPostsAccounts || [];
     const tbody = document.querySelector('#aap-accounts-table tbody');
     if (!tbody) return;
-    const rows = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
-    tbody.innerHTML = rows.map(a => {
-        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
-        const age = formatAccountAge(a.created_utc);
-        const existingCb = document.querySelector(`.aap-acct-cb[data-username="${a.username}"]`);
-        const checked = existingCb ? existingCb.checked : true;
-        return `<tr>
-            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aap-acct-cb"></td>
-            <td class="text-sm text-orange-500">${a.username}</td>
-            <td class="text-sm">${totalKarma.toLocaleString()}</td>
-            <td class="text-sm text-gray-400">${age}</td>
-            <td class="text-sm text-gray-300">${a.reference || ''}</td>
-            <td class="text-sm text-center">${a.owned_posts || 0}</td>
-        </tr>`;
-    }).join('');
+    const filtered = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = filtered.map(a => _aapAccountRow(a)).join('');
 }
 
 function toggleAllAutoAssignPosts(checked) {
-    document.querySelectorAll('.aap-acct-cb').forEach(cb => cb.checked = checked);
+    document.querySelectorAll('.aap-acct-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._aapChecked.add(cb.dataset.username);
+        else window._aapChecked.delete(cb.dataset.username);
+    });
 }
 
 async function submitAutoAssignPosts() {
     const sid = window._autoAssignPostsSubId;
-    const allCbs = document.querySelectorAll('.aap-acct-cb');
-    const exclude = [];
-    allCbs.forEach(cb => { if (!cb.checked) exclude.push(cb.dataset.username); });
+    const allAccounts = window._autoAssignPostsAccounts || [];
+    const checkedSet = window._aapChecked || new Set();
+    const exclude = allAccounts.filter(a => !checkedSet.has(a.username)).map(a => a.username);
 
     const btn = document.getElementById('aap-submit-btn');
     btn.disabled = true;
@@ -1869,6 +1870,86 @@ async function submitGenPosts() {
     if (!brandIds.length) { toast('Select at least one brand', 'error'); return; }
     closeModal();
     runTask('/api/generate/posts', { subreddit_id: sid, brand_ids: brandIds, count }, () => loadPosts());
+}
+
+function showAddCustomPostModal() {
+    const subs = subredditsCache || [];
+    const currentSub = document.getElementById('posts-sub-filter')?.value || '';
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Add Custom Post</h3>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Subreddit</label>
+                <select id="custom-post-sub" onchange="onCustomPostSubChange()">${subs.map(s => `<option value="${s.id}" ${s.id == currentSub ? 'selected' : ''}>r/${s.name}</option>`).join('')}</select>
+            </div>
+            <div>
+                <label class="text-xs text-gray-400">Brands (optional)</label>
+                <div id="custom-post-brands" class="max-h-32 overflow-y-auto border border-gray-600 rounded p-2 space-y-1"></div>
+            </div>
+            <div>
+                <label class="text-xs text-gray-400">Title</label>
+                <input id="custom-post-title" placeholder="Post title...">
+            </div>
+            <div>
+                <label class="text-xs text-gray-400">Body</label>
+                <textarea id="custom-post-body" rows="6" placeholder="Post body..." class="w-full bg-gray-800 text-white border border-gray-600 rounded px-3 py-2 text-sm"></textarea>
+            </div>
+            <div class="flex gap-3">
+                <div class="flex-1">
+                    <label class="text-xs text-gray-400">Storyline</label>
+                    <select id="custom-post-storyline" class="w-full">
+                        <option value="custom">Custom</option>
+                        <option value="question">Question</option>
+                        <option value="experience">Experience</option>
+                        <option value="comparison">Comparison</option>
+                        <option value="complaint">Complaint</option>
+                        <option value="discovery">Discovery</option>
+                        <option value="psa">PSA</option>
+                    </select>
+                </div>
+                <div class="flex-1">
+                    <label class="text-xs text-gray-400">Post Day</label>
+                    <input id="custom-post-day" type="number" value="0" min="0">
+                </div>
+            </div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn btn-primary" onclick="submitCustomPost()">Add Post</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    onCustomPostSubChange();
+}
+
+async function onCustomPostSubChange() {
+    const sid = document.getElementById('custom-post-sub').value;
+    const brands = await api(`/api/subreddits/${sid}/brands`);
+    document.getElementById('custom-post-brands').innerHTML = brands.map(b => `
+        <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="checkbox" value="${b.id}" class="custom-post-brand-cb">
+            <span>${b.name}</span>
+        </label>
+    `).join('');
+}
+
+async function submitCustomPost() {
+    const sid = parseInt(document.getElementById('custom-post-sub').value);
+    const title = document.getElementById('custom-post-title').value.trim();
+    const body = document.getElementById('custom-post-body').value.trim();
+    const storyline = document.getElementById('custom-post-storyline').value;
+    const day = parseInt(document.getElementById('custom-post-day').value) || 0;
+    const brandIds = [...document.querySelectorAll('.custom-post-brand-cb:checked')].map(cb => parseInt(cb.value));
+
+    if (!title) { toast('Title is required', 'error'); return; }
+    if (!body) { toast('Body is required', 'error'); return; }
+
+    await api('/api/posts/custom', {
+        method: 'POST',
+        body: { subreddit_id: sid, title, body, storyline, suggested_post_day: day, brand_ids: brandIds }
+    });
+    toast('Custom post added', 'success');
+    closeModal();
+    loadPosts();
 }
 
 function showGenFillerModal() {
@@ -2471,20 +2552,9 @@ async function showAutoAssignModal() {
     const accounts = await api('/api/accounts/assignment-status');
     window._autoAssignPostId = parseInt(pid);
     window._autoAssignAccounts = accounts;
+    window._aaChecked = new Set(accounts.map(a => a.username)); // track checked state persistently
 
-    const rows = accounts.map(a => {
-        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
-        const age = formatAccountAge(a.created_utc);
-        return `<tr>
-            <td class="text-center"><input type="checkbox" checked data-username="${a.username}" class="aa-acct-cb"></td>
-            <td class="text-sm text-orange-500">${a.username}</td>
-            <td class="text-sm">${totalKarma.toLocaleString()}</td>
-            <td class="text-sm text-gray-400">${age}</td>
-            <td class="text-sm text-gray-300">${a.reference || ''}</td>
-            <td class="text-sm text-center">${a.pending || 0}</td>
-            <td class="text-sm text-center">${a.total_assigned || 0}</td>
-        </tr>`;
-    }).join('');
+    const rows = accounts.map(a => _aaAccountRow(a)).join('');
 
     showModal(`
         <h3 class="text-xl font-bold mb-3">Auto Assign Comments</h3>
@@ -2508,39 +2578,49 @@ async function showAutoAssignModal() {
     `);
 }
 
+function _aaAccountRow(a) {
+    const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+    const age = formatAccountAge(a.created_utc);
+    const checked = window._aaChecked && window._aaChecked.has(a.username);
+    return `<tr>
+        <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aa-acct-cb" onchange="onAaCheckChange(this)"></td>
+        <td class="text-sm text-orange-500">${a.username}</td>
+        <td class="text-sm">${totalKarma.toLocaleString()}</td>
+        <td class="text-sm text-gray-400">${age}</td>
+        <td class="text-sm text-gray-300">${a.reference || ''}</td>
+        <td class="text-sm text-center">${a.pending || 0}</td>
+        <td class="text-sm text-center">${a.total_assigned || 0}</td>
+    </tr>`;
+}
+
+function onAaCheckChange(cb) {
+    if (cb.checked) window._aaChecked.add(cb.dataset.username);
+    else window._aaChecked.delete(cb.dataset.username);
+}
+
 function filterAutoAssignAccounts(query) {
     const q = query.toLowerCase();
     const accounts = window._autoAssignAccounts || [];
     const tbody = document.querySelector('#aa-accounts-table tbody');
     if (!tbody) return;
-    const rows = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
-    tbody.innerHTML = rows.map(a => {
-        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
-        const age = formatAccountAge(a.created_utc);
-        // Preserve checkbox state
-        const existingCb = document.querySelector(`.aa-acct-cb[data-username="${a.username}"]`);
-        const checked = existingCb ? existingCb.checked : true;
-        return `<tr>
-            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aa-acct-cb"></td>
-            <td class="text-sm text-orange-500">${a.username}</td>
-            <td class="text-sm">${totalKarma.toLocaleString()}</td>
-            <td class="text-sm text-gray-400">${age}</td>
-            <td class="text-sm text-gray-300">${a.reference || ''}</td>
-            <td class="text-sm text-center">${a.pending || 0}</td>
-            <td class="text-sm text-center">${a.total_assigned || 0}</td>
-        </tr>`;
-    }).join('');
+    const filtered = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = filtered.map(a => _aaAccountRow(a)).join('');
 }
 
 function toggleAllAutoAssign(checked) {
-    document.querySelectorAll('.aa-acct-cb').forEach(cb => cb.checked = checked);
+    // Only affect currently visible (filtered) checkboxes
+    document.querySelectorAll('.aa-acct-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._aaChecked.add(cb.dataset.username);
+        else window._aaChecked.delete(cb.dataset.username);
+    });
 }
 
 async function submitAutoAssign() {
     const pid = window._autoAssignPostId;
-    const allCbs = document.querySelectorAll('.aa-acct-cb');
-    const exclude = [];
-    allCbs.forEach(cb => { if (!cb.checked) exclude.push(cb.dataset.username); });
+    const allAccounts = window._autoAssignAccounts || [];
+    const checkedSet = window._aaChecked || new Set();
+    const exclude = allAccounts.filter(a => !checkedSet.has(a.username)).map(a => a.username);
 
     const btn = document.getElementById('aa-submit-btn');
     btn.disabled = true;
@@ -3790,6 +3870,14 @@ async function renderAnalytics(el) {
         return;
     }
 
+    // Gather all brands across subs for global filter
+    const allBrands = [];
+    for (const s of subs) {
+        const brands = await api(`/api/subreddits/${s.id}/brands`);
+        brands.forEach(b => { if (!allBrands.find(x => x.id === b.id)) allBrands.push(b); });
+    }
+    window._analyticsBrands = allBrands;
+
     el.innerHTML = `
         <h2 class="text-2xl font-bold mb-4">Analytics</h2>
         <div class="flex gap-1 mb-4 border-b border-gray-700">
@@ -3798,8 +3886,15 @@ async function renderAnalytics(el) {
             <div class="tab ${analyticsTab==='health'?'active':''}" onclick="analyticsTab='health';renderAnalyticsTab()">Content Health</div>
             <div class="tab ${analyticsTab==='schedule'?'active':''}" onclick="analyticsTab='schedule';renderAnalyticsTab()">Schedule</div>
         </div>
-        <div class="mb-3">
-            <select id="analytics-sub" onchange="renderAnalyticsTab()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+        <div class="flex gap-3 mb-3 items-center">
+            <select id="analytics-sub" onchange="renderAnalyticsTab()">
+                <option value="">All Subreddits</option>
+                ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
+            </select>
+            <select id="analytics-brand" onchange="renderAnalyticsTab()">
+                <option value="">All Brands</option>
+                ${allBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+            </select>
         </div>
         <div id="analytics-content"></div>
     `;
@@ -3819,51 +3914,54 @@ async function renderAnalyticsTab() {
 
     container.innerHTML = '<div class="spinner"></div>';
     const sid = document.getElementById('analytics-sub').value;
+    const bid = document.getElementById('analytics-brand')?.value || '';
 
-    if (analyticsTab === 'overview') await renderOverviewTab(container, sid);
+    if (analyticsTab === 'overview') await renderOverviewTab(container, sid, bid);
     else if (analyticsTab === 'brand') await renderBrandTab(container, sid);
     else if (analyticsTab === 'health') await renderHealthTab(container, sid);
     else if (analyticsTab === 'schedule') await renderScheduleTab(container, sid);
 }
 
-async function renderOverviewTab(container, sid) {
-    const [sub, storylines] = await Promise.all([
-        api(`/api/subreddits/${sid}`),
-        api(`/api/subreddits/${sid}/storylines`),
-    ]);
-    const stats = sub.stats || {};
-    const ps = stats.posts || {};
-    const cs = stats.comments || {};
-    const mentionPct = cs.total_comments > 0 ? Math.round((cs.brand_mentions || 0) / cs.total_comments * 100) : 0;
-    const avgScore = cs.avg_validation_score ? cs.avg_validation_score.toFixed(1) : 'N/A';
+async function renderOverviewTab(container, sid, bid) {
+    let url = '/api/analytics/deployments?';
+    if (sid) url += `subreddit_id=${sid}&`;
+    if (bid) url += `brand_id=${bid}&`;
+    const data = await api(url);
+    const t = data.totals || {};
+    const accts = data.accounts || [];
 
-    const allTypes = ['question', 'experience', 'comparison', 'complaint', 'discovery', 'psa'];
-    const maxStoryline = Math.max(...allTypes.map(t => storylines[t] || 0), 1);
-    const bars = allTypes.map(t => {
-        const val = storylines[t] || 0;
-        const pct = Math.round(val / maxStoryline * 100);
-        return `<div class="flex items-center gap-3 mb-2">
-            <span class="w-24 text-xs text-gray-400">${t}</span>
-            <div class="flex-1 bg-gray-700 rounded h-5"><div class="bar-fill bg-orange-500" style="width:${pct}%"></div></div>
-            <span class="text-xs text-gray-500 w-6 text-right">${val}</span>
-        </div>`;
-    }).join('');
+    const brandPct = t.deployed_comments > 0 ? Math.round((t.deployed_branded || 0) / t.deployed_comments * 100) : 0;
+
+    // Account table rows
+    const acctRows = accts.map(a => `
+        <tr>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm text-center">${a.total}</td>
+            <td class="text-sm text-center">${a.branded}</td>
+            <td class="text-sm text-center">${a.organic}</td>
+        </tr>
+    `).join('');
 
     container.innerHTML = `
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${ps.total_posts || 0}</p><p class="text-xs text-gray-500">Total Posts</p></div>
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${ps.brand_posts || 0} / ${ps.filler_posts || 0}</p><p class="text-xs text-gray-500">Brand / Filler</p></div>
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${cs.total_comments || 0}</p><p class="text-xs text-gray-500">Comments (${mentionPct}% brand)</p></div>
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${avgScore}</p><p class="text-xs text-gray-500">Avg Validation Score</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.subreddit_count || 0}</p><p class="text-xs text-gray-500">Subreddits</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.published_posts || 0} <span class="text-sm text-gray-500">/ ${t.total_posts || 0}</span></p><p class="text-xs text-gray-500">Published / Total Posts</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.deployed_comments || 0}</p><p class="text-xs text-gray-500">Deployed Comments</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.deployed_branded || 0} / ${t.deployed_organic || 0}</p><p class="text-xs text-gray-500">Branded / Organic (${brandPct}%)</p></div>
         </div>
-        <div class="stat-card p-4">
-            <div class="flex justify-between items-center mb-2">
-                <p class="text-sm text-gray-300">Published: ${ps.published_posts || 0} | Ready: ${ps.complete_posts || 0} | Draft: ${ps.draft_posts || 0}</p>
-            </div>
+        <div class="grid grid-cols-2 gap-4 mb-6">
+            <div class="stat-card p-4"><p class="text-2xl font-bold text-yellow-400">${t.assigned_comments || 0}</p><p class="text-xs text-gray-500">Assigned (pending deploy)</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold text-gray-500">${t.pending_comments || 0}</p><p class="text-xs text-gray-500">Draft / Unassigned</p></div>
         </div>
-        <div class="card p-5 mt-4">
-            <h4 class="text-sm font-bold text-gray-300 mb-3">Storyline Distribution</h4>
-            ${bars}
+        <div class="card p-5">
+            <h4 class="text-sm font-bold text-gray-300 mb-3">Account-wise Deployed Comments (${accts.length} accounts)</h4>
+            ${accts.length ? `
+            <div class="overflow-y-auto" style="max-height:50vh">
+                <table class="text-sm">
+                    <thead><tr><th>Account</th><th>Total Deployed</th><th>Branded</th><th>Organic</th></tr></thead>
+                    <tbody>${acctRows}</tbody>
+                </table>
+            </div>` : '<p class="text-gray-500">No deployed comments yet.</p>'}
         </div>
     `;
 }

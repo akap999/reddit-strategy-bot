@@ -222,6 +222,17 @@ def api_dashboard():
     finally:
         db.close()
 
+@app.route("/api/analytics/deployments")
+def api_deployment_analytics():
+    db = get_db()
+    try:
+        sid = request.args.get("subreddit_id", type=int)
+        bid = request.args.get("brand_id", type=int)
+        result = db.get_deployment_analytics(subreddit_id=sid, brand_id=bid)
+        return jsonify(result)
+    finally:
+        db.close()
+
 # ---------------------------------------------------------------------------
 # API: Subreddits
 # ---------------------------------------------------------------------------
@@ -369,6 +380,31 @@ def api_get_post(pid):
         post["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
         post["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""
         return jsonify(post)
+    finally:
+        db.close()
+
+@app.route("/api/posts/custom", methods=["POST"])
+def api_add_custom_post():
+    db = get_db()
+    try:
+        data = request.json
+        sid = data.get("subreddit_id")
+        title = data.get("title", "").strip()
+        body = data.get("body", "").strip()
+        storyline = data.get("storyline", "custom")
+        day = data.get("suggested_post_day", 0)
+        brand_ids = data.get("brand_ids", [])
+        if not sid or not title or not body:
+            return jsonify({"error": "subreddit_id, title, and body are required"}), 400
+        post_id = db.save_post(
+            subreddit_id=sid,
+            brand_id=brand_ids[0] if brand_ids else None,
+            title=title, body=body, storyline=storyline,
+            is_custom=1, status="draft",
+            suggested_post_day=day,
+            brand_ids=brand_ids if brand_ids else None,
+        )
+        return jsonify({"ok": True, "post_id": post_id})
     finally:
         db.close()
 

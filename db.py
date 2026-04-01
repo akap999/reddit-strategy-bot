@@ -141,8 +141,8 @@ class Database:
         rows = self.conn.execute("""
             SELECT s.*,
                    COUNT(DISTINCT b.id) as brand_count,
-                   COUNT(DISTINCT p.id) as post_count,
-                   COUNT(DISTINCT c.id) as comment_count
+                   COUNT(DISTINCT CASE WHEN p.status = 'published' THEN p.id END) as post_count,
+                   COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count
             FROM subreddits s
             LEFT JOIN brands b ON b.subreddit_id = s.id
             LEFT JOIN posts p ON p.subreddit_id = s.id
@@ -498,6 +498,70 @@ class Database:
         stats["comments"] = dict(row)
 
         return stats
+
+    def get_deployment_analytics(self, subreddit_id=None, brand_id=None):
+        """Get deployment stats: totals and per-account breakdown."""
+        where_parts = []
+        params = []
+
+        if subreddit_id:
+            where_parts.append("p.subreddit_id = ?")
+            params.append(subreddit_id)
+        if brand_id:
+            where_parts.append("c.brand_id = ?")
+            params.append(brand_id)
+
+        where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        # Totals
+        totals = dict(self.conn.execute(f"""
+            SELECT
+                COUNT(CASE WHEN c.status = 'deployed' THEN 1 END) as deployed_comments,
+                COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 END) as deployed_branded,
+                COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 0 THEN 1 END) as deployed_organic,
+                COUNT(CASE WHEN c.status = 'assigned' THEN 1 END) as assigned_comments,
+                COUNT(CASE WHEN c.status IN ('draft','complete') THEN 1 END) as pending_comments
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            {where_sql}
+        """, params).fetchone())
+
+        # Post and subreddit counts (deployed = published posts)
+        post_where = []
+        post_params = []
+        if subreddit_id:
+            post_where.append("p.subreddit_id = ?")
+            post_params.append(subreddit_id)
+        if brand_id:
+            post_where.append("EXISTS (SELECT 1 FROM post_brands pb WHERE pb.post_id = p.id AND pb.brand_id = ?)")
+            post_params.append(brand_id)
+        post_where_sql = ("WHERE " + " AND ".join(post_where)) if post_where else ""
+
+        post_row = dict(self.conn.execute(f"""
+            SELECT
+                COUNT(*) as total_posts,
+                COUNT(CASE WHEN p.status = 'published' THEN 1 END) as published_posts,
+                COUNT(DISTINCT p.subreddit_id) as subreddit_count
+            FROM posts p
+            {post_where_sql}
+        """, post_params).fetchone())
+        totals.update(post_row)
+
+        # Per-account breakdown
+        accounts = [dict(r) for r in self.conn.execute(f"""
+            SELECT
+                c.account_id as username,
+                COUNT(*) as total,
+                SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded,
+                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as organic
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            {where_sql} {"AND" if where_sql else "WHERE"} c.status = 'deployed' AND c.account_id IS NOT NULL
+            GROUP BY c.account_id
+            ORDER BY total DESC
+        """, params).fetchall()]
+
+        return {"totals": totals, "accounts": accounts}
 
     def get_persona_distribution(self, subreddit_id=None, brand_name=None):
         query = "SELECT c.persona_id, COUNT(*) as cnt FROM comments c"

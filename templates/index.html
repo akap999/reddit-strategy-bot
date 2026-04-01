@@ -34,6 +34,7 @@
         .toast-success { background: #1a3320; color: #46d160; }
         .toast-error { background: #4a1a1a; color: #ff6b6b; }
         .toast-info { background: #0045AC; color: #7AAFFF; }
+        .toast-warning { background: #3a2a00; color: #FFD635; }
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         .tree-indent { border-left: 2px solid #343536; margin-left: 16px; padding-left: 16px; }
         .spinner { border: 3px solid #343536; border-top: 3px solid #FF4500; border-radius: 50%; width: 24px; height: 24px; animation: spin 0.8s linear infinite; display: inline-block; }
@@ -1527,6 +1528,7 @@ async function renderPosts(el) {
                 <option value="complete">Complete</option>
                 <option value="published">Published</option>
             </select>
+            <button class="btn btn-primary" onclick="showAutoAssignPostsModal()">Auto Assign Posts</button>
         </div>
         <div id="posts-table"></div>
     `;
@@ -1584,9 +1586,10 @@ async function loadPosts() {
                     <td class="text-gray-400">${p.storyline}</td>
                     <td>${p.ai_query_score || '-'}</td>
                     <td><span class="badge badge-${p.status}">${p.status}</span></td>
-                    <td class="text-xs text-yellow-400">${p.owner_account || '-'}</td>
+                    <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td>${p.comment_count || 0}</td>
-                    <td class="flex gap-1">
+                    <td class="flex gap-1 flex-wrap">
+                        ${p.owner_account ? `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Publish</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </td>
@@ -1649,6 +1652,178 @@ async function deletePost(pid) {
     await api(`/api/posts/${pid}`, { method: 'DELETE' });
     toast('Post deleted', 'success');
     loadPosts();
+}
+
+// --- Post Owner Assignment ---
+async function assignPostOwner(pid) {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+    const accounts = await api('/api/accounts');
+    const rows = accounts.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="submitPostOwner(${pid}, '${a.username}')">Select</button></td>
+        </tr>`;
+    }).join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Assign Post Owner</h3>
+        <div class="mb-3">
+            <input id="post-owner-search" placeholder="Search username or reference..." class="text-sm" oninput="filterPostOwnerModal(this.value)">
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="post-owner-table">
+                <thead><tr><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    window._postOwnerAccounts = accounts;
+    window._postOwnerPid = pid;
+}
+
+function filterPostOwnerModal(query) {
+    const q = query.toLowerCase();
+    const all = window._postOwnerAccounts || [];
+    const pid = window._postOwnerPid;
+    const filtered = q ? all.filter(a => a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q)) : all;
+    const tbody = document.querySelector('#post-owner-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = filtered.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="submitPostOwner(${pid}, '${a.username}')">Select</button></td>
+        </tr>`;
+    }).join('');
+}
+
+async function submitPostOwner(pid, username) {
+    await api(`/api/posts/${pid}/owner`, { method: 'PUT', body: { username } });
+    toast(`Post assigned to u/${username}`, 'success');
+    closeModal();
+    loadPosts();
+}
+
+async function unassignPostOwner(pid) {
+    if (!confirm('Remove owner from this post?')) return;
+    await api(`/api/posts/${pid}/unassign-owner`, { method: 'POST', body: {} });
+    toast('Post owner removed', 'success');
+    loadPosts();
+}
+
+// --- Auto Assign Posts (bulk for subreddit) ---
+async function showAutoAssignPostsModal() {
+    const sid = document.getElementById('posts-sub-filter').value;
+    if (!sid) { toast('Select a subreddit first', 'error'); return; }
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+
+    const accounts = await api('/api/accounts/assignment-status');
+    window._autoAssignPostsSubId = parseInt(sid);
+    window._autoAssignPostsAccounts = accounts;
+
+    const rows = accounts.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-center"><input type="checkbox" checked data-username="${a.username}" class="aap-acct-cb"></td>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.owned_posts || 0}</td>
+        </tr>`;
+    }).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Auto Assign Posts</h3>
+        <p class="text-sm text-gray-400 mb-3">Assigns accounts to all unowned posts in this subreddit. Uncheck accounts to exclude.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="aap-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="filterAutoAssignPostsAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAutoAssignPosts(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAutoAssignPosts(false)">Deselect All</button>
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="aap-accounts-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Posts Owned</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button id="aap-submit-btn" class="btn btn-primary" onclick="submitAutoAssignPosts()">Auto Assign Posts</button>
+        </div>
+    `);
+}
+
+function filterAutoAssignPostsAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._autoAssignPostsAccounts || [];
+    const tbody = document.querySelector('#aap-accounts-table tbody');
+    if (!tbody) return;
+    const rows = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = rows.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        const existingCb = document.querySelector(`.aap-acct-cb[data-username="${a.username}"]`);
+        const checked = existingCb ? existingCb.checked : true;
+        return `<tr>
+            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aap-acct-cb"></td>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.owned_posts || 0}</td>
+        </tr>`;
+    }).join('');
+}
+
+function toggleAllAutoAssignPosts(checked) {
+    document.querySelectorAll('.aap-acct-cb').forEach(cb => cb.checked = checked);
+}
+
+async function submitAutoAssignPosts() {
+    const sid = window._autoAssignPostsSubId;
+    const allCbs = document.querySelectorAll('.aap-acct-cb');
+    const exclude = [];
+    allCbs.forEach(cb => { if (!cb.checked) exclude.push(cb.dataset.username); });
+
+    const btn = document.getElementById('aap-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Assigning...';
+
+    try {
+        const result = await api('/api/auto-assign-posts', {
+            method: 'POST',
+            body: { subreddit_id: sid, exclude_accounts: exclude }
+        });
+
+        if (result.error) { toast(result.error, 'error'); return; }
+
+        let msg = `Assigned ${result.assigned} posts`;
+        toast(msg, 'success');
+
+        if (result.warnings && result.warnings.length) {
+            result.warnings.forEach(w => toast(w, 'warning'));
+        }
+        closeModal();
+        loadPosts();
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Auto Assign Posts';
+    }
 }
 
 function showGenPostsModal() {
@@ -1799,6 +1974,8 @@ async function renderCommentTreeTab(container) {
             <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
             <select id="comments-brand-filter" onchange="filterPostsByBrand()" class="w-44"><option value="">All Brands</option></select>
             <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">Select a post...</option></select>
+            <button id="auto-assign-btn" class="btn btn-primary" onclick="showAutoAssignModal()" style="display:none">Auto Assign</button>
+            <button id="remove-all-assigns-btn" class="btn btn-danger" onclick="removeAllAssigns()" style="display:none">Remove All Assigns</button>
         </div>
         <div id="comment-tree"></div>
     `;
@@ -2190,7 +2367,14 @@ let _ctPostRedditUrl = '';
 async function loadCommentTree() {
     const pid = document.getElementById('comments-post-filter').value;
     const container = document.getElementById('comment-tree');
-    if (!pid) { container.innerHTML = ''; _ctPostRedditUrl = ''; return; }
+    const autoBtn = document.getElementById('auto-assign-btn');
+    const removeAllBtn = document.getElementById('remove-all-assigns-btn');
+    if (!pid) {
+        container.innerHTML = ''; _ctPostRedditUrl = '';
+        if (autoBtn) autoBtn.style.display = 'none';
+        if (removeAllBtn) removeAllBtn.style.display = 'none';
+        return;
+    }
 
     container.innerHTML = '<div class="spinner"></div>';
     const [tree, post] = await Promise.all([
@@ -2198,6 +2382,17 @@ async function loadCommentTree() {
         api(`/api/posts/${pid}`),
     ]);
     _ctPostRedditUrl = post.reddit_url || '';
+
+    // Check if any draft/assigned comments exist (flatten tree)
+    function hasStatus(nodes, statuses) {
+        for (const n of nodes) {
+            if (statuses.includes(n.status)) return true;
+            if (n.replies && hasStatus(n.replies, statuses)) return true;
+        }
+        return false;
+    }
+    if (autoBtn) autoBtn.style.display = hasStatus(tree, ['draft']) ? 'inline-block' : 'none';
+    if (removeAllBtn) removeAllBtn.style.display = (hasStatus(tree, ['assigned']) || post.owner_account) ? 'inline-block' : 'none';
 
     if (!tree.length) {
         container.innerHTML = '<p class="text-gray-500 mt-4">No comments for this post.</p>';
@@ -2218,8 +2413,9 @@ function renderCommentNode(c, depth) {
 
     // Status-dependent action buttons
     let actionBtns = '';
-    if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
+    if (c.status === 'draft') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
+    else if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Mark Deleted</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
@@ -2263,6 +2459,123 @@ async function unassignComment(cid) {
     if (!confirm('Unassign this comment from its account?')) return;
     await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
     toast('Comment unassigned', 'success');
+    loadCommentTree();
+}
+
+// --- Auto Assign Modal ---
+async function showAutoAssignModal() {
+    const pid = document.getElementById('comments-post-filter').value;
+    if (!pid) return;
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+
+    const accounts = await api('/api/accounts/assignment-status');
+    window._autoAssignPostId = parseInt(pid);
+    window._autoAssignAccounts = accounts;
+
+    const rows = accounts.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-center"><input type="checkbox" checked data-username="${a.username}" class="aa-acct-cb"></td>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.pending || 0}</td>
+        </tr>`;
+    }).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Auto Assign Comments</h3>
+        <p class="text-sm text-gray-400 mb-3">Select accounts to include in the assignment pool. Uncheck any accounts you want to exclude.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="aa-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="filterAutoAssignAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAutoAssign(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAutoAssign(false)">Deselect All</button>
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="aa-accounts-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button id="aa-submit-btn" class="btn btn-primary" onclick="submitAutoAssign()">Auto Assign</button>
+        </div>
+    `);
+}
+
+function filterAutoAssignAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._autoAssignAccounts || [];
+    const tbody = document.querySelector('#aa-accounts-table tbody');
+    if (!tbody) return;
+    const rows = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = rows.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        // Preserve checkbox state
+        const existingCb = document.querySelector(`.aa-acct-cb[data-username="${a.username}"]`);
+        const checked = existingCb ? existingCb.checked : true;
+        return `<tr>
+            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aa-acct-cb"></td>
+            <td class="text-sm text-orange-500">${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.pending || 0}</td>
+        </tr>`;
+    }).join('');
+}
+
+function toggleAllAutoAssign(checked) {
+    document.querySelectorAll('.aa-acct-cb').forEach(cb => cb.checked = checked);
+}
+
+async function submitAutoAssign() {
+    const pid = window._autoAssignPostId;
+    const allCbs = document.querySelectorAll('.aa-acct-cb');
+    const exclude = [];
+    allCbs.forEach(cb => { if (!cb.checked) exclude.push(cb.dataset.username); });
+
+    const btn = document.getElementById('aa-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Assigning...';
+
+    try {
+        const result = await api('/api/auto-assign', {
+            method: 'POST',
+            body: { post_id: pid, exclude_accounts: exclude }
+        });
+
+        if (result.error) { toast(result.error, 'error'); return; }
+
+        const r = result.results[0];
+        if (r.error) { toast(r.error, 'error'); return; }
+
+        let msg = `Assigned ${r.assigned} comments`;
+        if (r.skipped) msg += `, ${r.skipped} skipped`;
+        toast(msg, 'success');
+
+        if (r.warnings && r.warnings.length) {
+            r.warnings.forEach(w => toast(w, 'warning'));
+        }
+        closeModal();
+        loadCommentTree();
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Auto Assign';
+    }
+}
+
+async function removeAllAssigns() {
+    const pid = document.getElementById('comments-post-filter').value;
+    if (!pid) return;
+    if (!confirm('Remove all assignments (post owner + all assigned comments) for this post?')) return;
+    await api(`/api/posts/${pid}/unassign-all`, { method: 'POST', body: {} });
+    toast('All assignments removed', 'success');
     loadCommentTree();
 }
 

@@ -569,6 +569,59 @@ def api_unassign_comment(cid):
     finally:
         db.close()
 
+@app.route("/api/auto-assign", methods=["POST"])
+def api_auto_assign():
+    from auto_assign import auto_assign_post
+    db = get_db()
+    try:
+        data = request.json
+        post_ids = data.get("post_ids") or ([data["post_id"]] if "post_id" in data else [])
+        exclude = data.get("exclude_accounts", [])
+        if not post_ids:
+            return jsonify({"error": "post_id or post_ids required"}), 400
+        results = []
+        for pid in post_ids:
+            result = auto_assign_post(db, pid, exclude_accounts=exclude)
+            result["post_id"] = pid
+            results.append(result)
+        has_error = any(r.get("error") for r in results)
+        return jsonify({"ok": not has_error, "results": results})
+    finally:
+        db.close()
+
+@app.route("/api/auto-assign-posts", methods=["POST"])
+def api_auto_assign_posts():
+    from auto_assign import auto_assign_posts
+    db = get_db()
+    try:
+        data = request.json
+        subreddit_id = data.get("subreddit_id")
+        if not subreddit_id:
+            return jsonify({"error": "subreddit_id required"}), 400
+        exclude = data.get("exclude_accounts", [])
+        result = auto_assign_posts(db, subreddit_id, exclude_accounts=exclude)
+        return jsonify({"ok": not result.get("error"), **result})
+    finally:
+        db.close()
+
+@app.route("/api/posts/<int:pid>/unassign-all", methods=["POST"])
+def api_unassign_all_for_post(pid):
+    db = get_db()
+    try:
+        db.bulk_unassign_all_for_post(pid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/posts/<int:pid>/unassign-owner", methods=["POST"])
+def api_unassign_post_owner(pid):
+    db = get_db()
+    try:
+        db.unassign_post_owner(pid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/body", methods=["PUT"])
 def api_update_comment_body(cid):
     db = get_db()

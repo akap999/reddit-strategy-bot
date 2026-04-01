@@ -1081,6 +1081,131 @@ class Database:
         self.conn.execute("UPDATE posts SET owner_account = ? WHERE id = ?", (username, post_id))
         self.conn.commit()
 
+    def get_post_auto_assign_context(self, subreddit_id):
+        """Fetch all data needed for post auto-assignment scoring."""
+        sub = self.conn.execute("SELECT * FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+        if not sub:
+            return None
+
+        draft_posts = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM posts WHERE subreddit_id = ? AND (owner_account IS NULL OR owner_account = '')",
+            (subreddit_id,)
+        ).fetchall()]
+
+        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
+
+        # Per-account count of posts they already own across ALL subreddits
+        account_post_counts = [dict(r) for r in self.conn.execute(
+            """SELECT owner_account as account_id, COUNT(*) as cnt
+               FROM posts WHERE owner_account IS NOT NULL AND owner_account != ''
+               GROUP BY owner_account"""
+        ).fetchall()]
+
+        # Per-account count of posts they own in THIS subreddit
+        account_sub_post_counts = [dict(r) for r in self.conn.execute(
+            """SELECT owner_account as account_id, COUNT(*) as cnt
+               FROM posts WHERE subreddit_id = ? AND owner_account IS NOT NULL AND owner_account != ''
+               GROUP BY owner_account""",
+            (subreddit_id,)
+        ).fetchall()]
+
+        # Per-account count of comments assigned in this subreddit (shows activity)
+        account_sub_comment_counts = [dict(r) for r in self.conn.execute(
+            """SELECT c.account_id, COUNT(*) as cnt
+               FROM comments c JOIN posts p ON c.post_id = p.id
+               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+               GROUP BY c.account_id""",
+            (subreddit_id,)
+        ).fetchall()]
+
+        return {
+            "subreddit": dict(sub),
+            "draft_posts": draft_posts,
+            "all_accounts": all_accounts,
+            "account_post_counts": account_post_counts,
+            "account_sub_post_counts": account_sub_post_counts,
+            "account_sub_comment_counts": account_sub_comment_counts,
+        }
+
+    def bulk_unassign_post_comments(self, post_id):
+        """Unassign all assigned comments for a post, setting them back to draft."""
+        self.conn.execute(
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status = 'assigned'",
+            (post_id,)
+        )
+        self.conn.commit()
+
+    def unassign_post_owner(self, post_id):
+        """Remove owner_account from a post."""
+        self.conn.execute("UPDATE posts SET owner_account = '' WHERE id = ?", (post_id,))
+        self.conn.commit()
+
+    def bulk_unassign_all_for_post(self, post_id):
+        """Unassign post owner + all assigned comments for a post."""
+        self.unassign_post_owner(post_id)
+        self.bulk_unassign_post_comments(post_id)
+
+    def get_auto_assign_context(self, post_id):
+        """Fetch all data needed for auto-assignment scoring in one call."""
+        post = self.get_post(post_id)
+        if not post:
+            return None
+
+        sub_id = post["subreddit_id"]
+
+        draft_comments = [dict(r) for r in self.conn.execute(
+            """SELECT * FROM comments
+               WHERE post_id = ? AND status = 'draft'
+               ORDER BY comment_type = 'op_reply' DESC, mentions_brand DESC, suggested_post_day, suggested_order""",
+            (post_id,)
+        ).fetchall()]
+
+        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
+
+        subreddit_day_assignments = [dict(r) for r in self.conn.execute(
+            """SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
+               FROM comments c JOIN posts p ON c.post_id = p.id
+               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+                 AND c.status IN ('assigned','deployed')
+               GROUP BY c.account_id, c.suggested_post_day""",
+            (sub_id,)
+        ).fetchall()]
+
+        account_pending_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, COUNT(*) as cnt FROM comments
+               WHERE status = 'assigned' AND account_id IS NOT NULL
+               GROUP BY account_id"""
+        ).fetchall()]
+
+        account_brand_mentions = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, brand_id, COUNT(*) as cnt FROM comments
+               WHERE mentions_brand = 1 AND account_id IS NOT NULL
+               GROUP BY account_id, brand_id"""
+        ).fetchall()]
+
+        account_total_mentions = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, COUNT(*) as cnt FROM comments
+               WHERE mentions_brand = 1 AND account_id IS NOT NULL
+               GROUP BY account_id"""
+        ).fetchall()]
+
+        subreddit_veterans = [r[0] for r in self.conn.execute(
+            """SELECT DISTINCT c.account_id FROM comments c JOIN posts p ON c.post_id = p.id
+               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL""",
+            (sub_id,)
+        ).fetchall()]
+
+        return {
+            "post": post,
+            "draft_comments": draft_comments,
+            "all_accounts": all_accounts,
+            "subreddit_day_assignments": subreddit_day_assignments,
+            "account_pending_counts": account_pending_counts,
+            "account_brand_mentions": account_brand_mentions,
+            "account_total_mentions": account_total_mentions,
+            "subreddit_veterans": set(subreddit_veterans),
+        }
+
     def get_accounts_for_filters(self, subreddit_id=None, brand_id=None, post_id=None):
         rows = self.conn.execute(
             """SELECT DISTINCT c.account_id as username

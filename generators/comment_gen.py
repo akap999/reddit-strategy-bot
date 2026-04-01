@@ -302,11 +302,11 @@ PAGE CONTENT: {content['paragraphs']}{json_ld_line}
 Return JSON only:
 {{
     "brand_name": "the brand name",
-    "brand_context": "what the brand does (1-2 sentences)",
-    "brand_keywords": ["keyword1", "keyword2", "keyword3"]
+    "brand_context": "A detailed description (3-5 sentences) covering: what the brand does, who it serves (target audience), key services/products offered, and what makes it different from competitors. Be specific about the problem they solve.",
+    "brand_keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
 }}"""
 
-        result = self.claude.call(prompt, max_tokens=512, temperature=0.3)
+        result = self.claude.call(prompt, max_tokens=800, temperature=0.3)
         if result and result.get("brand_name") and result.get("brand_context"):
             return result
 
@@ -323,8 +323,8 @@ Use your knowledge of known brands and common domain naming patterns.
 Return JSON only:
 {{
     "brand_name": "the likely brand name (extract from domain, e.g. 'getpetermd.com' → 'PeterMD')",
-    "brand_context": "your best guess at what this brand does based on the domain name (1-2 sentences). If uncertain, provide a general description.",
-    "brand_keywords": ["keyword1", "keyword2", "keyword3"]
+    "brand_context": "Your best guess (3-5 sentences) covering: what the brand likely does, who it serves, key services/products, and what makes it different. If uncertain, provide a reasonable description based on the domain name.",
+    "brand_keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
 }}"""
 
         result = self.claude.call(prompt, max_tokens=512, temperature=0.3)
@@ -706,6 +706,8 @@ Return JSON only:
             brand_line = ""
             if should_mention:
                 brand_line = f"\n    BRAND: Mention {brand_name} exactly once as a brief aside."
+                if brand_context:
+                    brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {brand_context}"
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {brand_name} or any brand in this comment."
 

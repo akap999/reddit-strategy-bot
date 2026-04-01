@@ -186,6 +186,8 @@ BANNED_PHRASES = [
     "honestly",
     "actually",
     " — ", " -- ", " - ",
+    "don't post much", "don't usually post", "don't normally post",
+    "hit close to home", "hits close to home",
 ]
 
 # --- Anti-detection: System prompt rotation for generation ---

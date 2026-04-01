@@ -1389,6 +1389,117 @@ Return JSON only:
         print(f"    HQ thread complete — {len(saved)} comments generated")
         return saved
 
+    # ------------------------------------------------------------------
+    # OP Reply generation — post author replies to comments
+    # ------------------------------------------------------------------
+
+    def generate_op_replies(self, post, brand, num_replies=3, post_day_offset=0):
+        """Generate replies from the OP (post author) to existing comments.
+
+        OP replies never mention brands. They add authenticity by making
+        the thread look like a real person posted and is engaging with responses.
+
+        Args:
+            post: post dict from DB
+            brand: brand dict (for association only, never mentioned)
+            num_replies: how many OP replies to generate
+            post_day_offset: the day the post is scheduled for
+
+        Returns:
+            list of saved comment dicts with IDs
+        """
+        subreddit = self.db.get_subreddit(post["subreddit_id"])
+
+        # Get existing top-level comments to reply to
+        all_comments = self.db.get_comments(post["id"])
+        # Only reply to top-level non-OP comments that have actual content
+        top_level = [c for c in all_comments
+                     if not c["is_reply"]
+                     and c.get("comment_type") != "op_reply"
+                     and len(c.get("body", "")) > 20]
+
+        if not top_level:
+            print("    No top-level comments to reply to")
+            return []
+
+        # Select which comments to reply to (random sample, avoid duplicates)
+        targets = random.sample(top_level, min(num_replies, len(top_level)))
+
+        all_brand_names = [brand["name"]] if brand else []
+
+        saved = []
+        for i, target_comment in enumerate(targets):
+            target_body = target_comment["body"]
+            target_id = target_comment["id"]
+
+            # Schedule 1-2 days after post (OP checking back)
+            reply_day = post_day_offset + random.randint(1, 2)
+
+            prompt = f"""You are the person who wrote this Reddit post. You're replying to a comment on YOUR post.
+
+YOUR POST TITLE: "{post['title']}"
+YOUR POST BODY: "{post['body'][:600]}"
+
+SUBREDDIT: r/{subreddit['name']}
+
+COMMENT YOU'RE REPLYING TO:
+"{target_body[:500]}"
+
+Write a reply AS THE OP (original poster). You should:
+- Sound like the same person who wrote the post
+- React naturally to what they said (thank them, ask follow-up, share an update, agree/disagree)
+- Reference details from YOUR original post to show consistency
+- Be casual and conversational, like a real Reddit OP engaging
+- Keep it 1-3 sentences typically (OPs don't write essays in replies)
+- Vary your approach: sometimes grateful, sometimes curious, sometimes sharing an update
+- NEVER mention any brand name ({', '.join(all_brand_names)}) or any product/company
+- NEVER use dashes (-), em-dashes, or double-dashes
+- Do NOT start with "Thanks for..." every time, vary your openings
+
+Return JSON only:
+{{
+    "reply": "your OP reply text"
+}}"""
+
+            result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
+            if not result or "reply" not in result:
+                print(f"    Warning: failed to generate OP reply {i+1}")
+                continue
+
+            body = result["reply"]
+
+            # Verify no brand mention
+            if brand and brand["name"].lower() in body.lower():
+                print(f"    Warning: OP reply mentions brand, skipping")
+                continue
+
+            comment_id = self.db.save_comment(
+                post_id=post["id"],
+                brand_id=brand["id"] if brand else None,
+                body=body,
+                persona_id="op",
+                structure_id="op_reply",
+                is_reply=1,
+                parent_comment_id=target_id,
+                mentions_brand=0,
+                status="complete",
+                suggested_post_day=reply_day,
+                suggested_order=100 + i,  # after regular comments
+                prompt_version=PROMPT_VERSION,
+                comment_type="op_reply",
+            )
+
+            saved.append({
+                "id": comment_id, "body": body,
+                "is_reply": True, "mentions_brand": False,
+                "day": reply_day, "parent_id": target_id,
+                "comment_type": "op_reply",
+            })
+            print(f"    Generated OP reply {i+1} → comment #{target_id}")
+
+        print(f"    OP replies complete — {len(saved)} generated")
+        return saved
+
     def generate_for_existing_post(self, reddit_url, subreddit_id, brand, num_comments,
                                     brand_mention_ratio=None):
         """Generate comments for a post that already has live Reddit comments.

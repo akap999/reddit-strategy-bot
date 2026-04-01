@@ -1737,6 +1737,7 @@ async function renderComments(el) {
             <div class="flex gap-2">
                 <button class="btn btn-primary" onclick="showGenCommentsModal()">Generate Comments</button>
                 <button class="btn btn-accent" onclick="showGenHQCommentModal()">Generate HQ Comment</button>
+                <button class="btn btn-sm" style="background:#0e8a16;color:white" onclick="showGenOPRepliesModal()">Generate OP Replies</button>
                 <button class="btn btn-secondary" onclick="showGenLiveCommentsModal()">Generate for Live Post</button>
             </div>
         </div>
@@ -2229,6 +2230,7 @@ function renderCommentNode(c, depth) {
                 <div class="flex gap-2 items-center mb-2 flex-wrap">
                     <span class="text-xs text-gray-600">#${c.id}</span>
                     ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0079D3;color:white">HQ</span>' : ''}
+                    ${c.comment_type === 'op_reply' ? '<span class="badge" style="background:#0e8a16;color:white">OP</span>' : ''}
                     ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
                     ${c.is_reply && c.parent_comment_id ? `<span class="text-xs text-gray-500">→ #${c.parent_comment_id}</span>` : ''}
                     ${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}
@@ -2403,6 +2405,43 @@ async function submitGenHQComment() {
     if (!pid || !bid) { toast('Select post and brand', 'error'); return; }
     closeModal();
     runTask('/api/generate/hq-comment', { post_id: pid, brand_id: bid }, () => {
+        if (currentView === 'comments') loadCommentTree();
+    });
+}
+
+function showGenOPRepliesModal() {
+    const subs = subredditsCache || [];
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Generate OP Replies</h3>
+        <p class="text-xs text-gray-400 mb-3">Generates replies from the post author (OP) to existing comments. OP replies never mention brands and add authenticity to the thread.</p>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Subreddit</label><select id="gen-op-sub" onchange="loadPostsForOP()">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select></div>
+            <div><label class="text-xs text-gray-400">Post</label><select id="gen-op-post"><option value="">Loading...</option></select></div>
+            <div><label class="text-xs text-gray-400">Number of OP replies</label><input id="gen-op-count" type="number" value="3" min="1" max="10"></div>
+        </div>
+        <div class="flex gap-2 mt-5">
+            <button class="btn" style="background:#0e8a16;color:white" onclick="submitGenOPReplies()">Generate OP Replies</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+    loadPostsForOP();
+}
+
+async function loadPostsForOP() {
+    const sid = document.getElementById('gen-op-sub').value;
+    const posts = await api(`/api/subreddits/${sid}/posts`);
+    // Only show posts that have comments to reply to
+    document.getElementById('gen-op-post').innerHTML = posts.map(p =>
+        `<option value="${p.id}">${p.title.substring(0, 60)}${p.comment_count ? ` (${p.comment_count} comments)` : ''}</option>`
+    ).join('');
+}
+
+async function submitGenOPReplies() {
+    const pid = parseInt(document.getElementById('gen-op-post').value);
+    const count = parseInt(document.getElementById('gen-op-count').value);
+    if (!pid) { toast('Select a post', 'error'); return; }
+    closeModal();
+    runTask('/api/generate/op-replies', { post_id: pid, count }, () => {
         if (currentView === 'comments') loadCommentTree();
     });
 }

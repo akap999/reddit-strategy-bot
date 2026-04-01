@@ -1129,6 +1129,35 @@ def api_gen_hq_comment():
     tid = start_task("hq-comment", task)
     return jsonify({"task_id": tid})
 
+@app.route("/api/generate/op-replies", methods=["POST"])
+def api_gen_op_replies():
+    data = request.json
+
+    def task():
+        db, claude, _, _, comment_gen = make_generators()
+        try:
+            post = db.get_post(data["post_id"])
+            if not post:
+                raise ValueError("Post not found")
+            # Brand is optional — use first brand associated with the post
+            brand = None
+            if data.get("brand_id"):
+                brand = db.get_brand(data["brand_id"])
+            if not brand:
+                brands = db.get_brands_for_post(post["id"])
+                brand = brands[0] if brands else None
+            count = data.get("count", 3)
+            comments = comment_gen.generate_op_replies(
+                post, brand, num_replies=count,
+                post_day_offset=post.get("suggested_post_day", 0),
+            )
+            return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
+        finally:
+            db.close()
+
+    tid = start_task("op-replies", task)
+    return jsonify({"task_id": tid})
+
 @app.route("/api/generate/live-comments", methods=["POST"])
 def api_gen_live_comments():
     data = request.json

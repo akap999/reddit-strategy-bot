@@ -303,7 +303,6 @@ function filterSubreddits() {
     grid.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${filtered.map(s => `
         <div class="card p-5 cursor-pointer hover:border-orange-500" onclick="showSubredditDetail(${s.id})">
             <h3 class="font-bold text-orange-500 mb-2">r/${s.name}</h3>
-            <p class="text-sm text-gray-400 mb-3">${s.domain || ''}</p>
             <div class="flex gap-4 text-xs text-gray-500">
                 <span>${s.brand_count} brands</span>
                 <span>${s.post_count} posts</span>
@@ -333,7 +332,6 @@ async function showSubredditDetail(id) {
 
     showModal(`
         <h3 class="text-xl font-bold text-orange-500 mb-1">r/${sub.name}</h3>
-        <p class="text-sm text-gray-400 mb-4">${sub.domain || ''}</p>
 
         <div class="flex items-center gap-2 mb-4">
             <span class="text-xs text-gray-500">Owner:</span>

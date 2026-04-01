@@ -334,7 +334,6 @@ async function showSubredditDetail(id) {
     showModal(`
         <h3 class="text-xl font-bold text-orange-500 mb-1">r/${sub.name}</h3>
         <p class="text-sm text-gray-400 mb-4">${sub.domain || ''}</p>
-        <p class="text-sm text-gray-300 mb-4">${sub.description || ''}</p>
 
         <div class="flex items-center gap-2 mb-4">
             <span class="text-xs text-gray-500">Owner:</span>
@@ -969,7 +968,8 @@ let _brandsViewState = { selectedBrand: null, dateFrom: '', dateTo: '', data: nu
 
 async function renderBrands(el) {
     el.innerHTML = '<div class="spinner"></div>';
-    const brands = await api('/api/brands/unique');
+    const [brands, allBrands] = await Promise.all([api('/api/brands/unique'), api('/api/brands/all')]);
+    _brandsViewState._allBrands = allBrands;
 
     let brandCards = brands.map(b => `
         <div class="card p-5 cursor-pointer hover:border-orange-500" onclick="showBrandAnalytics('${b.name.replace(/'/g, "\\'")}')">
@@ -1113,11 +1113,32 @@ function renderBrandDetail(data) {
         </tr>
     `).join('');
 
+    // Find brand instances for this brand name (all subreddits)
+    const allBrands = _brandsViewState._allBrands || [];
+    const brandInstances = allBrands.filter(b => b.name === name);
+    const firstBrand = brandInstances[0] || {};
+    const brandContext = firstBrand.context || '';
+    const brandDomainUrl = firstBrand.domain_url || '';
+    const brandKeywords = (() => { try { return JSON.parse(firstBrand.keywords || '[]'); } catch(e) { return []; } })();
+
     area.innerHTML = `
         <div class="border-t border-gray-700 pt-6">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="text-xl font-bold text-orange-500">${name}</h3>
-                <button class="btn btn-sm btn-secondary" onclick="_brandsViewState.selectedBrand=null;document.getElementById('brand-detail-area').innerHTML=''">Close</button>
+                <div class="flex gap-2">
+                    <button class="btn btn-sm btn-secondary" onclick="editBrandContext('${name.replace(/'/g, "\\'")}')" title="Edit brand info">Edit Brand</button>
+                    <button class="btn btn-sm btn-secondary" onclick="_brandsViewState.selectedBrand=null;document.getElementById('brand-detail-area').innerHTML=''">Close</button>
+                </div>
+            </div>
+
+            <!-- Brand Context -->
+            <div class="card p-4 mb-5">
+                <div class="flex justify-between items-start mb-2">
+                    <h4 class="text-sm font-bold text-gray-300">Brand Context</h4>
+                    ${brandDomainUrl ? `<a href="${brandDomainUrl.startsWith('http') ? brandDomainUrl : 'https://' + brandDomainUrl}" target="_blank" class="text-xs text-orange-500 hover:underline">${brandDomainUrl}</a>` : ''}
+                </div>
+                <p class="text-sm text-gray-400 whitespace-pre-wrap mb-2">${brandContext || '<em class="text-gray-600">No context provided</em>'}</p>
+                ${brandKeywords.length ? `<div class="flex gap-1 flex-wrap">${brandKeywords.map(k => `<span class="badge badge-keyword">${k}</span>`).join('')}</div>` : ''}
             </div>
 
             <!-- Date filter -->
@@ -1216,6 +1237,63 @@ function renderBrandDetail(data) {
     if (oursSel) oursSel.value = _brandsViewState.oursFilter;
 
     renderBrandCommentTable();
+}
+
+async function editBrandContext(brandName) {
+    const allBrands = _brandsViewState._allBrands || [];
+    const brandInstances = allBrands.filter(b => b.name === brandName);
+    if (!brandInstances.length) { toast('Brand not found', 'error'); return; }
+
+    const first = brandInstances[0];
+    const context = first.context || '';
+    const domainUrl = first.domain_url || '';
+    let keywords = [];
+    try { keywords = JSON.parse(first.keywords || '[]'); } catch(e) {}
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Website URL</label>
+                <input id="edit-brand-url" value="${domainUrl}" class="w-full">
+            </div>
+            <div>
+                <label class="text-xs text-gray-400">Context / Description</label>
+                <textarea id="edit-brand-context" rows="6" class="w-full">${context}</textarea>
+            </div>
+            <div>
+                <label class="text-xs text-gray-400">Keywords (comma-separated)</label>
+                <input id="edit-brand-keywords" value="${keywords.join(', ')}" class="w-full">
+            </div>
+        </div>
+        <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary btn-sm" onclick="saveBrandContext('${brandName.replace(/'/g, "\\'")}')">Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function saveBrandContext(brandName) {
+    const context = document.getElementById('edit-brand-context').value;
+    const domainUrl = document.getElementById('edit-brand-url').value;
+    const keywordsRaw = document.getElementById('edit-brand-keywords').value;
+    const keywords = keywordsRaw.split(',').map(k => k.trim()).filter(Boolean);
+
+    const allBrands = _brandsViewState._allBrands || [];
+    const brandInstances = allBrands.filter(b => b.name === brandName);
+
+    // Update all instances of this brand across subreddits
+    for (const b of brandInstances) {
+        await api(`/api/brands/${b.id}`, { method: 'PUT', body: { context, domain_url: domainUrl, keywords } });
+    }
+
+    toast('Brand updated', 'success');
+    closeModal();
+
+    // Refresh the brands page
+    const el = document.getElementById('app');
+    if (el) renderBrands(el);
 }
 
 function renderBrandCommentTable() {

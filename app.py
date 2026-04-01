@@ -315,6 +315,21 @@ def api_add_brand(sid):
     finally:
         db.close()
 
+@app.route("/api/brands/<int:bid>", methods=["PUT"])
+def api_update_brand(bid):
+    db = get_db()
+    try:
+        data = request.json
+        db.update_brand(
+            brand_id=bid,
+            context=data.get("context"),
+            domain_url=data.get("domain_url"),
+            keywords=json.dumps(data["keywords"]) if "keywords" in data else None,
+        )
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 # ---------------------------------------------------------------------------
 # API: Posts
 # ---------------------------------------------------------------------------

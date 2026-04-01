@@ -161,6 +161,25 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
+    def update_brand(self, brand_id, context=None, domain_url=None, keywords=None):
+        """Update a brand's editable fields."""
+        updates = []
+        params = []
+        if context is not None:
+            updates.append("context = ?")
+            params.append(context)
+        if domain_url is not None:
+            updates.append("domain_url = ?")
+            params.append(domain_url)
+        if keywords is not None:
+            updates.append("keywords = ?")
+            params.append(keywords)
+        if not updates:
+            return
+        params.append(brand_id)
+        self.conn.execute(f"UPDATE brands SET {', '.join(updates)} WHERE id = ?", params)
+        self.conn.commit()
+
     def list_brands(self, subreddit_id):
         rows = self.conn.execute(
             "SELECT * FROM brands WHERE subreddit_id = ? ORDER BY added_at DESC",

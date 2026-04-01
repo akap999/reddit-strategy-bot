@@ -1052,6 +1052,29 @@ class Database:
         self.conn.commit()
 
     def delete_account(self, username):
+        # Unassign comments owned by this account (back to draft)
+        self.conn.execute(
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status = 'assigned'",
+            (username,)
+        )
+        # Clear account_id on deployed/complete comments (keep their status)
+        self.conn.execute(
+            "UPDATE comments SET account_id = NULL WHERE account_id = ? AND status != 'assigned'",
+            (username,)
+        )
+        # Same for search_comments
+        self.conn.execute(
+            "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status = 'assigned'",
+            (username,)
+        )
+        self.conn.execute(
+            "UPDATE search_comments SET account_id = NULL WHERE account_id = ? AND status != 'assigned'",
+            (username,)
+        )
+        # Clear owner_account on posts and subreddits
+        self.conn.execute("UPDATE posts SET owner_account = '' WHERE owner_account = ?", (username,))
+        self.conn.execute("UPDATE subreddits SET owner_account = '' WHERE owner_account = ?", (username,))
+        # Delete the account
         self.conn.execute("DELETE FROM accounts WHERE username = ?", (username,))
         self.conn.commit()
 

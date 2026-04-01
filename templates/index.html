@@ -1680,7 +1680,7 @@ async function onGenPostsSubChange() {
     const container = document.getElementById('gen-posts-brands');
     container.innerHTML = brands.map(b => `
         <label class="flex items-center gap-2 cursor-pointer text-sm">
-            <input type="checkbox" checked value="${b.id}" class="gen-posts-brand-cb">
+            <input type="checkbox" value="${b.id}" class="gen-posts-brand-cb">
             <span>${b.name}</span>
         </label>
     `).join('');
@@ -2185,13 +2185,18 @@ function exportAnalysisCSV() {
     toast('CSV downloaded', 'success');
 }
 
+let _ctPostRedditUrl = '';
 async function loadCommentTree() {
     const pid = document.getElementById('comments-post-filter').value;
     const container = document.getElementById('comment-tree');
-    if (!pid) { container.innerHTML = ''; return; }
+    if (!pid) { container.innerHTML = ''; _ctPostRedditUrl = ''; return; }
 
     container.innerHTML = '<div class="spinner"></div>';
-    const tree = await api(`/api/posts/${pid}/comments`);
+    const [tree, post] = await Promise.all([
+        api(`/api/posts/${pid}/comments`),
+        api(`/api/posts/${pid}`),
+    ]);
+    _ctPostRedditUrl = post.reddit_url || '';
 
     if (!tree.length) {
         container.innerHTML = '<p class="text-gray-500 mt-4">No comments for this post.</p>';
@@ -2213,8 +2218,10 @@ function renderCommentNode(c, depth) {
     // Status-dependent action buttons
     let actionBtns = '';
     if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Mark Deleted</button>`;
+
+    const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
     return `
         <div class="${indent} mb-3">
@@ -2234,6 +2241,7 @@ function renderCommentNode(c, depth) {
                     ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
                     ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-orange-500 hover:underline">reddit</a>` : ''}
                     <span class="ml-auto flex gap-1">
+                        <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                         ${actionBtns}
                         <button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>
                     </span>
@@ -2284,6 +2292,51 @@ async function markCommentDeleted(cid) {
     if (!confirm('Mark this comment as deleted from Reddit?')) return;
     await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
     toast('Comment marked as deleted', 'success');
+    loadCommentTree();
+}
+
+function copyCommentMessage(cid) {
+    // Find comment in the loaded tree (recursive search)
+    function findInTree(nodes) {
+        for (const n of nodes) {
+            if (n.id === cid) return n;
+            if (n.replies) { const found = findInTree(n.replies); if (found) return found; }
+        }
+        return null;
+    }
+    const container = document.getElementById('comment-tree');
+    // Re-fetch from API for simplicity
+    api(`/api/comments/${cid}`).then(c => {
+        if (!c) { toast('Comment not found', 'error'); return; }
+        const mentionType = c.mentions_brand ? 'Brand Mention' : 'General';
+        const replyType = c.is_reply ? 'Reply' : 'Direct';
+        const link = _ctPostRedditUrl || '';
+        const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${c.account_id || ''}\n\nPost/Comment Link - \n${link}\n\n Comment (${replyType}) - \n${c.body || ''}\n\nPlease share the comment link :)`;
+        navigator.clipboard.writeText(message).then(() => toast('Message copied to clipboard', 'success'));
+    });
+}
+
+function editComment(cid) {
+    api(`/api/comments/${cid}`).then(c => {
+        if (!c) { toast('Comment not found', 'error'); return; }
+        const escaped = (c.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        showModal(`
+            <h3 class="text-lg font-bold mb-3">Edit Comment #${cid}</h3>
+            <textarea id="edit-comment-body" rows="8" class="w-full bg-gray-800 text-white border border-gray-600 rounded p-3 text-sm">${escaped}</textarea>
+            <div class="flex gap-2 mt-4">
+                <button class="btn btn-primary" onclick="saveCommentEdit(${cid})">Save</button>
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            </div>
+        `);
+    });
+}
+
+async function saveCommentEdit(cid) {
+    const body = document.getElementById('edit-comment-body').value.trim();
+    if (!body) { toast('Comment cannot be empty', 'error'); return; }
+    await api(`/api/comments/${cid}/body`, { method: 'PUT', body: { body } });
+    toast('Comment updated', 'success');
+    closeModal();
     loadCommentTree();
 }
 
@@ -4171,11 +4224,13 @@ function lsFilterComments() {
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
+                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy Message</button>
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     ${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
                                 ` : ''}
+                                <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
                                 <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy">Copy</button>
                             </div>
@@ -4282,6 +4337,39 @@ function lsCopyComment(cid) {
     if (c) {
         navigator.clipboard.writeText(c.body).then(() => toast('Copied to clipboard', 'success'));
     }
+}
+
+function lsCopyMessage(cid) {
+    const c = _lsComments.find(x => x.id === cid);
+    if (!c) { toast('Comment not found', 'error'); return; }
+    const mentionType = c.mentions_brand ? 'Brand Mention' : 'General';
+    const replyType = c.is_reply ? 'Reply' : 'Direct';
+    const link = c.post_url || c.reddit_url || '';
+    const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${c.account_id || ''}\n\nPost/Comment Link - \n${link}\n\n Comment (${replyType}) - \n${c.body || ''}\n\nPlease share the comment link :)`;
+    navigator.clipboard.writeText(message).then(() => toast('Message copied to clipboard', 'success'));
+}
+
+function lsEditComment(cid) {
+    const c = _lsComments.find(x => x.id === cid);
+    if (!c) { toast('Comment not found', 'error'); return; }
+    const escaped = (c.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    showModal(`
+        <h3 class="text-lg font-bold mb-3">Edit Search Comment #${cid}</h3>
+        <textarea id="ls-edit-comment-body" rows="8" class="w-full bg-gray-800 text-white border border-gray-600 rounded p-3 text-sm">${escaped}</textarea>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" onclick="lsSaveCommentEdit(${cid})">Save</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function lsSaveCommentEdit(cid) {
+    const body = document.getElementById('ls-edit-comment-body').value.trim();
+    if (!body) { toast('Comment cannot be empty', 'error'); return; }
+    await api(`/api/search/comments/${cid}/body`, { method: 'PUT', body: { body } });
+    toast('Comment updated', 'success');
+    closeModal();
+    renderLsTabContent();
 }
 
 // --- Assigned Accounts Tab (Live Search) ---

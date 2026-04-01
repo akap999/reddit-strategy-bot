@@ -445,6 +445,10 @@ class Database:
         self.conn.execute("UPDATE comments SET status = ? WHERE id = ?", (status, comment_id))
         self.conn.commit()
 
+    def update_comment_body(self, comment_id, body):
+        self.conn.execute("UPDATE comments SET body = ? WHERE id = ?", (body, comment_id))
+        self.conn.commit()
+
     def delete_comment(self, comment_id):
         # Delete child replies first
         self.conn.execute("DELETE FROM comments WHERE parent_comment_id = ?", (comment_id,))
@@ -1420,6 +1424,10 @@ class Database:
         self.conn.execute(
             "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed' WHERE id = ?",
             (reddit_url, deployed_at, comment_id))
+        self.conn.commit()
+
+    def update_search_comment_body(self, comment_id, body):
+        self.conn.execute("UPDATE search_comments SET body = ? WHERE id = ?", (body, comment_id))
         self.conn.commit()
 
     def delete_search_comment(self, comment_id):

@@ -569,6 +569,19 @@ def api_unassign_comment(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/body", methods=["PUT"])
+def api_update_comment_body(cid):
+    db = get_db()
+    try:
+        data = request.json
+        body = data.get("body", "").strip()
+        if not body:
+            return jsonify({"error": "Body cannot be empty"}), 400
+        db.update_comment_body(cid, body)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/context")
 def api_comment_context(cid):
     """Get comment with its subreddit and brand context for the assignment modal."""
@@ -785,6 +798,17 @@ def api_comments_live_stats():
 
     tid = start_task("live-stats", task)
     return jsonify({"task_id": tid})
+
+@app.route("/api/comments/<int:cid>")
+def api_get_comment(cid):
+    db = get_db()
+    try:
+        comment = db.get_comment(cid)
+        if not comment:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(comment)
+    finally:
+        db.close()
 
 @app.route("/api/comments/<int:cid>", methods=["DELETE"])
 def api_delete_comment(cid):
@@ -1778,6 +1802,19 @@ def api_deploy_search_comment(cid):
     finally:
         db.close()
 
+
+@app.route("/api/search/comments/<int:cid>/body", methods=["PUT"])
+def api_update_search_comment_body(cid):
+    db = get_db()
+    try:
+        data = request.json
+        body = data.get("body", "").strip()
+        if not body:
+            return jsonify({"error": "Body cannot be empty"}), 400
+        db.update_search_comment_body(cid, body)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
 
 @app.route("/api/search/comments/<int:cid>", methods=["DELETE"])
 def api_delete_search_comment(cid):

@@ -185,7 +185,7 @@ BANNED_PHRASES = [
     "is spot on", "is absolutely right", "is right about",
     "honestly",
     "actually",
-    " — ", " -- ",
+    " — ", " -- ", " - ",
 ]
 
 # --- Anti-detection: System prompt rotation for generation ---

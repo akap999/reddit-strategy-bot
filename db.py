@@ -308,6 +308,61 @@ class Database:
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    def get_posts_with_details(self, subreddit_id, brand_id=None, limit=200, include_filler=True):
+        """Get posts with comment counts, reddit_url, and brand names in a single query."""
+        if brand_id is not None:
+            query = """SELECT p.*,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
+                       pu.reddit_url,
+                       GROUP_CONCAT(DISTINCT b2.name) as brand_names,
+                       GROUP_CONCAT(DISTINCT b2.id || ':' || b2.name) as brand_info
+                FROM posts p
+                JOIN post_brands pb_filter ON pb_filter.post_id = p.id AND pb_filter.brand_id = ?
+                LEFT JOIN comments c ON c.post_id = p.id
+                LEFT JOIN post_urls pu ON pu.post_id = p.id
+                LEFT JOIN post_brands pb ON pb.post_id = p.id
+                LEFT JOIN brands b2 ON b2.id = pb.brand_id
+                WHERE p.subreddit_id = ?"""
+            params = [brand_id, subreddit_id]
+        else:
+            query = """SELECT p.*,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
+                       pu.reddit_url,
+                       GROUP_CONCAT(DISTINCT b2.name) as brand_names,
+                       GROUP_CONCAT(DISTINCT b2.id || ':' || b2.name) as brand_info
+                FROM posts p
+                LEFT JOIN comments c ON c.post_id = p.id
+                LEFT JOIN post_urls pu ON pu.post_id = p.id
+                LEFT JOIN post_brands pb ON pb.post_id = p.id
+                LEFT JOIN brands b2 ON b2.id = pb.brand_id
+                WHERE p.subreddit_id = ?"""
+            params = [subreddit_id]
+        if not include_filler:
+            query += " AND p.is_filler = 0"
+        query += " GROUP BY p.id ORDER BY p.suggested_post_day ASC, p.created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        results = []
+        for r in rows:
+            p = dict(r)
+            # Parse brand_info into brands list
+            brand_info = p.pop("brand_info", None)
+            if brand_info:
+                brands = []
+                for item in brand_info.split(","):
+                    parts = item.split(":", 1)
+                    if len(parts) == 2:
+                        brands.append({"id": int(parts[0]), "name": parts[1]})
+                p["brands"] = brands
+            else:
+                p["brands"] = []
+            if not p.get("brand_names"):
+                p["brand_names"] = ""
+            if not p.get("reddit_url"):
+                p["reddit_url"] = ""
+            results.append(p)
+        return results
+
     def get_post(self, post_id):
         row = self.conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
         return dict(row) if row else None
@@ -530,7 +585,9 @@ class Database:
                 COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 END) as deployed_branded,
                 COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 0 THEN 1 END) as deployed_organic,
                 COUNT(CASE WHEN c.status IN ('assigned','informed') THEN 1 END) as assigned_comments,
-                COUNT(CASE WHEN c.status IN ('draft','complete') THEN 1 END) as pending_comments
+                COUNT(CASE WHEN c.status IN ('draft','complete') THEN 1 END) as pending_comments,
+                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NOT NULL THEN 1 END) as paid_comments,
+                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             {where_sql}
@@ -563,7 +620,9 @@ class Database:
                 c.account_id as username,
                 COUNT(*) as total,
                 SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded,
-                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as organic
+                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as organic,
+                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
+                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             {where_sql} {"AND" if where_sql else "WHERE"} c.status = 'deployed' AND c.account_id IS NOT NULL
@@ -593,7 +652,9 @@ class Database:
                 COUNT(DISTINCT p.id) as posts,
                 COUNT(c.id) as deployed_comments,
                 SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded_comments,
-                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as general_comments
+                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as general_comments,
+                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid_comments,
+                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             JOIN subreddits s ON p.subreddit_id = s.id
@@ -603,7 +664,23 @@ class Database:
             ORDER BY deployed_comments DESC
         """, bq_params).fetchall()]
 
-        return {"totals": totals, "accounts": accounts, "brand_stats": brand_stats}
+        # Per-subreddit paid breakdown
+        sub_stats = [dict(r) for r in self.conn.execute(f"""
+            SELECT
+                s.id as subreddit_id,
+                s.name as subreddit_name,
+                COUNT(c.id) as deployed_comments,
+                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid_comments,
+                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid_comments
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            JOIN subreddits s ON p.subreddit_id = s.id
+            WHERE {bq_where}
+            GROUP BY s.id, s.name
+            ORDER BY deployed_comments DESC
+        """, bq_params).fetchall()]
+
+        return {"totals": totals, "accounts": accounts, "brand_stats": brand_stats, "sub_stats": sub_stats}
 
     def get_persona_distribution(self, subreddit_id=None, brand_name=None):
         query = "SELECT c.persona_id, COUNT(*) as cnt FROM comments c"
@@ -768,6 +845,15 @@ class Database:
             self.conn.execute("ALTER TABLE search_comments ADD COLUMN paid_at TEXT")
             self.conn.commit()
 
+        # paid_at migration for posts
+        post_cols2 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]
+        if "paid_at" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN paid_at TEXT")
+            self.conn.commit()
+        if "deployed_at" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN deployed_at TEXT")
+            self.conn.commit()
+
         # Backfill post_brands from posts.brand_id for existing data
         if self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_brands'").fetchone():
             existing = self.conn.execute("SELECT COUNT(*) as c FROM post_brands").fetchone()["c"]
@@ -777,6 +863,22 @@ class Database:
                     SELECT id, brand_id FROM posts WHERE brand_id IS NOT NULL
                 """)
                 self.conn.commit()
+
+        # Performance indexes
+        perf_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_brands_subreddit ON brands(subreddit_id)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_account ON comments(account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_deployed_at ON comments(deployed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_brand ON comments(brand_id)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_mentions ON comments(mentions_brand)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_type ON comments(comment_type)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_account ON search_comments(account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_status ON search_comments(status)",
+            "CREATE INDEX IF NOT EXISTS idx_post_urls_post ON post_urls(post_id)",
+        ]
+        for idx_sql in perf_indexes:
+            self.conn.execute(idx_sql)
+        self.conn.commit()
 
     # --- Background Tasks ---
 
@@ -908,7 +1010,7 @@ class Database:
 
     # --- Filtered Comment Queries ---
 
-    def get_filtered_comments(self, subreddit_id, status=None, mentions_brand=None, account_id=None):
+    def get_filtered_comments(self, subreddit_id, status=None, mentions_brand=None, account_id=None, brand_id=None, sort_by=None):
         """Get comments with post info, filtered by status/brand/account."""
         query = """SELECT c.*, p.title as post_title, p.id as p_id, pu.reddit_url as post_reddit_url
                    FROM comments c
@@ -925,7 +1027,13 @@ class Database:
         if account_id:
             query += " AND c.account_id = ?"
             params.append(account_id)
-        query += " ORDER BY c.suggested_post_day, c.suggested_order, c.id"
+        if brand_id:
+            query += " AND c.brand_id = ?"
+            params.append(brand_id)
+        if sort_by == 'deployed_at':
+            query += " ORDER BY c.deployed_at DESC, c.id DESC"
+        else:
+            query += " ORDER BY c.suggested_post_day, c.suggested_order, c.id"
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
@@ -1442,6 +1550,13 @@ class Database:
         self.conn.execute(
             "UPDATE comments SET paid_at = datetime('now') WHERE id = ?",
             (comment_id,)
+        )
+        self.conn.commit()
+
+    def mark_post_paid(self, post_id):
+        self.conn.execute(
+            "UPDATE posts SET paid_at = datetime('now') WHERE id = ?",
+            (post_id,)
         )
         self.conn.commit()
 

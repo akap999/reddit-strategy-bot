@@ -25,19 +25,45 @@ class SubredditGenerator:
             # 404 = doesn't exist = available
             if resp.status_code == 404:
                 return True
-            # 200 = exists = taken
+            # 200 = need to inspect the response carefully
             if resp.status_code == 200:
-                data = resp.json()
-                # Sometimes Reddit returns a search page for non-existent subs
+                try:
+                    data = resp.json()
+                except (ValueError, Exception):
+                    return None  # invalid JSON — can't determine
+
+                # Reddit returns kind=t5 for real subreddits
                 if data.get("kind") == "t5":
                     return False
+
+                # Some responses wrap in {"data": {...}} without "kind"
                 sub_data = data.get("data", {})
-                if sub_data.get("display_name"):
+                if isinstance(sub_data, dict) and sub_data.get("display_name"):
+                    # Verify it's actually the subreddit we asked for (not a redirect)
+                    display = sub_data["display_name"].lower()
+                    if display == name.lower():
+                        return False
+                    # Reddit redirected to a different sub — original name may be available
+                    # but treat as taken to be safe
                     return False
-                return True
+
+                # Reddit returned 200 but no subreddit data — this is a search/listing page
+                # which means the subreddit doesn't exist
+                kind = data.get("kind", "")
+                if kind == "Listing" or kind == "listing":
+                    return True
+
+                # If there's no meaningful subreddit data, assume available
+                if not sub_data or not sub_data.get("display_name"):
+                    return True
+
+                return None  # ambiguous
             # 403 = private/quarantined = taken
             if resp.status_code == 403:
                 return False
+            # 302/301 redirect — Reddit sometimes redirects non-existent subs
+            if resp.status_code in (301, 302):
+                return True
             return None  # unknown status — don't assume available
         except requests.exceptions.RequestException:
             return None  # unknown, couldn't check

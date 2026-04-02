@@ -85,10 +85,15 @@ def set_security_headers(response):
 # Database helper — main thread DB
 # ---------------------------------------------------------------------------
 
+_db_initialized = False
+
 def get_db():
+    global _db_initialized
     db = Database(DB_PATH)
     db.connect()
-    db.initialize()
+    if not _db_initialized:
+        db.initialize()
+        _db_initialized = True
     return db
 
 # ---------------------------------------------------------------------------
@@ -353,16 +358,7 @@ def api_list_posts(sid):
     try:
         brand_id = request.args.get("brand_id", type=int)
         include_filler = request.args.get("include_filler", "true") == "true"
-        posts = db.get_posts(sid, brand_id=brand_id, include_filler=include_filler, limit=200)
-        # Attach comment count and brand info to each post
-        for p in posts:
-            p["comment_count"] = db.conn.execute(
-                "SELECT COUNT(*) FROM comments WHERE post_id = ? AND status = 'deployed'", (p["id"],)
-            ).fetchone()[0]
-            p["reddit_url"] = db.get_url_for_post(p["id"])
-            brands = db.get_brands_for_post(p["id"])
-            p["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
-            p["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""
+        posts = db.get_posts_with_details(sid, brand_id=brand_id, include_filler=include_filler, limit=200)
         return jsonify(posts)
     finally:
         db.close()
@@ -374,9 +370,9 @@ def api_get_post(pid):
         post = db.get_post(pid)
         if not post:
             return jsonify({"error": "Not found"}), 404
-        post["reddit_url"] = db.get_url_for_post(pid)
+        post["reddit_url"] = db.get_url_for_post(pid) or ""
         post["comment_count"] = db.conn.execute(
-            "SELECT COUNT(*) FROM comments WHERE post_id = ? AND status = 'deployed'", (pid,)
+            "SELECT COUNT(*) FROM comments WHERE post_id = ?", (pid,)
         ).fetchone()[0]
         brands = db.get_brands_for_post(pid)
         post["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
@@ -428,6 +424,10 @@ def api_publish_post(pid):
         reddit_url = data.get("reddit_url", "")
         owner_account = data.get("owner_account", "")
         db.update_post_status(pid, "published")
+        # Set deployed_at timestamp
+        from datetime import datetime as _dt
+        db.conn.execute("UPDATE posts SET deployed_at = ? WHERE id = ?", (_dt.now().strftime("%Y-%m-%d %H:%M:%S"), pid))
+        db.conn.commit()
         post = db.get_post(pid)
         if reddit_url and post:
             db.link_url_to_post(pid, reddit_url, post["subreddit_id"])
@@ -757,6 +757,15 @@ def api_mark_comment_paid(cid):
     finally:
         db.close()
 
+@app.route("/api/posts/<int:pid>/mark-paid", methods=["POST"])
+def api_mark_post_paid(pid):
+    db = get_db()
+    try:
+        db.mark_post_paid(pid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 
 @app.route("/api/subreddits/<int:sid>/all-comments")
 def api_all_comments(sid):
@@ -765,12 +774,19 @@ def api_all_comments(sid):
         status = request.args.get("status")
         mentions_brand = request.args.get("mentions_brand")
         account_id = request.args.get("account_id")
+        brand_id = request.args.get("brand_id")
+        sort_by = request.args.get("sort_by")
         mb = None
         if mentions_brand == "1":
             mb = True
         elif mentions_brand == "0":
             mb = False
-        comments = db.get_filtered_comments(sid, status=status or None, mentions_brand=mb, account_id=account_id or None)
+        comments = db.get_filtered_comments(
+            sid, status=status or None, mentions_brand=mb,
+            account_id=account_id or None,
+            brand_id=int(brand_id) if brand_id else None,
+            sort_by=sort_by or None
+        )
         return jsonify(comments)
     finally:
         db.close()
@@ -988,10 +1004,12 @@ def api_content_health(sid):
         if not sub:
             return jsonify({"error": "Not found"}), 404
 
-        all_posts = db.get_posts(sid)
-        all_comments = []
-        for p in all_posts:
-            all_comments.extend(db.get_comments(p["id"]))
+        all_comments = [dict(r) for r in db.conn.execute(
+            """SELECT c.* FROM comments c
+               JOIN posts p ON c.post_id = p.id
+               WHERE p.subreddit_id = ?""",
+            (sid,)
+        ).fetchall()]
 
         if not all_comments:
             return jsonify({
@@ -1644,14 +1662,21 @@ def api_check_subreddit():
                 data = json_data["data"]
 
             if data.get("display_name"):
+                # Verify the display_name matches what we asked for
+                # (Reddit can redirect to a different subreddit)
+                display = data.get("display_name", "")
                 return jsonify({
                     "exists": True,
-                    "name": data.get("display_name", name),
+                    "name": display or name,
                     "subscribers": data.get("subscribers", 0),
                     "active_accounts": data.get("accounts_active", 0),
                     "description": (data.get("public_description", "") or "")[:200],
+                    "exact_match": display.lower() == name.lower(),
                 })
-            # 200 but not a real subreddit (search/redirect page)
+            # 200 but no subreddit data — check if it's a listing/search page
+            kind = json_data.get("kind", "")
+            if kind in ("Listing", "listing") or not data:
+                return jsonify({"exists": False})
             return jsonify({"exists": False})
         elif r.status_code == 404:
             return jsonify({"exists": False})

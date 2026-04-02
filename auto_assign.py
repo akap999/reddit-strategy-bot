@@ -245,10 +245,25 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
         # If no owner_account set, or owner is excluded, pick best-scoring account
         valid_op = op_account and any(a["username"] == op_account for a in accounts)
         if not valid_op:
-            # Score all accounts for the first OP comment and pick best
-            scores = [(score_account(a, op_comments[0], lookups, batch_picks), a) for a in accounts]
-            scores.sort(key=lambda x: -x[0])
-            op_account = scores[0][1]["username"]
+            # Check if any OP replies in this post are already assigned
+            existing_op = db.conn.execute(
+                """SELECT account_id FROM comments
+                   WHERE post_id = ? AND comment_type = 'op_reply'
+                     AND account_id IS NOT NULL AND account_id != ''
+                   LIMIT 1""",
+                (post["id"],)
+            ).fetchone()
+            if existing_op and any(a["username"] == existing_op["account_id"] for a in accounts):
+                op_account = existing_op["account_id"]
+            else:
+                # Score all accounts for the first OP comment and pick best
+                scores = [(score_account(a, op_comments[0], lookups, batch_picks), a) for a in accounts]
+                scores.sort(key=lambda x: -x[0])
+                op_account = scores[0][1]["username"]
+
+        # If post has no owner, set the OP account as post owner
+        if not post.get("owner_account"):
+            db.set_post_owner(post["id"], op_account)
 
         for c in op_comments:
             db.assign_comment(c["id"], op_account)
@@ -320,12 +335,26 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
 
-    # OP reply: prefer post owner
+    # OP reply: prefer post owner, then match existing OP assignments
     post = context["post"]
-    if comment.get("comment_type") == "op_reply" and post.get("owner_account"):
-        op_acct = post["owner_account"]
-        if any(a["username"] == op_acct for a in accounts):
+    if comment.get("comment_type") == "op_reply":
+        op_acct = post.get("owner_account") or ""
+        # If no post owner, check for existing OP reply assignments in this post
+        if not op_acct or not any(a["username"] == op_acct for a in accounts):
+            existing_op = db.conn.execute(
+                """SELECT account_id FROM comments
+                   WHERE post_id = ? AND comment_type = 'op_reply'
+                     AND account_id IS NOT NULL AND account_id != ''
+                   LIMIT 1""",
+                (post_id,)
+            ).fetchone()
+            if existing_op and any(a["username"] == existing_op["account_id"] for a in accounts):
+                op_acct = existing_op["account_id"]
+        if op_acct and any(a["username"] == op_acct for a in accounts):
             db.assign_comment(comment_id, op_acct)
+            # Also set post owner if not set
+            if not post.get("owner_account"):
+                db.set_post_owner(post_id, op_acct)
             return {"ok": True, "account": op_acct, "score": None, "type": "op_reply"}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]

@@ -35,6 +35,9 @@
         .toast-success { background: #1a3320; color: #46d160; }
         .toast-error { background: #4a1a1a; color: #ff6b6b; }
         .toast-info { background: #0045AC; color: #7AAFFF; }
+        .task-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: #1A1A1B; border-bottom: 1px solid #343536; padding: 6px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 0.8rem; }
+        .task-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 9999px; background: #3a2a00; color: #FFD635; font-size: 0.75rem; }
+        .task-pill .spinner { width: 12px; height: 12px; border-width: 2px; display: inline-block; }
         .toast-warning { background: #3a2a00; color: #FFD635; }
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         .tree-indent { border-left: 2px solid #343536; margin-left: 16px; padding-left: 16px; }
@@ -103,6 +106,9 @@
     <!-- Main content -->
     <div class="main p-8" id="app"></div>
 
+    <!-- Background tasks bar -->
+    <div id="task-bar" class="task-bar" style="display:none"></div>
+
     <!-- Toast container -->
     <div class="toast-container" id="toasts"></div>
 
@@ -161,12 +167,43 @@ function showModal(html) {
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
 // =========================================================================
-// Task polling
+// Task polling — non-blocking background tasks
 // =========================================================================
-async function runTask(url, body, onComplete) {
-    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating... this may take 30-60 seconds.</p></div>`);
+const _bgTasks = new Map(); // taskId -> { label, status }
+
+function _renderTaskBar() {
+    const bar = document.getElementById('task-bar');
+    if (!bar) return;
+    const mainEl = document.querySelector('.main');
+    if (_bgTasks.size === 0) {
+        bar.style.display = 'none';
+        if (mainEl) mainEl.style.paddingTop = '';
+        return;
+    }
+    bar.style.display = 'flex';
+    if (mainEl) mainEl.style.paddingTop = '40px';
+    bar.innerHTML = '<span style="color:#818384;font-weight:600;font-size:0.75rem">RUNNING:</span>' +
+        [..._bgTasks.entries()].map(([id, t]) =>
+            `<span class="task-pill"><span class="spinner"></span>${t.label}</span>`
+        ).join('');
+}
+
+function _addBgTask(taskId, label) {
+    _bgTasks.set(taskId, { label });
+    _renderTaskBar();
+}
+
+function _removeBgTask(taskId) {
+    _bgTasks.delete(taskId);
+    _renderTaskBar();
+}
+
+async function runTask(url, body, onComplete, label) {
+    const taskLabel = label || 'Generating...';
+    toast(`${taskLabel} started — running in background`, 'info');
     try {
         const { task_id } = await api(url, { method: 'POST', body });
+        _addBgTask(task_id, taskLabel);
         let retries = 0;
         const poll = setInterval(async () => {
             try {
@@ -174,25 +211,25 @@ async function runTask(url, body, onComplete) {
                 retries = 0;
                 if (t.status === 'complete') {
                     clearInterval(poll);
-                    closeModal();
-                    toast('Generation complete!', 'success');
+                    _removeBgTask(task_id);
+                    toast(`${taskLabel} complete!`, 'success');
                     if (onComplete) onComplete(t.result);
                 } else if (t.status === 'error') {
                     clearInterval(poll);
-                    closeModal();
-                    toast(`Error: ${t.error}`, 'error');
+                    _removeBgTask(task_id);
+                    toast(`${taskLabel} failed: ${t.error}`, 'error');
                 }
             } catch (e) {
                 retries++;
                 if (retries > 5) {
                     clearInterval(poll);
-                    closeModal();
-                    toast('Task lost — please try again', 'error');
+                    _removeBgTask(task_id);
+                    toast(`${taskLabel} lost — please try again`, 'error');
                 }
             }
         }, 2000);
     } catch (e) {
-        closeModal();
+        toast(`Failed to start ${taskLabel}`, 'error');
     }
 }
 
@@ -545,7 +582,7 @@ async function generateWelcomePost(subId) {
     closeModal();
     runTask('/api/generate/welcome-post', { subreddit_id: subId }, (result) => {
         toast(`Welcome post created: "${result.title}"`, 'success');
-    });
+    }, 'Welcome Post');
 }
 
 // --- Create Subreddit Wizard ---
@@ -781,27 +818,31 @@ async function wizardStep2() {
     const brandContexts = validBrands.map(b => b.context || `Brand at ${b.domain_url}`);
     wizardState.validBrands = validBrands;
 
-    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating name suggestions & checking availability...</p><p class="text-xs text-gray-600 mt-2">This may take 30-60 seconds</p></div>`);
+    toast('Generating name suggestions — running in background', 'info');
+    closeModal();
 
     try {
         const { task_id } = await api('/api/generate/subreddit-names', {
             method: 'POST',
             body: { brand_names: brandNames, brand_contexts: brandContexts, count: 5 }
         });
+        _addBgTask(task_id, 'Subreddit Names');
 
         const poll = setInterval(async () => {
             const t = await api(`/api/tasks/${task_id}`);
             if (t.status === 'complete') {
                 clearInterval(poll);
+                _removeBgTask(task_id);
                 wizardState.suggestions = t.result;
+                toast('Subreddit names ready!', 'success');
                 renderWizardStep2();
             } else if (t.status === 'error') {
                 clearInterval(poll);
-                closeModal();
-                toast(`Error: ${t.error}`, 'error');
+                _removeBgTask(task_id);
+                toast(`Subreddit names failed: ${t.error}`, 'error');
             }
         }, 2000);
-    } catch(e) { closeModal(); }
+    } catch(e) {}
 }
 
 function renderWizardStep2() {
@@ -869,24 +910,28 @@ async function wizardStep3() {
     if (!chosenName) { toast('Select or enter a name', 'error'); return; }
     wizardState.chosenName = chosenName;
 
-    showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p class="text-gray-400">Generating subreddit info for r/${chosenName}...</p></div>`);
+    toast(`Generating info for r/${chosenName} — running in background`, 'info');
+    closeModal();
 
     try {
         const { task_id } = await api('/api/generate/subreddit-info', {
             method: 'POST',
             body: { name: chosenName, domain: wizardState.domain }
         });
+        _addBgTask(task_id, 'Subreddit Info');
 
         const poll = setInterval(async () => {
             const t = await api(`/api/tasks/${task_id}`);
             if (t.status === 'complete') {
                 clearInterval(poll);
+                _removeBgTask(task_id);
                 wizardState.info = t.result;
+                toast('Subreddit info ready!', 'success');
                 renderWizardStep3();
             } else if (t.status === 'error') {
                 clearInterval(poll);
-                closeModal();
-                toast(`Error: ${t.error}`, 'error');
+                _removeBgTask(task_id);
+                toast(`Subreddit info failed: ${t.error}`, 'error');
             }
         }, 2000);
     } catch(e) { closeModal(); }
@@ -1887,7 +1932,7 @@ async function submitGenPosts() {
     const brandIds = checked.map(cb => parseInt(cb.value));
     if (!brandIds.length) { toast('Select at least one brand', 'error'); return; }
     closeModal();
-    runTask('/api/generate/posts', { subreddit_id: sid, brand_ids: brandIds, count }, () => loadPosts());
+    runTask('/api/generate/posts', { subreddit_id: sid, brand_ids: brandIds, count }, () => loadPosts(), 'Generate Posts');
 }
 
 function showAddCustomPostModal() {
@@ -1989,7 +2034,7 @@ async function submitGenFiller() {
     const sid = parseInt(document.getElementById('gen-filler-sub').value);
     const count = parseInt(document.getElementById('gen-filler-count').value);
     closeModal();
-    runTask('/api/generate/filler-posts', { subreddit_id: sid, count }, () => loadPosts());
+    runTask('/api/generate/filler-posts', { subreddit_id: sid, count }, () => loadPosts(), 'Filler Posts');
 }
 
 // =========================================================================
@@ -2830,7 +2875,7 @@ async function submitGenHQComment() {
     closeModal();
     runTask('/api/generate/hq-comment', { post_id: pid, brand_id: bid }, () => {
         if (currentView === 'comments') loadCommentTree();
-    });
+    }, 'HQ Comment');
 }
 
 function showGenOPRepliesModal() {
@@ -2867,7 +2912,7 @@ async function submitGenOPReplies() {
     closeModal();
     runTask('/api/generate/op-replies', { post_id: pid, count }, () => {
         if (currentView === 'comments') loadCommentTree();
-    });
+    }, 'OP Replies');
 }
 
 let _genCmtBrands = [];
@@ -2947,7 +2992,7 @@ async function submitGenComments() {
     closeModal();
     runTask('/api/generate/comments', { post_id: pid, brands_config: brandsConfig, count, op_reply_count: opReplyCount }, () => {
         if (currentView === 'comments') loadCommentTree();
-    });
+    }, 'Comments');
 }
 
 function showGenLiveCommentsModal() {
@@ -2985,7 +3030,7 @@ async function submitGenLiveComments() {
     closeModal();
     runTask('/api/generate/live-comments', { reddit_url: url, subreddit_id: sid, brand_id: bid, count, brand_mention_ratio: ratio }, () => {
         toast('Live comments generated!', 'success');
-    });
+    }, 'Live Comments');
 }
 
 // --- Comment Management Tab ---
@@ -3091,7 +3136,7 @@ async function checkLiveComments() {
     runTask(`/api/subreddits/${sid}/check-live`, {}, (result) => {
         toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
         loadManagedComments();
-    });
+    }, 'Check Live');
 }
 
 async function backfillKeywords() {
@@ -3099,7 +3144,7 @@ async function backfillKeywords() {
     runTask(`/api/subreddits/${sid}/backfill-keywords`, {}, (result) => {
         toast(`Processed ${result.processed} comments, ${result.with_keywords} had keywords`, 'success');
         loadManagedComments();
-    });
+    }, 'Backfill Keywords');
 }
 
 function exportFilteredComments() {
@@ -3642,7 +3687,9 @@ async function submitImportCsv() {
         }
         const { task_id } = await resp.json();
 
-        showModal(`<div class="text-center py-8"><div class="spinner mx-auto mb-4"></div><p style="color:#818384">Importing accounts &amp; fetching Reddit data...<br>This may take a while for large lists.</p></div>`);
+        closeModal();
+        toast('Importing accounts — running in background', 'info');
+        _addBgTask(task_id, 'Import Accounts');
 
         let _impRetries = 0;
         const poll = setInterval(async () => {
@@ -3651,21 +3698,20 @@ async function submitImportCsv() {
                 _impRetries = 0;
                 if (t.status === 'complete') {
                     clearInterval(poll);
-                    closeModal();
+                    _removeBgTask(task_id);
                     const r = t.result;
                     toast(`Imported: ${r.imported}, Skipped: ${r.skipped}, Errors: ${r.errors}${r.error_usernames?.length ? ' (' + r.error_usernames.join(', ') + ')' : ''}`, r.errors ? 'info' : 'success');
                     renderAccounts(document.getElementById('app'));
                 } else if (t.status === 'error') {
                     clearInterval(poll);
-                    closeModal();
+                    _removeBgTask(task_id);
                     toast(`Import failed: ${t.error}`, 'error');
                 }
             } catch(e) {
-                if (++_impRetries > 5) { clearInterval(poll); closeModal(); toast('Task lost — please try again', 'error'); }
+                if (++_impRetries > 5) { clearInterval(poll); _removeBgTask(task_id); toast('Task lost — please try again', 'error'); }
             }
         }, 2000);
     } catch(e) {
-        closeModal();
         toast(`Import failed: ${e.message}`, 'error');
     }
 }
@@ -3717,30 +3763,35 @@ async function deleteAccountConfirm(username) {
 async function refreshAllAccounts() {
     if (!_accountsData.length) { toast('No accounts to refresh', 'error'); return; }
     const total = _accountsData.length;
-    if (!confirm(`Refresh all ${total} accounts? This will take ~${Math.ceil(total * 2 / 60)} minutes.`)) return;
-    showModal(`<h3 class="text-lg font-bold mb-3">Refreshing Accounts</h3><p id="refresh-progress" class="text-gray-300">0 / ${total} ...</p><p class="text-xs text-gray-500 mt-2">Please wait, ~2s per account to avoid Reddit rate limits.</p>`);
+    if (!confirm(`Refresh all ${total} accounts? This will take ~${Math.ceil(total * 2 / 60)} minutes in background.`)) return;
+
+    const bgId = 'refresh-all-' + Date.now();
+    _addBgTask(bgId, `Refreshing 0/${total}`);
+    toast(`Refreshing ${total} accounts in background`, 'info');
+
     let done = 0, failed = 0;
-    for (const a of _accountsData) {
-        try {
-            const { task_id } = await api(`/api/accounts/${encodeURIComponent(a.username)}/refresh`, { method: 'POST' });
-            await new Promise((resolve) => {
-                const poll = setInterval(async () => {
-                    try {
-                        const t = await api(`/api/tasks/${task_id}`);
-                        if (t.status === 'complete') { clearInterval(poll); done++; resolve(); }
-                        else if (t.status === 'error') { clearInterval(poll); failed++; resolve(); }
-                    } catch(e) { clearInterval(poll); failed++; resolve(); }
-                }, 1500);
-            });
-        } catch(e) { failed++; }
-        const el = document.getElementById('refresh-progress');
-        if (el) el.textContent = `${done + failed} / ${total} (${done} ok, ${failed} failed)`;
-        // 2s delay between requests to avoid Reddit rate limiting
-        await new Promise(r => setTimeout(r, 2000));
-    }
-    closeModal();
-    toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
-    renderAccounts(document.getElementById('app'));
+    (async () => {
+        for (const a of _accountsData) {
+            try {
+                const { task_id } = await api(`/api/accounts/${encodeURIComponent(a.username)}/refresh`, { method: 'POST' });
+                await new Promise((resolve) => {
+                    const poll = setInterval(async () => {
+                        try {
+                            const t = await api(`/api/tasks/${task_id}`);
+                            if (t.status === 'complete') { clearInterval(poll); done++; resolve(); }
+                            else if (t.status === 'error') { clearInterval(poll); failed++; resolve(); }
+                        } catch(e) { clearInterval(poll); failed++; resolve(); }
+                    }, 1500);
+                });
+            } catch(e) { failed++; }
+            _bgTasks.set(bgId, { label: `Refreshing ${done+failed}/${total}` });
+            _renderTaskBar();
+            await new Promise(r => setTimeout(r, 2000));
+        }
+        _removeBgTask(bgId);
+        toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
+        if (currentView === 'accounts') renderAccounts(document.getElementById('app'));
+    })();
 }
 
 async function deleteAllAccounts() {
@@ -4667,15 +4718,17 @@ async function lsConfirmBrand(postId) {
 
 async function lsGenerate(postId) {
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast('Starting comment generation...', 'info');
+    toast('Comment generation started — running in background', 'info');
     try {
         const { task_id } = await api(`/api/search/posts/${postId}/generate`, { method: 'POST', body: { num_comments: numComments } });
+        _addBgTask(task_id, 'Search Comments');
         renderLsTabContent();
         const poll = setInterval(async () => {
             try {
                 const t = await api(`/api/tasks/${task_id}`);
                 if (t.status === 'complete') {
                     clearInterval(poll);
+                    _removeBgTask(task_id);
                     if (t.result.skipped) {
                         toast(`Skipped: ${t.result.reason}`, 'warning');
                     } else {
@@ -4684,10 +4737,11 @@ async function lsGenerate(postId) {
                     renderLsTabContent();
                 } else if (t.status === 'error') {
                     clearInterval(poll);
+                    _removeBgTask(task_id);
                     toast(`Generation failed: ${t.error}`, 'error');
                     renderLsTabContent();
                 }
-            } catch(e) { clearInterval(poll); }
+            } catch(e) { clearInterval(poll); _removeBgTask(task_id); }
         }, 3000);
     } catch(e) {}
 }

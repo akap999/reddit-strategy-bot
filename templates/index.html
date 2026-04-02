@@ -345,8 +345,8 @@ function filterSubreddits() {
             ${s.description ? `<p class="text-sm text-gray-400 mb-2">${s.description}</p>` : ''}
             <div class="flex gap-4 text-xs text-gray-500">
                 <span>${s.brand_count} brands</span>
-                <span>${s.post_count} posts</span>
-                <span>${s.comment_count} comments</span>
+                <span>${s.post_count} deployed posts</span>
+                <span>${s.comment_count} deployed comments</span>
             </div>
         </div>
     `).join('')}</div>`;
@@ -1670,8 +1670,9 @@ async function showPostDetail(pid) {
 }
 
 async function publishPost(pid) {
-    const accounts = await api('/api/accounts');
-    let acctOpts = accounts.map(a => `<option value="${a.username}">${a.username}</option>`).join('');
+    const [accounts, post] = await Promise.all([api('/api/accounts'), api(`/api/posts/${pid}`)]);
+    const ownerAccount = post.owner_account || '';
+    let acctOpts = accounts.map(a => `<option value="${a.username}" ${a.username === ownerAccount ? 'selected' : ''}>${a.username}</option>`).join('');
     showModal(`
         <h3 class="text-lg font-bold mb-4">Publish Post</h3>
         <p class="text-sm text-gray-400 mb-3">Paste the Reddit URL after manually posting:</p>
@@ -1786,15 +1787,7 @@ async function markPostPaid(pid) {
 }
 
 async function autoAssignPost(pid) {
-    try {
-        const res = await api(`/api/posts/${pid}/auto-assign`, { method: 'POST', body: {} });
-        if (res.ok) {
-            toast(`Auto-assigned to u/${res.account}`, 'success');
-        } else {
-            toast(res.error || 'Auto-assign failed', 'error');
-        }
-    } catch(e) { toast('Auto-assign failed', 'error'); }
-    loadPosts();
+    showSingleAutoAssignModal('post', pid);
 }
 
 async function copyPostMessage(pid) {
@@ -2211,7 +2204,7 @@ function filterPostsByBrand() {
     const filtered = brandId ? _commentsPosts.filter(p => p.brand_id == brandId) : _commentsPosts;
     const sel = document.getElementById('comments-post-filter');
     sel.innerHTML = '<option value="">All Comments</option>' + filtered.map(p =>
-        `<option value="${p.id}">[Day ${p.suggested_post_day}] ${p.title.substring(0, 60)}</option>`
+        `<option value="${p.id}">${postLabel(p)}</option>`
     ).join('');
     loadCommentTree();
 }
@@ -2272,7 +2265,7 @@ async function loadAnalysisPosts() {
     const posts = await api(`/api/subreddits/${sid}/published-posts`);
     const sel = document.getElementById('analysis-post-filter');
     sel.innerHTML = '<option value="">Select a published post...</option>' + posts.map(p =>
-        `<option value="${p.id}">[Day ${p.suggested_post_day}] ${p.title.substring(0, 55)}</option>`
+        `<option value="${p.id}">${postLabel(p)}</option>`
     ).join('');
     document.getElementById('analysis-results').innerHTML = '';
     document.getElementById('analysis-filter-row').style.display = 'none';
@@ -2731,15 +2724,78 @@ async function informComment(cid) {
 }
 
 async function autoAssignComment(cid) {
+    showSingleAutoAssignModal('comment', cid);
+}
+
+// --- Single Auto Assign with Account Pool ---
+async function showSingleAutoAssignModal(type, id) {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+    const accounts = await api('/api/accounts/assignment-status');
+    window._saaType = type;
+    window._saaId = id;
+    window._saaAccounts = accounts;
+    window._aaChecked = new Set(accounts.map(a => a.username));
+
+    const rows = accounts.map(a => _aaAccountRow(a)).join('');
+    const title = type === 'post' ? 'Auto Assign Post Owner' : 'Auto Assign Comment';
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">${title}</h3>
+        <p class="text-sm text-gray-400 mb-3">Select accounts to include in the assignment pool. Uncheck any you want to exclude.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="aa-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="filterSingleAutoAssignAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllSingleAA(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllSingleAA(false)">Deselect All</button>
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="saa-accounts-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th><th>Total</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="submitSingleAutoAssign()">Auto Assign</button>
+        </div>
+    `);
+}
+
+function filterSingleAutoAssignAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._saaAccounts || [];
+    const tbody = document.querySelector('#saa-accounts-table tbody');
+    if (!tbody) return;
+    const filtered = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = filtered.map(a => _aaAccountRow(a)).join('');
+}
+
+function toggleAllSingleAA(checked) {
+    document.querySelectorAll('.aa-acct-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._aaChecked.add(cb.dataset.username);
+        else window._aaChecked.delete(cb.dataset.username);
+    });
+}
+
+async function submitSingleAutoAssign() {
+    const type = window._saaType;
+    const id = window._saaId;
+    const allAccounts = window._saaAccounts || [];
+    const excluded = allAccounts.filter(a => !window._aaChecked.has(a.username)).map(a => a.username);
+
+    closeModal();
     try {
-        const res = await api(`/api/comments/${cid}/auto-assign`, { method: 'POST', body: {} });
+        const endpoint = type === 'post' ? `/api/posts/${id}/auto-assign` : `/api/comments/${id}/auto-assign`;
+        const res = await api(endpoint, { method: 'POST', body: { exclude_accounts: excluded } });
         if (res.ok) {
             toast(`Auto-assigned to u/${res.account}`, 'success');
         } else {
             toast(res.error || 'Auto-assign failed', 'error');
         }
     } catch(e) { toast('Auto-assign failed', 'error'); }
-    loadCommentTree();
+    if (type === 'post') loadPosts();
+    else loadCommentTree();
 }
 
 // --- Auto Assign Modal ---
@@ -3000,7 +3056,7 @@ async function loadPostsAndBrandsForHQ() {
         api(`/api/subreddits/${sid}/posts`),
         api(`/api/subreddits/${sid}/brands`),
     ]);
-    document.getElementById('gen-hq-post').innerHTML = posts.map(p => `<option value="${p.id}">${p.title.substring(0, 60)}</option>`).join('');
+    document.getElementById('gen-hq-post').innerHTML = posts.map(p => `<option value="${p.id}">${postLabel(p)}</option>`).join('');
     document.getElementById('gen-hq-brand').innerHTML = brands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
 }
 
@@ -3037,7 +3093,7 @@ async function loadPostsForOP() {
     const posts = await api(`/api/subreddits/${sid}/posts`);
     // Only show posts that have comments to reply to
     document.getElementById('gen-op-post').innerHTML = posts.map(p =>
-        `<option value="${p.id}">${p.title.substring(0, 60)}${p.comment_count ? ` (${p.comment_count} comments)` : ''}</option>`
+        `<option value="${p.id}">${postLabel(p)}${p.comment_count ? ` (${p.comment_count} comments)` : ''}</option>`
     ).join('');
 }
 
@@ -3058,7 +3114,7 @@ async function loadPostsAndBrandsForCmt() {
         api(`/api/subreddits/${sid}/posts`),
         api(`/api/subreddits/${sid}/brands`),
     ]);
-    document.getElementById('gen-cmt-post').innerHTML = posts.map(p => `<option value="${p.id}">${p.title.substring(0, 60)}</option>`).join('');
+    document.getElementById('gen-cmt-post').innerHTML = posts.map(p => `<option value="${p.id}">${postLabel(p)}</option>`).join('');
     _genCmtBrands = brands;
     updateBrandMentionDefaults();
 }
@@ -3372,7 +3428,7 @@ async function onAaSubredditFilterChange() {
     if (postSelect) {
         if (sid) {
             const posts = await api('/api/subreddits/' + sid + '/posts');
-            postSelect.innerHTML = '<option value="">All Posts</option>' + posts.map(p => `<option value="${p.id}">${p.title.substring(0,60)}</option>`).join('');
+            postSelect.innerHTML = '<option value="">All Posts</option>' + posts.map(p => `<option value="${p.id}">${postLabel(p)}</option>`).join('');
         } else {
             postSelect.innerHTML = '<option value="">All Posts</option>';
         }
@@ -3595,6 +3651,11 @@ function filterAccountComments(username) {
 let _accountsFilterState = { min_karma: '', min_age_days: '', reference: '' };
 let _accountsSort = { col: 'username', dir: 'asc' };
 let _accountsData = [];
+
+function postLabel(p) {
+    const tag = p.status === 'published' ? '[deployed]' : `[Day ${p.suggested_post_day}]`;
+    return `#${p.id} ${tag} ${(p.title || '').substring(0, 55)}`;
+}
 
 function formatAccountAge(created_utc) {
     if (!created_utc) return '—';

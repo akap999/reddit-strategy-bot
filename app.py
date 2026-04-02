@@ -650,7 +650,9 @@ def api_auto_assign_single_comment(cid):
     from auto_assign import auto_assign_single_comment
     db = get_db()
     try:
-        result = auto_assign_single_comment(db, cid)
+        data = request.json or {}
+        exclude = data.get("exclude_accounts")
+        result = auto_assign_single_comment(db, cid, exclude_accounts=exclude)
         return jsonify(result), 200 if result.get("ok") else 400
     finally:
         db.close()
@@ -660,7 +662,9 @@ def api_auto_assign_single_post(pid):
     from auto_assign import auto_assign_single_post
     db = get_db()
     try:
-        result = auto_assign_single_post(db, pid)
+        data = request.json or {}
+        exclude = data.get("exclude_accounts")
+        result = auto_assign_single_post(db, pid, exclude_accounts=exclude)
         return jsonify(result), 200 if result.get("ok") else 400
     finally:
         db.close()

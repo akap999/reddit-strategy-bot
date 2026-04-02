@@ -296,3 +296,72 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
         "assignments": assignments,
         "warnings": warnings,
     }
+
+
+def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
+    """Auto-assign a single unassigned comment to the best-scoring account."""
+    comment = db.get_comment(comment_id)
+    if not comment:
+        return {"error": "Comment not found"}
+    if comment.get("account_id") and comment["status"] not in ("draft", "complete"):
+        return {"error": "Comment already assigned"}
+
+    post_id = comment["post_id"]
+    context = db.get_auto_assign_context(post_id)
+    if not context:
+        return {"error": "Post not found"}
+
+    accounts = context["all_accounts"]
+    if exclude_accounts:
+        accounts = [a for a in accounts if a["username"] not in set(exclude_accounts)]
+    if not accounts:
+        return {"error": "No accounts available"}
+
+    lookups = _build_lookups(context)
+    batch_picks = defaultdict(int)
+
+    # OP reply: prefer post owner
+    post = context["post"]
+    if comment.get("comment_type") == "op_reply" and post.get("owner_account"):
+        op_acct = post["owner_account"]
+        if any(a["username"] == op_acct for a in accounts):
+            db.assign_comment(comment_id, op_acct)
+            return {"ok": True, "account": op_acct, "score": None, "type": "op_reply"}
+
+    scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+    scores.sort(key=lambda x: -x[0])
+    best_score, best_account = scores[0]
+    username = best_account["username"]
+    db.assign_comment(comment_id, username)
+    return {"ok": True, "account": username, "score": best_score}
+
+
+def auto_assign_single_post(db, post_id, exclude_accounts=None):
+    """Auto-assign a single unowned post to the best-scoring account."""
+    post = db.get_post(post_id)
+    if not post:
+        return {"error": "Post not found"}
+    if post.get("owner_account"):
+        return {"error": "Post already has an owner"}
+
+    subreddit_id = post["subreddit_id"]
+    context = db.get_post_auto_assign_context(subreddit_id)
+    if not context:
+        return {"error": "Subreddit not found"}
+
+    accounts = context["all_accounts"]
+    if exclude_accounts:
+        accounts = [a for a in accounts if a["username"] not in set(exclude_accounts)]
+    if not accounts:
+        return {"error": "No accounts available"}
+
+    lookups = _build_post_lookups(context)
+    sub_owner = context["subreddit"].get("owner_account") or ""
+    batch_picks = defaultdict(int)
+
+    scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in accounts]
+    scores.sort(key=lambda x: -x[0])
+    best_score, best_account = scores[0]
+    username = best_account["username"]
+    db.set_post_owner(post_id, username)
+    return {"ok": True, "account": username, "score": best_score}

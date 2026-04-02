@@ -1637,11 +1637,11 @@ async function loadPosts() {
                     <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span></td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td>${p.comment_count || 0}</td>
-                    <td class="flex gap-1 flex-wrap">
-                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy Message</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
+                    <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
-                    </td>
+                    </div></td>
                 </tr>
             `).join('')}</tbody>
         </table>
@@ -1775,6 +1775,18 @@ async function unassignPostOwner(pid) {
 async function informPost(pid) {
     await api(`/api/posts/${pid}/status`, { method: 'POST', body: { status: 'informed' } });
     toast('Post marked as informed', 'success');
+    loadPosts();
+}
+
+async function autoAssignPost(pid) {
+    try {
+        const res = await api(`/api/posts/${pid}/auto-assign`, { method: 'POST', body: {} });
+        if (res.ok) {
+            toast(`Auto-assigned to u/${res.account}`, 'success');
+        } else {
+            toast(res.error || 'Auto-assign failed', 'error');
+        }
+    } catch(e) { toast('Auto-assign failed', 'error'); }
     loadPosts();
 }
 
@@ -2557,11 +2569,10 @@ function renderCommentNode(c, depth) {
 
     // Status-dependent action buttons
     let actionBtns = '';
-    if (c.status === 'draft') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
-    else if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
-    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
-    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Mark Deleted</button>`;
+    if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
+    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -2583,10 +2594,10 @@ function renderCommentNode(c, depth) {
                     <span class="text-xs text-gray-500">Day ${c.suggested_post_day}</span>
                     ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
                     ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-orange-500 hover:underline">reddit</a>` : ''}
-                    <span class="ml-auto flex gap-1">
+                    <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
                         <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                         ${actionBtns}
-                        <button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>
+                        ${c.status !== 'deployed' ? `<button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>` : ''}
                     </span>
                 </div>
                 <p class="text-sm text-gray-300 whitespace-pre-wrap">${c.body}</p>
@@ -2610,6 +2621,18 @@ async function unassignComment(cid) {
 async function informComment(cid) {
     await api(`/api/comments/${cid}/inform`, { method: 'POST', body: {} });
     toast('Comment marked as informed', 'success');
+    loadCommentTree();
+}
+
+async function autoAssignComment(cid) {
+    try {
+        const res = await api(`/api/comments/${cid}/auto-assign`, { method: 'POST', body: {} });
+        if (res.ok) {
+            toast(`Auto-assigned to u/${res.account}`, 'success');
+        } else {
+            toast(res.error || 'Auto-assign failed', 'error');
+        }
+    } catch(e) { toast('Auto-assign failed', 'error'); }
     loadCommentTree();
 }
 
@@ -3106,7 +3129,7 @@ async function loadManagedComments() {
                         ${c.post_reddit_url ? `<a href="${c.post_reddit_url}" target="_blank" class="text-orange-500 hover:underline mr-1">post</a>` : ''}
                         ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">comment</a>` : ''}
                     </td>
-                    <td>${actions}</td>
+                    <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">${actions}</div></td>
                 </tr>`;
             }).join('')}</tbody>
         </table>
@@ -4822,18 +4845,18 @@ function lsFilterComments() {
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                         <td>
-                            <div class="flex gap-1 flex-wrap">
+                            <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                                 ${c.status === 'draft' ? `<button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
-                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy Message</button>
+                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
                                 ` : ''}
                                 ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
-                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy Message</button>
+                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>

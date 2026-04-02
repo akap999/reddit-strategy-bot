@@ -645,6 +645,26 @@ def api_auto_assign_posts():
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/auto-assign", methods=["POST"])
+def api_auto_assign_single_comment(cid):
+    from auto_assign import auto_assign_single_comment
+    db = get_db()
+    try:
+        result = auto_assign_single_comment(db, cid)
+        return jsonify(result), 200 if result.get("ok") else 400
+    finally:
+        db.close()
+
+@app.route("/api/posts/<int:pid>/auto-assign", methods=["POST"])
+def api_auto_assign_single_post(pid):
+    from auto_assign import auto_assign_single_post
+    db = get_db()
+    try:
+        result = auto_assign_single_post(db, pid)
+        return jsonify(result), 200 if result.get("ok") else 400
+    finally:
+        db.close()
+
 @app.route("/api/posts/<int:pid>/unassign-all", methods=["POST"])
 def api_unassign_all_for_post(pid):
     db = get_db()

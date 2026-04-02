@@ -1246,12 +1246,21 @@ class Database:
         ).fetchall()]
 
         # Per-account count of comments assigned in this subreddit (shows activity)
+        # Cross-table: includes search_comments by matching subreddit name
+        sub_name = dict(sub).get("name", "")
         account_sub_comment_counts = [dict(r) for r in self.conn.execute(
-            """SELECT c.account_id, COUNT(*) as cnt
-               FROM comments c JOIN posts p ON c.post_id = p.id
-               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
-               GROUP BY c.account_id""",
-            (subreddit_id,)
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, COUNT(*) as cnt
+                   FROM comments c JOIN posts p ON c.post_id = p.id
+                   WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+                   GROUP BY c.account_id
+                   UNION ALL
+                   SELECT sc.account_id, COUNT(*) as cnt
+                   FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id""",
+            (subreddit_id, sub_name)
         ).fetchall()]
 
         return {
@@ -1307,22 +1316,43 @@ class Database:
             (sub_id,)
         ).fetchall()]
 
+        # Cross-table: pending counts from BOTH comments and search_comments
         account_pending_counts = [dict(r) for r in self.conn.execute(
-            """SELECT account_id, COUNT(*) as cnt FROM comments
-               WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
-               GROUP BY account_id"""
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
         ).fetchall()]
 
+        # Cross-table: brand mentions from BOTH tables
         account_brand_mentions = [dict(r) for r in self.conn.execute(
-            """SELECT account_id, brand_id, COUNT(*) as cnt FROM comments
-               WHERE mentions_brand = 1 AND account_id IS NOT NULL
-               GROUP BY account_id, brand_id"""
+            """SELECT account_id, brand_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, brand_id, COUNT(*) as cnt FROM comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id, brand_id
+                   UNION ALL
+                   SELECT account_id, brand_id, COUNT(*) as cnt FROM search_comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id, brand_id
+               ) GROUP BY account_id, brand_id"""
         ).fetchall()]
 
+        # Cross-table: total brand mentions from BOTH tables
         account_total_mentions = [dict(r) for r in self.conn.execute(
-            """SELECT account_id, COUNT(*) as cnt FROM comments
-               WHERE mentions_brand = 1 AND account_id IS NOT NULL
-               GROUP BY account_id"""
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
         ).fetchall()]
 
         subreddit_veterans = [r[0] for r in self.conn.execute(

@@ -2572,7 +2572,7 @@ function renderCommentNode(c, depth) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -2589,7 +2589,7 @@ function renderCommentNode(c, depth) {
                     ${c.persona_id ? `<span class="badge badge-draft">${c.persona_id}</span>` : ''}
                     ${c.structure_id ? `<span class="badge badge-draft">${c.structure_id}</span>` : ''}
                     ${kwPills}
-                    <span class="badge badge-${c.status}">${c.status}</span>
+                    <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
                     ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
                     <span class="text-xs text-gray-500">Day ${c.suggested_post_day}</span>
                     ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
@@ -2783,6 +2783,13 @@ async function markCommentDeleted(cid) {
     await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
     toast('Comment marked as deleted', 'success');
     loadCommentTree();
+}
+
+async function markCommentPaid(cid) {
+    await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
+    toast('Marked as paid', 'success');
+    if (currentView === 'comments') loadCommentTree();
+    else loadManagedComments();
 }
 
 function copyCommentMessage(cid) {
@@ -3115,13 +3122,13 @@ async function loadManagedComments() {
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
                 else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
-                else if (c.status === 'deployed') actions = `<button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
 
                 return `<tr>
                     <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
                     <td class="max-w-xs"><p class="text-sm text-gray-300 truncate">${c.body.substring(0, 80)}</p></td>
                     <td class="text-xs">${c.comment_type === 'hq' ? '<span class="badge mr-1" style="background:#0079D3;color:white">HQ</span>' : ''}${c.is_reply ? '<span class="badge mr-1" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge mr-1" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}</td>
-                    <td><span class="badge badge-${c.status}">${c.status}</span></td>
+                    <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                     <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
                     <td>${kws}</td>
                     <td class="text-xs text-gray-400">${c.deployed_at || '-'}</td>

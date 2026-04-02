@@ -228,7 +228,9 @@ def api_deployment_analytics():
     try:
         sid = request.args.get("subreddit_id", type=int)
         bid = request.args.get("brand_id", type=int)
-        result = db.get_deployment_analytics(subreddit_id=sid, brand_id=bid)
+        date_from = request.args.get("date_from") or None
+        date_to = request.args.get("date_to") or None
+        result = db.get_deployment_analytics(subreddit_id=sid, brand_id=bid, date_from=date_from, date_to=date_to)
         return jsonify(result)
     finally:
         db.close()
@@ -704,6 +706,15 @@ def api_deploy_comment(cid):
             data.get("reddit_comment_url", ""),
             data.get("deployed_at"),
         )
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/comments/<int:cid>/inform", methods=["POST"])
+def api_inform_comment(cid):
+    db = get_db()
+    try:
+        db.inform_comment(cid)
         return jsonify({"ok": True})
     finally:
         db.close()
@@ -1800,6 +1811,17 @@ def api_generate_search_comments(pid):
             )
             rel_score = relevance.get("score", 0)
 
+            # Relevancy threshold — skip generation if score too low
+            threshold = data.get("relevance_threshold", 6)
+            if rel_score < threshold:
+                db2.update_search_post_status(pid, "saved")
+                return {
+                    "skipped": True,
+                    "relevance_score": rel_score,
+                    "threshold": threshold,
+                    "reason": f"Post relevance score ({rel_score}) is below threshold ({threshold}). Comments not generated."
+                }
+
             # Tone analysis
             tone_analysis = bot.analyze_tone(
                 post["title"], post_body, post["subreddit"],
@@ -1908,6 +1930,16 @@ def api_unassign_search_comment(cid):
     db = get_db()
     try:
         db.unassign_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/inform", methods=["POST"])
+def api_inform_search_comment(cid):
+    db = get_db()
+    try:
+        db.inform_search_comment(cid)
         return jsonify({"ok": True})
     finally:
         db.close()

@@ -499,8 +499,8 @@ class Database:
 
         return stats
 
-    def get_deployment_analytics(self, subreddit_id=None, brand_id=None):
-        """Get deployment stats: totals and per-account breakdown."""
+    def get_deployment_analytics(self, subreddit_id=None, brand_id=None, date_from=None, date_to=None):
+        """Get deployment stats: totals, per-account, and per-brand breakdown."""
         where_parts = []
         params = []
 
@@ -511,7 +511,17 @@ class Database:
             where_parts.append("c.brand_id = ?")
             params.append(brand_id)
 
-        where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        # Date filter on deployed_at for deployed comments
+        date_where = []
+        if date_from:
+            date_where.append("c.deployed_at >= ?")
+            params.append(date_from)
+        if date_to:
+            date_where.append("c.deployed_at <= ?")
+            params.append(date_to + " 23:59:59")
+
+        all_where = where_parts + date_where
+        where_sql = ("WHERE " + " AND ".join(all_where)) if all_where else ""
 
         # Totals
         totals = dict(self.conn.execute(f"""
@@ -519,14 +529,14 @@ class Database:
                 COUNT(CASE WHEN c.status = 'deployed' THEN 1 END) as deployed_comments,
                 COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 END) as deployed_branded,
                 COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 0 THEN 1 END) as deployed_organic,
-                COUNT(CASE WHEN c.status = 'assigned' THEN 1 END) as assigned_comments,
+                COUNT(CASE WHEN c.status IN ('assigned','informed') THEN 1 END) as assigned_comments,
                 COUNT(CASE WHEN c.status IN ('draft','complete') THEN 1 END) as pending_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             {where_sql}
         """, params).fetchone())
 
-        # Post and subreddit counts (deployed = published posts)
+        # Post and subreddit counts
         post_where = []
         post_params = []
         if subreddit_id:
@@ -561,7 +571,39 @@ class Database:
             ORDER BY total DESC
         """, params).fetchall()]
 
-        return {"totals": totals, "accounts": accounts}
+        # Per-brand breakdown: subreddits, posts, comments (branded/general) deployed
+        bq_parts = ["c.status = 'deployed'"]
+        bq_params = []
+        if date_from:
+            bq_parts.append("c.deployed_at >= ?")
+            bq_params.append(date_from)
+        if date_to:
+            bq_parts.append("c.deployed_at <= ?")
+            bq_params.append(date_to + " 23:59:59")
+        if subreddit_id:
+            bq_parts.append("p.subreddit_id = ?")
+            bq_params.append(subreddit_id)
+        bq_where = " AND ".join(bq_parts)
+
+        brand_stats = [dict(r) for r in self.conn.execute(f"""
+            SELECT
+                b.id as brand_id,
+                b.name as brand_name,
+                COUNT(DISTINCT s.id) as subreddits,
+                COUNT(DISTINCT p.id) as posts,
+                COUNT(c.id) as deployed_comments,
+                SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded_comments,
+                SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as general_comments
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            JOIN subreddits s ON p.subreddit_id = s.id
+            JOIN brands b ON c.brand_id = b.id
+            WHERE {bq_where}
+            GROUP BY b.id, b.name
+            ORDER BY deployed_comments DESC
+        """, bq_params).fetchall()]
+
+        return {"totals": totals, "accounts": accounts, "brand_stats": brand_stats}
 
     def get_persona_distribution(self, subreddit_id=None, brand_name=None):
         query = "SELECT c.persona_id, COUNT(*) as cnt FROM comments c"
@@ -801,6 +843,13 @@ class Database:
         )
         self.conn.commit()
 
+    def inform_comment(self, comment_id):
+        self.conn.execute(
+            "UPDATE comments SET status = 'informed' WHERE id = ? AND status = 'assigned'",
+            (comment_id,)
+        )
+        self.conn.commit()
+
     def mark_comment_deleted(self, comment_id):
         deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute(
@@ -1014,7 +1063,7 @@ class Database:
                           SUM(CASE WHEN c.is_ours = 1 THEN 1 ELSE 0 END) as ours,
                           SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
                           SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                          SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as assigned,
+                          SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
                           SUM(CASE WHEN c.status = 'complete' THEN 1 ELSE 0 END) as complete
                    FROM comments c
                    JOIN posts p ON c.post_id = p.id
@@ -1057,7 +1106,7 @@ class Database:
                        SUM(CASE WHEN c.is_ours = 1 THEN 1 ELSE 0 END) as ours,
                        SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
                        SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                       SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as assigned,
+                       SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
                        SUM(CASE WHEN c.status = 'complete' THEN 1 ELSE 0 END) as complete,
                        COUNT(DISTINCT p.id) as total_posts,
                        COUNT(DISTINCT p.subreddit_id) as num_subreddits
@@ -1118,21 +1167,21 @@ class Database:
     def delete_account(self, username):
         # Unassign comments owned by this account (back to draft)
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status = 'assigned'",
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status IN ('assigned','informed')",
             (username,)
         )
         # Clear account_id on deployed/complete comments (keep their status)
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL WHERE account_id = ? AND status != 'assigned'",
+            "UPDATE comments SET account_id = NULL WHERE account_id = ? AND status NOT IN ('assigned','informed')",
             (username,)
         )
         # Same for search_comments
         self.conn.execute(
-            "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status = 'assigned'",
+            "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status IN ('assigned','informed')",
             (username,)
         )
         self.conn.execute(
-            "UPDATE search_comments SET account_id = NULL WHERE account_id = ? AND status != 'assigned'",
+            "UPDATE search_comments SET account_id = NULL WHERE account_id = ? AND status NOT IN ('assigned','informed')",
             (username,)
         )
         # Clear owner_account on posts and subreddits
@@ -1146,7 +1195,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT a.*,
                       COUNT(c.id) as total_assigned,
-                      SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as pending,
+                      SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as pending,
                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
                       SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
@@ -1217,7 +1266,7 @@ class Database:
     def bulk_unassign_post_comments(self, post_id):
         """Unassign all assigned comments for a post, setting them back to draft."""
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status = 'assigned'",
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status IN ('assigned','informed')",
             (post_id,)
         )
         self.conn.commit()
@@ -1253,14 +1302,14 @@ class Database:
             """SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
                FROM comments c JOIN posts p ON c.post_id = p.id
                WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
-                 AND c.status IN ('assigned','deployed')
+                 AND c.status IN ('assigned','informed','deployed')
                GROUP BY c.account_id, c.suggested_post_day""",
             (sub_id,)
         ).fetchall()]
 
         account_pending_counts = [dict(r) for r in self.conn.execute(
             """SELECT account_id, COUNT(*) as cnt FROM comments
-               WHERE status = 'assigned' AND account_id IS NOT NULL
+               WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
                GROUP BY account_id"""
         ).fetchall()]
 
@@ -1330,7 +1379,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT a.*,
                       COUNT(sc.id) as total_assigned,
-                      SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as pending,
+                      SUM(CASE WHEN sc.status IN ('assigned','informed') THEN 1 ELSE 0 END) as pending,
                       SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN sc.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
                       SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
@@ -1468,7 +1517,7 @@ class Database:
                         JOIN subreddits s ON p.subreddit_id = s.id
                         LEFT JOIN brands b ON c.brand_id = b.id
                         LEFT JOIN post_urls pu ON pu.post_id = p.id
-                        WHERE c.status IN ('assigned', 'deployed')"""
+                        WHERE c.status IN ('assigned', 'informed', 'deployed')"""
                 p2 = []
                 if date_from:
                     q2 += " AND COALESCE(c.deployed_at, c.created_at) >= ?"
@@ -1510,7 +1559,7 @@ class Database:
                         FROM search_comments sc
                         JOIN search_posts sp ON sc.search_post_id = sp.id
                         LEFT JOIN brands b ON sc.brand_id = b.id
-                        WHERE sc.status IN ('assigned', 'deployed')"""
+                        WHERE sc.status IN ('assigned', 'informed', 'deployed')"""
                 p3 = []
                 if date_from:
                     q3 += " AND COALESCE(sc.deployed_at, sc.created_at) >= ?"
@@ -1640,6 +1689,12 @@ class Database:
 
     def update_search_comment_body(self, comment_id, body):
         self.conn.execute("UPDATE search_comments SET body = ? WHERE id = ?", (body, comment_id))
+        self.conn.commit()
+
+    def inform_search_comment(self, comment_id):
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'informed' WHERE id = ? AND status = 'assigned'",
+            (comment_id,))
         self.conn.commit()
 
     def delete_search_comment(self, comment_id):

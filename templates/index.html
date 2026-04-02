@@ -23,6 +23,7 @@
         .badge-available { background: #1a3320; color: #46d160; }
         .badge-taken { background: #4a1a1a; color: #ff6b6b; }
         .badge-assigned { background: #3a2a00; color: #FFD635; }
+        .badge-informed { background: #4a2a00; color: #FF8b60; }
         .badge-deployed { background: #1a3320; color: #46d160; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
@@ -1212,6 +1213,7 @@ function renderBrandDetail(data) {
                     <option value="all">All Statuses</option>
                     <option value="complete">Complete</option>
                     <option value="assigned">Assigned</option>
+                    <option value="informed">Informed</option>
                     <option value="deployed">Deployed</option>
                     <option value="deleted">Deleted</option>
                 </select>
@@ -1334,7 +1336,7 @@ function renderBrandCommentTable() {
     }
 
     const statusBadge = (s) => {
-        const map = { complete: 'badge-complete', assigned: 'badge-assigned', deployed: 'badge-deployed', deleted: 'badge-deleted', draft: 'badge-draft' };
+        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', deleted: 'badge-deleted', draft: 'badge-draft' };
         return `<span class="badge ${map[s] || 'badge-draft'}">${s}</span>`;
     };
 
@@ -1527,7 +1529,8 @@ async function renderPosts(el) {
                 <option value="all">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="complete">Complete</option>
-                <option value="published">Published</option>
+                <option value="informed">Informed</option>
+                <option value="published">Deployed</option>
             </select>
             <button class="btn btn-primary" onclick="showAutoAssignPostsModal()">Auto Assign Posts</button>
         </div>
@@ -1586,12 +1589,12 @@ async function loadPosts() {
                     <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : 'Brand'}</span></td>
                     <td class="text-gray-400">${p.storyline}</td>
                     <td>${p.ai_query_score || '-'}</td>
-                    <td><span class="badge badge-${p.status}">${p.status}</span></td>
+                    <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span></td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td>${p.comment_count || 0}</td>
                     <td class="flex gap-1 flex-wrap">
-                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy Message</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
-                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Publish</button>` : ''}
+                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy Message</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
+                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </td>
                 </tr>
@@ -1605,7 +1608,7 @@ async function showPostDetail(pid) {
     showModal(`
         <h3 class="text-lg font-bold mb-1">${post.title}</h3>
         <div class="flex gap-2 mb-3 flex-wrap">
-            <span class="badge badge-${post.status}">${post.status}</span>
+            <span class="badge badge-${post.status}">${post.status === 'published' ? 'deployed' : post.status}</span>
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
             ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
             <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
@@ -1721,6 +1724,12 @@ async function unassignPostOwner(pid) {
     if (!confirm('Remove owner from this post?')) return;
     await api(`/api/posts/${pid}/unassign-owner`, { method: 'POST', body: {} });
     toast('Post owner removed', 'success');
+    loadPosts();
+}
+
+async function informPost(pid) {
+    await api(`/api/posts/${pid}/status`, { method: 'POST', body: { status: 'informed' } });
+    toast('Post marked as informed', 'success');
     loadPosts();
 }
 
@@ -2505,7 +2514,8 @@ function renderCommentNode(c, depth) {
     let actionBtns = '';
     if (c.status === 'draft') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
+    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy Message</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Mark Deleted</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
@@ -2549,6 +2559,12 @@ async function unassignComment(cid) {
     if (!confirm('Unassign this comment from its account?')) return;
     await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
     toast('Comment unassigned', 'success');
+    loadCommentTree();
+}
+
+async function informComment(cid) {
+    await api(`/api/comments/${cid}/inform`, { method: 'POST', body: {} });
+    toast('Comment marked as informed', 'success');
     loadCommentTree();
 }
 
@@ -2982,6 +2998,7 @@ async function renderCommentManagementTab(container) {
                 <option value="">All Status</option>
                 <option value="complete">Complete</option>
                 <option value="assigned">Assigned</option>
+                <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
                 <option value="deleted">Deleted</option>
             </select>
@@ -3028,7 +3045,8 @@ async function loadManagedComments() {
 
                 let actions = '';
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
-                else if (c.status === 'assigned') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
+                else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
+                else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'deployed') actions = `<button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
 
                 return `<tr>
@@ -3895,7 +3913,7 @@ async function renderAnalytics(el) {
             <div class="tab ${analyticsTab==='health'?'active':''}" onclick="analyticsTab='health';renderAnalyticsTab()">Content Health</div>
             <div class="tab ${analyticsTab==='schedule'?'active':''}" onclick="analyticsTab='schedule';renderAnalyticsTab()">Schedule</div>
         </div>
-        <div class="flex gap-3 mb-3 items-center">
+        <div class="flex gap-3 mb-3 items-center flex-wrap">
             <select id="analytics-sub" onchange="renderAnalyticsTab()">
                 <option value="">All Subreddits</option>
                 ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
@@ -3904,6 +3922,10 @@ async function renderAnalytics(el) {
                 <option value="">All Brands</option>
                 ${allBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
             </select>
+            <input type="date" id="analytics-date-from" class="text-sm" onchange="renderAnalyticsTab()">
+            <span class="text-gray-500 text-sm">to</span>
+            <input type="date" id="analytics-date-to" class="text-sm" onchange="renderAnalyticsTab()">
+            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('analytics-date-from').value='';document.getElementById('analytics-date-to').value='';renderAnalyticsTab()">Clear Dates</button>
         </div>
         <div id="analytics-content"></div>
     `;
@@ -3924,20 +3946,25 @@ async function renderAnalyticsTab() {
     container.innerHTML = '<div class="spinner"></div>';
     const sid = document.getElementById('analytics-sub').value;
     const bid = document.getElementById('analytics-brand')?.value || '';
+    const dateFrom = document.getElementById('analytics-date-from')?.value || '';
+    const dateTo = document.getElementById('analytics-date-to')?.value || '';
 
-    if (analyticsTab === 'overview') await renderOverviewTab(container, sid, bid);
+    if (analyticsTab === 'overview') await renderOverviewTab(container, sid, bid, dateFrom, dateTo);
     else if (analyticsTab === 'brand') await renderBrandTab(container, sid);
     else if (analyticsTab === 'health') await renderHealthTab(container, sid);
     else if (analyticsTab === 'schedule') await renderScheduleTab(container, sid);
 }
 
-async function renderOverviewTab(container, sid, bid) {
+async function renderOverviewTab(container, sid, bid, dateFrom, dateTo) {
     let url = '/api/analytics/deployments?';
     if (sid) url += `subreddit_id=${sid}&`;
     if (bid) url += `brand_id=${bid}&`;
+    if (dateFrom) url += `date_from=${dateFrom}&`;
+    if (dateTo) url += `date_to=${dateTo}&`;
     const data = await api(url);
     const t = data.totals || {};
     const accts = data.accounts || [];
+    const brandStats = data.brand_stats || [];
 
     const brandPct = t.deployed_comments > 0 ? Math.round((t.deployed_branded || 0) / t.deployed_comments * 100) : 0;
 
@@ -3951,23 +3978,63 @@ async function renderOverviewTab(container, sid, bid) {
         </tr>
     `).join('');
 
+    // Brand breakdown rows
+    const brandRows = brandStats.map(b => `
+        <tr>
+            <td class="text-sm" style="color:#FF8b60">${b.brand_name}</td>
+            <td class="text-sm text-center">${b.subreddits}</td>
+            <td class="text-sm text-center">${b.posts}</td>
+            <td class="text-sm text-center">${b.deployed_comments}</td>
+            <td class="text-sm text-center">${b.branded_comments}</td>
+            <td class="text-sm text-center">${b.general_comments}</td>
+        </tr>
+    `).join('');
+
+    // Brand totals row
+    const bTotals = brandStats.reduce((acc, b) => {
+        acc.subs += b.subreddits; acc.posts += b.posts; acc.comments += b.deployed_comments;
+        acc.branded += b.branded_comments; acc.general += b.general_comments;
+        return acc;
+    }, {subs:0, posts:0, comments:0, branded:0, general:0});
+
     container.innerHTML = `
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <div class="stat-card p-4"><p class="text-2xl font-bold">${t.subreddit_count || 0}</p><p class="text-xs text-gray-500">Subreddits</p></div>
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.published_posts || 0} <span class="text-sm text-gray-500">/ ${t.total_posts || 0}</span></p><p class="text-xs text-gray-500">Published / Total Posts</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.published_posts || 0} <span class="text-sm text-gray-500">/ ${t.total_posts || 0}</span></p><p class="text-xs text-gray-500">Deployed / Total Posts</p></div>
             <div class="stat-card p-4"><p class="text-2xl font-bold">${t.deployed_comments || 0}</p><p class="text-xs text-gray-500">Deployed Comments</p></div>
-            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.deployed_branded || 0} / ${t.deployed_organic || 0}</p><p class="text-xs text-gray-500">Branded / Organic (${brandPct}%)</p></div>
+            <div class="stat-card p-4"><p class="text-2xl font-bold">${t.deployed_branded || 0} / ${t.deployed_organic || 0}</p><p class="text-xs text-gray-500">Branded / General (${brandPct}%)</p></div>
         </div>
         <div class="grid grid-cols-2 gap-4 mb-6">
             <div class="stat-card p-4"><p class="text-2xl font-bold text-yellow-400">${t.assigned_comments || 0}</p><p class="text-xs text-gray-500">Assigned (pending deploy)</p></div>
             <div class="stat-card p-4"><p class="text-2xl font-bold text-gray-500">${t.pending_comments || 0}</p><p class="text-xs text-gray-500">Draft / Unassigned</p></div>
         </div>
+
+        <div class="card p-5 mb-5">
+            <h4 class="text-sm font-bold text-gray-300 mb-3">Brand-wise Deployed Breakdown</h4>
+            ${brandStats.length ? `
+            <div class="overflow-y-auto" style="max-height:40vh">
+                <table class="text-sm">
+                    <thead><tr><th>Brand</th><th>Subreddits</th><th>Posts</th><th>Comments</th><th>Branded</th><th>General</th></tr></thead>
+                    <tbody>${brandRows}
+                        <tr style="border-top:1px solid #343536;font-weight:bold">
+                            <td class="text-sm text-gray-300">Total</td>
+                            <td class="text-sm text-center">${bTotals.subs}</td>
+                            <td class="text-sm text-center">${bTotals.posts}</td>
+                            <td class="text-sm text-center">${bTotals.comments}</td>
+                            <td class="text-sm text-center">${bTotals.branded}</td>
+                            <td class="text-sm text-center">${bTotals.general}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>` : '<p class="text-gray-500">No brand deployment data yet.</p>'}
+        </div>
+
         <div class="card p-5">
             <h4 class="text-sm font-bold text-gray-300 mb-3">Account-wise Deployed Comments (${accts.length} accounts)</h4>
             ${accts.length ? `
             <div class="overflow-y-auto" style="max-height:50vh">
                 <table class="text-sm">
-                    <thead><tr><th>Account</th><th>Total Deployed</th><th>Branded</th><th>Organic</th></tr></thead>
+                    <thead><tr><th>Account</th><th>Total Deployed</th><th>Branded</th><th>General</th></tr></thead>
                     <tbody>${acctRows}</tbody>
                 </table>
             </div>` : '<p class="text-gray-500">No deployed comments yet.</p>'}
@@ -4162,6 +4229,7 @@ async function renderExport(el) {
                         <option value="">All Status</option>
                         <option value="complete">Complete</option>
                         <option value="assigned">Assigned</option>
+                        <option value="informed">Informed</option>
                         <option value="deployed">Deployed</option>
                         <option value="deleted">Deleted</option>
                     </select>
@@ -4608,7 +4676,11 @@ async function lsGenerate(postId) {
                 const t = await api(`/api/tasks/${task_id}`);
                 if (t.status === 'complete') {
                     clearInterval(poll);
-                    toast(`Generated ${t.result.generated} comments (relevance: ${t.result.relevance_score}/10)`, 'success');
+                    if (t.result.skipped) {
+                        toast(`Skipped: ${t.result.reason}`, 'warning');
+                    } else {
+                        toast(`Generated ${t.result.generated} comments (relevance: ${t.result.relevance_score}/10)`, 'success');
+                    }
                     renderLsTabContent();
                 } else if (t.status === 'error') {
                     clearInterval(poll);
@@ -4648,6 +4720,7 @@ async function renderLsComments(c) {
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="assigned">Assigned</option>
+                <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
             </select>
         </div>
@@ -4698,6 +4771,12 @@ function lsFilterComments() {
                             <div class="flex gap-1 flex-wrap">
                                 ${c.status === 'draft' ? `<button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
                                 ${c.status === 'assigned' ? `
+                                    <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
+                                    <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
+                                    <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy Message</button>
+                                ` : ''}
+                                ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy Message</button>
@@ -4770,6 +4849,14 @@ async function lsUnassignComment(cid) {
     try {
         await api(`/api/search/comments/${cid}/unassign`, { method: 'POST' });
         toast('Unassigned', 'success');
+        renderLsTabContent();
+    } catch(e) {}
+}
+
+async function lsInformComment(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/inform`, { method: 'POST' });
+        toast('Marked as informed', 'success');
         renderLsTabContent();
     } catch(e) {}
 }
@@ -5033,8 +5120,9 @@ async function renderCalendar(el) {
                 <select id="cal-status-filter" class="w-32 text-sm" onchange="onCalFilterChange()">
                     <option value="">All</option>
                     <option value="assigned">Assigned</option>
+                    <option value="informed">Informed</option>
                     <option value="deployed">Deployed</option>
-                    <option value="published">Published</option>
+                    <option value="published">Deployed (Posts)</option>
                 </select>
             </div>
             <div>

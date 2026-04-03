@@ -1250,22 +1250,29 @@ class Database:
         Optionally filtered by created_at date range.
         Returns list of dicts with comment fields + post_title, post_reddit_url, subreddit_name, subreddit_id.
         """
+        # Get all brand IDs matching this name (brands are per-subreddit)
+        brand_ids = [r[0] for r in self.conn.execute(
+            "SELECT id FROM brands WHERE LOWER(name) = LOWER(?)", (brand_name,)
+        ).fetchall()]
+        if not brand_ids:
+            return []
+
+        placeholders = ",".join("?" * len(brand_ids))
+
         # Regular comments
-        q1 = """SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+        q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                        c.paid_at, c.reddit_comment_url, c.suggested_post_day,
                        c.is_ours, c.matched_keywords,
                        'comment' as source,
                        p.title as post_title, p.subreddit_id,
-                       s.name as subreddit_name,
-                       pu.reddit_url as post_reddit_url
+                       COALESCE(s.name, '') as subreddit_name,
+                       (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
                 FROM comments c
                 JOIN posts p ON c.post_id = p.id
-                JOIN brands b ON c.brand_id = b.id
                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
-                LEFT JOIN post_urls pu ON pu.post_id = p.id
-                WHERE LOWER(b.name) = LOWER(?)"""
-        p1 = [brand_name]
+                WHERE c.brand_id IN ({placeholders})"""
+        p1 = list(brand_ids)
         if date_from:
             q1 += " AND c.created_at >= ?"
             p1.append(date_from)
@@ -1274,7 +1281,7 @@ class Database:
             p1.append(date_to + " 23:59:59")
 
         # Search comments
-        q2 = """SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+        q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                        sc.paid_at, sc.reddit_comment_url, 0 as suggested_post_day,
                        1 as is_ours, NULL as matched_keywords,
@@ -1284,9 +1291,8 @@ class Database:
                        sp.reddit_url as post_reddit_url
                 FROM search_comments sc
                 JOIN search_posts sp ON sc.search_post_id = sp.id
-                JOIN brands b2 ON sc.brand_id = b2.id
-                WHERE LOWER(b2.name) = LOWER(?)"""
-        p2 = [brand_name]
+                WHERE sc.brand_id IN ({placeholders})"""
+        p2 = list(brand_ids)
         if date_from:
             q2 += " AND sc.created_at >= ?"
             p2.append(date_from)

@@ -4884,21 +4884,20 @@ let _lsSavedPosts = [];
 let _lsComments = [];
 
 function lsMatchKeywords(text, brandId) {
-    if (!text) return [];
-    const lower = text.toLowerCase();
+    const lower = (text || '').toLowerCase();
     const matched = [];
-    // Match selected brand keywords
-    if (brandId) {
+    // Always show the search keyword — every result was found by it
+    const searchKw = document.getElementById('ls-keyword')?.value?.trim();
+    if (searchKw) {
+        matched.push(searchKw);
+    }
+    // Match selected brand keywords in the text
+    if (brandId && lower) {
         const brand = _lsBrands.find(b => b.id == brandId);
         if (brand) {
             const kws = typeof brand.keywords === 'string' ? JSON.parse(brand.keywords || '[]') : (brand.keywords || []);
-            kws.forEach(kw => { if (kw && lower.includes(kw.toLowerCase())) matched.push(kw); });
+            kws.forEach(kw => { if (kw && lower.includes(kw.toLowerCase()) && !matched.some(m => m.toLowerCase() === kw.toLowerCase())) matched.push(kw); });
         }
-    }
-    // Also match search keyword
-    const searchKw = document.getElementById('ls-keyword')?.value?.trim();
-    if (searchKw && lower.includes(searchKw.toLowerCase()) && !matched.some(m => m.toLowerCase() === searchKw.toLowerCase())) {
-        matched.push(searchKw);
     }
     return matched;
 }

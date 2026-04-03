@@ -623,6 +623,53 @@ def _get_search_post_toplevel_accounts(db, search_post_id):
     return {r["account_id"] for r in rows}
 
 
+def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
+    """Auto-assign a single search comment to the best-scoring account.
+
+    Rules:
+      - Non-reply: unique account per search post (no account already used on that post)
+      - Reply: normal scoring, any account eligible
+    """
+    comment = dict(db.conn.execute(
+        """SELECT sc.*, sp.subreddit, sp.title as post_title
+           FROM search_comments sc
+           JOIN search_posts sp ON sc.search_post_id = sp.id
+           WHERE sc.id = ?""", (comment_id,)
+    ).fetchone() or {})
+    if not comment.get("id"):
+        return {"error": "Comment not found"}
+    if comment.get("account_id") and comment["status"] not in ("draft",):
+        return {"error": "Comment already assigned"}
+
+    context = db.get_search_auto_assign_context()
+    accounts = context["all_accounts"]
+    if exclude_accounts:
+        accounts = [a for a in accounts if a["username"] not in set(exclude_accounts)]
+    if not accounts:
+        return {"error": "No accounts available"}
+
+    lookups = _build_lookups(context)
+    batch_picks = defaultdict(int)
+    is_reply = comment.get("is_reply", 0)
+
+    if is_reply:
+        eligible = accounts
+    else:
+        blocked = _get_search_post_toplevel_accounts(db, comment["search_post_id"])
+        eligible = [a for a in accounts if a["username"] not in blocked]
+
+    if not eligible:
+        return {"error": "No eligible account — all accounts already used on this post."}
+
+    scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
+    scores.sort(key=lambda x: -x[0])
+    best_score, best_account = scores[0]
+    username = best_account["username"]
+
+    db.assign_search_comment(comment_id, username)
+    return {"ok": True, "account": username, "score": best_score}
+
+
 def auto_assign_search_comments(db, exclude_accounts=None):
     """Auto-assign all draft search comments using the same scoring as regular comments.
 

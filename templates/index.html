@@ -5699,34 +5699,115 @@ async function lsUndeployComment(cid) {
 }
 
 async function lsAssignComment(cid) {
-    // Reuse the existing assignment modal pattern
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
     let accounts;
-    try { accounts = await api('/api/accounts'); } catch(e) { return; }
+    try { accounts = await api('/api/accounts/search-assignment-status'); } catch(e) { closeModal(); toast('Failed to load accounts', 'error'); return; }
+    if (!accounts.length) { closeModal(); toast('No accounts available', 'error'); return; }
+
+    window._lsAsgAccounts = accounts;
+    window._lsAsgChecked = new Set(accounts.map(a => a.username));
+    window._lsAsgCid = cid;
+    window._lsAsgSortBy = 'default';
+    _renderLsAssignModal();
+}
+
+function _renderLsAssignModal() {
+    const accounts = window._lsAsgAccounts || [];
+    const cid = window._lsAsgCid;
+    const sorted = window._lsAsgSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
+    const sortLabel = window._lsAsgSortBy === 'karma' ? 'Sort: Default' : 'Sort: Karma ↓';
+    const rows = sorted.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        const checked = window._lsAsgChecked && window._lsAsgChecked.has(a.username);
+        return `<tr class="ls-acct-row">
+            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="lsasg-cb" onchange="if(this.checked)window._lsAsgChecked.add(this.dataset.username);else window._lsAsgChecked.delete(this.dataset.username)"></td>
+            <td class="text-sm text-orange-500">u/${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.pending || 0}</td>
+            <td class="text-sm text-center">${a.total_assigned || 0}</td>
+            <td><button class="btn btn-accent btn-sm" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
+        </tr>`;
+    }).join('');
     showModal(`
-        <div class="p-5">
-            <h3 class="text-lg font-bold mb-3">Assign Account</h3>
-            <input id="ls-acct-search" placeholder="Search username..." oninput="lsFilterAccts()" class="mb-3">
-            <div style="max-height:300px;overflow-y:auto">
-                <table><thead><tr><th>Username</th><th>Karma</th><th>Age</th><th></th></tr></thead>
-                <tbody id="ls-acct-rows">${accounts.map(a => `
-                    <tr class="ls-acct-row">
-                        <td>u/${a.username}</td>
-                        <td>${(a.link_karma||0)+(a.comment_karma||0)}</td>
-                        <td class="text-xs">${a.created_utc ? Math.floor((Date.now()/1000 - a.created_utc)/86400) + 'd' : '?'}</td>
-                        <td><button class="btn btn-accent btn-sm" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
-                    </tr>
-                `).join('')}</tbody></table>
-            </div>
-            <div class="flex justify-end mt-3"><button class="btn btn-secondary" onclick="closeModal()">Cancel</button></div>
+        <h3 class="text-xl font-bold mb-3">Assign Comment</h3>
+        <p class="text-sm text-gray-400 mb-3">Auto-assign using scoring or manually pick an account. Uncheck accounts to exclude from auto-assign pool.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="ls-acct-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="_filterLsAssignAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="window._lsAsgSortBy=window._lsAsgSortBy==='karma'?'default':'karma';_renderLsAssignModal()">${sortLabel}</button>
+            <button class="btn btn-sm btn-secondary" onclick="_toggleAllLsAsg(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="_toggleAllLsAsg(false)">Deselect All</button>
+        </div>
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="lsasg-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th><th>Total</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button id="lsasg-auto-btn" class="btn btn-primary" onclick="_lsAutoAssignSingle()">Auto Assign (Best Score)</button>
         </div>
     `);
 }
 
-function lsFilterAccts() {
-    const q = (document.getElementById('ls-acct-search')?.value || '').toLowerCase();
-    document.querySelectorAll('.ls-acct-row').forEach(r => {
-        r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
+function _filterLsAssignAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._lsAsgAccounts || [];
+    const cid = window._lsAsgCid;
+    const sorted = window._lsAsgSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
+    const filtered = sorted.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    const tbody = document.querySelector('#lsasg-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = filtered.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        const checked = window._lsAsgChecked && window._lsAsgChecked.has(a.username);
+        return `<tr class="ls-acct-row">
+            <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="lsasg-cb" onchange="if(this.checked)window._lsAsgChecked.add(this.dataset.username);else window._lsAsgChecked.delete(this.dataset.username)"></td>
+            <td class="text-sm text-orange-500">u/${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td class="text-sm text-center">${a.pending || 0}</td>
+            <td class="text-sm text-center">${a.total_assigned || 0}</td>
+            <td><button class="btn btn-accent btn-sm" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
+        </tr>`;
+    }).join('');
+}
+
+function _toggleAllLsAsg(checked) {
+    document.querySelectorAll('.lsasg-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._lsAsgChecked.add(cb.dataset.username);
+        else window._lsAsgChecked.delete(cb.dataset.username);
     });
+}
+
+async function _lsAutoAssignSingle() {
+    const allAccounts = window._lsAsgAccounts || [];
+    const checkedSet = window._lsAsgChecked || new Set();
+    const exclude = allAccounts.filter(a => !checkedSet.has(a.username)).map(a => a.username);
+    const cid = window._lsAsgCid;
+    const btn = document.getElementById('lsasg-auto-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Assigning...'; }
+    try {
+        const result = await api(`/api/search/comments/${cid}/auto-assign`, { method: 'POST', body: { exclude_accounts: exclude } });
+        if (result.error) { toast(result.error, 'error'); return; }
+        toast(`Assigned to ${result.account} (score: ${result.score})`, 'success');
+        closeModal();
+        renderLsTabContent();
+    } catch(e) {
+        toast('Auto-assign failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Auto Assign (Best Score)'; }
+    }
 }
 
 async function lsDoAssign(cid, username) {

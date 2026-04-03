@@ -4186,6 +4186,7 @@ async function renderAnalytics(el) {
             <div class="tab ${analyticsTab==='brand'?'active':''}" onclick="analyticsTab='brand';renderAnalyticsTab()">Brand Performance</div>
             <div class="tab ${analyticsTab==='health'?'active':''}" onclick="analyticsTab='health';renderAnalyticsTab()">Content Health</div>
             <div class="tab ${analyticsTab==='schedule'?'active':''}" onclick="analyticsTab='schedule';renderAnalyticsTab()">Schedule</div>
+            <div class="tab ${analyticsTab==='pay'?'active':''}" onclick="analyticsTab='pay';renderAnalyticsTab()">Pay</div>
         </div>
         <div class="flex gap-3 mb-3 items-center flex-wrap">
             <select id="analytics-sub" onchange="renderAnalyticsTab()">
@@ -4211,10 +4212,9 @@ async function renderAnalyticsTab() {
     if (!container) return;
 
     // Update tab active states
+    const tabMap = { overview: 'overview', brand: 'brand', health: 'health', schedule: 'schedule', pay: 'pay' };
     document.querySelectorAll('.tab').forEach(t => {
-        t.classList.toggle('active', t.textContent.toLowerCase().includes(
-            analyticsTab === 'overview' ? 'overview' : analyticsTab === 'brand' ? 'brand' : analyticsTab === 'health' ? 'health' : 'schedule'
-        ));
+        t.classList.toggle('active', t.textContent.toLowerCase().includes(tabMap[analyticsTab] || ''));
     });
 
     container.innerHTML = '<div class="spinner"></div>';
@@ -4227,6 +4227,7 @@ async function renderAnalyticsTab() {
     else if (analyticsTab === 'brand') await renderBrandTab(container, sid);
     else if (analyticsTab === 'health') await renderHealthTab(container, sid);
     else if (analyticsTab === 'schedule') await renderScheduleTab(container, sid);
+    else if (analyticsTab === 'pay') await renderPayTab(container, sid, bid);
 }
 
 async function renderOverviewTab(container, sid, bid, dateFrom, dateTo) {
@@ -4500,6 +4501,191 @@ async function renderScheduleTab(container, sid) {
         `;
     }
     container.innerHTML = html;
+}
+
+// --- Pay Tab ---
+let _payPage = 0;
+let _payFilter = 'unpaid';
+let _payAccountFilter = '';
+
+async function renderPayTab(container, sid, bid) {
+    _payPage = 0;
+    container.innerHTML = '<div class="spinner mx-auto"></div>';
+
+    // Get accounts for filter
+    let accounts = [];
+    try { accounts = await api('/api/accounts'); } catch(e) {}
+
+    container.innerHTML = `
+        <div class="flex gap-3 mb-4 items-center flex-wrap">
+            <select id="pay-filter" onchange="_payFilter=this.value;_payPage=0;loadPayItems()" class="w-36">
+                <option value="unpaid" ${_payFilter==='unpaid'?'selected':''}>Unpaid</option>
+                <option value="paid" ${_payFilter==='paid'?'selected':''}>Paid</option>
+                <option value="" ${_payFilter===''?'selected':''}>All</option>
+            </select>
+            <select id="pay-account" onchange="_payAccountFilter=this.value;_payPage=0;loadPayItems()" class="w-40">
+                <option value="">All Accounts</option>
+                ${accounts.map(a => `<option value="${a.username}">${a.username}</option>`).join('')}
+            </select>
+            <button class="btn btn-sm btn-accent" onclick="markAllVisiblePaid()">Mark All Visible as Paid</button>
+            <span id="pay-summary" class="text-sm text-gray-400 ml-auto"></span>
+        </div>
+        <div id="pay-stats" class="mb-4"></div>
+        <div id="pay-items"></div>
+        <div id="pay-pagination" class="flex gap-2 mt-3 justify-center"></div>
+    `;
+    loadPayItems();
+}
+
+async function loadPayItems() {
+    const el = document.getElementById('pay-items');
+    const statsEl = document.getElementById('pay-stats');
+    if (!el) return;
+    el.innerHTML = '<div class="spinner mx-auto"></div>';
+
+    const sid = document.getElementById('analytics-sub')?.value || '';
+    const bid = document.getElementById('analytics-brand')?.value || '';
+    const limit = 50;
+    const offset = _payPage * limit;
+
+    let url = `/api/analytics/payments?limit=${limit}&offset=${offset}`;
+    if (sid) url += `&subreddit_id=${sid}`;
+    if (bid) url += `&brand_id=${bid}`;
+    if (_payAccountFilter) url += `&account_id=${encodeURIComponent(_payAccountFilter)}`;
+    if (_payFilter) url += `&paid_filter=${_payFilter}`;
+
+    try {
+        const data = await api(url);
+        const s = data.summary || {};
+        const items = data.items || [];
+        const total = data.total || 0;
+        const totalPages = Math.ceil(total / limit);
+
+        // Stats cards
+        statsEl.innerHTML = `
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-red-400">${s.unpaid_comments || 0}</p>
+                    <p class="text-xs text-gray-500">Unpaid Comments</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-green-400">${s.paid_comments || 0}</p>
+                    <p class="text-xs text-gray-500">Paid Comments</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-red-400">${s.unpaid_posts || 0}</p>
+                    <p class="text-xs text-gray-500">Unpaid Posts</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-green-400">${s.paid_posts || 0}</p>
+                    <p class="text-xs text-gray-500">Paid Posts</p>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-2 gap-3 mt-2">
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-red-400">${s.unpaid_search_comments || 0}</p>
+                    <p class="text-xs text-gray-500">Unpaid Search Comments</p>
+                </div>
+                <div class="stat-card p-3 text-center">
+                    <p class="text-lg font-bold text-green-400">${s.paid_search_comments || 0}</p>
+                    <p class="text-xs text-gray-500">Paid Search Comments</p>
+                </div>
+            </div>
+        `;
+
+        // Summary text
+        document.getElementById('pay-summary').textContent = `Showing ${offset+1}-${Math.min(offset+limit, total)} of ${total}`;
+
+        if (!items.length) {
+            el.innerHTML = `<p class="text-gray-500 py-4">No ${_payFilter || ''} items found.</p>`;
+        } else {
+            el.innerHTML = `
+                <table>
+                    <thead><tr>
+                        <th>Type</th><th>Post / Content</th><th>Brand</th><th>Subreddit</th>
+                        <th>Account</th><th>Deployed</th><th>Paid</th><th>Action</th>
+                    </tr></thead>
+                    <tbody>${items.map(item => {
+                        const typeLabel = item.type === 'post' ? '<span class="badge badge-brand">Post</span>'
+                            : item.type === 'search_comment' ? '<span class="badge" style="background:#1a3a2a;color:#4ade80">Search</span>'
+                            : `<span class="badge ${item.mentions_brand ? 'badge-assigned' : 'badge-draft'}">${item.mentions_brand ? 'Brand' : 'Comment'}</span>`;
+                        const content = item.type === 'post'
+                            ? (item.post_title||'').substring(0,60)
+                            : `<span class="text-gray-400 text-xs">${(item.post_title||'').substring(0,30)}</span><br>${(item.body||'').substring(0,80)}`;
+                        const paidBadge = item.paid_at
+                            ? `<span class="badge" style="background:#00A86B;color:white">${item.paid_at.substring(0,10)}</span>`
+                            : '<span class="text-red-400 text-xs">Unpaid</span>';
+                        const action = item.paid_at
+                            ? ''
+                            : `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="payItem('${item.type}',${item.id})">Pay</button>`;
+                        return `<tr>
+                            <td>${typeLabel}</td>
+                            <td style="max-width:300px">${content}</td>
+                            <td class="text-xs">${item.brand_name || '-'}</td>
+                            <td class="text-xs">${item.subreddit_name ? 'r/'+item.subreddit_name : '-'}</td>
+                            <td class="text-xs text-yellow-400">${item.account_id || '-'}</td>
+                            <td class="text-xs">${(item.deployed_at||'').substring(0,10)}</td>
+                            <td>${paidBadge}</td>
+                            <td>${action}</td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>
+            `;
+        }
+
+        // Pagination
+        const pagEl = document.getElementById('pay-pagination');
+        if (totalPages > 1) {
+            let phtml = '';
+            if (_payPage > 0) phtml += `<button class="btn btn-sm btn-secondary" onclick="_payPage--;loadPayItems()">← Prev</button>`;
+            phtml += `<span class="text-sm text-gray-400 py-1">Page ${_payPage+1} of ${totalPages}</span>`;
+            if (_payPage < totalPages - 1) phtml += `<button class="btn btn-sm btn-secondary" onclick="_payPage++;loadPayItems()">Next →</button>`;
+            pagEl.innerHTML = phtml;
+        } else {
+            pagEl.innerHTML = '';
+        }
+    } catch(e) {
+        el.innerHTML = `<p class="text-red-400">Failed to load payment data</p>`;
+    }
+}
+
+async function payItem(type, id) {
+    try {
+        if (type === 'comment') {
+            await api(`/api/comments/${id}/mark-paid`, { method: 'POST' });
+        } else if (type === 'post') {
+            await api(`/api/posts/${id}/mark-paid`, { method: 'POST' });
+        } else if (type === 'search_comment') {
+            await api(`/api/search/comments/${id}/mark-paid`, { method: 'POST' });
+        }
+        toast('Marked as paid', 'success');
+        loadPayItems();
+    } catch(e) { toast('Failed to mark paid', 'error'); }
+}
+
+async function markAllVisiblePaid() {
+    const rows = document.querySelectorAll('#pay-items table tbody tr');
+    if (!rows.length) { toast('No items to mark', 'error'); return; }
+    // Collect unpaid items from current page
+    const buttons = document.querySelectorAll('#pay-items button[onclick^="payItem"]');
+    if (!buttons.length) { toast('No unpaid items on this page', 'info'); return; }
+    if (!confirm(`Mark ${buttons.length} items as paid?`)) return;
+    let count = 0;
+    for (const btn of buttons) {
+        try {
+            const onclick = btn.getAttribute('onclick');
+            const match = onclick.match(/payItem\('(\w+)',(\d+)\)/);
+            if (match) {
+                const [, type, id] = match;
+                if (type === 'comment') await api(`/api/comments/${id}/mark-paid`, { method: 'POST' });
+                else if (type === 'post') await api(`/api/posts/${id}/mark-paid`, { method: 'POST' });
+                else if (type === 'search_comment') await api(`/api/search/comments/${id}/mark-paid`, { method: 'POST' });
+                count++;
+            }
+        } catch(e) {}
+    }
+    toast(`Marked ${count} items as paid`, 'success');
+    loadPayItems();
 }
 
 // =========================================================================

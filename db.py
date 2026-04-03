@@ -1600,6 +1600,187 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_payment_data(self, subreddit_id=None, brand_id=None, account_id=None,
+                         paid_filter=None, limit=200, offset=0):
+        """Get all deployed comments and posts with payment status.
+
+        Args:
+            subreddit_id: Filter by subreddit
+            brand_id: Filter by brand
+            account_id: Filter by account
+            paid_filter: 'paid', 'unpaid', or None (all)
+            limit: Max items to return
+            offset: Pagination offset
+
+        Returns:
+            dict with 'items' list, 'summary' stats, and 'total' count
+        """
+        # --- Summary stats (always unfiltered by paid_filter for context) ---
+        sum_where = []
+        sum_params = []
+        if subreddit_id:
+            sum_where.append("p.subreddit_id = ?")
+            sum_params.append(subreddit_id)
+        if brand_id:
+            sum_where.append("c.brand_id = ?")
+            sum_params.append(brand_id)
+        if account_id:
+            sum_where.append("c.account_id = ?")
+            sum_params.append(account_id)
+        sw = ("AND " + " AND ".join(sum_where)) if sum_where else ""
+
+        summary = dict(self.conn.execute(f"""
+            SELECT
+                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NOT NULL THEN 1 END) as paid_comments,
+                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 END) as unpaid_comments
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            WHERE c.status = 'deployed' {sw}
+        """, sum_params).fetchone())
+
+        # Posts summary
+        pw = []
+        pp = []
+        if subreddit_id:
+            pw.append("p.subreddit_id = ?")
+            pp.append(subreddit_id)
+        if brand_id:
+            pw.append("EXISTS (SELECT 1 FROM post_brands pb WHERE pb.post_id = p.id AND pb.brand_id = ?)")
+            pp.append(brand_id)
+        pw_sql = ("AND " + " AND ".join(pw)) if pw else ""
+
+        post_summary = dict(self.conn.execute(f"""
+            SELECT
+                COUNT(CASE WHEN p.status = 'published' AND p.paid_at IS NOT NULL THEN 1 END) as paid_posts,
+                COUNT(CASE WHEN p.status = 'published' AND p.paid_at IS NULL THEN 1 END) as unpaid_posts
+            FROM posts p
+            WHERE p.status = 'published' {pw_sql}
+        """, pp).fetchone())
+        summary.update(post_summary)
+
+        # Search comments summary
+        sc_where = []
+        sc_params = []
+        if brand_id:
+            sc_where.append("sc.brand_id = ?")
+            sc_params.append(brand_id)
+        if account_id:
+            sc_where.append("sc.account_id = ?")
+            sc_params.append(account_id)
+        scw = ("AND " + " AND ".join(sc_where)) if sc_where else ""
+
+        sc_summary = dict(self.conn.execute(f"""
+            SELECT
+                COUNT(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NOT NULL THEN 1 END) as paid_search_comments,
+                COUNT(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NULL THEN 1 END) as unpaid_search_comments
+            FROM search_comments sc
+            WHERE sc.status = 'deployed' {scw}
+        """, sc_params).fetchone())
+        summary.update(sc_summary)
+
+        # --- Items list (comments + posts + search_comments) with UNION ---
+        paid_clause = ""
+        if paid_filter == 'paid':
+            paid_clause = "AND paid_at IS NOT NULL"
+        elif paid_filter == 'unpaid':
+            paid_clause = "AND paid_at IS NULL"
+
+        # Build WHERE for comments
+        c_where = ["c.status = 'deployed'"]
+        c_params = []
+        if subreddit_id:
+            c_where.append("p.subreddit_id = ?")
+            c_params.append(subreddit_id)
+        if brand_id:
+            c_where.append("c.brand_id = ?")
+            c_params.append(brand_id)
+        if account_id:
+            c_where.append("c.account_id = ?")
+            c_params.append(account_id)
+        c_where_sql = " AND ".join(c_where)
+
+        # Build WHERE for posts
+        p_where = ["p.status = 'published'"]
+        p_params = []
+        if subreddit_id:
+            p_where.append("p.subreddit_id = ?")
+            p_params.append(subreddit_id)
+        if brand_id:
+            p_where.append("EXISTS (SELECT 1 FROM post_brands pb WHERE pb.post_id = p.id AND pb.brand_id = ?)")
+            p_params.append(brand_id)
+        if account_id:
+            p_where.append("p.owner_account = ?")
+            p_params.append(account_id)
+        p_where_sql = " AND ".join(p_where)
+
+        # Build WHERE for search comments
+        sc_where2 = ["sc.status = 'deployed'"]
+        sc_params2 = []
+        if brand_id:
+            sc_where2.append("sc.brand_id = ?")
+            sc_params2.append(brand_id)
+        if account_id:
+            sc_where2.append("sc.account_id = ?")
+            sc_params2.append(account_id)
+        sc_where_sql = " AND ".join(sc_where2)
+
+        query = f"""
+            SELECT 'comment' as type, c.id, c.body, c.account_id, c.deployed_at,
+                   c.paid_at, c.mentions_brand, p.title as post_title,
+                   b.name as brand_name, s.name as subreddit_name
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            LEFT JOIN brands b ON c.brand_id = b.id
+            LEFT JOIN subreddits s ON p.subreddit_id = s.id
+            WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
+
+            UNION ALL
+
+            SELECT 'post' as type, p.id, p.title as body, p.owner_account as account_id,
+                   p.deployed_at, p.paid_at, 0 as mentions_brand, p.title as post_title,
+                   GROUP_CONCAT(DISTINCT b2.name) as brand_name, s.name as subreddit_name
+            FROM posts p
+            LEFT JOIN post_brands pb ON pb.post_id = p.id
+            LEFT JOIN brands b2 ON b2.id = pb.brand_id
+            LEFT JOIN subreddits s ON p.subreddit_id = s.id
+            WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
+            GROUP BY p.id
+
+            UNION ALL
+
+            SELECT 'search_comment' as type, sc.id, sc.body, sc.account_id, sc.deployed_at,
+                   sc.paid_at, sc.mentions_brand, sp.title as post_title,
+                   b.name as brand_name, sp.subreddit as subreddit_name
+            FROM search_comments sc
+            LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+            LEFT JOIN brands b ON sc.brand_id = b.id
+            WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
+
+            ORDER BY paid_at IS NULL DESC, deployed_at DESC
+            LIMIT ? OFFSET ?
+        """
+        all_params = c_params + p_params + sc_params2 + [limit, offset]
+        rows = self.conn.execute(query, all_params).fetchall()
+        items = [dict(r) for r in rows]
+
+        # Total count for pagination
+        count_query = f"""
+            SELECT (
+                SELECT COUNT(*) FROM comments c JOIN posts p ON c.post_id = p.id
+                WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
+            ) + (
+                SELECT COUNT(*) FROM posts p
+                WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
+            ) + (
+                SELECT COUNT(*) FROM search_comments sc
+                WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
+            ) as total
+        """
+        count_params = c_params + p_params + sc_params2
+        total = self.conn.execute(count_query, count_params).fetchone()[0]
+
+        return {"items": items, "summary": summary, "total": total}
+
     # --- Calendar Events ---
 
     def get_calendar_events(self, date_from=None, date_to=None, brand_id=None,

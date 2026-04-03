@@ -2094,6 +2094,23 @@ def api_due_payments():
         db.close()
 
 
+@app.route("/api/analytics/payments")
+def api_analytics_payments():
+    """Get deployed items with payment status, filterable."""
+    db = get_db()
+    try:
+        return jsonify(db.get_payment_data(
+            subreddit_id=request.args.get("subreddit_id", type=int),
+            brand_id=request.args.get("brand_id", type=int),
+            account_id=request.args.get("account_id") or None,
+            paid_filter=request.args.get("paid_filter") or None,
+            limit=request.args.get("limit", 100, type=int),
+            offset=request.args.get("offset", 0, type=int),
+        ))
+    finally:
+        db.close()
+
+
 @app.route("/api/search/brands")
 def api_search_brands():
     """List all brands (including standalone) for the search feature."""

@@ -94,32 +94,32 @@ def score_account(account, comment, lookups, batch_picks):
 
     # =====================================================================
     # HEAVY penalties — activity & load (these decide assignment)
+    # Goal: guarantee max participation / round-robin behavior.
+    # Each penalty must exceed the max bonus gap between accounts (~53 pts)
+    # so that ANY fresh account always beats ANY account with 1+ assignment.
     # =====================================================================
 
-    # --- Subreddit cooldown: -25 per assignment in same sub within ±2 days ---
+    # --- Subreddit cooldown: -40 per assignment in same sub within ±2 days ---
     comment_day = comment.get("suggested_post_day", 0) or 0
     sub_day = lookups["sub_day"]
     for day_offset in range(-2, 3):
-        score -= 25 * sub_day[username].get(comment_day + day_offset, 0)
+        score -= 40 * sub_day[username].get(comment_day + day_offset, 0)
 
-    # --- Load balancing: -40 per pending assignment globally ---
-    score -= 40 * lookups["pending"].get(username, 0)
+    # --- Load balancing: -55 per pending assignment globally ---
+    score -= 55 * lookups["pending"].get(username, 0)
 
-    # --- Global deployed footprint: -10 per deployed comment ---
-    # This is the KEY fix: old system was -3, so a high-karma account
-    # needed 12 deployments to offset its karma bonus. Now 2-3 is enough.
+    # --- Global deployed footprint: -30 per deployed comment ---
+    # 2 deployments = -60, guaranteed behind any fresh account
     deployed_count = lookups["deployed"].get(username, 0)
-    score -= 10 * deployed_count
+    score -= 30 * deployed_count
 
-    # --- Post ownership load: -12 per post owned ---
-    score -= 12 * lookups["post_ownership"].get(username, 0)
+    # --- Post ownership load: -55 per post owned ---
+    # 1 post owned = guaranteed behind any fresh account
+    score -= 55 * lookups["post_ownership"].get(username, 0)
 
-    # --- Batch spread: progressive penalty ---
+    # --- Batch spread: -55 per pick (flat, no reuse before all accounts used) ---
     picks = batch_picks.get(username, 0)
-    if picks <= 2:
-        score -= 20 * picks
-    else:
-        score -= 20 * 2 + 35 * (picks - 2)
+    score -= 55 * picks
 
     # =====================================================================
     # LIGHT bonuses — credibility signals (only break ties)

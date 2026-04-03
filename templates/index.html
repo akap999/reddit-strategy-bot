@@ -147,12 +147,13 @@ async function api(url, opts = {}) {
 // =========================================================================
 // Toast
 // =========================================================================
-function toast(msg, type = 'info') {
+function toast(msg, type = 'info', duration = 3500) {
     const el = document.createElement('div');
     el.className = `toast toast-${type}`;
+    el.style.whiteSpace = 'pre-line';
     el.textContent = msg;
     document.getElementById('toasts').appendChild(el);
-    setTimeout(() => el.remove(), 3500);
+    setTimeout(() => el.remove(), duration);
 }
 
 // =========================================================================
@@ -2951,9 +2952,20 @@ async function submitAutoAssign() {
         const r = result.results[0];
         if (r.error) { toast(r.error, 'error'); return; }
 
+        // Build per-account breakdown with references
+        const refLookup = {};
+        (window._autoAssignAccounts || []).forEach(a => { refLookup[a.username] = a.reference || ''; });
+        const acctCounts = {};
+        (r.assignments || []).forEach(a => { acctCounts[a.account] = (acctCounts[a.account] || 0) + 1; });
+
         let msg = `Assigned ${r.assigned} comments`;
         if (r.skipped) msg += `, ${r.skipped} skipped`;
-        toast(msg, 'success');
+        const breakdown = Object.entries(acctCounts).map(([u, cnt]) => {
+            const ref = refLookup[u] ? ` (${refLookup[u]})` : '';
+            return `${u}${ref}: ${cnt}`;
+        }).join(' | ');
+        if (breakdown) msg += `\n${breakdown}`;
+        toast(msg, 'success', 8000);
 
         if (r.warnings && r.warnings.length) {
             r.warnings.forEach(w => toast(w, 'warning'));
@@ -2991,7 +3003,26 @@ async function autoAssignAllComments() {
         if (result.error) { toast(result.error, 'error'); return; }
         const total = result.results.reduce((s, r) => s + (r.assigned || 0), 0);
         const skipped = result.results.filter(r => r.error).length;
-        toast(`Assigned ${total} comments across ${result.results.length - skipped} posts`, 'success');
+
+        // Aggregate per-account breakdown across all posts
+        const acctCounts = {};
+        result.results.forEach(r => {
+            (r.assignments || []).forEach(a => { acctCounts[a.account] = (acctCounts[a.account] || 0) + 1; });
+        });
+        // Fetch account references
+        let refLookup = {};
+        try {
+            const accounts = await api('/api/accounts/assignment-status');
+            accounts.forEach(a => { refLookup[a.username] = a.reference || ''; });
+        } catch(e) {}
+        const breakdown = Object.entries(acctCounts).map(([u, cnt]) => {
+            const ref = refLookup[u] ? ` (${refLookup[u]})` : '';
+            return `${u}${ref}: ${cnt}`;
+        }).join(' | ');
+
+        let msg = `Assigned ${total} comments across ${result.results.length - skipped} posts`;
+        if (breakdown) msg += `\n${breakdown}`;
+        toast(msg, 'success', 8000);
         loadCommentTree();
     } catch(e) { toast('Failed to auto-assign', 'error'); }
 }
@@ -3053,25 +3084,27 @@ async function undeployComment(cid) {
     else loadManagedComments();
 }
 
-function copyCommentMessage(cid) {
-    // Find comment in the loaded tree (recursive search)
-    function findInTree(nodes) {
-        for (const n of nodes) {
-            if (n.id === cid) return n;
-            if (n.replies) { const found = findInTree(n.replies); if (found) return found; }
+async function copyCommentMessage(cid) {
+    const c = await api(`/api/comments/${cid}`);
+    if (!c) { toast('Comment not found', 'error'); return; }
+    const mentionType = c.mentions_brand ? 'Brand Mention' : 'General';
+    const replyType = c.is_reply ? 'Reply' : 'Direct';
+
+    let link = '';
+    let linkLabel = 'Post Link';
+    if (c.is_reply && c.parent_comment_id) {
+        // For replies, fetch parent comment to get its deployed Reddit URL
+        const parent = await api(`/api/comments/${c.parent_comment_id}`);
+        if (parent && parent.reddit_comment_url) {
+            link = parent.reddit_comment_url;
         }
-        return null;
+        linkLabel = 'Reply to Comment Link';
+    } else {
+        link = _ctPostRedditUrl || '';
     }
-    const container = document.getElementById('comment-tree');
-    // Re-fetch from API for simplicity
-    api(`/api/comments/${cid}`).then(c => {
-        if (!c) { toast('Comment not found', 'error'); return; }
-        const mentionType = c.mentions_brand ? 'Brand Mention' : 'General';
-        const replyType = c.is_reply ? 'Reply' : 'Direct';
-        const link = _ctPostRedditUrl || '';
-        const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${c.account_id || ''}\n\nPost/Comment Link - \n${link}\n\n Comment (${replyType}) - \n${c.body || ''}\n\nPlease share the comment link :)`;
-        navigator.clipboard.writeText(message).then(() => toast('Message copied to clipboard', 'success'));
-    });
+
+    const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${c.account_id || ''}\n\n${linkLabel} - \n${link}\n\n Comment (${replyType}) - \n${c.body || ''}\n\nPlease share the comment link :)`;
+    navigator.clipboard.writeText(message).then(() => toast('Message copied to clipboard', 'success'));
 }
 
 function editComment(cid) {

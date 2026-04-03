@@ -83,18 +83,74 @@ def _get_post_toplevel_accounts(db, post_id):
 # ---------------------------------------------------------------------------
 
 def score_account(account, comment, lookups, batch_picks):
-    """Score an (account, comment) pair. Higher = better fit."""
+    """Score an (account, comment) pair. Higher = better fit.
+
+    Design principle: ACTIVITY-BASED penalties dominate.
+    Karma/age are only tiebreakers — they should never override
+    the fact that an account just posted or was recently assigned.
+    """
     username = account["username"]
     score = 100
 
-    # --- Subreddit cooldown: -20 per assignment in same sub within ±2 days ---
+    # =====================================================================
+    # HEAVY penalties — activity & load (these decide assignment)
+    # =====================================================================
+
+    # --- Subreddit cooldown: -25 per assignment in same sub within ±2 days ---
     comment_day = comment.get("suggested_post_day", 0) or 0
     sub_day = lookups["sub_day"]
     for day_offset in range(-2, 3):
-        score -= 20 * sub_day[username].get(comment_day + day_offset, 0)
+        score -= 25 * sub_day[username].get(comment_day + day_offset, 0)
 
-    # --- Load balancing: -30 per pending assignment globally ---
-    score -= 30 * lookups["pending"].get(username, 0)
+    # --- Load balancing: -40 per pending assignment globally ---
+    score -= 40 * lookups["pending"].get(username, 0)
+
+    # --- Global deployed footprint: -10 per deployed comment ---
+    # This is the KEY fix: old system was -3, so a high-karma account
+    # needed 12 deployments to offset its karma bonus. Now 2-3 is enough.
+    deployed_count = lookups["deployed"].get(username, 0)
+    score -= 10 * deployed_count
+
+    # --- Post ownership load: -12 per post owned ---
+    score -= 12 * lookups["post_ownership"].get(username, 0)
+
+    # --- Batch spread: progressive penalty ---
+    picks = batch_picks.get(username, 0)
+    if picks <= 2:
+        score -= 20 * picks
+    else:
+        score -= 20 * 2 + 35 * (picks - 2)
+
+    # =====================================================================
+    # LIGHT bonuses — credibility signals (only break ties)
+    # =====================================================================
+
+    # --- Karma bonus: +2 per 1000 karma, capped at +10 ---
+    # (was +5/1000 capped at +35 — way too dominant)
+    total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
+    score += min(10, 2 * (total_karma // 1000))
+
+    # --- Low karma penalty: -10 if total < 500 ---
+    if total_karma < 500:
+        score -= 10
+
+    # --- Account age: only penalize very new, minimal bonus for old ---
+    created = account.get("created_utc")
+    if created:
+        age_days = (time.time() - created) / 86400
+        if age_days < 30:
+            score -= 15   # Very new — suspicious
+        elif age_days < 90:
+            score -= 5    # Still building credibility
+        # No bonus for old accounts — age should not be an advantage
+
+    # --- Subreddit familiarity: +5 if account has history here ---
+    # (was +15 — too strong, made veterans always win)
+    if username in lookups["veterans"]:
+        score += 5
+
+    # --- Subreddit spread bonus: +2 per distinct sub active in (max +8) ---
+    score += min(8, 2 * lookups["sub_spread"].get(username, 0))
 
     # --- Brand skew: proportional penalty starting at 35% concentration ---
     brand_id = comment.get("brand_id")
@@ -105,51 +161,8 @@ def score_account(account, comment, lookups, batch_picks):
             if ratio > 0.35:
                 score -= int(50 * (ratio - 0.35))
 
-    # --- Batch spread: progressive penalty ---
-    picks = batch_picks.get(username, 0)
-    if picks <= 2:
-        score -= 15 * picks
-    else:
-        score -= 15 * 2 + 30 * (picks - 2)  # -30 for first 2, then -30 per additional
-
-    # --- Subreddit familiarity: +15 if account has history here ---
-    if username in lookups["veterans"]:
-        score += 15
-
-    # --- Karma bonus: +5 per 1000 karma, capped at +35 ---
-    total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(35, 5 * (total_karma // 1000))
-
-    # --- Low karma penalty: -15 if total < 500 ---
-    if total_karma < 500:
-        score -= 15
-
-    # --- Global deployed footprint: -3 per deployed comment (spreads load) ---
-    deployed_count = lookups["deployed"].get(username, 0)
-    score -= 3 * deployed_count
-
-    # --- Post ownership load: -5 per post owned (more exposed = more risk) ---
-    score -= 5 * lookups["post_ownership"].get(username, 0)
-
-    # --- Subreddit spread bonus: +3 per distinct sub active in (max +15) ---
-    # More spread = looks more natural
-    score += min(15, 3 * lookups["sub_spread"].get(username, 0))
-
-    # --- Account age: graduated bonus/penalty ---
-    created = account.get("created_utc")
-    if created:
-        age_days = (time.time() - created) / 86400
-        if age_days < 30:
-            score -= 20   # Very new — suspicious
-        elif age_days < 90:
-            score -= 10   # Still building credibility
-        elif age_days > 365:
-            score += 5    # Established
-        elif age_days > 180:
-            score += 3    # Moderately established
-
-    # --- Tiebreaker: small random jitter to avoid deterministic ties ---
-    score += random.randint(0, 3)
+    # --- Tiebreaker: small random jitter ---
+    score += random.randint(0, 5)
 
     return score
 
@@ -179,53 +192,58 @@ def _build_post_lookups(context):
 
 
 def score_account_for_post(account, lookups, batch_picks, sub_owner):
+    """Score an account for post ownership. Activity penalties dominate."""
     username = account["username"]
     score = 100
 
-    # --- Subreddit post concentration: -35 per post in this sub ---
-    score -= 35 * lookups["sub_posts"].get(username, 0)
+    # =====================================================================
+    # HEAVY penalties — activity & load
+    # =====================================================================
 
-    # --- Global post load: -15 per post across all subs ---
-    score -= 15 * lookups["global_posts"].get(username, 0)
+    # --- Subreddit post concentration: -40 per post in this sub ---
+    score -= 40 * lookups["sub_posts"].get(username, 0)
+
+    # --- Global post load: -20 per post across all subs ---
+    score -= 20 * lookups["global_posts"].get(username, 0)
 
     # --- Batch spread: progressive ---
     picks = batch_picks.get(username, 0)
     if picks <= 2:
-        score -= 20 * picks
+        score -= 25 * picks
     else:
-        score -= 20 * 2 + 35 * (picks - 2)
+        score -= 25 * 2 + 40 * (picks - 2)
 
-    # --- Subreddit activity: +15 if account has comments here ---
+    # =====================================================================
+    # LIGHT bonuses — tiebreakers only
+    # =====================================================================
+
+    # --- Subreddit activity: +5 if account has comments here ---
     if lookups["sub_comments"].get(username, 0) > 0:
-        score += 15
+        score += 5
 
-    # --- Subreddit owner bonus: +20 ---
+    # --- Subreddit owner bonus: +10 ---
     if username == sub_owner:
-        score += 20
+        score += 10
 
-    # --- Karma bonus: +5 per 1000, capped at +35 ---
+    # --- Karma bonus: +2 per 1000, capped at +10 ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(35, 5 * (total_karma // 1000))
+    score += min(10, 2 * (total_karma // 1000))
 
     # --- Low karma penalty ---
     if total_karma < 500:
-        score -= 15
+        score -= 10
 
-    # --- Account age: graduated ---
+    # --- Account age: only penalize very new ---
     created = account.get("created_utc")
     if created:
         age_days = (time.time() - created) / 86400
         if age_days < 30:
-            score -= 20
+            score -= 15
         elif age_days < 90:
-            score -= 10
-        elif age_days > 365:
-            score += 5
-        elif age_days > 180:
-            score += 3
+            score -= 5
 
     # --- Tiebreaker ---
-    score += random.randint(0, 3)
+    score += random.randint(0, 5)
 
     return score
 

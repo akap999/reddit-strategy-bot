@@ -1651,7 +1651,7 @@ async function loadPosts() {
 
     container.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th>Comments</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Deployed: Brand + Non-Brand / Total generated">Comments (B+NB/Total)</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => `
                 <tr>
                     <td>${p.suggested_post_day}</td>
@@ -1662,7 +1662,12 @@ async function loadPosts() {
                     <td>${p.ai_query_score || '-'}</td>
                     <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
-                    <td>${p.comment_count || 0}</td>
+                    <td class="text-xs">
+                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand | Assigned: ${p.assigned_brand||0} brand + ${p.assigned_non_brand||0} non-brand | Total generated: ${p.total_comments||0}">
+                            <span style="color:#FF8b60">${p.deployed_brand||0}B</span>+<span style="color:#818384">${p.deployed_non_brand||0}NB</span>
+                            <span class="text-gray-600">/ ${p.total_comments||0}</span>
+                        </span>
+                    </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}`}

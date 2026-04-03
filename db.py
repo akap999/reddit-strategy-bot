@@ -310,9 +310,15 @@ class Database:
 
     def get_posts_with_details(self, subreddit_id, brand_id=None, limit=200, include_filler=True):
         """Get posts with comment counts, reddit_url, and brand names in a single query."""
-        if brand_id is not None:
-            query = """SELECT p.*,
+        comment_counts = """
+                       COUNT(DISTINCT CASE WHEN c.status != 'deleted' THEN c.id END) as total_comments,
                        COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed') AND c.mentions_brand = 1 THEN c.id END) as assigned_brand,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN c.id END) as deployed_brand,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed') AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as assigned_non_brand,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as deployed_non_brand,"""
+        if brand_id is not None:
+            query = f"""SELECT p.*,{comment_counts}
                        pu.reddit_url,
                        GROUP_CONCAT(DISTINCT b2.name) as brand_names,
                        GROUP_CONCAT(DISTINCT b2.id || ':' || b2.name) as brand_info
@@ -325,8 +331,7 @@ class Database:
                 WHERE p.subreddit_id = ?"""
             params = [brand_id, subreddit_id]
         else:
-            query = """SELECT p.*,
-                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
+            query = f"""SELECT p.*,{comment_counts}
                        pu.reddit_url,
                        GROUP_CONCAT(DISTINCT b2.name) as brand_names,
                        GROUP_CONCAT(DISTINCT b2.id || ':' || b2.name) as brand_info

@@ -10,6 +10,7 @@ Hard rules (never violated):
 Soft scoring picks the best account among those that pass the hard rules.
 """
 
+import hashlib
 import time
 import random
 from collections import defaultdict
@@ -162,8 +163,8 @@ def score_account(account, comment, lookups, batch_picks):
                 score -= int(50 * (ratio - 0.35))
 
     # --- Tiebreaker: deterministic jitter based on username ---
-    # Ensures consistent assignment when scores are equal (no randomness)
-    score += hash(username) % 6
+    # Uses md5 (not hash()) because Python's hash() is randomized per process
+    score += int(hashlib.md5(username.encode()).hexdigest(), 16) % 6
 
     return score
 

@@ -1301,33 +1301,54 @@ class Database:
     def get_brand_subreddit_stats(self, brand_name, date_from=None, date_to=None):
         """Get per-subreddit stats for a brand: total comments, deployed, ours, brand mentions.
 
+        Includes both regular comments and search_comments.
         Returns list of dicts: subreddit_id, subreddit_name, total, deployed, ours, mentions_brand, deleted.
         """
-        date_clause = ""
-        params = [brand_name]
+        date_clause_reg = ""
+        date_clause_sc = ""
+        p1 = [brand_name]
+        p2 = [brand_name]
         if date_from:
-            date_clause += " AND c.created_at >= ?"
-            params.append(date_from)
+            date_clause_reg += " AND c.created_at >= ?"
+            date_clause_sc += " AND sc.created_at >= ?"
+            p1.append(date_from)
+            p2.append(date_from)
         if date_to:
-            date_clause += " AND c.created_at <= ?"
-            params.append(date_to + " 23:59:59")
+            date_clause_reg += " AND c.created_at <= ?"
+            date_clause_sc += " AND sc.created_at <= ?"
+            p1.append(date_to + " 23:59:59")
+            p2.append(date_to + " 23:59:59")
 
-        query = f"""SELECT s.id as subreddit_id, s.name as subreddit_name,
+        # Regular comments
+        q1 = f"""SELECT s.id as subreddit_id, s.name as subreddit_name,
+                        c.status, c.is_ours, c.mentions_brand
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 JOIN brands b ON c.brand_id = b.id
+                 JOIN subreddits s ON p.subreddit_id = s.id
+                 WHERE LOWER(b.name) = LOWER(?) {date_clause_reg}"""
+
+        # Search comments (use subreddit name from search_posts)
+        q2 = f"""SELECT NULL as subreddit_id, sp.subreddit as subreddit_name,
+                        sc.status, 1 as is_ours, sc.mentions_brand
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 JOIN brands b2 ON sc.brand_id = b2.id
+                 WHERE LOWER(b2.name) = LOWER(?) {date_clause_sc}"""
+
+        combined = f"{q1} UNION ALL {q2}"
+        query = f"""SELECT subreddit_id, subreddit_name,
                           COUNT(*) as total,
-                          SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
-                          SUM(CASE WHEN c.is_ours = 1 THEN 1 ELSE 0 END) as ours,
-                          SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
-                          SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                          SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
-                          SUM(CASE WHEN c.status = 'complete' THEN 1 ELSE 0 END) as complete
-                   FROM comments c
-                   JOIN posts p ON c.post_id = p.id
-                   JOIN brands b ON c.brand_id = b.id
-                   JOIN subreddits s ON p.subreddit_id = s.id
-                   WHERE LOWER(b.name) = LOWER(?) {date_clause}
-                   GROUP BY s.id, s.name
+                          SUM(CASE WHEN status = 'deployed' THEN 1 ELSE 0 END) as deployed,
+                          SUM(CASE WHEN is_ours = 1 THEN 1 ELSE 0 END) as ours,
+                          SUM(CASE WHEN mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
+                          SUM(CASE WHEN status = 'deleted' THEN 1 ELSE 0 END) as deleted,
+                          SUM(CASE WHEN status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
+                          SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete
+                   FROM ({combined})
+                   GROUP BY subreddit_name
                    ORDER BY total DESC"""
-        rows = self.conn.execute(query, params).fetchall()
+        rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_unique_brand_names(self):
@@ -1345,31 +1366,48 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_brand_overview_stats(self, brand_name, date_from=None, date_to=None):
-        """Get aggregate stats for a brand across all subreddits."""
-        date_clause = ""
-        params = [brand_name]
+        """Get aggregate stats for a brand across all subreddits (regular + search comments)."""
+        date_clause_reg = ""
+        date_clause_sc = ""
+        p1 = [brand_name]
+        p2 = [brand_name]
         if date_from:
-            date_clause += " AND c.created_at >= ?"
-            params.append(date_from)
+            date_clause_reg += " AND c.created_at >= ?"
+            date_clause_sc += " AND sc.created_at >= ?"
+            p1.append(date_from)
+            p2.append(date_from)
         if date_to:
-            date_clause += " AND c.created_at <= ?"
-            params.append(date_to + " 23:59:59")
+            date_clause_reg += " AND c.created_at <= ?"
+            date_clause_sc += " AND sc.created_at <= ?"
+            p1.append(date_to + " 23:59:59")
+            p2.append(date_to + " 23:59:59")
 
+        # Regular comments
+        q1 = f"""SELECT c.status, c.is_ours, c.mentions_brand, p.id as post_id, p.subreddit_id
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 JOIN brands b ON c.brand_id = b.id
+                 WHERE LOWER(b.name) = LOWER(?) {date_clause_reg}"""
+
+        # Search comments
+        q2 = f"""SELECT sc.status, 1 as is_ours, sc.mentions_brand, sc.search_post_id as post_id, NULL as subreddit_id
+                 FROM search_comments sc
+                 JOIN brands b2 ON sc.brand_id = b2.id
+                 WHERE LOWER(b2.name) = LOWER(?) {date_clause_sc}"""
+
+        combined = f"SELECT * FROM ({q1} UNION ALL {q2}) combined"
         row = self.conn.execute(
             f"""SELECT COUNT(*) as total_comments,
-                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
-                       SUM(CASE WHEN c.is_ours = 1 THEN 1 ELSE 0 END) as ours,
-                       SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
-                       SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                       SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
-                       SUM(CASE WHEN c.status = 'complete' THEN 1 ELSE 0 END) as complete,
-                       COUNT(DISTINCT p.id) as total_posts,
-                       COUNT(DISTINCT p.subreddit_id) as num_subreddits
-                FROM comments c
-                JOIN posts p ON c.post_id = p.id
-                JOIN brands b ON c.brand_id = b.id
-                WHERE LOWER(b.name) = LOWER(?) {date_clause}""",
-            params,
+                       SUM(CASE WHEN status = 'deployed' THEN 1 ELSE 0 END) as deployed,
+                       SUM(CASE WHEN is_ours = 1 THEN 1 ELSE 0 END) as ours,
+                       SUM(CASE WHEN mentions_brand = 1 THEN 1 ELSE 0 END) as mentions_brand,
+                       SUM(CASE WHEN status = 'deleted' THEN 1 ELSE 0 END) as deleted,
+                       SUM(CASE WHEN status IN ('assigned','informed') THEN 1 ELSE 0 END) as assigned,
+                       SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete,
+                       COUNT(DISTINCT post_id) as total_posts,
+                       COUNT(DISTINCT subreddit_id) as num_subreddits
+                FROM ({combined})""",
+            p1 + p2,
         ).fetchone()
         return dict(row) if row else {}
 

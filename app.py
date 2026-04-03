@@ -2038,6 +2038,170 @@ def api_generate_search_comments(pid):
     return jsonify({"task_id": tid})
 
 
+@app.route("/api/search/posts/generate-batch", methods=["POST"])
+def api_generate_search_comments_batch():
+    """Generate comments for multiple search posts sequentially in one background task."""
+    from generate.comment_generator import CommentGeneratorBot
+    data = request.json or {}
+    post_ids = data.get("post_ids", [])
+    num_comments = data.get("num_comments", 2)
+
+    if not post_ids:
+        return jsonify({"error": "No post_ids provided"}), 400
+
+    # Validate all posts upfront
+    db_check = get_db()
+    valid_posts = []
+    for pid in post_ids:
+        post = db_check.get_search_post(pid)
+        if not post:
+            continue
+        if post.get("status") == "generating":
+            continue
+        brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
+        if not brand:
+            continue
+        valid_posts.append({
+            "pid": pid, "post": post,
+            "brand_name": brand["name"],
+            "brand_context": brand["context"],
+            "brand_keywords": json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+        })
+    db_check.close()
+
+    if not valid_posts:
+        return jsonify({"error": "No eligible posts to generate for"}), 400
+
+    def task():
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        bot = CommentGeneratorBot(api_key, reddit_base=proxy.rstrip("/") if proxy else None)
+
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        results = []
+        try:
+            for i, vp in enumerate(valid_posts):
+                pid = vp["pid"]
+                post = vp["post"]
+                brand_name = vp["brand_name"]
+                brand_context = vp["brand_context"]
+                brand_keywords = vp["brand_keywords"]
+
+                # Update progress
+                progress_db = Database(DB_PATH)
+                progress_db.connect()
+                # We don't have a progress field, so store partial result
+                progress_db.close()
+
+                try:
+                    db2.update_search_post_status(pid, "generating")
+
+                    comments, post_body, is_archived = bot.fetch_comments(post["reddit_url"], limit=20)
+                    if is_archived:
+                        db2.update_search_post_status(pid, "saved")
+                        results.append({"pid": pid, "skipped": True, "reason": "Post is archived"})
+                        continue
+                    if len(comments) < 1:
+                        db2.update_search_post_status(pid, "saved")
+                        results.append({"pid": pid, "skipped": True, "reason": "No comments found"})
+                        continue
+
+                    comment_stats = bot._compute_comment_stats(comments)
+
+                    relevance = bot.check_relevance(
+                        post["title"], post_body, post["subreddit"],
+                        comments, brand_name, brand_context, brand_keywords
+                    )
+                    rel_score = relevance.get("score", 0)
+
+                    threshold = data.get("relevance_threshold", 6)
+                    if rel_score < threshold:
+                        db2.update_search_post_status(pid, "saved")
+                        results.append({"pid": pid, "skipped": True, "reason": f"Low relevance ({rel_score})"})
+                        continue
+
+                    tone_analysis = bot.analyze_tone(
+                        post["title"], post_body, post["subreddit"],
+                        comments, comment_stats
+                    )
+
+                    reply_targets = {}
+                    if num_comments >= 3:
+                        reply_target = bot._select_reply_target(comments, post["title"], brand_name, relevance)
+                        if reply_target:
+                            reply_targets[2] = reply_target
+
+                    generation = bot.generate_comments(
+                        post["title"], post_body, post["subreddit"],
+                        comments, brand_name, brand_context,
+                        num_comments=num_comments,
+                        tone_analysis=tone_analysis,
+                        comment_stats=comment_stats,
+                        relevance=relevance,
+                        reply_targets=reply_targets
+                    )
+
+                    generated = generation.get("generated_comments", [])
+                    if not generated:
+                        db2.update_search_post_status(pid, "saved")
+                        results.append({"pid": pid, "error": "Generation failed"})
+                        continue
+
+                    # Brand mention enforcement retry
+                    missing = [j+1 for j, c in enumerate(generated) if brand_name.lower() not in c.lower()]
+                    if missing:
+                        feedback = f"Comment(s) {missing} don't mention '{brand_name}'. Naturally weave in a mention."
+                        retry_gen = bot.generate_comments(
+                            post["title"], post_body, post["subreddit"],
+                            comments, brand_name, brand_context,
+                            num_comments=num_comments,
+                            tone_analysis=tone_analysis,
+                            comment_stats=comment_stats,
+                            retry_feedback=feedback,
+                            relevance=relevance,
+                            reply_targets=reply_targets
+                        )
+                        retry_comments = retry_gen.get("generated_comments", [])
+                        if retry_comments:
+                            retry_missing = [j for j, c in enumerate(retry_comments) if brand_name.lower() not in c.lower()]
+                            if len(retry_missing) < len(missing):
+                                generated = retry_comments
+                                generation = retry_gen
+
+                    stored = []
+                    for idx, body in enumerate(generated):
+                        is_reply = 1 if idx == 2 and reply_targets.get(2) else 0
+                        reply_url = None
+                        if is_reply and reply_targets.get(2):
+                            rt = reply_targets[2]
+                            reply_url = f"https://www.reddit.com{rt.get('permalink', '')}" if rt.get('permalink') else None
+                        mentions = 1 if brand_name.lower() in body.lower() else 0
+                        cid = db2.add_search_comment(
+                            search_post_id=pid, body=body, brand_id=post.get("brand_id"),
+                            persona_id=generation.get("config", {}).get(f"persona_{idx+1}"),
+                            is_reply=is_reply, reply_to_url=reply_url,
+                            mentions_brand=mentions, relevance_score=rel_score
+                        )
+                        stored.append({"id": cid, "body": body[:100]})
+
+                    db2.update_search_post_status(pid, "complete")
+                    results.append({"pid": pid, "generated": len(stored), "relevance_score": rel_score})
+
+                except Exception as e:
+                    db2.update_search_post_status(pid, "saved")
+                    results.append({"pid": pid, "error": str(e)})
+                    print(f"[BATCH GEN ERROR] post {pid}: {e}", flush=True)
+
+            return {"total": len(valid_posts), "results": results}
+        finally:
+            db2.close()
+
+    tid = start_task("generate-search-comments-batch", task)
+    return jsonify({"task_id": tid, "post_count": len(valid_posts)})
+
+
 @app.route("/api/search/comments")
 def api_list_search_comments():
     db = get_db()

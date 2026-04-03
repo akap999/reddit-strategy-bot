@@ -5317,14 +5317,11 @@ async function lsSaveAndGenerateAll() {
         const eligible = saved.filter(p => savedUrls.has(p.reddit_url) && p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
         if (!eligible.length) { toast('No new posts to generate for (may already be complete or excluded)', 'info'); _lsTab = 'saved'; renderLsTabContent(); return; }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-        toast(`Starting generation for ${eligible.length} posts...`, 'info');
-        for (const p of eligible) {
-            try {
-                const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
-                _addBgTask(task_id, `Gen: ${(p.title||'').substring(0,20)}`);
-            } catch(e) {}
-        }
-        toast('All generation tasks started', 'success');
+        toast(`Starting sequential generation for ${eligible.length} posts...`, 'info');
+        try {
+            const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: eligible.map(p => p.id), num_comments: numComments } });
+            _addBgTask(task_id, `Gen: ${post_count} posts`);
+        } catch(e) { toast('Generation failed to start', 'error'); }
     } catch(e) { toast('Generation failed to start', 'error'); }
     _lsTab = 'saved';
     renderLsTabContent();
@@ -5440,15 +5437,11 @@ async function lsGenerateSelected() {
     const skipped = allIds.length - eligible.length;
     if (!eligible.length) { toast('All selected posts are in excluded subreddits', 'error'); return; }
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast(`Generating for ${eligible.length} posts${skipped ? ` (${skipped} excluded)` : ''}...`, 'info');
-    for (const id of eligible) {
-        try {
-            const p = _lsSavedPosts.find(sp => sp.id === id);
-            const { task_id } = await api(`/api/search/posts/${id}/generate`, { method: 'POST', body: { num_comments: numComments } });
-            _addBgTask(task_id, `Gen: ${(p?.title||'').substring(0,20)}`);
-        } catch(e) {}
-    }
-    toast('Generation tasks started', 'success');
+    toast(`Starting sequential generation for ${eligible.length} posts${skipped ? ` (${skipped} excluded)` : ''}...`, 'info');
+    try {
+        const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: eligible, num_comments: numComments } });
+        _addBgTask(task_id, `Gen: ${post_count} posts`);
+    } catch(e) { toast('Generation failed to start', 'error'); }
     renderLsTabContent();
 }
 
@@ -5458,14 +5451,11 @@ async function lsGenerateAll() {
     if (!filtered.length) { toast('No eligible posts (must have brand, not already generating/complete, not excluded)', 'error'); return; }
     if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast(`Starting generation for ${filtered.length} posts...`, 'info');
-    for (const p of filtered) {
-        try {
-            const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
-            _addBgTask(task_id, `Gen: ${(p.title||'').substring(0,20)}`);
-        } catch(e) {}
-    }
-    toast('All generation tasks started', 'success');
+    toast(`Starting sequential generation for ${filtered.length} posts...`, 'info');
+    try {
+        const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: filtered.map(p => p.id), num_comments: numComments } });
+        _addBgTask(task_id, `Gen: ${post_count} posts`);
+    } catch(e) { toast('Generation failed to start', 'error'); }
     renderLsTabContent();
 }
 

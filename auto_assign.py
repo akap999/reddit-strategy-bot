@@ -12,7 +12,6 @@ Soft scoring picks the best account among those that pass the hard rules.
 
 import hashlib
 import time
-import random
 from collections import defaultdict
 
 
@@ -762,6 +761,8 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             # Update tracking
             batch_picks[username] += 1
             lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
+            comment_day = comment.get("suggested_post_day", 0) or 0
+            lookups["sub_day"][username][comment_day] += 1
             if not is_reply:
                 blocked.add(username)
 

@@ -161,8 +161,9 @@ def score_account(account, comment, lookups, batch_picks):
             if ratio > 0.35:
                 score -= int(50 * (ratio - 0.35))
 
-    # --- Tiebreaker: small random jitter ---
-    score += random.randint(0, 5)
+    # --- Tiebreaker: deterministic jitter based on username ---
+    # Ensures consistent assignment when scores are equal (no randomness)
+    score += hash(username) % 6
 
     return score
 

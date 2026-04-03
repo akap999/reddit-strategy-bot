@@ -1467,6 +1467,7 @@ class Database:
                FROM comments c JOIN posts p ON c.post_id = p.id
                WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
                  AND c.status IN ('assigned','informed','deployed')
+                 AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
                GROUP BY c.account_id, c.suggested_post_day""",
             (sub_id,)
         ).fetchall()]

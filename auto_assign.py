@@ -2,15 +2,16 @@
 Auto-assignment of Reddit accounts to draft comments.
 
 Hard rules (never violated):
-  1. Reply comments (is_reply=1) → SAME account as their parent comment
-  2. OP replies (comment_type='op_reply') → post owner only
-  3. Top-level non-OP comments → unique account per post, never the post owner
+  1. OP replies (comment_type='op_reply') → post owner only
+  2. Top-level non-OP comments → unique account per post, never the post owner
+  3. Reply comments (is_reply=1) → normal scoring, exempt from uniqueness + OP exclusion
   4. Already-assigned / deployed comments are never touched
 
 Soft scoring picks the best account among those that pass the hard rules.
 """
 
 import time
+import random
 from collections import defaultdict
 
 
@@ -48,34 +49,19 @@ def _build_lookups(context):
 def _get_post_toplevel_accounts(db, post_id):
     """Return set of account usernames that already have a TOP-LEVEL
     (non-reply) comment (assigned, informed, or deployed) on this post.
-    Replies inherit their parent's account, so they don't count toward
-    the one-account-per-post rule."""
+    Only top-level comments count toward uniqueness — replies are exempt."""
     rows = db.conn.execute(
         """SELECT DISTINCT account_id FROM comments
            WHERE post_id = ? AND account_id IS NOT NULL AND account_id != ''
              AND status IN ('assigned', 'informed', 'deployed')
-             AND is_reply = 0""",
+             AND is_reply = 0 AND comment_type != 'op_reply'""",
         (post_id,)
     ).fetchall()
     return {r["account_id"] for r in rows}
 
 
-def _get_parent_account(db, parent_comment_id):
-    """Get the account_id of a parent comment. Returns None if not found
-    or parent is unassigned."""
-    if not parent_comment_id:
-        return None
-    row = db.conn.execute(
-        "SELECT account_id FROM comments WHERE id = ?",
-        (parent_comment_id,)
-    ).fetchone()
-    if row and row["account_id"]:
-        return row["account_id"]
-    return None
-
-
 # ---------------------------------------------------------------------------
-# Scoring
+# Scoring — comment assignment
 # ---------------------------------------------------------------------------
 
 def score_account(account, comment, lookups, batch_picks):
@@ -83,45 +69,64 @@ def score_account(account, comment, lookups, batch_picks):
     username = account["username"]
     score = 100
 
-    # Subreddit cooldown: -30 per assignment in same sub within ±2 days
+    # --- Subreddit cooldown: -20 per assignment in same sub within ±2 days ---
     comment_day = comment.get("suggested_post_day", 0) or 0
     sub_day = lookups["sub_day"]
     for day_offset in range(-2, 3):
-        score -= 30 * sub_day[username].get(comment_day + day_offset, 0)
+        score -= 20 * sub_day[username].get(comment_day + day_offset, 0)
 
-    # Load balancing: -20 per pending assignment globally
-    score -= 20 * lookups["pending"].get(username, 0)
+    # --- Load balancing: -30 per pending assignment globally ---
+    score -= 30 * lookups["pending"].get(username, 0)
 
-    # Brand skew: proportional penalty starting at 25% concentration
+    # --- Brand skew: proportional penalty starting at 35% concentration ---
     brand_id = comment.get("brand_id")
     if brand_id and comment.get("mentions_brand"):
         total = lookups["total_mentions"].get(username, 0)
         if total > 0:
             ratio = lookups["brand_mentions"][username].get(brand_id, 0) / total
-            if ratio > 0.25:
-                score -= int(80 * (ratio - 0.25))
+            if ratio > 0.35:
+                score -= int(50 * (ratio - 0.35))
 
-    # Batch spread: -15 per pick already made in this run
-    score -= 15 * batch_picks.get(username, 0)
+    # --- Batch spread: progressive penalty ---
+    picks = batch_picks.get(username, 0)
+    if picks <= 2:
+        score -= 15 * picks
+    else:
+        score -= 15 * 2 + 30 * (picks - 2)  # -30 for first 2, then -30 per additional
 
-    # Subreddit familiarity: +10 if account has history here
+    # --- Subreddit familiarity: +15 if account has history here ---
     if username in lookups["veterans"]:
-        score += 10
+        score += 15
 
-    # Karma bonus: +5 per 1000 karma, capped at +25
+    # --- Karma bonus: +5 per 1000 karma, capped at +35 ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(25, 5 * (total_karma // 1000))
+    score += min(35, 5 * (total_karma // 1000))
 
-    # Age bonus: +5 if account > 1 year old
+    # --- Low karma penalty: -15 if total < 500 ---
+    if total_karma < 500:
+        score -= 15
+
+    # --- Account age: graduated bonus/penalty ---
     created = account.get("created_utc")
-    if created and (time.time() - created) > 365 * 86400:
-        score += 5
+    if created:
+        age_days = (time.time() - created) / 86400
+        if age_days < 30:
+            score -= 20   # Very new — suspicious
+        elif age_days < 90:
+            score -= 10   # Still building credibility
+        elif age_days > 365:
+            score += 5    # Established
+        elif age_days > 180:
+            score += 3    # Moderately established
+
+    # --- Tiebreaker: small random jitter to avoid deterministic ties ---
+    score += random.randint(0, 3)
 
     return score
 
 
 # ---------------------------------------------------------------------------
-# Post ownership scoring
+# Scoring — post ownership
 # ---------------------------------------------------------------------------
 
 def _build_post_lookups(context):
@@ -147,18 +152,52 @@ def _build_post_lookups(context):
 def score_account_for_post(account, lookups, batch_picks, sub_owner):
     username = account["username"]
     score = 100
-    score -= 25 * lookups["sub_posts"].get(username, 0)
-    score -= 10 * lookups["global_posts"].get(username, 0)
-    score -= 20 * batch_picks.get(username, 0)
+
+    # --- Subreddit post concentration: -35 per post in this sub ---
+    score -= 35 * lookups["sub_posts"].get(username, 0)
+
+    # --- Global post load: -15 per post across all subs ---
+    score -= 15 * lookups["global_posts"].get(username, 0)
+
+    # --- Batch spread: progressive ---
+    picks = batch_picks.get(username, 0)
+    if picks <= 2:
+        score -= 20 * picks
+    else:
+        score -= 20 * 2 + 35 * (picks - 2)
+
+    # --- Subreddit activity: +15 if account has comments here ---
     if lookups["sub_comments"].get(username, 0) > 0:
-        score += 10
-    if username == sub_owner:
         score += 15
+
+    # --- Subreddit owner bonus: +20 ---
+    if username == sub_owner:
+        score += 20
+
+    # --- Karma bonus: +5 per 1000, capped at +35 ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(25, 5 * (total_karma // 1000))
+    score += min(35, 5 * (total_karma // 1000))
+
+    # --- Low karma penalty ---
+    if total_karma < 500:
+        score -= 15
+
+    # --- Account age: graduated ---
     created = account.get("created_utc")
-    if created and (time.time() - created) > 365 * 86400:
-        score += 5
+    if created:
+        age_days = (time.time() - created) / 86400
+        if age_days < 30:
+            score -= 20
+        elif age_days < 90:
+            score -= 10
+        elif age_days > 365:
+            score += 5
+        elif age_days > 180:
+            score += 3
+
+    # --- Tiebreaker ---
+    score += random.randint(0, 3)
+
     return score
 
 
@@ -232,9 +271,9 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     Auto-assign all draft comments for a post to accounts.
 
     Hard rules enforced:
-      - Reply comments → same account as parent comment
       - OP replies → post owner only
       - Top-level non-OP → unique account per post, never the post owner
+      - Replies → normal scoring, any account eligible
     """
     context = db.get_auto_assign_context(post_id)
     if not context:
@@ -312,47 +351,14 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             })
 
     # ---------------------------------------------------------------
-    # 2. Reply comments: inherit parent's account
-    # ---------------------------------------------------------------
-    # Build a map of comment_id → account from already-assigned comments
-    # (includes ones we just assigned above + existing DB state)
-    assigned_map = {}  # comment_id → account_id
-    for a in assignments:
-        assigned_map[a["comment_id"]] = a["account"]
-
-    skipped = 0
-    for c in reply_comments:
-        parent_acct = _get_parent_account(db, c["parent_comment_id"])
-        # Also check if parent was just assigned in this batch
-        if not parent_acct:
-            parent_acct = assigned_map.get(c["parent_comment_id"])
-
-        if parent_acct:
-            db.assign_comment(c["id"], parent_acct)
-            assigned_map[c["id"]] = parent_acct
-            batch_picks[parent_acct] += 1
-            lookups["pending"][parent_acct] = lookups["pending"].get(parent_acct, 0) + 1
-            assignments.append({
-                "comment_id": c["id"],
-                "account": parent_acct,
-                "score": None,
-                "type": "reply",
-            })
-        else:
-            skipped += 1
-            warnings.append(
-                f"Comment #{c['id']}: skipped — parent comment #{c['parent_comment_id']} "
-                f"has no account assigned yet."
-            )
-
-    # ---------------------------------------------------------------
-    # 3. Top-level non-OP: unique account per post, never the OP
+    # 2. Top-level non-OP: unique account per post, never the OP
     # ---------------------------------------------------------------
     op_to_exclude = op_account or post.get("owner_account") or ""
     blocked = set(used_on_post)
     if op_to_exclude:
         blocked.add(op_to_exclude)
 
+    skipped = 0
     for comment in toplevel_comments:
         eligible = [a for a in accounts if a["username"] not in blocked]
         if not eligible:
@@ -375,7 +381,6 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
-        assigned_map[comment["id"]] = username
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
@@ -391,6 +396,36 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "account": username,
             "score": best_score,
             "type": "brand" if comment.get("mentions_brand") else "organic",
+        })
+
+    # ---------------------------------------------------------------
+    # 3. Reply comments: normal scoring, any account eligible
+    #    (exempt from uniqueness + OP exclusion)
+    # ---------------------------------------------------------------
+    for comment in reply_comments:
+        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+        scores.sort(key=lambda x: -x[0])
+        best_score, best_account = scores[0]
+
+        if best_score < 0:
+            warnings.append(
+                f"Reply #{comment['id']}: low confidence score ({best_score}). "
+                f"Consider adding more accounts."
+            )
+
+        username = best_account["username"]
+        db.assign_comment(comment["id"], username)
+        batch_picks[username] += 1
+        lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
+
+        comment_day = comment.get("suggested_post_day", 0) or 0
+        lookups["sub_day"][username][comment_day] += 1
+
+        assignments.append({
+            "comment_id": comment["id"],
+            "account": username,
+            "score": best_score,
+            "type": "reply",
         })
 
     return {
@@ -409,9 +444,9 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single unassigned comment to the best-scoring account.
 
     Hard rules:
-      - Reply → same account as parent
       - OP reply → post owner only
       - Top-level non-OP → unique account, never the post owner
+      - Reply → normal scoring, any account eligible
     """
     comment = db.get_comment(comment_id)
     if not comment:
@@ -433,16 +468,6 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     post = context["post"]
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
-
-    # ---------------------------------------------------------------
-    # Reply → must go to parent's account
-    # ---------------------------------------------------------------
-    if comment.get("is_reply") and comment.get("parent_comment_id"):
-        parent_acct = _get_parent_account(db, comment["parent_comment_id"])
-        if parent_acct:
-            db.assign_comment(comment_id, parent_acct)
-            return {"ok": True, "account": parent_acct, "score": None, "type": "reply"}
-        return {"error": f"Parent comment #{comment['parent_comment_id']} has no account. Assign the parent first."}
 
     # ---------------------------------------------------------------
     # OP reply → must go to post owner
@@ -467,6 +492,17 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
             return {"ok": True, "account": op_acct, "score": None, "type": "op_reply"}
 
         return {"error": "No valid OP account available. Assign a post owner first."}
+
+    # ---------------------------------------------------------------
+    # Reply → normal scoring, all accounts eligible
+    # ---------------------------------------------------------------
+    if comment.get("is_reply") and comment.get("parent_comment_id"):
+        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+        scores.sort(key=lambda x: -x[0])
+        best_score, best_account = scores[0]
+        username = best_account["username"]
+        db.assign_comment(comment_id, username)
+        return {"ok": True, "account": username, "score": best_score, "type": "reply"}
 
     # ---------------------------------------------------------------
     # Top-level non-OP → unique account, exclude OP + already used

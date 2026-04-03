@@ -1822,38 +1822,39 @@ class Database:
         sc_where_sql = " AND ".join(sc_where2)
 
         query = f"""
-            SELECT 'comment' as type, c.id, c.body, c.account_id, c.deployed_at,
-                   c.paid_at, c.mentions_brand, p.title as post_title,
-                   b.name as brand_name, s.name as subreddit_name
-            FROM comments c
-            JOIN posts p ON c.post_id = p.id
-            LEFT JOIN brands b ON c.brand_id = b.id
-            LEFT JOIN subreddits s ON p.subreddit_id = s.id
-            WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
+            SELECT * FROM (
+                SELECT 'comment' as type, c.id, c.body, c.account_id, c.deployed_at,
+                       c.paid_at, c.mentions_brand, p.title as post_title,
+                       b.name as brand_name, s.name as subreddit_name
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
 
-            UNION ALL
+                UNION ALL
 
-            SELECT 'post' as type, p.id, p.title as body, p.owner_account as account_id,
-                   p.deployed_at, p.paid_at, 0 as mentions_brand, p.title as post_title,
-                   GROUP_CONCAT(DISTINCT b2.name) as brand_name, s.name as subreddit_name
-            FROM posts p
-            LEFT JOIN post_brands pb ON pb.post_id = p.id
-            LEFT JOIN brands b2 ON b2.id = pb.brand_id
-            LEFT JOIN subreddits s ON p.subreddit_id = s.id
-            WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
-            GROUP BY p.id
+                SELECT 'post' as type, p.id, p.title as body, p.owner_account as account_id,
+                       p.deployed_at, p.paid_at, 0 as mentions_brand, p.title as post_title,
+                       GROUP_CONCAT(DISTINCT b2.name) as brand_name, s.name as subreddit_name
+                FROM posts p
+                LEFT JOIN post_brands pb ON pb.post_id = p.id
+                LEFT JOIN brands b2 ON b2.id = pb.brand_id
+                LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
+                GROUP BY p.id
 
-            UNION ALL
+                UNION ALL
 
-            SELECT 'search_comment' as type, sc.id, sc.body, sc.account_id, sc.deployed_at,
-                   sc.paid_at, sc.mentions_brand, sp.title as post_title,
-                   b.name as brand_name, sp.subreddit as subreddit_name
-            FROM search_comments sc
-            LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
-            LEFT JOIN brands b ON sc.brand_id = b.id
-            WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
-
-            ORDER BY 6 IS NULL DESC, 5 DESC
+                SELECT 'search_comment' as type, sc.id, sc.body, sc.account_id, sc.deployed_at,
+                       sc.paid_at, sc.mentions_brand, sp.title as post_title,
+                       b.name as brand_name, sp.subreddit as subreddit_name
+                FROM search_comments sc
+                LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+                LEFT JOIN brands b ON sc.brand_id = b.id
+                WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
+            ) combined
+            ORDER BY paid_at IS NULL DESC, deployed_at DESC
             LIMIT ? OFFSET ?
         """
         all_params = c_params + p_params + sc_params2 + [limit, offset]

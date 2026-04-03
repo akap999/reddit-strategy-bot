@@ -2205,7 +2205,7 @@ async function renderCommentTreeTab(container) {
                 <option value="">All Brands</option>
                 ${uniqueBrands.map(b => `<option value="${b.name}">${b.name}</option>`).join('')}
             </select>
-            <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+            <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48"><option value="">All Subreddits</option>${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
             <select id="comments-brand-filter" onchange="filterPostsByBrand()" class="w-44"><option value="">All Brands</option></select>
             <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">All Comments</option></select>
             <select id="comments-status-filter" onchange="loadCommentTree()" class="w-32">
@@ -2237,12 +2237,12 @@ function onCtBrandFilterChange() {
 
     if (!brandName) {
         // Show all subreddits
-        subFilter.innerHTML = _ctAllSubs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + _ctAllSubs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     } else {
         // Filter to subreddits that have this brand
         const brandSubIds = _ctAllBrands.filter(b => b.name === brandName).map(b => b.subreddit_id).filter(Boolean);
         const filtered = _ctAllSubs.filter(s => brandSubIds.includes(s.id));
-        subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     }
     loadBrandsAndPostsForComments();
 }
@@ -2251,12 +2251,30 @@ let _commentsPosts = []; // cached for brand filtering
 
 async function loadBrandsAndPostsForComments() {
     const sid = document.getElementById('comments-sub-filter').value;
-    if (!sid) {
-        document.getElementById('comments-brand-filter').innerHTML = '<option value="">All Brands</option>';
-        document.getElementById('comments-post-filter').innerHTML = '<option value="">All Comments</option>';
+    const topBrand = document.getElementById('comments-brand-top-filter')?.value;
+    const brandSel = document.getElementById('comments-brand-filter');
+    const postSel = document.getElementById('comments-post-filter');
+
+    if (!sid && !topBrand) {
+        brandSel.innerHTML = '<option value="">All Brands</option>';
+        postSel.innerHTML = '<option value="">All Comments</option>';
         document.getElementById('comment-tree').innerHTML = '';
         return;
     }
+
+    if (!sid && topBrand) {
+        // Brand selected but no subreddit — find brand ID and set it in the brand filter
+        const match = _ctAllBrands.find(b => b.name === topBrand);
+        brandSel.innerHTML = match
+            ? `<option value="${match.id}">${match.name}</option>`
+            : '<option value="">All Brands</option>';
+        if (match) brandSel.value = match.id;
+        _commentsPosts = [];
+        postSel.innerHTML = '<option value="">All Comments</option>';
+        loadCommentTree();
+        return;
+    }
+
     const [posts, brands] = await Promise.all([
         api(`/api/subreddits/${sid}/posts`),
         api(`/api/subreddits/${sid}/brands`),
@@ -2264,13 +2282,11 @@ async function loadBrandsAndPostsForComments() {
     _commentsPosts = posts;
 
     // Populate brand filter for this subreddit
-    const brandSel = document.getElementById('comments-brand-filter');
     brandSel.innerHTML = '<option value="">All Brands</option>' + brands.map(b =>
         `<option value="${b.id}">${b.name}</option>`
     ).join('');
 
     // If top-level brand filter is set, auto-select matching brand in sub-level filter
-    const topBrand = document.getElementById('comments-brand-top-filter')?.value;
     if (topBrand) {
         const match = brands.find(b => b.name === topBrand);
         if (match) brandSel.value = match.id;

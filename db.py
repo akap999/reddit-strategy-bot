@@ -543,6 +543,7 @@ class Database:
         row = self.conn.execute(
             """SELECT
                 COUNT(*) as total_comments,
+                SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed_comments,
                 SUM(CASE WHEN mentions_brand = 1 THEN 1 ELSE 0 END) as brand_mentions,
                 AVG(validation_score) as avg_validation_score
             FROM comments c

@@ -544,6 +544,8 @@ class Database:
             """SELECT
                 COUNT(*) as total_comments,
                 SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed_comments,
+                SUM(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as deployed_brand_mentions,
+                SUM(CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as deployed_non_brand,
                 SUM(CASE WHEN mentions_brand = 1 THEN 1 ELSE 0 END) as brand_mentions,
                 AVG(validation_score) as avg_validation_score
             FROM comments c

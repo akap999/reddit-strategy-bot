@@ -383,7 +383,7 @@ async function showSubredditDetail(id) {
                 : `<button class="btn btn-sm btn-secondary" onclick="assignSubredditOwner(${id})">Assign Owner</button>`}
         </div>
 
-        <div class="grid grid-cols-4 gap-3 mb-5">
+        <div class="grid grid-cols-5 gap-3 mb-5">
             <div class="stat-card p-3 text-center">
                 <p class="text-lg font-bold">${postStats.published_posts || 0}</p>
                 <p class="text-xs text-gray-500">Deployed Posts</p>
@@ -393,8 +393,12 @@ async function showSubredditDetail(id) {
                 <p class="text-xs text-gray-500">Deployed Comments</p>
             </div>
             <div class="stat-card p-3 text-center">
-                <p class="text-lg font-bold">${commentStats.brand_mentions || 0}</p>
+                <p class="text-lg font-bold">${commentStats.deployed_brand_mentions || 0}</p>
                 <p class="text-xs text-gray-500">Brand Mentions</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold">${commentStats.deployed_non_brand || 0}</p>
+                <p class="text-xs text-gray-500">Non-Brand</p>
             </div>
             <div class="stat-card p-3 text-center">
                 <p class="text-lg font-bold">${postStats.total_posts || 0} / ${commentStats.total_comments || 0}</p>

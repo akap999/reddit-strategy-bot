@@ -1853,7 +1853,7 @@ class Database:
             LEFT JOIN brands b ON sc.brand_id = b.id
             WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
 
-            ORDER BY paid_at IS NULL DESC, deployed_at DESC
+            ORDER BY 6 IS NULL DESC, 5 DESC
             LIMIT ? OFFSET ?
         """
         all_params = c_params + p_params + sc_params2 + [limit, offset]

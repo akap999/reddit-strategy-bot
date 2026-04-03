@@ -1044,7 +1044,8 @@ class Database:
         q1 = """SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                        c.paid_at, c.reddit_comment_url, c.comment_type,
-                       c.suggested_post_day, c.suggested_order, c.matched_keywords,
+                       c.suggested_post_day, c.suggested_order,
+                       c.is_ours, c.matched_keywords,
                        'comment' as source,
                        p.title as post_title, p.id as p_id,
                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
@@ -1074,7 +1075,8 @@ class Database:
         q2 = """SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                        sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
-                       0 as suggested_post_day, 0 as suggested_order, NULL as matched_keywords,
+                       0 as suggested_post_day, 0 as suggested_order,
+                       1 as is_ours, NULL as matched_keywords,
                        'search_comment' as source,
                        sp.title as post_title, sp.id as p_id,
                        sp.reddit_url as post_reddit_url
@@ -1115,6 +1117,7 @@ class Database:
                         c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                         c.paid_at, c.reddit_comment_url, c.comment_type,
                         c.suggested_post_day, c.suggested_order,
+                        c.is_ours, c.matched_keywords,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name,
@@ -1131,6 +1134,7 @@ class Database:
                         sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                         sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                         0 as suggested_post_day, 0 as suggested_order,
+                        1 as is_ours, NULL as matched_keywords,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name,
@@ -1250,6 +1254,7 @@ class Database:
         q1 = """SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                        c.paid_at, c.reddit_comment_url, c.suggested_post_day,
+                       c.is_ours, c.matched_keywords,
                        'comment' as source,
                        p.title as post_title, p.subreddit_id,
                        s.name as subreddit_name,
@@ -1257,7 +1262,7 @@ class Database:
                 FROM comments c
                 JOIN posts p ON c.post_id = p.id
                 JOIN brands b ON c.brand_id = b.id
-                JOIN subreddits s ON p.subreddit_id = s.id
+                LEFT JOIN subreddits s ON p.subreddit_id = s.id
                 LEFT JOIN post_urls pu ON pu.post_id = p.id
                 WHERE LOWER(b.name) = LOWER(?)"""
         p1 = [brand_name]
@@ -1272,6 +1277,7 @@ class Database:
         q2 = """SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                        sc.paid_at, sc.reddit_comment_url, 0 as suggested_post_day,
+                       1 as is_ours, NULL as matched_keywords,
                        'search_comment' as source,
                        sp.title as post_title, NULL as subreddit_id,
                        sp.subreddit as subreddit_name,

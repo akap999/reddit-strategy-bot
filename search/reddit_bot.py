@@ -398,11 +398,11 @@ class RedditSearchBot:
             if len(filtered) >= limit:
                 break
 
-            # Adaptive over-fetch: 3x when filters are active (they reject
-            # 60-80% of raw posts), 1.5x otherwise.
-            multiplier = 3 if has_strict_filters else 1.5
-            floor = 200 if has_strict_filters else 50
-            needed_raw = max(int((limit - len(filtered)) * multiplier), floor)
+            # Adaptive over-fetch: 5x when filters are active (they reject
+            # 60-80% of raw posts), 2x otherwise.
+            multiplier = 5 if has_strict_filters else 2
+            floor = 500 if has_strict_filters else 100
+            needed_raw = max((limit - len(filtered)) * multiplier, floor)
             try:
                 print(f"    Trying {api_name} API...", end=" ", flush=True)
 

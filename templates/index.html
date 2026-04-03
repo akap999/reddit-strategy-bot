@@ -5193,22 +5193,36 @@ async function lsRunSearch() {
         min_upvote_ratio: isNaN(ratioVal) ? undefined : ratioVal,
         max_subscribers: isNaN(maxSubsVal) ? undefined : maxSubsVal,
     };
-    document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit...</p></div>';
+    document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit... (running in background)</p></div>';
     try {
         const { task_id } = await api('/api/search/reddit', { method: 'POST', body });
+        _addBgTask(task_id, `Search: ${keyword.substring(0, 20)}`);
+        let retries = 0;
         const poll = setInterval(async () => {
             try {
                 const t = await api(`/api/tasks/${task_id}`);
+                retries = 0;
                 if (t.status === 'complete') {
                     clearInterval(poll);
+                    _removeBgTask(task_id);
                     _lsSearchResults = t.result || [];
                     lsRenderResults();
+                    toast(`Search complete: ${_lsSearchResults.length} results`, 'success');
                 } else if (t.status === 'error') {
                     clearInterval(poll);
+                    _removeBgTask(task_id);
                     document.getElementById('ls-results').innerHTML = `<p class="text-red-400">Error: ${t.error}</p>`;
+                    toast('Search failed', 'error');
                 }
-            } catch(e) { clearInterval(poll); }
-        }, 2000);
+            } catch(e) {
+                retries++;
+                if (retries > 5) {
+                    clearInterval(poll);
+                    _removeBgTask(task_id);
+                    document.getElementById('ls-results').innerHTML = '<p class="text-red-400">Search lost — please try again</p>';
+                }
+            }
+        }, 1000);
     } catch(e) { document.getElementById('ls-results').innerHTML = ''; }
 }
 

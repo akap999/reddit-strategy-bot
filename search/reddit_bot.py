@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class RedditSearchBot:
-    def __init__(self, retry_attempts=3, retry_delay=2, reddit_base=None):
+    def __init__(self, retry_attempts=2, retry_delay=1, reddit_base=None):
         """Initialize the Reddit bot with multiple API endpoints."""
         self.apis = {
             "reddit": reddit_base or "https://www.reddit.com",
@@ -157,7 +157,7 @@ class RedditSearchBot:
 
             print(f"(page {page}: {len(results)} posts)", end=" ", flush=True)
             page += 1
-            time.sleep(1)
+            time.sleep(0.3)
 
         return results
 
@@ -233,7 +233,7 @@ class RedditSearchBot:
 
             # Advance cursor: backward for desc, forward for asc
             cursor_ts = newest_ts if sort_order == "asc" else oldest_ts
-            time.sleep(0.5)
+            time.sleep(0.2)
 
         return results
 
@@ -290,7 +290,7 @@ class RedditSearchBot:
                 break
 
             before_ts = oldest_ts
-            time.sleep(0.5)
+            time.sleep(0.2)
 
         return results
 
@@ -394,16 +394,15 @@ class RedditSearchBot:
                               or nsfw is not None or excluded_set)
 
         for api_name in apis_to_try:
-            # Always try all APIs — each has different post coverage.
-            # Reddit caps at ~1000 results; Pullpush/Arctic-Shift archive
-            # older posts that Reddit's search may not surface.
+            # Stop early if we already have enough results
+            if len(filtered) >= limit:
+                break
 
-            # Adaptive over-fetch: 5x when filters are active (they reject
-            # 60-80% of raw posts), 2x otherwise.  Higher floor ensures
-            # each API gets a meaningful chance to contribute.
-            multiplier = 5 if has_strict_filters else 2
-            floor = 500 if has_strict_filters else 100
-            needed_raw = max((limit - len(filtered)) * multiplier, floor)
+            # Adaptive over-fetch: 3x when filters are active (they reject
+            # 60-80% of raw posts), 1.5x otherwise.
+            multiplier = 3 if has_strict_filters else 1.5
+            floor = 200 if has_strict_filters else 50
+            needed_raw = max(int((limit - len(filtered)) * multiplier), floor)
             try:
                 print(f"    Trying {api_name} API...", end=" ", flush=True)
 
@@ -545,10 +544,15 @@ class RedditSearchBot:
 
         return filtered[:limit]
 
+    # Class-level subscriber cache (persists across searches within same process)
+    _sub_cache = {}  # sub_name_lower -> (subscriber_count, timestamp)
+    _SUB_CACHE_TTL = 3600  # 1 hour
+
     def _filter_by_subscribers(self, results, max_subscribers):
         """Filter results to only include posts from subs with ≤ max_subscribers.
 
         Fetches subscriber counts for each unique subreddit via Reddit API.
+        Uses in-memory cache to avoid redundant lookups.
         Attaches sub_subscribers to each result for frontend display.
         Posts from subs where the count can't be determined are kept.
         """
@@ -561,29 +565,50 @@ class RedditSearchBot:
         if "Mozilla" in ua or "AppleWebKit" in ua:
             headers["User-Agent"] = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
 
+        now = time.time()
         sub_info = {}
+
+        # Check cache first
+        to_fetch = []
         for sub_name in unique_subs:
-            try:
-                resp = requests.get(
-                    f"{self.apis['reddit']}/r/{sub_name}/about.json",
-                    headers=headers, timeout=8
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("kind") == "t5":
+            key = sub_name.lower()
+            cached = self._sub_cache.get(key)
+            if cached and (now - cached[1]) < self._SUB_CACHE_TTL:
+                sub_info[key] = cached[0]
+                symbol = "✓" if (cached[0] or 0) <= max_subscribers else "✗"
+                print(f"      {symbol} r/{sub_name}: {cached[0]:,} (cached)")
+            else:
+                to_fetch.append(sub_name)
+
+        # Fetch uncached subs using concurrent threads
+        if to_fetch:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def fetch_sub(sub_name):
+                try:
+                    resp = requests.get(
+                        f"{self.apis['reddit']}/r/{sub_name}/about.json",
+                        headers=headers, timeout=8
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
                         subs_count = data.get("data", {}).get("subscribers", 0)
+                        return sub_name, subs_count
                     else:
-                        subs_count = data.get("data", {}).get("subscribers", 0)
-                    sub_info[sub_name.lower()] = subs_count
-                    symbol = "✓" if subs_count <= max_subscribers else "✗"
-                    print(f"      {symbol} r/{sub_name}: {subs_count:,} subscribers")
-                else:
-                    sub_info[sub_name.lower()] = None
-                    print(f"      ? r/{sub_name}: HTTP {resp.status_code} (keeping)")
-                time.sleep(0.5)
-            except Exception as e:
-                sub_info[sub_name.lower()] = None
-                print(f"      ? r/{sub_name}: error ({str(e)[:40]}) (keeping)")
+                        return sub_name, None
+                except Exception:
+                    return sub_name, None
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_sub, s): s for s in to_fetch}
+                for future in as_completed(futures):
+                    sub_name, count = future.result()
+                    key = sub_name.lower()
+                    sub_info[key] = count
+                    if count is not None:
+                        self._sub_cache[key] = (count, now)
+                    symbol = "✓" if count is not None and count <= max_subscribers else ("✗" if count is not None else "?")
+                    print(f"      {symbol} r/{sub_name}: {count:,} subscribers" if count is not None else f"      ? r/{sub_name}: unknown (keeping)")
 
         # Attach subscriber count to each result & filter
         filtered = []

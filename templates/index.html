@@ -3185,6 +3185,10 @@ async function copyCommentMessage(cid) {
         linkLabel = 'Reply to Comment Link';
     } else {
         link = _ctPostRedditUrl || '';
+        if (!link && c.post_id) {
+            const post = await api(`/api/posts/${c.post_id}`);
+            if (post) link = post.reddit_url || '';
+        }
     }
 
     const message = `Please follow the subreddit and upvote the post before commenting. \nComment Type - ${mentionType}\n\nUsername - \n${c.account_id || ''}\n\n${linkLabel} - \n${link}\n\n Comment (${replyType}) - \n${c.body || ''}\n\nPlease share the comment link :)`;

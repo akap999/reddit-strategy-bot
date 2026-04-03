@@ -1840,7 +1840,7 @@ async function copyPostMessage(pid) {
 async function unassignAllPosts() {
     const sid = document.getElementById('posts-sub-filter').value;
     if (!sid) { toast('Select a subreddit first', 'error'); return; }
-    if (!confirm('Remove owner from all non-deployed posts in this subreddit?')) return;
+    if (!confirm('Remove owner from all draft/complete posts in this subreddit? Informed and deployed posts will NOT be affected.')) return;
     try {
         const result = await api(`/api/subreddits/${sid}/unassign-all-posts`, { method: 'POST', body: {} });
         toast(`Unassigned ${result.unassigned} posts`, 'success');
@@ -2969,7 +2969,7 @@ async function submitAutoAssign() {
 async function removeAllAssigns() {
     const pid = document.getElementById('comments-post-filter').value;
     if (!pid) return;
-    if (!confirm('Remove all assignments (post owner + all assigned comments) for this post?')) return;
+    if (!confirm('Remove all assignments (post owner + assigned comments) for this post? Informed and deployed items will NOT be affected.')) return;
     await api(`/api/posts/${pid}/unassign-all`, { method: 'POST', body: {} });
     toast('All assignments removed', 'success');
     loadCommentTree();
@@ -2999,7 +2999,7 @@ async function autoAssignAllComments() {
 async function unassignAllComments() {
     const sid = document.getElementById('comments-sub-filter')?.value;
     if (!sid) { toast('Select a subreddit first', 'error'); return; }
-    if (!confirm('Unassign all assigned/informed comments in this subreddit? Deployed comments will NOT be affected.')) return;
+    if (!confirm('Unassign all assigned comments in this subreddit? Informed and deployed comments will NOT be affected.')) return;
     try {
         const result = await api(`/api/subreddits/${sid}/unassign-all-comments`, { method: 'POST', body: {} });
         toast(`Unassigned ${result.unassigned} comments`, 'success');

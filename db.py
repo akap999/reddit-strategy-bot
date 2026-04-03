@@ -1039,15 +1039,18 @@ class Database:
 
     def get_filtered_comments(self, subreddit_id, status=None, mentions_brand=None, account_id=None, brand_id=None, sort_by=None):
         """Get comments with post info, filtered by status/brand/account."""
-        query = """SELECT c.*, p.title as post_title, p.id as p_id, pu.reddit_url as post_reddit_url
+        query = """SELECT c.*, p.title as post_title, p.id as p_id,
+                          (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
                    FROM comments c
                    JOIN posts p ON c.post_id = p.id
-                   LEFT JOIN post_urls pu ON pu.post_id = p.id
                    WHERE p.subreddit_id = ?"""
         params = [subreddit_id]
         if status:
             query += " AND c.status = ?"
             params.append(status)
+        else:
+            # By default exclude deleted comments from the flat view
+            query += " AND c.status != 'deleted'"
         if mentions_brand is not None:
             query += " AND c.mentions_brand = ?"
             params.append(1 if mentions_brand else 0)
@@ -1408,29 +1411,29 @@ class Database:
         }
 
     def bulk_unassign_posts_in_subreddit(self, subreddit_id):
-        """Remove owner_account from all non-published posts in a subreddit."""
+        """Remove owner_account from posts in a subreddit. Skips informed, published (deployed)."""
         cur = self.conn.execute(
-            "UPDATE posts SET owner_account = '' WHERE subreddit_id = ? AND status != 'published' AND owner_account IS NOT NULL AND owner_account != ''",
+            "UPDATE posts SET owner_account = '' WHERE subreddit_id = ? AND status NOT IN ('published', 'informed') AND owner_account IS NOT NULL AND owner_account != ''",
             (subreddit_id,)
         )
         self.conn.commit()
         return cur.rowcount
 
     def bulk_unassign_comments_in_subreddit(self, subreddit_id):
-        """Unassign all assigned/informed comments across all posts in a subreddit. Skips deployed."""
+        """Unassign all assigned comments across all posts in a subreddit. Skips informed and deployed."""
         cur = self.conn.execute(
             """UPDATE comments SET account_id = NULL, status = 'draft'
                WHERE post_id IN (SELECT id FROM posts WHERE subreddit_id = ?)
-                 AND status IN ('assigned','informed')""",
+                 AND status = 'assigned'""",
             (subreddit_id,)
         )
         self.conn.commit()
         return cur.rowcount
 
     def bulk_unassign_post_comments(self, post_id):
-        """Unassign all assigned comments for a post, setting them back to draft."""
+        """Unassign all assigned comments for a post, setting them back to draft. Skips informed and deployed."""
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status IN ('assigned','informed')",
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status = 'assigned'",
             (post_id,)
         )
         self.conn.commit()

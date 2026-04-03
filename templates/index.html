@@ -2990,31 +2990,107 @@ async function removeAllAssigns() {
 async function autoAssignAllComments() {
     const sid = document.getElementById('comments-sub-filter')?.value;
     if (!sid) { toast('Select a subreddit first', 'error'); return; }
-    // Get all posts in the subreddit, then auto-assign each
-    const posts = await api(`/api/subreddits/${sid}/posts`);
-    const postIds = posts.map(p => p.id);
-    if (!postIds.length) { toast('No posts found in this subreddit', 'error'); return; }
-    if (!confirm(`Auto-assign comments for all ${postIds.length} posts in this subreddit? Already assigned/deployed comments will be skipped.`)) return;
+
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+
+    const [posts, accounts] = await Promise.all([
+        api(`/api/subreddits/${sid}/posts`),
+        api('/api/accounts/assignment-status')
+    ]);
+
+    if (!posts.length) { closeModal(); toast('No posts found in this subreddit', 'error'); return; }
+
+    window._aacSubId = parseInt(sid);
+    window._aacPostIds = posts.map(p => p.id);
+    window._aacAccounts = accounts;
+    window._aacChecked = new Set(accounts.map(a => a.username));
+
+    const rows = accounts.map(a => _aacAccountRow(a)).join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Auto Assign All Comments</h3>
+        <p class="text-sm text-gray-400 mb-3">Assign comments across all ${posts.length} posts in this subreddit. Select accounts to include in the pool.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="aac-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="filterAacAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAac(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="toggleAllAac(false)">Deselect All</button>
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="aac-accounts-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th><th>Total</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button id="aac-submit-btn" class="btn btn-primary" onclick="submitAutoAssignAll()">Auto Assign All</button>
+        </div>
+    `);
+}
+
+function _aacAccountRow(a) {
+    const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+    const age = formatAccountAge(a.created_utc);
+    const checked = window._aacChecked && window._aacChecked.has(a.username);
+    return `<tr>
+        <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="aac-acct-cb" onchange="onAacCheckChange(this)"></td>
+        <td class="text-sm text-orange-500">${a.username}</td>
+        <td class="text-sm">${totalKarma.toLocaleString()}</td>
+        <td class="text-sm text-gray-400">${age}</td>
+        <td class="text-sm text-gray-300">${a.reference || ''}</td>
+        <td class="text-sm text-center">${a.pending || 0}</td>
+        <td class="text-sm text-center">${a.total_assigned || 0}</td>
+    </tr>`;
+}
+
+function onAacCheckChange(cb) {
+    if (cb.checked) window._aacChecked.add(cb.dataset.username);
+    else window._aacChecked.delete(cb.dataset.username);
+}
+
+function filterAacAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._aacAccounts || [];
+    const tbody = document.querySelector('#aac-accounts-table tbody');
+    if (!tbody) return;
+    const filtered = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    tbody.innerHTML = filtered.map(a => _aacAccountRow(a)).join('');
+}
+
+function toggleAllAac(checked) {
+    document.querySelectorAll('.aac-acct-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._aacChecked.add(cb.dataset.username);
+        else window._aacChecked.delete(cb.dataset.username);
+    });
+}
+
+async function submitAutoAssignAll() {
+    const postIds = window._aacPostIds || [];
+    const allAccounts = window._aacAccounts || [];
+    const checkedSet = window._aacChecked || new Set();
+    const exclude = allAccounts.filter(a => !checkedSet.has(a.username)).map(a => a.username);
+
+    const btn = document.getElementById('aac-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Assigning...';
+
     try {
         const result = await api('/api/auto-assign', {
             method: 'POST',
-            body: { post_ids: postIds }
+            body: { post_ids: postIds, exclude_accounts: exclude }
         });
         if (result.error) { toast(result.error, 'error'); return; }
         const total = result.results.reduce((s, r) => s + (r.assigned || 0), 0);
         const skipped = result.results.filter(r => r.error).length;
 
-        // Aggregate per-account breakdown across all posts
+        // Aggregate per-account breakdown
         const acctCounts = {};
         result.results.forEach(r => {
             (r.assignments || []).forEach(a => { acctCounts[a.account] = (acctCounts[a.account] || 0) + 1; });
         });
-        // Fetch account references
-        let refLookup = {};
-        try {
-            const accounts = await api('/api/accounts/assignment-status');
-            accounts.forEach(a => { refLookup[a.username] = a.reference || ''; });
-        } catch(e) {}
+        const refLookup = {};
+        allAccounts.forEach(a => { refLookup[a.username] = a.reference || ''; });
         const breakdown = Object.entries(acctCounts).map(([u, cnt]) => {
             const ref = refLookup[u] ? ` (${refLookup[u]})` : '';
             return `${u}${ref}: ${cnt}`;
@@ -3023,8 +3099,14 @@ async function autoAssignAllComments() {
         let msg = `Assigned ${total} comments across ${result.results.length - skipped} posts`;
         if (breakdown) msg += `\n${breakdown}`;
         toast(msg, 'success', 8000);
+        closeModal();
         loadCommentTree();
-    } catch(e) { toast('Failed to auto-assign', 'error'); }
+    } catch(e) {
+        toast('Failed to auto-assign', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Auto Assign All';
+    }
 }
 
 async function unassignAllComments() {

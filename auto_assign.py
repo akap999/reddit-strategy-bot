@@ -673,7 +673,16 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     username = best_account["username"]
 
     db.assign_search_comment(comment_id, username)
-    return {"ok": True, "account": username, "score": best_score}
+    return {
+        "ok": True, "account": username, "score": best_score,
+        "_debug_all_scores": {s[1]["username"]: s[0] for s in scores},
+        "_debug_blocked": list(blocked) if not is_reply else [],
+        "_debug_lookups": {
+            "pending": dict(lookups["pending"]),
+            "deployed": dict(lookups["deployed"]),
+            "post_ownership": dict(lookups["post_ownership"]),
+        },
+    }
 
 
 def auto_assign_search_comments(db, exclude_accounts=None):

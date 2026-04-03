@@ -192,7 +192,12 @@ def _build_post_lookups(context):
 
 
 def score_account_for_post(account, lookups, batch_picks, sub_owner):
-    """Score an account for post ownership. Activity penalties dominate."""
+    """Score an account for post ownership. Activity penalties dominate.
+
+    Goal: guarantee max participation / round-robin behavior.
+    Each penalty exceeds the max bonus gap (~53 pts) so ANY fresh
+    account always beats ANY account with 1+ post.
+    """
     username = account["username"]
     score = 100
 
@@ -200,18 +205,15 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     # HEAVY penalties — activity & load
     # =====================================================================
 
-    # --- Subreddit post concentration: -40 per post in this sub ---
-    score -= 40 * lookups["sub_posts"].get(username, 0)
+    # --- Subreddit post concentration: -55 per post in this sub ---
+    score -= 55 * lookups["sub_posts"].get(username, 0)
 
-    # --- Global post load: -20 per post across all subs ---
-    score -= 20 * lookups["global_posts"].get(username, 0)
+    # --- Global post load: -55 per post across all subs ---
+    score -= 55 * lookups["global_posts"].get(username, 0)
 
-    # --- Batch spread: progressive ---
+    # --- Batch spread: -55 per pick (flat, use all before reusing) ---
     picks = batch_picks.get(username, 0)
-    if picks <= 2:
-        score -= 25 * picks
-    else:
-        score -= 25 * 2 + 40 * (picks - 2)
+    score -= 55 * picks
 
     # =====================================================================
     # LIGHT bonuses — tiebreakers only
@@ -242,8 +244,7 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
         elif age_days < 90:
             score -= 5
 
-    # --- Tiebreaker ---
-    score += random.randint(0, 5)
+    # No random jitter — ties broken by username sort in caller
 
     return score
 
@@ -609,7 +610,16 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.set_post_owner(post_id, username)
-    return {"ok": True, "account": username, "score": best_score}
+    return {
+        "ok": True,
+        "account": username,
+        "score": best_score,
+        "_debug_scores": [{"account": a["username"], "score": s} for s, a in scores[:10]],
+        "_debug_lookups": {
+            "sub_posts": dict(lookups["sub_posts"]),
+            "global_posts": dict(lookups["global_posts"]),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

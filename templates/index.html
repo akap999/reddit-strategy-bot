@@ -1455,17 +1455,26 @@ function renderBrandCommentTable() {
         // Live stats
         const ls = liveStats[String(c.id)];
         const hasUrl = !!c.reddit_comment_url;
-        let upvoteCell, replyCell;
+        let upvoteCell, replyCell, livenessCell;
         if (ls) {
             const scoreColor = ls.score > 0 ? 'text-green-400' : ls.score < 0 ? 'text-red-400' : 'text-gray-400';
             upvoteCell = `<span class="${scoreColor}">${ls.score > 0 ? '+' : ''}${ls.score}</span>`;
             replyCell = `<span class="text-gray-300">${ls.num_replies}</span>`;
+            if (ls.liveness === 'live') {
+                livenessCell = `<span class="badge" style="background:rgba(34,197,94,0.15);color:#22c55e;font-size:0.65rem">Live</span>`;
+            } else if (ls.liveness === 'removed') {
+                livenessCell = `<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;font-size:0.65rem">Removed</span>`;
+            } else {
+                livenessCell = `<span class="text-gray-600">—</span>`;
+            }
         } else if (hasUrl) {
             upvoteCell = `<span class="text-gray-600">—</span>`;
             replyCell = `<span class="text-gray-600">—</span>`;
+            livenessCell = `<span class="text-gray-600">—</span>`;
         } else {
             upvoteCell = `<span class="text-gray-700">n/a</span>`;
             replyCell = `<span class="text-gray-700">n/a</span>`;
+            livenessCell = `<span class="text-gray-700"></span>`;
         }
 
         return `<tr>
@@ -1473,6 +1482,7 @@ function renderBrandCommentTable() {
             <td class="text-xs">${postLink}</td>
             <td class="text-xs text-gray-300" title="${(c.body || '').replace(/"/g, '&quot;')}">${preview}</td>
             <td>${statusBadge(c.status)}</td>
+            <td class="text-center text-xs">${livenessCell}</td>
             <td class="text-center text-xs">${upvoteCell}</td>
             <td class="text-center text-xs">${replyCell}</td>
             <td class="text-xs">${c.is_ours ? '<span class="text-green-400">Yes</span>' : '<span class="text-gray-600">No</span>'}</td>
@@ -1489,7 +1499,7 @@ function renderBrandCommentTable() {
         <div class="overflow-x-auto">
             <table class="text-sm">
                 <thead><tr>
-                    <th>Subreddit</th><th>Post</th><th>Comment</th><th>Status</th><th>Upvotes</th><th>Replies</th><th>Ours</th><th>Brand Mention</th><th>Keywords</th><th>Account</th><th>Deployed</th><th>Created</th><th>Link</th>
+                    <th>Subreddit</th><th>Post</th><th>Comment</th><th>Status</th><th>Live</th><th>Upvotes</th><th>Replies</th><th>Ours</th><th>Brand Mention</th><th>Keywords</th><th>Account</th><th>Deployed</th><th>Created</th><th>Link</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>

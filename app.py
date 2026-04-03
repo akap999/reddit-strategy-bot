@@ -1013,7 +1013,13 @@ def api_comments_live_stats():
                 clean = url.split("?")[0].rstrip("/")
                 path = clean.replace("https://www.reddit.com", "") + ".json"
                 resp = _reddit_get(path)
-                if resp.status_code == 200:
+                if resp.status_code == 404:
+                    results[str(cid)] = {
+                        "score": 0, "author": "", "num_replies": 0,
+                        "permalink": "", "created_utc": 0,
+                        "liveness": "removed",
+                    }
+                elif resp.status_code == 200:
                     rdata = resp.json()
                     if isinstance(rdata, list) and len(rdata) > 1:
                         children = rdata[1].get("data", {}).get("children", [])
@@ -1024,12 +1030,15 @@ def api_comments_live_stats():
                                 num_replies = 0
                                 if isinstance(replies_obj, dict):
                                     num_replies = len(replies_obj.get("data", {}).get("children", []))
+                                body_text = cd.get("body", "")
+                                is_removed = body_text in ("[deleted]", "[removed]")
                                 results[str(cid)] = {
                                     "score": cd.get("score", 0),
                                     "author": cd.get("author", ""),
                                     "num_replies": num_replies,
                                     "permalink": cd.get("permalink", ""),
                                     "created_utc": cd.get("created_utc", 0),
+                                    "liveness": "removed" if is_removed else "live",
                                 }
                                 break
             except Exception:

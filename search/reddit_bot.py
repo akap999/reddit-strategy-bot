@@ -391,6 +391,7 @@ class RedditSearchBot:
         # Detect whether strict filters are active (high rejection rate expected)
         has_strict_filters = (min_comments > 0 or min_score > 0
                               or min_upvote_ratio is not None
+                              or max_subscribers is not None
                               or nsfw is not None or excluded_set)
 
         for api_name in apis_to_try:
@@ -522,13 +523,18 @@ class RedditSearchBot:
                 print(f"✗ ({str(e)[:60]})")
                 continue
 
+            # Apply subscriber filter after each API batch so len(filtered)
+            # reflects the true count and adaptive over-fetch works correctly
+            if max_subscribers and filtered:
+                before_sub = len(filtered)
+                filtered = self._filter_by_subscribers(filtered, max_subscribers)
+                removed = before_sub - len(filtered)
+                if removed:
+                    print(f"    Subscriber filter: removed {removed}, {len(filtered)} remaining")
+
         if not filtered:
             print("    ⚠ All APIs failed or returned no results")
             return []
-
-        # Filter by subreddit subscriber count (requires per-sub API calls)
-        if max_subscribers and filtered:
-            filtered = self._filter_by_subscribers(filtered, max_subscribers)
 
         # Sort locally (filtering already done above)
         sort_key_map = {

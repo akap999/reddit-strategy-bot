@@ -1527,7 +1527,7 @@ class Database:
             (subreddit_id,)
         ).fetchall()]
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
 
         # Per-account count of posts they already own across ALL subreddits
         account_post_counts = [dict(r) for r in self.conn.execute(
@@ -1624,7 +1624,7 @@ class Database:
             (post_id,)
         ).fetchall()]
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
 
         # Cross-table: subreddit day assignments from BOTH comments and search_comments
         sub_name = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (sub_id,)).fetchone()
@@ -1764,7 +1764,7 @@ class Database:
                     "account_deployed_counts": [], "account_post_ownership": [],
                     "account_sub_spread": []}
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
 
         # Distinct subreddits in the draft batch
         sub_names = list(set(c["subreddit"] for c in draft_comments if c.get("subreddit")))

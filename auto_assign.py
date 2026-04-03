@@ -162,9 +162,7 @@ def score_account(account, comment, lookups, batch_picks):
             if ratio > 0.35:
                 score -= int(50 * (ratio - 0.35))
 
-    # --- Tiebreaker: deterministic jitter based on username ---
-    # Uses md5 (not hash()) because Python's hash() is randomized per process
-    score += int(hashlib.md5(username.encode()).hexdigest(), 16) % 6
+    # No random jitter — ties are broken by username sort in the caller
 
     return score
 
@@ -283,7 +281,7 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
             (score_account_for_post(a, lookups, batch_picks, sub_owner), a)
             for a in accounts
         ]
-        scores.sort(key=lambda x: -x[0])
+        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
 
         if best_score < 0:
@@ -380,7 +378,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
                 op_account = existing_op["account_id"]
             else:
                 scores = [(score_account(a, op_comments[0], lookups, batch_picks), a) for a in accounts]
-                scores.sort(key=lambda x: -x[0])
+                scores.sort(key=lambda x: (-x[0], x[1]["username"]))
                 op_account = scores[0][1]["username"]
 
         if not post.get("owner_account"):
@@ -419,7 +417,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             continue
 
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-        scores.sort(key=lambda x: -x[0])
+        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
 
         if best_score < 0:
@@ -453,7 +451,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     # ---------------------------------------------------------------
     for comment in reply_comments:
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
-        scores.sort(key=lambda x: -x[0])
+        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
 
         if best_score < 0:
@@ -547,7 +545,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     # ---------------------------------------------------------------
     if comment.get("is_reply") and comment.get("parent_comment_id"):
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
-        scores.sort(key=lambda x: -x[0])
+        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
@@ -567,7 +565,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No unique account available — all accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-    scores.sort(key=lambda x: -x[0])
+    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
@@ -601,7 +599,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     batch_picks = defaultdict(int)
 
     scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in accounts]
-    scores.sort(key=lambda x: -x[0])
+    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.set_post_owner(post_id, username)
@@ -664,7 +662,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No eligible account — all accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-    scores.sort(key=lambda x: -x[0])
+    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
     best_score, best_account = scores[0]
     username = best_account["username"]
 
@@ -723,7 +721,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             for a in eligible:
                 s = score_account(a, comment, lookups, batch_picks)
                 scores.append((s, a))
-            scores.sort(key=lambda x: -x[0])
+            scores.sort(key=lambda x: (-x[0], x[1]["username"]))
             best_score, best_account = scores[0]
             username = best_account["username"]
 

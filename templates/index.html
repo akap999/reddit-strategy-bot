@@ -2699,6 +2699,8 @@ function renderCommentNodeFlat(c) {
                     <span class="text-xs text-gray-500 truncate max-w-[150px]" title="${c.post_title || ''}">${(c.post_title || '').substring(0, 40)}</span>
                     ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0079D3;color:white">HQ</span>' : ''}
                     ${c.comment_type === 'op_reply' ? '<span class="badge" style="background:#0e8a16;color:white">OP</span>' : ''}
+                    ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
+                    ${c.is_reply && c.parent_comment_id ? `<span class="text-xs text-gray-500">→ #${c.parent_comment_id}</span>` : ''}
                     ${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}
                     ${kwPills}
                     <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}

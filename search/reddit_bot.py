@@ -313,6 +313,7 @@ class RedditSearchBot:
         api="auto",
         nsfw=None,
         min_upvote_ratio=None,
+        max_subscribers=None,
     ):
         """
         Search Reddit for posts matching the given criteria.
@@ -336,6 +337,8 @@ class RedditSearchBot:
             api: "auto" | "reddit" | "pullpush" | "arctic"
             nsfw: None = include all, True = only NSFW, False = exclude NSFW.
             min_upvote_ratio: Float 0.0–1.0. Filter out low-quality posts.
+            max_subscribers: Maximum subscriber count for a post's subreddit.
+                             Posts from larger subs are filtered out.
 
         Returns:
             List of post dicts.
@@ -524,6 +527,10 @@ class RedditSearchBot:
             print("    ⚠ All APIs failed or returned no results")
             return []
 
+        # Filter by subreddit subscriber count (requires per-sub API calls)
+        if max_subscribers and filtered:
+            filtered = self._filter_by_subscribers(filtered, max_subscribers)
+
         # Sort locally (filtering already done above)
         sort_key_map = {
             "score": "score",
@@ -537,6 +544,58 @@ class RedditSearchBot:
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
         return filtered[:limit]
+
+    def _filter_by_subscribers(self, results, max_subscribers):
+        """Filter results to only include posts from subs with ≤ max_subscribers.
+
+        Fetches subscriber counts for each unique subreddit via Reddit API.
+        Attaches sub_subscribers to each result for frontend display.
+        Posts from subs where the count can't be determined are kept.
+        """
+        unique_subs = list(set(r.get("subreddit", "") for r in results if r.get("subreddit")))
+        print(f"    Checking subscriber counts for {len(unique_subs)} subreddits (max: {max_subscribers:,})...")
+
+        # Use bot-style UA for Reddit JSON API
+        headers = dict(self.headers)
+        ua = headers.get("User-Agent", "")
+        if "Mozilla" in ua or "AppleWebKit" in ua:
+            headers["User-Agent"] = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
+
+        sub_info = {}
+        for sub_name in unique_subs:
+            try:
+                resp = requests.get(
+                    f"{self.reddit_base}/r/{sub_name}/about.json",
+                    headers=headers, timeout=8
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("kind") == "t5":
+                        subs_count = data.get("data", {}).get("subscribers", 0)
+                    else:
+                        subs_count = data.get("data", {}).get("subscribers", 0)
+                    sub_info[sub_name.lower()] = subs_count
+                    symbol = "✓" if subs_count <= max_subscribers else "✗"
+                    print(f"      {symbol} r/{sub_name}: {subs_count:,} subscribers")
+                else:
+                    sub_info[sub_name.lower()] = None
+                    print(f"      ? r/{sub_name}: HTTP {resp.status_code} (keeping)")
+                time.sleep(0.5)
+            except Exception as e:
+                sub_info[sub_name.lower()] = None
+                print(f"      ? r/{sub_name}: error ({str(e)[:40]}) (keeping)")
+
+        # Attach subscriber count to each result & filter
+        filtered = []
+        for r in results:
+            count = sub_info.get(r.get("subreddit", "").lower())
+            r["sub_subscribers"] = count
+            if count is None or count <= max_subscribers:
+                filtered.append(r)
+
+        removed = len(results) - len(filtered)
+        print(f"    Subscriber filter: kept {len(filtered)}, removed {removed} (from subs >{max_subscribers:,})")
+        return filtered
 
     def search_multiple_keywords(self, keywords, delay=2, concurrent=False, **kwargs):
         """

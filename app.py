@@ -1750,6 +1750,7 @@ def api_search_reddit():
             limit=min(data.get("limit", 50), 200),
             nsfw=data.get("nsfw"),
             min_upvote_ratio=data.get("min_upvote_ratio"),
+            max_subscribers=data.get("max_subscribers"),
         )
         return results
 

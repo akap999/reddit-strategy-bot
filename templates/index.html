@@ -36,6 +36,9 @@
         .toast-error { background: #4a1a1a; color: #ff6b6b; }
         .toast-info { background: #0045AC; color: #7AAFFF; }
         .task-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: #1A1A1B; border-bottom: 1px solid #343536; padding: 6px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 0.8rem; }
+        .task-bar.minimized { flex-wrap: nowrap; overflow: hidden; max-height: 32px; }
+        .task-bar.minimized .task-pill:not(:first-of-type) { display: none; }
+        .task-bar .task-bar-toggle { background: none; border: none; color: #818384; cursor: pointer; font-size: 0.75rem; margin-left: auto; padding: 2px 6px; white-space: nowrap; }
         .task-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 9999px; background: #3a2a00; color: #FFD635; font-size: 0.75rem; }
         .task-pill .spinner { width: 12px; height: 12px; border-width: 2px; display: inline-block; }
         .toast-warning { background: #3a2a00; color: #FFD635; }
@@ -172,6 +175,7 @@ function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 // =========================================================================
 const _bgTasks = new Map(); // taskId -> { label, status }
 
+let _taskBarMinimized = false;
 function _renderTaskBar() {
     const bar = document.getElementById('task-bar');
     if (!bar) return;
@@ -182,11 +186,15 @@ function _renderTaskBar() {
         return;
     }
     bar.style.display = 'flex';
-    if (mainEl) mainEl.style.paddingTop = '40px';
-    bar.innerHTML = '<span style="color:#818384;font-weight:600;font-size:0.75rem">RUNNING:</span>' +
-        [..._bgTasks.entries()].map(([id, t]) =>
-            `<span class="task-pill"><span class="spinner"></span>${t.label}<button onclick="_killTask('${id}')" style="margin-left:6px;background:none;border:none;color:#ff4444;cursor:pointer;font-size:14px;line-height:1;padding:0" title="Cancel task">✕</button></span>`
-        ).join('');
+    if (mainEl) mainEl.style.paddingTop = _taskBarMinimized ? '36px' : '40px';
+    if (_taskBarMinimized) bar.classList.add('minimized'); else bar.classList.remove('minimized');
+    const pills = [..._bgTasks.entries()].map(([id, t]) =>
+        `<span class="task-pill"><span class="spinner"></span>${t.label}<button onclick="_killTask('${id}')" style="margin-left:6px;background:none;border:none;color:#ff4444;cursor:pointer;font-size:14px;line-height:1;padding:0" title="Cancel task">✕</button></span>`
+    ).join('');
+    const toggleBtn = _bgTasks.size > 1
+        ? `<button class="task-bar-toggle" onclick="_taskBarMinimized=!_taskBarMinimized;_renderTaskBar()">${_taskBarMinimized ? `Show all (${_bgTasks.size})` : 'Minimize'}</button>`
+        : '';
+    bar.innerHTML = '<span style="color:#818384;font-weight:600;font-size:0.75rem">RUNNING:</span>' + pills + toggleBtn;
 }
 
 async function _killTask(taskId) {
@@ -240,6 +248,18 @@ async function runTask(url, body, onComplete, label) {
     } catch (e) {
         toast(`Failed to start ${taskLabel}`, 'error');
     }
+}
+
+function _batchGenComplete(result) {
+    if (!result || !result.results) { renderLsTabContent(); return; }
+    const generated = result.results.filter(r => r.generated);
+    const skipped = result.results.filter(r => r.skipped);
+    const errored = result.results.filter(r => r.error);
+    let msg = `Generation complete: ${generated.length} post${generated.length!==1?'s':''} generated`;
+    if (skipped.length) msg += `, ${skipped.length} skipped (low relevancy)`;
+    if (errored.length) msg += `, ${errored.length} failed`;
+    toast(msg, generated.length ? 'success' : 'info', 8000);
+    renderLsTabContent();
 }
 
 // =========================================================================
@@ -5317,11 +5337,9 @@ async function lsSaveAndGenerateAll() {
         const eligible = saved.filter(p => savedUrls.has(p.reddit_url) && p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
         if (!eligible.length) { toast('No new posts to generate for (may already be complete or excluded)', 'info'); _lsTab = 'saved'; renderLsTabContent(); return; }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-        toast(`Starting sequential generation for ${eligible.length} posts...`, 'info');
-        try {
-            const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: eligible.map(p => p.id), num_comments: numComments } });
-            _addBgTask(task_id, `Gen: ${post_count} posts`);
-        } catch(e) { toast('Generation failed to start', 'error'); }
+        runTask('/api/search/posts/generate-batch',
+            { post_ids: eligible.map(p => p.id), num_comments: numComments },
+            _batchGenComplete, `Gen: ${eligible.length} posts`);
     } catch(e) { toast('Generation failed to start', 'error'); }
     _lsTab = 'saved';
     renderLsTabContent();
@@ -5437,11 +5455,9 @@ async function lsGenerateSelected() {
     const skipped = allIds.length - eligible.length;
     if (!eligible.length) { toast('All selected posts are in excluded subreddits', 'error'); return; }
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast(`Starting sequential generation for ${eligible.length} posts${skipped ? ` (${skipped} excluded)` : ''}...`, 'info');
-    try {
-        const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: eligible, num_comments: numComments } });
-        _addBgTask(task_id, `Gen: ${post_count} posts`);
-    } catch(e) { toast('Generation failed to start', 'error'); }
+    runTask('/api/search/posts/generate-batch',
+        { post_ids: eligible, num_comments: numComments },
+        _batchGenComplete, `Gen: ${eligible.length} posts`);
     renderLsTabContent();
 }
 
@@ -5451,11 +5467,9 @@ async function lsGenerateAll() {
     if (!filtered.length) { toast('No eligible posts (must have brand, not already generating/complete, not excluded)', 'error'); return; }
     if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast(`Starting sequential generation for ${filtered.length} posts...`, 'info');
-    try {
-        const { task_id, post_count } = await api('/api/search/posts/generate-batch', { method: 'POST', body: { post_ids: filtered.map(p => p.id), num_comments: numComments } });
-        _addBgTask(task_id, `Gen: ${post_count} posts`);
-    } catch(e) { toast('Generation failed to start', 'error'); }
+    runTask('/api/search/posts/generate-batch',
+        { post_ids: filtered.map(p => p.id), num_comments: numComments },
+        _batchGenComplete, `Gen: ${filtered.length} posts`);
     renderLsTabContent();
 }
 
@@ -5562,6 +5576,10 @@ async function renderLsComments(c) {
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
             </select>
+            <span style="margin-left:auto" class="flex gap-2">
+                <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
+                <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
+            </span>
         </div>
         <div id="ls-comments-list"></div>
     `;
@@ -5595,7 +5613,8 @@ function lsFilterComments() {
     el.innerHTML = sortedGroups.map(([pid, g]) => `
         <div class="card p-4 mb-4">
             <div class="flex justify-between items-center mb-3" style="border-bottom:1px solid #343536;padding-bottom:8px">
-                <div>
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" class="ls-cg-check" data-post-id="${pid}" title="Select post for bulk delete">
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
                     <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
@@ -5748,6 +5767,32 @@ async function lsDeleteComment(cid) {
         toast('Deleted', 'success');
         renderLsTabContent();
     } catch(e) {}
+}
+
+async function lsDeleteSelectedPostComments() {
+    const checks = document.querySelectorAll('.ls-cg-check:checked');
+    if (!checks.length) { toast('Select at least one post group', 'error'); return; }
+    const postIds = [...checks].map(cb => parseInt(cb.dataset.postId));
+    const toDelete = _lsComments.filter(c => postIds.includes(c.search_post_id) && c.status !== 'deleted');
+    if (!confirm(`Delete all ${toDelete.length} comments from ${postIds.length} selected post(s)?`)) return;
+    let done = 0;
+    for (const c of toDelete) {
+        try { await api(`/api/search/comments/${c.id}`, { method: 'DELETE' }); done++; } catch(e) {}
+    }
+    toast(`Deleted ${done} comment(s)`, 'success');
+    renderLsTabContent();
+}
+
+async function lsDeleteAllComments() {
+    const active = _lsComments.filter(c => c.status !== 'deleted');
+    if (!active.length) { toast('No comments to delete', 'info'); return; }
+    if (!confirm(`Delete ALL ${active.length} generated comments? This cannot be undone.`)) return;
+    let done = 0;
+    for (const c of active) {
+        try { await api(`/api/search/comments/${c.id}`, { method: 'DELETE' }); done++; } catch(e) {}
+    }
+    toast(`Deleted ${done} comment(s)`, 'success');
+    renderLsTabContent();
 }
 
 function lsCopyComment(cid) {

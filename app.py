@@ -688,6 +688,20 @@ def api_auto_assign_single_post(pid):
     finally:
         db.close()
 
+@app.route("/api/search/auto-assign", methods=["POST"])
+def api_auto_assign_search_comments():
+    """Auto-assign all draft search comments using scoring logic."""
+    from auto_assign import auto_assign_search_comments
+    db = get_db()
+    try:
+        data = request.json or {}
+        exclude = data.get("exclude_accounts", [])
+        result = auto_assign_search_comments(db, exclude_accounts=exclude)
+        return jsonify(result), 200 if not result.get("error") else 400
+    finally:
+        db.close()
+
+
 @app.route("/api/posts/<int:pid>/unassign-all", methods=["POST"])
 def api_unassign_all_for_post(pid):
     db = get_db()

@@ -604,3 +604,98 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     username = best_account["username"]
     db.set_post_owner(post_id, username)
     return {"ok": True, "account": username, "score": best_score}
+
+
+# ---------------------------------------------------------------------------
+# Search comment auto-assignment
+# ---------------------------------------------------------------------------
+
+def _get_search_post_toplevel_accounts(db, search_post_id):
+    """Return set of account usernames that already have a top-level
+    (non-reply) comment assigned/informed/deployed on this search post."""
+    rows = db.conn.execute(
+        """SELECT DISTINCT account_id FROM search_comments
+           WHERE search_post_id = ? AND account_id IS NOT NULL AND account_id != ''
+             AND status IN ('assigned', 'informed', 'deployed')
+             AND is_reply = 0""",
+        (search_post_id,)
+    ).fetchall()
+    return {r["account_id"] for r in rows}
+
+
+def auto_assign_search_comments(db, exclude_accounts=None):
+    """Auto-assign all draft search comments using the same scoring as regular comments.
+
+    Groups comments by search_post_id and enforces uniqueness per post for
+    top-level comments. Reply comments are exempt from uniqueness.
+    """
+    context = db.get_search_auto_assign_context()
+    draft_comments = context["draft_comments"]
+    if not draft_comments:
+        return {"assigned": 0, "skipped": 0, "assignments": [], "warnings": ["No draft search comments"]}
+
+    accounts = context["all_accounts"]
+    exclude_set = set(exclude_accounts or [])
+    accounts = [a for a in accounts if a["username"] not in exclude_set]
+    if not accounts:
+        return {"error": "No accounts available after exclusions"}
+
+    lookups = _build_lookups(context)
+    batch_picks = defaultdict(int)
+    assignments = []
+    skipped = 0
+    warnings = []
+
+    # Group by search_post_id
+    by_post = defaultdict(list)
+    for c in draft_comments:
+        by_post[c["search_post_id"]].append(c)
+
+    for post_id, comments in by_post.items():
+        # Track accounts already assigned to top-level comments on this post
+        blocked = _get_search_post_toplevel_accounts(db, post_id)
+
+        for comment in comments:
+            is_reply = comment.get("is_reply", 0)
+
+            # Build eligible account list
+            if is_reply:
+                eligible = accounts  # replies: any account
+            else:
+                eligible = [a for a in accounts if a["username"] not in blocked]
+
+            if not eligible:
+                skipped += 1
+                warnings.append(f"No eligible account for comment {comment['id']} (all blocked on post)")
+                continue
+
+            # Score each eligible account
+            scores = []
+            for a in eligible:
+                s = score_account(a, comment, lookups, batch_picks)
+                scores.append((s, a))
+            scores.sort(key=lambda x: -x[0])
+            best_score, best_account = scores[0]
+            username = best_account["username"]
+
+            # Assign
+            db.assign_search_comment(comment["id"], username)
+            assignments.append({
+                "comment_id": comment["id"],
+                "account": username,
+                "score": best_score,
+                "subreddit": comment.get("subreddit", ""),
+            })
+
+            # Update tracking
+            batch_picks[username] += 1
+            lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
+            if not is_reply:
+                blocked.add(username)
+
+    return {
+        "assigned": len(assignments),
+        "skipped": skipped,
+        "assignments": assignments,
+        "warnings": warnings,
+    }

@@ -3034,13 +3034,23 @@ async function autoAssignAllComments() {
     window._aacPostIds = posts.map(p => p.id);
     window._aacAccounts = accounts;
     window._aacChecked = new Set(accounts.map(a => a.username));
+    window._aacSortBy = 'default';
 
-    const rows = accounts.map(a => _aacAccountRow(a)).join('');
+    _renderAacModal(posts.length);}
+
+function _renderAacModal(postCount) {
+    const accounts = window._aacAccounts || [];
+    const sorted = window._aacSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
+    const rows = sorted.map(a => _aacAccountRow(a)).join('');
+    const sortLabel = window._aacSortBy === 'karma' ? 'Sort: Default' : 'Sort: Karma ↓';
     showModal(`
         <h3 class="text-xl font-bold mb-3">Auto Assign All Comments</h3>
-        <p class="text-sm text-gray-400 mb-3">Assign comments across all ${posts.length} posts in this subreddit. Select accounts to include in the pool.</p>
+        <p class="text-sm text-gray-400 mb-3">Assign comments across all ${postCount} posts in this subreddit. Select accounts to include in the pool.</p>
         <div class="mb-3 flex gap-2 items-center">
             <input id="aac-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="filterAacAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="toggleAacSort(${postCount})">${sortLabel}</button>
             <button class="btn btn-sm btn-secondary" onclick="toggleAllAac(true)">Select All</button>
             <button class="btn btn-sm btn-secondary" onclick="toggleAllAac(false)">Deselect All</button>
         </div>
@@ -3081,10 +3091,18 @@ function onAacCheckChange(cb) {
 function filterAacAccounts(query) {
     const q = query.toLowerCase();
     const accounts = window._aacAccounts || [];
+    const sorted = window._aacSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
     const tbody = document.querySelector('#aac-accounts-table tbody');
     if (!tbody) return;
-    const filtered = accounts.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    const filtered = sorted.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
     tbody.innerHTML = filtered.map(a => _aacAccountRow(a)).join('');
+}
+
+function toggleAacSort(postCount) {
+    window._aacSortBy = window._aacSortBy === 'karma' ? 'default' : 'karma';
+    _renderAacModal(postCount);
 }
 
 function toggleAllAac(checked) {
@@ -5577,6 +5595,7 @@ async function renderLsComments(c) {
                 <option value="deployed">Deployed</option>
             </select>
             <span style="margin-left:auto" class="flex gap-2">
+                <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
             </span>
@@ -5793,6 +5812,124 @@ async function lsDeleteAllComments() {
     }
     toast(`Deleted ${done} comment(s)`, 'success');
     renderLsTabContent();
+}
+
+async function lsAutoAssignAll() {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+    let accounts;
+    try { accounts = await api('/api/accounts/search-assignment-status'); } catch(e) { closeModal(); toast('Failed to load accounts', 'error'); return; }
+    if (!accounts.length) { closeModal(); toast('No accounts available', 'error'); return; }
+
+    window._lsAacAccounts = accounts;
+    window._lsAacChecked = new Set(accounts.map(a => a.username));
+    window._lsAacSortBy = 'default';
+
+    _renderLsAacModal();
+}
+
+function _renderLsAacModal() {
+    const accounts = window._lsAacAccounts || [];
+    const sorted = window._lsAacSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
+    const draftCount = _lsComments.filter(c => c.status === 'draft' && (!c.account_id || c.account_id === '')).length;
+    const rows = sorted.map(a => _lsAacAccountRow(a)).join('');
+    const sortLabel = window._lsAacSortBy === 'karma' ? 'Sort: Default' : 'Sort: Karma ↓';
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Auto Assign Search Comments</h3>
+        <p class="text-sm text-gray-400 mb-3">Auto-assign ${draftCount} draft comment${draftCount!==1?'s':''} across search posts. Select accounts to include in the pool.</p>
+        <div class="mb-3 flex gap-2 items-center">
+            <input id="lsaac-search" placeholder="Search username or reference..." class="text-sm flex-1" oninput="_filterLsAacAccounts(this.value)">
+            <button class="btn btn-sm btn-secondary" onclick="_toggleLsAacSort()">${sortLabel}</button>
+            <button class="btn btn-sm btn-secondary" onclick="_toggleAllLsAac(true)">Select All</button>
+            <button class="btn btn-sm btn-secondary" onclick="_toggleAllLsAac(false)">Deselect All</button>
+        </div>
+        ${accounts.length ? `
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="lsaac-table">
+                <thead><tr><th></th><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th>Pending</th><th>Total</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>` : '<p style="color:#818384" class="mb-3">No accounts available.</p>'}
+        <div class="flex gap-2 mt-4 border-t pt-3 justify-end" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+            <button id="lsaac-submit" class="btn btn-primary" onclick="_submitLsAutoAssign()">Auto Assign All</button>
+        </div>
+    `);
+}
+
+function _lsAacAccountRow(a) {
+    const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+    const age = formatAccountAge(a.created_utc);
+    const checked = window._lsAacChecked && window._lsAacChecked.has(a.username);
+    return `<tr>
+        <td class="text-center"><input type="checkbox" ${checked ? 'checked' : ''} data-username="${a.username}" class="lsaac-cb" onchange="if(this.checked)window._lsAacChecked.add(this.dataset.username);else window._lsAacChecked.delete(this.dataset.username)"></td>
+        <td class="text-sm text-orange-500">${a.username}</td>
+        <td class="text-sm">${totalKarma.toLocaleString()}</td>
+        <td class="text-sm text-gray-400">${age}</td>
+        <td class="text-sm text-gray-300">${a.reference || ''}</td>
+        <td class="text-sm text-center">${a.pending || 0}</td>
+        <td class="text-sm text-center">${a.total_assigned || 0}</td>
+    </tr>`;
+}
+
+function _filterLsAacAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._lsAacAccounts || [];
+    const sorted = window._lsAacSortBy === 'karma'
+        ? [...accounts].sort((a, b) => ((b.link_karma||0)+(b.comment_karma||0)) - ((a.link_karma||0)+(a.comment_karma||0)))
+        : accounts;
+    const filtered = sorted.filter(a => !q || a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q));
+    const tbody = document.querySelector('#lsaac-table tbody');
+    if (tbody) tbody.innerHTML = filtered.map(a => _lsAacAccountRow(a)).join('');
+}
+
+function _toggleAllLsAac(checked) {
+    document.querySelectorAll('.lsaac-cb').forEach(cb => {
+        cb.checked = checked;
+        if (checked) window._lsAacChecked.add(cb.dataset.username);
+        else window._lsAacChecked.delete(cb.dataset.username);
+    });
+}
+
+function _toggleLsAacSort() {
+    window._lsAacSortBy = window._lsAacSortBy === 'karma' ? 'default' : 'karma';
+    _renderLsAacModal();
+}
+
+async function _submitLsAutoAssign() {
+    const allAccounts = window._lsAacAccounts || [];
+    const checkedSet = window._lsAacChecked || new Set();
+    const exclude = allAccounts.filter(a => !checkedSet.has(a.username)).map(a => a.username);
+
+    const btn = document.getElementById('lsaac-submit');
+    if (btn) { btn.disabled = true; btn.textContent = 'Assigning...'; }
+
+    try {
+        const result = await api('/api/search/auto-assign', { method: 'POST', body: { exclude_accounts: exclude } });
+        if (result.error) { toast(result.error, 'error'); return; }
+
+        // Build breakdown
+        const acctCounts = {};
+        (result.assignments || []).forEach(a => { acctCounts[a.account] = (acctCounts[a.account] || 0) + 1; });
+        const refLookup = {};
+        allAccounts.forEach(a => { refLookup[a.username] = a.reference || ''; });
+        const breakdown = Object.entries(acctCounts).map(([u, cnt]) => {
+            const ref = refLookup[u] ? ` (${refLookup[u]})` : '';
+            return `${u}${ref}: ${cnt}`;
+        }).join(' | ');
+
+        let msg = `Assigned ${result.assigned} comment${result.assigned!==1?'s':''}`;
+        if (result.skipped) msg += `, ${result.skipped} skipped`;
+        if (breakdown) msg += `\n${breakdown}`;
+        toast(msg, 'success', 8000);
+        closeModal();
+        renderLsTabContent();
+    } catch(e) {
+        toast('Failed to auto-assign', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Auto Assign All'; }
+    }
 }
 
 function lsCopyComment(cid) {

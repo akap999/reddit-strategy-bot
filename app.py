@@ -878,6 +878,21 @@ def api_all_comments(sid):
     finally:
         db.close()
 
+@app.route("/api/brands/<int:bid>/all-comments")
+def api_brand_all_comments(bid):
+    """Get all comments (regular + search) for a brand across all subreddits."""
+    db = get_db()
+    try:
+        status = request.args.get("status")
+        sort_by = request.args.get("sort_by")
+        comments = db.get_all_comments_by_brand(
+            bid, status=status or None, sort_by=sort_by or None
+        )
+        return jsonify(comments)
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
     import time as _time

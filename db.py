@@ -1038,33 +1038,117 @@ class Database:
     # --- Filtered Comment Queries ---
 
     def get_filtered_comments(self, subreddit_id, status=None, mentions_brand=None, account_id=None, brand_id=None, sort_by=None):
-        """Get comments with post info, filtered by status/brand/account."""
-        query = """SELECT c.*, p.title as post_title, p.id as p_id,
-                          (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
-                   FROM comments c
-                   JOIN posts p ON c.post_id = p.id
-                   WHERE p.subreddit_id = ?"""
-        params = [subreddit_id]
+        """Get comments with post info, filtered by status/brand/account.
+        Includes both regular comments and search_comments for this subreddit."""
+        # Regular comments
+        q1 = """SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                       c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
+                       c.paid_at, c.reddit_comment_url, c.comment_type,
+                       c.suggested_post_day, c.suggested_order, c.matched_keywords,
+                       'comment' as source,
+                       p.title as post_title, p.id as p_id,
+                       (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                WHERE p.subreddit_id = ?"""
+        p1 = [subreddit_id]
         if status:
-            query += " AND c.status = ?"
-            params.append(status)
+            q1 += " AND c.status = ?"
+            p1.append(status)
         else:
-            # By default exclude deleted comments from the flat view
-            query += " AND c.status != 'deleted'"
+            q1 += " AND c.status != 'deleted'"
         if mentions_brand is not None:
-            query += " AND c.mentions_brand = ?"
-            params.append(1 if mentions_brand else 0)
+            q1 += " AND c.mentions_brand = ?"
+            p1.append(1 if mentions_brand else 0)
         if account_id:
-            query += " AND c.account_id = ?"
-            params.append(account_id)
+            q1 += " AND c.account_id = ?"
+            p1.append(account_id)
         if brand_id:
-            query += " AND c.brand_id = ?"
-            params.append(brand_id)
-        if sort_by == 'deployed_at':
-            query += " ORDER BY c.deployed_at DESC, c.id DESC"
+            q1 += " AND c.brand_id = ?"
+            p1.append(brand_id)
+
+        # Search comments for this subreddit (match by subreddit name)
+        sub_name_row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+        sub_name = sub_name_row["name"] if sub_name_row else ""
+
+        q2 = """SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+                       sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
+                       sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
+                       0 as suggested_post_day, 0 as suggested_order, NULL as matched_keywords,
+                       'search_comment' as source,
+                       sp.title as post_title, sp.id as p_id,
+                       sp.reddit_url as post_reddit_url
+                FROM search_comments sc
+                JOIN search_posts sp ON sc.search_post_id = sp.id
+                WHERE LOWER(sp.subreddit) = LOWER(?)"""
+        p2 = [sub_name]
+        if status:
+            q2 += " AND sc.status = ?"
+            p2.append(status)
         else:
-            query += " ORDER BY c.suggested_post_day, c.suggested_order, c.id"
-        rows = self.conn.execute(query, params).fetchall()
+            q2 += " AND sc.status != 'deleted'"
+        if mentions_brand is not None:
+            q2 += " AND sc.mentions_brand = ?"
+            p2.append(1 if mentions_brand else 0)
+        if account_id:
+            q2 += " AND sc.account_id = ?"
+            p2.append(account_id)
+        if brand_id:
+            q2 += " AND sc.brand_id = ?"
+            p2.append(brand_id)
+
+        if sort_by == 'deployed_at':
+            order = "ORDER BY deployed_at DESC, id DESC"
+        else:
+            order = "ORDER BY suggested_post_day, suggested_order, id"
+
+        query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
+        rows = self.conn.execute(query, p1 + p2).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_comments_by_brand(self, brand_id, status=None, sort_by=None):
+        """Get all comments (regular + search) for a brand across all subreddits."""
+        status_filter_reg = "AND c.status = ?" if status else "AND c.status != 'deleted'"
+        status_filter_sc = "AND sc.status = ?" if status else "AND sc.status != 'deleted'"
+
+        q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
+                        c.paid_at, c.reddit_comment_url, c.comment_type,
+                        c.suggested_post_day, c.suggested_order,
+                        'comment' as source,
+                        p.title as post_title, p.id as p_id,
+                        s.name as subreddit_name,
+                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 WHERE c.brand_id = ? {status_filter_reg}"""
+        p1 = [brand_id]
+        if status:
+            p1.append(status)
+
+        q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
+                        sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
+                        0 as suggested_post_day, 0 as suggested_order,
+                        'search_comment' as source,
+                        sp.title as post_title, sp.id as p_id,
+                        sp.subreddit as subreddit_name,
+                        sp.reddit_url as post_reddit_url
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 WHERE sc.brand_id = ? {status_filter_sc}"""
+        p2 = [brand_id]
+        if status:
+            p2.append(status)
+
+        if sort_by == 'deployed_at':
+            order = "ORDER BY deployed_at DESC, id DESC"
+        else:
+            order = "ORDER BY created_at DESC, id DESC"
+
+        query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
+        rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_deployed_comments_by_brand(self, brand_id=None, brand_name=None):
@@ -1158,27 +1242,54 @@ class Database:
     def get_brand_comments_with_details(self, brand_name, date_from=None, date_to=None):
         """Get all comments for a brand (by name, across all subreddits) with post+subreddit info.
 
+        Includes both regular comments and search_comments via UNION.
         Optionally filtered by created_at date range.
         Returns list of dicts with comment fields + post_title, post_reddit_url, subreddit_name, subreddit_id.
         """
-        query = """SELECT c.*, p.title as post_title, p.subreddit_id,
-                          s.name as subreddit_name,
-                          pu.reddit_url as post_reddit_url
-                   FROM comments c
-                   JOIN posts p ON c.post_id = p.id
-                   JOIN brands b ON c.brand_id = b.id
-                   JOIN subreddits s ON p.subreddit_id = s.id
-                   LEFT JOIN post_urls pu ON pu.post_id = p.id
-                   WHERE LOWER(b.name) = LOWER(?)"""
-        params = [brand_name]
+        # Regular comments
+        q1 = """SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                       c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
+                       c.paid_at, c.reddit_comment_url, c.suggested_post_day,
+                       'comment' as source,
+                       p.title as post_title, p.subreddit_id,
+                       s.name as subreddit_name,
+                       pu.reddit_url as post_reddit_url
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                JOIN brands b ON c.brand_id = b.id
+                JOIN subreddits s ON p.subreddit_id = s.id
+                LEFT JOIN post_urls pu ON pu.post_id = p.id
+                WHERE LOWER(b.name) = LOWER(?)"""
+        p1 = [brand_name]
         if date_from:
-            query += " AND c.created_at >= ?"
-            params.append(date_from)
+            q1 += " AND c.created_at >= ?"
+            p1.append(date_from)
         if date_to:
-            query += " AND c.created_at <= ?"
-            params.append(date_to + " 23:59:59")
-        query += " ORDER BY c.created_at DESC, c.id DESC"
-        rows = self.conn.execute(query, params).fetchall()
+            q1 += " AND c.created_at <= ?"
+            p1.append(date_to + " 23:59:59")
+
+        # Search comments
+        q2 = """SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+                       sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
+                       sc.paid_at, sc.reddit_comment_url, 0 as suggested_post_day,
+                       'search_comment' as source,
+                       sp.title as post_title, NULL as subreddit_id,
+                       sp.subreddit as subreddit_name,
+                       sp.reddit_url as post_reddit_url
+                FROM search_comments sc
+                JOIN search_posts sp ON sc.search_post_id = sp.id
+                JOIN brands b2 ON sc.brand_id = b2.id
+                WHERE LOWER(b2.name) = LOWER(?)"""
+        p2 = [brand_name]
+        if date_from:
+            q2 += " AND sc.created_at >= ?"
+            p2.append(date_from)
+        if date_to:
+            q2 += " AND sc.created_at <= ?"
+            p2.append(date_to + " 23:59:59")
+
+        query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined ORDER BY created_at DESC, id DESC"
+        rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_brand_subreddit_stats(self, brand_name, date_from=None, date_to=None):

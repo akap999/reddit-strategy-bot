@@ -2625,7 +2625,7 @@ async function loadCommentTree() {
     const autoAllBtn = document.getElementById('auto-assign-all-btn');
     const unassignAllBtn = document.getElementById('unassign-all-comments-btn');
 
-    if (!sid) {
+    if (!sid && !brandId) {
         container.innerHTML = ''; _ctPostRedditUrl = '';
         if (autoBtn) autoBtn.style.display = 'none';
         if (removeAllBtn) removeAllBtn.style.display = 'none';
@@ -2684,11 +2684,16 @@ async function loadCommentTree() {
     _ctPostRedditUrl = '';
     if (autoBtn) autoBtn.style.display = 'none';
     if (removeAllBtn) removeAllBtn.style.display = 'none';
-    if (autoAllBtn) autoAllBtn.style.display = 'inline-block';
-    if (unassignAllBtn) unassignAllBtn.style.display = 'inline-block';
+    if (autoAllBtn) autoAllBtn.style.display = sid ? 'inline-block' : 'none';
+    if (unassignAllBtn) unassignAllBtn.style.display = sid ? 'inline-block' : 'none';
 
-    let url = `/api/subreddits/${sid}/all-comments?`;
-    if (brandId) url += `brand_id=${brandId}&`;
+    let url;
+    if (sid) {
+        url = `/api/subreddits/${sid}/all-comments?`;
+        if (brandId) url += `brand_id=${brandId}&`;
+    } else if (brandId) {
+        url = `/api/brands/${brandId}/all-comments?`;
+    }
     if (statusFilter) url += `status=${statusFilter}&`;
     if (sortBy) url += `sort_by=${sortBy}&`;
 

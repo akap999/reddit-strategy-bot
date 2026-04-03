@@ -2,9 +2,9 @@
 Auto-assignment of Reddit accounts to draft comments.
 
 Hard rules (never violated):
-  1. ONE account per post — no account may appear twice on the same post
-  2. OP replies MUST go to the post owner (owner_account)
-  3. Non-OP comments MUST NOT go to the post owner
+  1. Reply comments (is_reply=1) → SAME account as their parent comment
+  2. OP replies (comment_type='op_reply') → post owner only
+  3. Top-level non-OP comments → unique account per post, never the post owner
   4. Already-assigned / deployed comments are never touched
 
 Soft scoring picks the best account among those that pass the hard rules.
@@ -45,16 +45,33 @@ def _build_lookups(context):
     }
 
 
-def _get_post_assigned_accounts(db, post_id):
-    """Return set of account usernames that already have a comment
-    (assigned, informed, or deployed) on this post."""
+def _get_post_toplevel_accounts(db, post_id):
+    """Return set of account usernames that already have a TOP-LEVEL
+    (non-reply) comment (assigned, informed, or deployed) on this post.
+    Replies inherit their parent's account, so they don't count toward
+    the one-account-per-post rule."""
     rows = db.conn.execute(
         """SELECT DISTINCT account_id FROM comments
            WHERE post_id = ? AND account_id IS NOT NULL AND account_id != ''
-             AND status IN ('assigned', 'informed', 'deployed')""",
+             AND status IN ('assigned', 'informed', 'deployed')
+             AND is_reply = 0""",
         (post_id,)
     ).fetchall()
     return {r["account_id"] for r in rows}
+
+
+def _get_parent_account(db, parent_comment_id):
+    """Get the account_id of a parent comment. Returns None if not found
+    or parent is unassigned."""
+    if not parent_comment_id:
+        return None
+    row = db.conn.execute(
+        "SELECT account_id FROM comments WHERE id = ?",
+        (parent_comment_id,)
+    ).fetchone()
+    if row and row["account_id"]:
+        return row["account_id"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +121,7 @@ def score_account(account, comment, lookups, batch_picks):
 
 
 # ---------------------------------------------------------------------------
-# Post ownership scoring (unchanged logic)
+# Post ownership scoring
 # ---------------------------------------------------------------------------
 
 def _build_post_lookups(context):
@@ -215,9 +232,9 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     Auto-assign all draft comments for a post to accounts.
 
     Hard rules enforced:
+      - Reply comments → same account as parent comment
       - OP replies → post owner only
-      - Non-OP → never the post owner, never an account already on this post
-      - One account per post (except OP which is the post owner)
+      - Top-level non-OP → unique account per post, never the post owner
     """
     context = db.get_auto_assign_context(post_id)
     if not context:
@@ -241,22 +258,29 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     assignments = []
     warnings = []
 
-    # Hard rule: track accounts already on this post (from prior runs)
-    used_on_post = _get_post_assigned_accounts(db, post_id)
+    # Track accounts used for top-level comments on this post (from prior runs)
+    used_on_post = _get_post_toplevel_accounts(db, post_id)
 
-    # Separate OP replies from regular comments
-    op_comments = [c for c in draft_comments if c.get("comment_type") == "op_reply"]
-    regular_comments = [c for c in draft_comments if c.get("comment_type") != "op_reply"]
+    # Categorize comments into three groups
+    op_comments = []
+    reply_comments = []
+    toplevel_comments = []
+    for c in draft_comments:
+        if c.get("comment_type") == "op_reply":
+            op_comments.append(c)
+        elif c.get("is_reply") and c.get("parent_comment_id"):
+            reply_comments.append(c)
+        else:
+            toplevel_comments.append(c)
 
     # ---------------------------------------------------------------
-    # OP replies: ALL must go to the post owner
+    # 1. OP replies: ALL go to the post owner
     # ---------------------------------------------------------------
     op_account = post.get("owner_account") or ""
 
     if op_comments:
         valid_op = op_account and any(a["username"] == op_account for a in accounts)
         if not valid_op:
-            # Check for existing OP reply assignment
             existing_op = db.conn.execute(
                 """SELECT account_id FROM comments
                    WHERE post_id = ? AND comment_type = 'op_reply'
@@ -267,16 +291,14 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             if existing_op and any(a["username"] == existing_op["account_id"] for a in accounts):
                 op_account = existing_op["account_id"]
             else:
-                # Pick best-scoring account for OP role
                 scores = [(score_account(a, op_comments[0], lookups, batch_picks), a) for a in accounts]
                 scores.sort(key=lambda x: -x[0])
                 op_account = scores[0][1]["username"]
 
-        # Ensure post owner is set correctly
         if not post.get("owner_account"):
             db.set_post_owner(post["id"], op_account)
 
-        used_on_post.add(op_account)  # OP account is "used" on this post
+        used_on_post.add(op_account)
 
         for c in op_comments:
             db.assign_comment(c["id"], op_account)
@@ -290,20 +312,50 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             })
 
     # ---------------------------------------------------------------
-    # Regular comments: each gets a UNIQUE account, never the OP
+    # 2. Reply comments: inherit parent's account
     # ---------------------------------------------------------------
-    # Build the pool: exclude OP account + accounts already on this post
+    # Build a map of comment_id → account from already-assigned comments
+    # (includes ones we just assigned above + existing DB state)
+    assigned_map = {}  # comment_id → account_id
+    for a in assignments:
+        assigned_map[a["comment_id"]] = a["account"]
+
+    skipped = 0
+    for c in reply_comments:
+        parent_acct = _get_parent_account(db, c["parent_comment_id"])
+        # Also check if parent was just assigned in this batch
+        if not parent_acct:
+            parent_acct = assigned_map.get(c["parent_comment_id"])
+
+        if parent_acct:
+            db.assign_comment(c["id"], parent_acct)
+            assigned_map[c["id"]] = parent_acct
+            batch_picks[parent_acct] += 1
+            lookups["pending"][parent_acct] = lookups["pending"].get(parent_acct, 0) + 1
+            assignments.append({
+                "comment_id": c["id"],
+                "account": parent_acct,
+                "score": None,
+                "type": "reply",
+            })
+        else:
+            skipped += 1
+            warnings.append(
+                f"Comment #{c['id']}: skipped — parent comment #{c['parent_comment_id']} "
+                f"has no account assigned yet."
+            )
+
+    # ---------------------------------------------------------------
+    # 3. Top-level non-OP: unique account per post, never the OP
+    # ---------------------------------------------------------------
     op_to_exclude = op_account or post.get("owner_account") or ""
     blocked = set(used_on_post)
     if op_to_exclude:
         blocked.add(op_to_exclude)
 
-    skipped = 0
-    for comment in regular_comments:
-        # Eligible = all accounts minus blocked ones
+    for comment in toplevel_comments:
         eligible = [a for a in accounts if a["username"] not in blocked]
         if not eligible:
-            # No more unique accounts available — skip this comment
             skipped += 1
             warnings.append(
                 f"Comment #{comment['id']}: skipped — no unique account available "
@@ -323,13 +375,14 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
+        assigned_map[comment["id"]] = username
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
         comment_day = comment.get("suggested_post_day", 0) or 0
         lookups["sub_day"][username][comment_day] += 1
 
-        # Hard rule: mark this account as used on the post
+        # Mark this account as used on the post (top-level uniqueness)
         blocked.add(username)
         used_on_post.add(username)
 
@@ -356,8 +409,9 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single unassigned comment to the best-scoring account.
 
     Hard rules:
+      - Reply → same account as parent
       - OP reply → post owner only
-      - Non-OP → never the post owner, never an account already on this post
+      - Top-level non-OP → unique account, never the post owner
     """
     comment = db.get_comment(comment_id)
     if not comment:
@@ -381,12 +435,21 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     batch_picks = defaultdict(int)
 
     # ---------------------------------------------------------------
+    # Reply → must go to parent's account
+    # ---------------------------------------------------------------
+    if comment.get("is_reply") and comment.get("parent_comment_id"):
+        parent_acct = _get_parent_account(db, comment["parent_comment_id"])
+        if parent_acct:
+            db.assign_comment(comment_id, parent_acct)
+            return {"ok": True, "account": parent_acct, "score": None, "type": "reply"}
+        return {"error": f"Parent comment #{comment['parent_comment_id']} has no account. Assign the parent first."}
+
+    # ---------------------------------------------------------------
     # OP reply → must go to post owner
     # ---------------------------------------------------------------
     if comment.get("comment_type") == "op_reply":
         op_acct = post.get("owner_account") or ""
         if not op_acct or not any(a["username"] == op_acct for a in accounts):
-            # Fallback: check existing OP assignments
             existing_op = db.conn.execute(
                 """SELECT account_id FROM comments
                    WHERE post_id = ? AND comment_type = 'op_reply'
@@ -406,9 +469,9 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No valid OP account available. Assign a post owner first."}
 
     # ---------------------------------------------------------------
-    # Non-OP → exclude post owner + accounts already on this post
+    # Top-level non-OP → unique account, exclude OP + already used
     # ---------------------------------------------------------------
-    used_on_post = _get_post_assigned_accounts(db, post_id)
+    used_on_post = _get_post_toplevel_accounts(db, post_id)
     op_account_name = post.get("owner_account") or ""
     blocked = set(used_on_post)
     if op_account_name:

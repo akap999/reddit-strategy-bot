@@ -1650,6 +1650,15 @@ def api_brand_full_analytics(name):
     finally:
         db.close()
 
+@app.route("/api/brands/<name>/deployed-hierarchy")
+def api_brand_deployed_hierarchy(name):
+    """Get deployed posts and comments for a brand, grouped by subreddit."""
+    db = get_db()
+    try:
+        return jsonify(db.get_brand_deployed_hierarchy(name))
+    finally:
+        db.close()
+
 @app.route("/api/debug/brand/<name>/comments")
 def api_debug_brand_comments(name):
     """Debug endpoint: show raw comment data for a brand to diagnose missing comments."""

@@ -1306,6 +1306,15 @@ function renderBrandDetail(data) {
                 </table>
             </div>` : '<p class="text-xs text-gray-500 mb-6">No comments found for this date range.</p>'}
 
+            <!-- Deployed Overview (hierarchy) -->
+            <div class="mb-6">
+                <div class="flex gap-3 items-center mb-2">
+                    <h4 class="text-sm font-bold text-gray-300">Deployed Overview</h4>
+                    <button class="btn btn-sm btn-secondary" onclick="loadBrandDeployedHierarchy('${name.replace(/'/g, "\\'")}')">Load</button>
+                </div>
+                <div id="brand-deployed-hierarchy"></div>
+            </div>
+
             <!-- Comments table with filters -->
             <div class="flex gap-3 items-end mb-3 flex-wrap">
                 <h4 class="text-sm font-bold text-gray-300">Comments</h4>
@@ -1505,6 +1514,78 @@ function renderBrandCommentTable() {
             </table>
         </div>
     `;
+}
+
+async function loadBrandDeployedHierarchy(brandName) {
+    const container = document.getElementById('brand-deployed-hierarchy');
+    if (!container) return;
+    container.innerHTML = '<div class="spinner mx-auto my-4"></div>';
+
+    const data = await api(`/api/brands/${encodeURIComponent(brandName)}/deployed-hierarchy`);
+    const subs = data.subreddits || [];
+
+    if (!subs.length || subs.every(s => !s.posts.length)) {
+        container.innerHTML = '<p class="text-xs text-gray-500">No deployed posts found for this brand.</p>';
+        return;
+    }
+
+    container.innerHTML = subs.map(sub => {
+        const postRows = sub.posts.map(p => {
+            const brandedRows = (p.branded_comments || []).map(c => `
+                <tr>
+                    <td class="text-xs text-gray-400 max-w-xs truncate">${(c.body || '').substring(0, 100)}</td>
+                    <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
+                    <td class="text-xs text-gray-500">${c.deployed_at ? c.deployed_at.split(' ')[0] : '-'}</td>
+                    <td class="text-xs">${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">view</a>` : '-'}</td>
+                </tr>`).join('');
+
+            const nonBrandedRows = (p.non_branded_comments || []).map(c => `
+                <tr>
+                    <td class="text-xs text-gray-400 max-w-xs truncate">${(c.body || '').substring(0, 100)}</td>
+                    <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
+                    <td class="text-xs text-gray-500">${c.deployed_at ? c.deployed_at.split(' ')[0] : '-'}</td>
+                    <td class="text-xs">${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">view</a>` : '-'}</td>
+                </tr>`).join('');
+
+            const brandedCount = (p.branded_comments || []).length;
+            const nonBrandedCount = (p.non_branded_comments || []).length;
+            const postLink = p.reddit_url ? `<a href="${p.reddit_url}" target="_blank" class="text-orange-500 hover:underline">${p.title}</a>` : p.title;
+            const sourceTag = p.source === 'search' ? '<span class="badge ml-1" style="background:#6366f1;color:white;font-size:0.6rem">Search</span>' : '';
+            const ownerTag = p.owner_account ? `<span class="text-xs text-yellow-400 ml-2">Owner: ${p.owner_account}</span>` : '';
+
+            return `
+                <div class="ml-6 mb-3 border-l-2 border-gray-700 pl-3">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-sm text-gray-200">${postLink}</span>
+                        ${sourceTag}${ownerTag}
+                        <span class="text-xs text-gray-600">Day ${p.suggested_post_day || '-'}</span>
+                    </div>
+                    ${brandedCount ? `
+                    <details open class="ml-4 mb-1">
+                        <summary class="text-xs text-blue-400 cursor-pointer mb-1">Branded (${brandedCount})</summary>
+                        <table class="text-xs w-full"><thead><tr><th>Comment</th><th>Account</th><th>Deployed</th><th>Link</th></tr></thead>
+                        <tbody>${brandedRows}</tbody></table>
+                    </details>` : ''}
+                    ${nonBrandedCount ? `
+                    <details open class="ml-4 mb-1">
+                        <summary class="text-xs text-gray-400 cursor-pointer mb-1">Non-Branded (${nonBrandedCount})</summary>
+                        <table class="text-xs w-full"><thead><tr><th>Comment</th><th>Account</th><th>Deployed</th><th>Link</th></tr></thead>
+                        <tbody>${nonBrandedRows}</tbody></table>
+                    </details>` : ''}
+                    ${!brandedCount && !nonBrandedCount ? '<p class="text-xs text-gray-600 ml-4">No deployed comments</p>' : ''}
+                </div>`;
+        }).join('');
+
+        const totalComments = sub.posts.reduce((sum, p) => sum + (p.branded_comments || []).length + (p.non_branded_comments || []).length, 0);
+
+        return `
+            <details open class="mb-4">
+                <summary class="cursor-pointer text-sm font-bold text-orange-500 mb-2">
+                    r/${sub.name} <span class="text-xs text-gray-500 font-normal">(${sub.posts.length} posts, ${totalComments} comments)</span>
+                </summary>
+                ${postRows}
+            </details>`;
+    }).join('');
 }
 
 async function refreshBrandLiveStats() {
@@ -3922,6 +4003,7 @@ function renderAccountCommentsPanel(username, cell, allComments) {
                 <select id="${filterId}" class="text-xs w-32" onchange="filterAccountComments('${username}')">
                     <option value="" ${!currentFilter ? 'selected' : ''}>All Status</option>
                     <option value="assigned" ${currentFilter==='assigned' ? 'selected' : ''}>Assigned</option>
+                    <option value="informed" ${currentFilter==='informed' ? 'selected' : ''}>Informed</option>
                     <option value="deployed" ${currentFilter==='deployed' ? 'selected' : ''}>Deployed</option>
                     <option value="complete" ${currentFilter==='complete' ? 'selected' : ''}>Complete</option>
                     <option value="deleted" ${currentFilter==='deleted' ? 'selected' : ''}>Deleted</option>

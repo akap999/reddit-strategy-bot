@@ -1465,14 +1465,26 @@ class Database:
 
         all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts").fetchall()]
 
+        # Cross-table: subreddit day assignments from BOTH comments and search_comments
+        sub_name = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (sub_id,)).fetchone()
+        sub_name_val = sub_name["name"] if sub_name else ""
         subreddit_day_assignments = [dict(r) for r in self.conn.execute(
-            """SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
-               FROM comments c JOIN posts p ON c.post_id = p.id
-               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
-                 AND c.status IN ('assigned','informed','deployed')
-                 AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
-               GROUP BY c.account_id, c.suggested_post_day""",
-            (sub_id,)
+            """SELECT account_id, suggested_post_day, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
+                   FROM comments c JOIN posts p ON c.post_id = p.id
+                   WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+                     AND c.status IN ('assigned','informed','deployed')
+                     AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
+                   GROUP BY c.account_id, c.suggested_post_day
+                   UNION ALL
+                   SELECT sc.account_id, 0 as suggested_post_day, COUNT(*) as cnt
+                   FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+                     AND sc.status IN ('assigned','informed','deployed')
+                     AND (sc.deployed_at IS NULL OR sc.deployed_at > datetime('now', '-30 days'))
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id, suggested_post_day""",
+            (sub_id, sub_name_val)
         ).fetchall()]
 
         # Cross-table: pending counts from BOTH comments and search_comments
@@ -1514,10 +1526,16 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
+        # Cross-table: veterans from BOTH comments and search_comments in this subreddit
         subreddit_veterans = [r[0] for r in self.conn.execute(
-            """SELECT DISTINCT c.account_id FROM comments c JOIN posts p ON c.post_id = p.id
-               WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL""",
-            (sub_id,)
+            """SELECT DISTINCT account_id FROM (
+                   SELECT c.account_id FROM comments c JOIN posts p ON c.post_id = p.id
+                   WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+                   UNION
+                   SELECT sc.account_id FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+               )""",
+            (sub_id, sub_name_val)
         ).fetchall()]
 
         return {

@@ -1641,6 +1641,57 @@ def api_brand_full_analytics(name):
     finally:
         db.close()
 
+@app.route("/api/debug/brand/<name>/comments")
+def api_debug_brand_comments(name):
+    """Debug endpoint: show raw comment data for a brand to diagnose missing comments."""
+    db = get_db()
+    try:
+        # All brand IDs for this name
+        brand_ids = db.conn.execute(
+            "SELECT id, name, subreddit_id FROM brands WHERE LOWER(name) = LOWER(?)", (name,)
+        ).fetchall()
+        brand_ids_list = [r["id"] for r in brand_ids]
+
+        # Raw comment counts per brand_id
+        raw_comments = []
+        for bid in brand_ids_list:
+            rows = db.conn.execute(
+                "SELECT c.id, c.brand_id, c.post_id, c.status, c.account_id, c.is_ours, c.created_at FROM comments c WHERE c.brand_id = ?", (bid,)
+            ).fetchall()
+            for r in rows:
+                d = dict(r)
+                # Check if post exists
+                post = db.conn.execute("SELECT id, title, subreddit_id FROM posts WHERE id = ?", (d["post_id"],)).fetchone()
+                d["post_exists"] = post is not None
+                d["post_title"] = dict(post)["title"] if post else None
+                d["post_subreddit_id"] = dict(post)["subreddit_id"] if post else None
+                raw_comments.append(d)
+
+        # Raw search_comments
+        raw_search = []
+        for bid in brand_ids_list:
+            rows = db.conn.execute(
+                "SELECT sc.id, sc.brand_id, sc.search_post_id, sc.status, sc.account_id, sc.created_at FROM search_comments sc WHERE sc.brand_id = ?", (bid,)
+            ).fetchall()
+            raw_search.extend([dict(r) for r in rows])
+
+        # What get_brand_comments_with_details returns
+        unified = db.get_brand_comments_with_details(name)
+
+        return jsonify({
+            "brand_name": name,
+            "brand_entries": [dict(r) for r in brand_ids],
+            "brand_ids": brand_ids_list,
+            "raw_comments": raw_comments,
+            "raw_comments_count": len(raw_comments),
+            "raw_search_comments": raw_search,
+            "raw_search_count": len(raw_search),
+            "unified_result": unified,
+            "unified_count": len(unified),
+        })
+    finally:
+        db.close()
+
 @app.route("/api/export/brand/<name>")
 def api_export_brand(name):
     """Export brand comments as CSV with optional date filtering."""

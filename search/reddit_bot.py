@@ -565,7 +565,7 @@ class RedditSearchBot:
         for sub_name in unique_subs:
             try:
                 resp = requests.get(
-                    f"{self.reddit_base}/r/{sub_name}/about.json",
+                    f"{self.apis['reddit']}/r/{sub_name}/about.json",
                     headers=headers, timeout=8
                 )
                 if resp.status_code == 200:

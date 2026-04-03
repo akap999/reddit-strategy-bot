@@ -443,6 +443,8 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "account": username,
             "score": best_score,
             "type": "brand" if comment.get("mentions_brand") else "organic",
+            "_debug_scores": {s[1]["username"]: s[0] for s in scores[:10]},
+            "_debug_blocked": list(blocked),
         })
 
     # ---------------------------------------------------------------
@@ -569,7 +571,11 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
-    return {"ok": True, "account": username, "score": best_score}
+    return {
+        "ok": True, "account": username, "score": best_score,
+        "_debug_scores": {s[1]["username"]: s[0] for s in scores[:10]},
+        "_debug_blocked": list(blocked),
+    }
 
 
 # ---------------------------------------------------------------------------

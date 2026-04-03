@@ -37,12 +37,30 @@ def _build_lookups(context):
     for r in context["account_total_mentions"]:
         total_mentions[r["account_id"]] = r["cnt"]
 
+    # Global deployed footprint
+    deployed = defaultdict(int)
+    for r in context.get("account_deployed_counts", []):
+        deployed[r["account_id"]] = r["cnt"]
+
+    # Post ownership count
+    post_ownership = defaultdict(int)
+    for r in context.get("account_post_ownership", []):
+        post_ownership[r["account_id"]] = r["cnt"]
+
+    # Subreddit spread (how many distinct subs the account is active in)
+    sub_spread = defaultdict(int)
+    for r in context.get("account_sub_spread", []):
+        sub_spread[r["account_id"]] = r["cnt"]
+
     return {
         "sub_day": sub_day,
         "pending": pending,
         "brand_mentions": brand_mentions,
         "total_mentions": total_mentions,
         "veterans": context["subreddit_veterans"],
+        "deployed": deployed,
+        "post_ownership": post_ownership,
+        "sub_spread": sub_spread,
     }
 
 
@@ -105,6 +123,17 @@ def score_account(account, comment, lookups, batch_picks):
     # --- Low karma penalty: -15 if total < 500 ---
     if total_karma < 500:
         score -= 15
+
+    # --- Global deployed footprint: -3 per deployed comment (spreads load) ---
+    deployed_count = lookups["deployed"].get(username, 0)
+    score -= 3 * deployed_count
+
+    # --- Post ownership load: -5 per post owned (more exposed = more risk) ---
+    score -= 5 * lookups["post_ownership"].get(username, 0)
+
+    # --- Subreddit spread bonus: +3 per distinct sub active in (max +15) ---
+    # More spread = looks more natural
+    score += min(15, 3 * lookups["sub_spread"].get(username, 0))
 
     # --- Account age: graduated bonus/penalty ---
     created = account.get("created_utc")

@@ -1538,6 +1538,39 @@ class Database:
             (sub_id, sub_name_val)
         ).fetchall()]
 
+        # Global deployed footprint: total deployed comments + search_comments per account
+        account_deployed_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
+        # Post ownership count per account (all subreddits)
+        account_post_ownership = [dict(r) for r in self.conn.execute(
+            """SELECT owner_account as account_id, COUNT(*) as cnt FROM posts
+               WHERE owner_account IS NOT NULL AND owner_account != ''
+               GROUP BY owner_account"""
+        ).fetchall()]
+
+        # Number of distinct subreddits each account is active in (comments + search_comments)
+        account_sub_spread = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, COUNT(DISTINCT sub) as cnt FROM (
+                   SELECT c.account_id, p.subreddit_id as sub FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed')
+                   UNION ALL
+                   SELECT sc.account_id, sp.subreddit as sub FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed')
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
         return {
             "post": post,
             "draft_comments": draft_comments,
@@ -1547,6 +1580,9 @@ class Database:
             "account_brand_mentions": account_brand_mentions,
             "account_total_mentions": account_total_mentions,
             "subreddit_veterans": set(subreddit_veterans),
+            "account_deployed_counts": account_deployed_counts,
+            "account_post_ownership": account_post_ownership,
+            "account_sub_spread": account_sub_spread,
         }
 
     def get_accounts_for_filters(self, subreddit_id=None, brand_id=None, post_id=None):

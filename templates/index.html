@@ -1604,6 +1604,7 @@ async function renderPosts(el) {
                 <option value="published">Deployed</option>
             </select>
             <button class="btn btn-primary" onclick="showAutoAssignPostsModal()">Auto Assign Posts</button>
+            <button class="btn btn-danger" onclick="unassignAllPosts()">Unassign All Posts</button>
         </div>
         <div id="posts-table"></div>
     `;
@@ -1670,7 +1671,7 @@ async function loadPosts() {
                     </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
-                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}`}
+                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </div></td>
                 </tr>
@@ -1816,6 +1817,13 @@ async function markPostPaid(pid) {
     loadPosts();
 }
 
+async function undeployPost(pid) {
+    if (!confirm('Undeploy this post? It will revert to "complete" status.')) return;
+    await api(`/api/posts/${pid}/undeploy`, { method: 'POST', body: {} });
+    toast('Post undeployed', 'success');
+    loadPosts();
+}
+
 async function autoAssignPost(pid) {
     showSingleAutoAssignModal('post', pid);
 }
@@ -1827,6 +1835,17 @@ async function copyPostMessage(pid) {
     const subName = subSelect?.options[subSelect.selectedIndex]?.text?.replace('r/', '') || '';
     const message = `SubReddit Post! Please follow the subReddit before posting. \nUsername - \n${post.owner_account || ''}\n\nSubreddit Link - \nhttps://reddit.com/r/${subName}\n\nPost Heading -\n${post.title || ''}\n\nPost Description -\n${post.body || ''}\n\nPlease share the post link :)`;
     navigator.clipboard.writeText(message).then(() => toast('Post message copied to clipboard', 'success'));
+}
+
+async function unassignAllPosts() {
+    const sid = document.getElementById('posts-sub-filter').value;
+    if (!sid) { toast('Select a subreddit first', 'error'); return; }
+    if (!confirm('Remove owner from all non-deployed posts in this subreddit?')) return;
+    try {
+        const result = await api(`/api/subreddits/${sid}/unassign-all-posts`, { method: 'POST', body: {} });
+        toast(`Unassigned ${result.unassigned} posts`, 'success');
+        loadPosts();
+    } catch(e) { toast('Failed to unassign posts', 'error'); }
 }
 
 // --- Auto Assign Posts (bulk for subreddit) ---
@@ -2175,6 +2194,8 @@ async function renderCommentTreeTab(container) {
             </select>
             <button id="auto-assign-btn" class="btn btn-primary" onclick="showAutoAssignModal()" style="display:none">Auto Assign</button>
             <button id="remove-all-assigns-btn" class="btn btn-danger" onclick="removeAllAssigns()" style="display:none">Remove All Assigns</button>
+            <button id="auto-assign-all-btn" class="btn btn-primary" onclick="autoAssignAllComments()" style="display:none">Auto Assign All</button>
+            <button id="unassign-all-comments-btn" class="btn btn-danger" onclick="unassignAllComments()" style="display:none">Unassign All</button>
         </div>
         <div id="comment-tree"></div>
     `;
@@ -2572,11 +2593,15 @@ async function loadCommentTree() {
     const container = document.getElementById('comment-tree');
     const autoBtn = document.getElementById('auto-assign-btn');
     const removeAllBtn = document.getElementById('remove-all-assigns-btn');
+    const autoAllBtn = document.getElementById('auto-assign-all-btn');
+    const unassignAllBtn = document.getElementById('unassign-all-comments-btn');
 
     if (!sid) {
         container.innerHTML = ''; _ctPostRedditUrl = '';
         if (autoBtn) autoBtn.style.display = 'none';
         if (removeAllBtn) removeAllBtn.style.display = 'none';
+        if (autoAllBtn) autoAllBtn.style.display = 'none';
+        if (unassignAllBtn) unassignAllBtn.style.display = 'none';
         return;
     }
 
@@ -2598,6 +2623,8 @@ async function loadCommentTree() {
         }
         if (autoBtn) autoBtn.style.display = hasStatus(tree, ['draft', 'complete']) ? 'inline-block' : 'none';
         if (removeAllBtn) removeAllBtn.style.display = (hasStatus(tree, ['assigned']) || post.owner_account) ? 'inline-block' : 'none';
+        if (autoAllBtn) autoAllBtn.style.display = 'none';
+        if (unassignAllBtn) unassignAllBtn.style.display = 'none';
 
         // Apply status filter to tree
         let filteredTree = tree;
@@ -2628,6 +2655,8 @@ async function loadCommentTree() {
     _ctPostRedditUrl = '';
     if (autoBtn) autoBtn.style.display = 'none';
     if (removeAllBtn) removeAllBtn.style.display = 'none';
+    if (autoAllBtn) autoAllBtn.style.display = 'inline-block';
+    if (unassignAllBtn) unassignAllBtn.style.display = 'inline-block';
 
     let url = `/api/subreddits/${sid}/all-comments?`;
     if (brandId) url += `brand_id=${brandId}&`;
@@ -2657,7 +2686,7 @@ function renderCommentNodeFlat(c) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const deployedDate = c.deployed_at ? `<span class="text-xs text-gray-500">${c.deployed_at.substring(0, 10)}</span>` : '';
 
@@ -2700,7 +2729,7 @@ function renderCommentNode(c, depth) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -2946,6 +2975,38 @@ async function removeAllAssigns() {
     loadCommentTree();
 }
 
+async function autoAssignAllComments() {
+    const sid = document.getElementById('comments-sub-filter')?.value;
+    if (!sid) { toast('Select a subreddit first', 'error'); return; }
+    // Get all posts in the subreddit, then auto-assign each
+    const posts = await api(`/api/subreddits/${sid}/posts`);
+    const postIds = posts.map(p => p.id);
+    if (!postIds.length) { toast('No posts found in this subreddit', 'error'); return; }
+    if (!confirm(`Auto-assign comments for all ${postIds.length} posts in this subreddit? Already assigned/deployed comments will be skipped.`)) return;
+    try {
+        const result = await api('/api/auto-assign', {
+            method: 'POST',
+            body: { post_ids: postIds }
+        });
+        if (result.error) { toast(result.error, 'error'); return; }
+        const total = result.results.reduce((s, r) => s + (r.assigned || 0), 0);
+        const skipped = result.results.filter(r => r.error).length;
+        toast(`Assigned ${total} comments across ${result.results.length - skipped} posts`, 'success');
+        loadCommentTree();
+    } catch(e) { toast('Failed to auto-assign', 'error'); }
+}
+
+async function unassignAllComments() {
+    const sid = document.getElementById('comments-sub-filter')?.value;
+    if (!sid) { toast('Select a subreddit first', 'error'); return; }
+    if (!confirm('Unassign all assigned/informed comments in this subreddit? Deployed comments will NOT be affected.')) return;
+    try {
+        const result = await api(`/api/subreddits/${sid}/unassign-all-comments`, { method: 'POST', body: {} });
+        toast(`Unassigned ${result.unassigned} comments`, 'success');
+        loadCommentTree();
+    } catch(e) { toast('Failed to unassign comments', 'error'); }
+}
+
 function deployCommentModal(cid) {
     showModal(`
         <h3 class="text-lg font-bold mb-4">Deploy Comment</h3>
@@ -2980,6 +3041,14 @@ async function markCommentDeleted(cid) {
 async function markCommentPaid(cid) {
     await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
     toast('Marked as paid', 'success');
+    if (currentView === 'comments') loadCommentTree();
+    else loadManagedComments();
+}
+
+async function undeployComment(cid) {
+    if (!confirm('Undeploy this comment? It will revert to "assigned" status.')) return;
+    await api(`/api/comments/${cid}/undeploy`, { method: 'POST', body: {} });
+    toast('Comment undeployed', 'success');
     if (currentView === 'comments') loadCommentTree();
     else loadManagedComments();
 }
@@ -3314,7 +3383,7 @@ async function loadManagedComments() {
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
                 else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
-                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
 
                 return `<tr>
                     <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
@@ -4616,8 +4685,8 @@ async function loadPayItems() {
                             ? `<span class="badge" style="background:#00A86B;color:white">${item.paid_at.substring(0,10)}</span>`
                             : '<span class="text-red-400 text-xs">Unpaid</span>';
                         const action = item.paid_at
-                            ? ''
-                            : `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="payItem('${item.type}',${item.id})">Pay</button>`;
+                            ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPayItem('${item.type}',${item.id})">Undeploy</button>`
+                            : `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="payItem('${item.type}',${item.id})">Pay</button><button class="btn btn-sm ml-1" style="background:#8B0000;color:white" onclick="undeployPayItem('${item.type}',${item.id})">Undeploy</button>`;
                         return `<tr>
                             <td>${typeLabel}</td>
                             <td style="max-width:300px">${content}</td>
@@ -4661,6 +4730,21 @@ async function payItem(type, id) {
         toast('Marked as paid', 'success');
         loadPayItems();
     } catch(e) { toast('Failed to mark paid', 'error'); }
+}
+
+async function undeployPayItem(type, id) {
+    if (!confirm('Undeploy this item? It will revert to its previous status.')) return;
+    try {
+        if (type === 'comment') {
+            await api(`/api/comments/${id}/undeploy`, { method: 'POST' });
+        } else if (type === 'post') {
+            await api(`/api/posts/${id}/undeploy`, { method: 'POST' });
+        } else if (type === 'search_comment') {
+            await api(`/api/search/comments/${id}/undeploy`, { method: 'POST' });
+        }
+        toast('Item undeployed', 'success');
+        loadPayItems();
+    } catch(e) { toast('Failed to undeploy', 'error'); }
 }
 
 async function markAllVisiblePaid() {
@@ -5411,6 +5495,15 @@ async function lsMarkPaid(cid) {
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
+async function lsUndeployComment(cid) {
+    if (!confirm('Undeploy this search comment? It will revert to "assigned" status.')) return;
+    try {
+        await api(`/api/search/comments/${cid}/undeploy`, { method: 'POST' });
+        toast('Comment undeployed', 'success');
+        renderLsTabContent();
+    } catch(e) { toast('Failed to undeploy', 'error'); }
+}
+
 async function lsAssignComment(cid) {
     // Reuse the existing assignment modal pattern
     let accounts;
@@ -5649,6 +5742,7 @@ async function lsToggleAccountDetail(username) {
                         <td>${c.deployed_at ? new Date(c.deployed_at+'Z').toLocaleDateString() : '-'}</td>
                         <td>
                             ${c.status === 'deployed' && !c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                            ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="lsUndeployComment(${c.id})">Undeploy</button>` : ''}
                             ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                         </td>
                     </tr>

@@ -11,8 +11,7 @@ Interactive CLI tool for managing subreddit content strategy — generates subre
 pip3 install -r requirements.txt
 
 # Set your Anthropic API key
-export ANTHROPIC_API_KEY="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
-"
+
 ```
 
 ## How to Run

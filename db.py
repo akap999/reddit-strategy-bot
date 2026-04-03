@@ -376,6 +376,15 @@ class Database:
         self.conn.execute("UPDATE posts SET status = ? WHERE id = ?", (status, post_id))
         self.conn.commit()
 
+    def undeploy_post(self, post_id):
+        """Revert a deployed (published) post back to complete status."""
+        self.conn.execute(
+            """UPDATE posts SET status = 'complete', deployed_at = NULL, paid_at = NULL
+               WHERE id = ? AND status = 'published'""",
+            (post_id,)
+        )
+        self.conn.commit()
+
     def delete_subreddit(self, subreddit_id):
         """Delete a subreddit and all its underlying data (brands, posts, comments, post_urls)."""
         # Get all post IDs for this subreddit
@@ -953,6 +962,16 @@ class Database:
         )
         self.conn.commit()
 
+    def undeploy_comment(self, comment_id):
+        """Revert a deployed comment back to assigned status."""
+        self.conn.execute(
+            """UPDATE comments SET status = 'assigned', deployed_at = NULL,
+               reddit_comment_url = NULL, paid_at = NULL
+               WHERE id = ? AND status = 'deployed'""",
+            (comment_id,)
+        )
+        self.conn.commit()
+
     def inform_comment(self, comment_id):
         self.conn.execute(
             "UPDATE comments SET status = 'informed' WHERE id = ? AND status = 'assigned'",
@@ -1387,6 +1406,26 @@ class Database:
             "account_sub_post_counts": account_sub_post_counts,
             "account_sub_comment_counts": account_sub_comment_counts,
         }
+
+    def bulk_unassign_posts_in_subreddit(self, subreddit_id):
+        """Remove owner_account from all non-published posts in a subreddit."""
+        cur = self.conn.execute(
+            "UPDATE posts SET owner_account = '' WHERE subreddit_id = ? AND status != 'published' AND owner_account IS NOT NULL AND owner_account != ''",
+            (subreddit_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def bulk_unassign_comments_in_subreddit(self, subreddit_id):
+        """Unassign all assigned/informed comments across all posts in a subreddit. Skips deployed."""
+        cur = self.conn.execute(
+            """UPDATE comments SET account_id = NULL, status = 'draft'
+               WHERE post_id IN (SELECT id FROM posts WHERE subreddit_id = ?)
+                 AND status IN ('assigned','informed')""",
+            (subreddit_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def bulk_unassign_post_comments(self, post_id):
         """Unassign all assigned comments for a post, setting them back to draft."""
@@ -2019,6 +2058,16 @@ class Database:
         self.conn.execute(
             "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed' WHERE id = ?",
             (reddit_url, deployed_at, comment_id))
+        self.conn.commit()
+
+    def undeploy_search_comment(self, comment_id):
+        """Revert a deployed search comment back to assigned status."""
+        self.conn.execute(
+            """UPDATE search_comments SET status = 'assigned', deployed_at = NULL,
+               reddit_comment_url = NULL, paid_at = NULL
+               WHERE id = ? AND status = 'deployed'""",
+            (comment_id,)
+        )
         self.conn.commit()
 
     def update_search_comment_body(self, comment_id, body):

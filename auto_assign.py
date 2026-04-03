@@ -278,8 +278,14 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             })
 
     # --- Assign regular comments (brand-mention first from query ordering) ---
+    # Exclude OP account so non-OP comments never land on the post owner
+    op_account_name = post.get("owner_account") or ""
+    regular_accounts = [a for a in accounts if a["username"] != op_account_name] if op_account_name else accounts
+    if not regular_accounts:
+        regular_accounts = accounts  # fallback: only 1 account available
+
     for comment in regular_comments:
-        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in regular_accounts]
         scores.sort(key=lambda x: -x[0])
         best_score, best_account = scores[0]
 
@@ -357,7 +363,13 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
                 db.set_post_owner(post_id, op_acct)
             return {"ok": True, "account": op_acct, "score": None, "type": "op_reply"}
 
-    scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+    # For non-OP comments, exclude the post's OP account
+    op_account_name = post.get("owner_account") or ""
+    scoring_accounts = [a for a in accounts if a["username"] != op_account_name] if op_account_name else accounts
+    if not scoring_accounts:
+        scoring_accounts = accounts  # fallback: only 1 account available
+
+    scores = [(score_account(a, comment, lookups, batch_picks), a) for a in scoring_accounts]
     scores.sort(key=lambda x: -x[0])
     best_score, best_account = scores[0]
     username = best_account["username"]

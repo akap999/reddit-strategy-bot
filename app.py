@@ -703,6 +703,24 @@ def api_unassign_post_owner(pid):
     finally:
         db.close()
 
+@app.route("/api/subreddits/<int:sid>/unassign-all-posts", methods=["POST"])
+def api_unassign_all_posts(sid):
+    db = get_db()
+    try:
+        count = db.bulk_unassign_posts_in_subreddit(sid)
+        return jsonify({"ok": True, "unassigned": count})
+    finally:
+        db.close()
+
+@app.route("/api/subreddits/<int:sid>/unassign-all-comments", methods=["POST"])
+def api_unassign_all_comments(sid):
+    db = get_db()
+    try:
+        count = db.bulk_unassign_comments_in_subreddit(sid)
+        return jsonify({"ok": True, "unassigned": count})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/body", methods=["PUT"])
 def api_update_comment_body(cid):
     db = get_db()
@@ -750,6 +768,15 @@ def api_deploy_comment(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/undeploy", methods=["POST"])
+def api_undeploy_comment(cid):
+    db = get_db()
+    try:
+        db.undeploy_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/inform", methods=["POST"])
 def api_inform_comment(cid):
     db = get_db()
@@ -773,6 +800,15 @@ def api_mark_comment_paid(cid):
     db = get_db()
     try:
         db.mark_comment_paid(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/posts/<int:pid>/undeploy", methods=["POST"])
+def api_undeploy_post(pid):
+    db = get_db()
+    try:
+        db.undeploy_post(pid)
         return jsonify({"ok": True})
     finally:
         db.close()
@@ -2056,6 +2092,15 @@ def api_delete_search_comment(cid):
     finally:
         db.close()
 
+
+@app.route("/api/search/comments/<int:cid>/undeploy", methods=["POST"])
+def api_undeploy_search_comment(cid):
+    db = get_db()
+    try:
+        db.undeploy_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
 
 @app.route("/api/search/comments/<int:cid>/mark-paid", methods=["POST"])
 def api_mark_search_comment_paid(cid):

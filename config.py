@@ -61,5 +61,5 @@ COMMENT_SPREAD_DAYS = 5   # comments for a post spread across this many days
 FILLER_LEAD_DAYS = 3      # filler posts lead brand posts by this many days
 
 # --- Reddit ---
-REDDIT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+REDDIT_USER_AGENT = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
 REDDIT_PROXY_URL = os.environ.get("REDDIT_PROXY_URL", "")  # Cloudflare Worker URL for Reddit proxy

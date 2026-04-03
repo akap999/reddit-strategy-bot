@@ -957,36 +957,51 @@ function renderWizardStep3() {
 
 async function wizardFinish() {
     const info = wizardState.info || {};
-    const resp = await api('/api/subreddits', {
-        method: 'POST',
-        body: {
-            name: wizardState.chosenName,
-            domain: wizardState.domain || '',
-            description: document.getElementById('wiz-desc').value,
-            rules: info.rules_json || JSON.stringify(info.rules || []),
-            sidebar: document.getElementById('wiz-sidebar').value,
-            welcome_message: document.getElementById('wiz-welcome').value,
-        }
-    });
+    let resp;
+    try {
+        resp = await api('/api/subreddits', {
+            method: 'POST',
+            body: {
+                name: wizardState.chosenName,
+                domain: wizardState.domain || '',
+                description: document.getElementById('wiz-desc')?.value || info.description || '',
+                rules: info.rules_json || JSON.stringify(info.rules || []),
+                sidebar: document.getElementById('wiz-sidebar')?.value || info.sidebar || '',
+                welcome_message: document.getElementById('wiz-welcome')?.value || info.welcome_message || '',
+            }
+        });
+    } catch(e) {
+        toast(`Failed to create subreddit: ${e.message}`, 'error');
+        return;
+    }
 
+    if (!resp || !resp.id) {
+        toast('Failed to create subreddit — no ID returned', 'error');
+        return;
+    }
     const subId = resp.id;
 
     // Add all brands
     const brands = wizardState.validBrands || wizardState.brands || [];
+    let brandCount = 0;
     for (const b of brands) {
         if (!b.name && !b.domain_url) continue;
-        await api(`/api/subreddits/${subId}/brands`, {
-            method: 'POST',
-            body: {
-                name: b.name || b.domain_url,
-                domain_url: b.domain_url || '',
-                context: b.context || '',
-                keywords: b.keywords || [],
-            }
-        });
+        try {
+            await api(`/api/subreddits/${subId}/brands`, {
+                method: 'POST',
+                body: {
+                    name: b.name || b.domain_url,
+                    domain_url: b.domain_url || '',
+                    context: b.context || '',
+                    keywords: b.keywords || [],
+                }
+            });
+            brandCount++;
+        } catch(e) {
+            toast(`Failed to add brand "${b.name}": ${e.message}`, 'error');
+        }
     }
 
-    const brandCount = brands.filter(b => b.name || b.domain_url).length;
     toast(`Subreddit created with ${brandCount} brand${brandCount !== 1 ? 's' : ''}!`, 'success');
 
     // Auto-generate welcome post for the new subreddit
@@ -994,14 +1009,16 @@ async function wizardFinish() {
         const { task_id } = await api('/api/generate/welcome-post', { method: 'POST', body: { subreddit_id: subId } });
         toast('Generating welcome post...', 'info');
         const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                toast(`Welcome post created: "${t.result.title}"`, 'success');
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                toast(`Welcome post failed: ${t.error}`, 'error');
-            }
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    toast(`Welcome post created: "${t.result.title}"`, 'success');
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    toast(`Welcome post failed: ${t.error}`, 'error');
+                }
+            } catch(e) { clearInterval(poll); }
         }, 2000);
     } catch(e) { /* non-critical */ }
 
@@ -4550,6 +4567,31 @@ let _lsSearchResults = [];
 let _lsSavedPosts = [];
 let _lsComments = [];
 
+function lsMatchKeywords(text, brandId) {
+    if (!text) return [];
+    const lower = text.toLowerCase();
+    const matched = [];
+    // Match selected brand keywords
+    if (brandId) {
+        const brand = _lsBrands.find(b => b.id == brandId);
+        if (brand) {
+            const kws = typeof brand.keywords === 'string' ? JSON.parse(brand.keywords || '[]') : (brand.keywords || []);
+            kws.forEach(kw => { if (kw && lower.includes(kw.toLowerCase())) matched.push(kw); });
+        }
+    }
+    // Also match search keyword
+    const searchKw = document.getElementById('ls-keyword')?.value?.trim();
+    if (searchKw && lower.includes(searchKw.toLowerCase()) && !matched.some(m => m.toLowerCase() === searchKw.toLowerCase())) {
+        matched.push(searchKw);
+    }
+    return matched;
+}
+
+function lsKeywordBadges(keywords) {
+    if (!keywords.length) return '';
+    return keywords.map(kw => `<span class="badge" style="background:#1a3a2a;color:#4ade80;font-size:10px;margin:1px">${kw}</span>`).join(' ');
+}
+
 async function renderLiveSearch(el) {
     try { _lsBrands = await api('/api/search/brands'); } catch(e) { _lsBrands = []; }
     el.innerHTML = `
@@ -4657,6 +4699,7 @@ function renderLsSearch(c) {
                 <button class="btn btn-accent" onclick="lsRunSearch()">Search Reddit</button>
                 <button class="btn btn-secondary" onclick="lsSuggestSubreddits()">Suggest Subreddits</button>
                 <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
+                <button class="btn btn-accent" onclick="lsSaveAndGenerateAll()" id="ls-save-gen-btn" style="display:none">Save & Generate All</button>
             </div>
         </div>
         <div id="ls-suggestions" class="mb-4"></div>
@@ -4759,24 +4802,29 @@ function lsRenderResults() {
     const el = document.getElementById('ls-results');
     if (!_lsSearchResults.length) { el.innerHTML = '<p class="text-gray-500">No results found.</p>'; return; }
     document.getElementById('ls-save-btn').style.display = '';
+    document.getElementById('ls-save-gen-btn').style.display = '';
     el.innerHTML = `
         <div class="flex justify-between items-center mb-2">
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
         </div>
         <table>
-            <thead><tr><th style="width:30px"></th><th>Title</th><th>Subreddit</th><th>Score</th><th>Comments</th><th>Date</th><th>Author</th></tr></thead>
-            <tbody>${_lsSearchResults.map((r,i)=>`
+            <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Comments</th><th>Date</th><th>Author</th></tr></thead>
+            <tbody>${_lsSearchResults.map((r,i)=>{
+                const brandId = document.getElementById('ls-brand')?.value;
+                const kws = lsMatchKeywords((r.title||'')+' '+(r.text||''), brandId);
+                return `
                 <tr>
                     <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
                     <td><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${(r.title||'').substring(0,80)}${(r.title||'').length>80?'...':''}</a></td>
+                    <td>${lsKeywordBadges(kws)}</td>
                     <td class="text-xs">r/${r.subreddit}</td>
                     <td>${r.score}</td>
                     <td>${r.comments}</td>
                     <td class="text-xs">${(r.date||'').substring(0,10)}</td>
                     <td class="text-xs">u/${r.author}</td>
-                </tr>
-            `).join('')}</tbody>
+                </tr>`;
+            }).join('')}</tbody>
         </table>
     `;
 }
@@ -4804,6 +4852,43 @@ async function lsSaveSelected() {
         toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
         _lsTab = 'saved'; renderLsTabContent();
     } catch(e) {}
+}
+
+async function lsSaveAndGenerateAll() {
+    const brandId = document.getElementById('ls-brand').value;
+    if (!brandId) { toast('Select a brand before saving & generating', 'error'); return; }
+    if (!_lsSearchResults.length) { toast('No search results to save', 'error'); return; }
+    if (!confirm(`Save all ${_lsSearchResults.length} posts and generate comments for each?`)) return;
+
+    // Step 1: Save all posts with the selected brand
+    const posts = _lsSearchResults.map(r => ({
+        reddit_url: r.url, title: r.title, subreddit: r.subreddit,
+        score: r.score, num_comments: r.comments, author: r.author,
+        post_date: r.date, body_preview: r.text || '',
+        brand_id: parseInt(brandId),
+    }));
+    try {
+        const res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
+        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
+    } catch(e) { toast('Failed to save posts', 'error'); return; }
+
+    // Step 2: Fetch saved posts and generate comments for all with brand (respecting exclude list)
+    try {
+        const saved = await api('/api/search/posts');
+        const excludeSubs = lsGetExcludedSubs();
+        const eligible = saved.filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
+        if (!eligible.length) { toast('No new posts to generate for (may already be complete or excluded)', 'info'); _lsTab = 'saved'; renderLsTabContent(); return; }
+        toast(`Starting generation for ${eligible.length} posts...`, 'info');
+        for (const p of eligible) {
+            try {
+                const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: 2 } });
+                _addBgTask(task_id, `Gen: ${(p.title||'').substring(0,20)}`);
+            } catch(e) {}
+        }
+        toast('All generation tasks started', 'success');
+    } catch(e) { toast('Generation failed to start', 'error'); }
+    _lsTab = 'saved';
+    renderLsTabContent();
 }
 
 // --- Saved Posts Tab ---
@@ -4837,9 +4922,15 @@ async function renderLsSaved(c) {
                 <button class="btn btn-primary btn-sm" onclick="lsGenerateAll()">Generate All</button>
             </div>
         </div>
-        <div class="mb-2">
-            <label class="text-xs text-gray-400">Comments per post:</label>
-            <input id="ls-num-comments" type="number" value="2" min="1" max="5" class="w-16 text-sm ml-1">
+        <div class="flex gap-4 mb-2 items-center flex-wrap">
+            <div>
+                <label class="text-xs text-gray-400">Comments per post:</label>
+                <input id="ls-num-comments" type="number" value="2" min="1" max="5" class="w-16 text-sm ml-1">
+            </div>
+            <div class="flex-1">
+                <label class="text-xs text-gray-400">Exclude subreddits from generation:</label>
+                <input id="ls-exclude-subs" placeholder="sub1, sub2, ..." class="w-full text-sm ml-1">
+            </div>
         </div>
         <div id="ls-saved-table"></div>
     `;
@@ -4865,11 +4956,14 @@ function lsRenderSavedTable() {
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
     el.innerHTML = `
         <table>
-            <thead><tr><th style="width:30px"></th><th>Title</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>${filtered.map(p => `
+            <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>${filtered.map(p => {
+                const kws = lsMatchKeywords((p.title||'')+' '+(p.body_preview||''), p.brand_id);
+                return `
                 <tr>
                     <td><input type="checkbox" class="ls-sp-check" data-id="${p.id}" ${!p.brand_id?'disabled title="Assign brand first"':''}></td>
                     <td><a href="${p.reddit_url}" target="_blank" class="hover:underline" style="color:#0079D3">${(p.title||'').substring(0,70)}${(p.title||'').length>70?'...':''}</a></td>
+                    <td>${lsKeywordBadges(kws)}</td>
                     <td class="text-xs">r/${p.subreddit}</td>
                     <td>${p.score}</td>
                     <td>${p.brand_name ? `<span class="badge badge-brand">${p.brand_name}</span>` : '<span class="text-gray-500 text-xs">none</span>'}</td>
@@ -4879,8 +4973,8 @@ function lsRenderSavedTable() {
                         ${p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
                         <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
                     </td>
-                </tr>
-            `).join('')}</tbody>
+                </tr>`;
+            }).join('')}</tbody>
         </table>
     `;
 }
@@ -4889,13 +4983,25 @@ function lsToggleSavedAll(checked) {
     document.querySelectorAll('.ls-sp-check:not(:disabled)').forEach(cb => cb.checked = checked);
 }
 
+function lsGetExcludedSubs() {
+    const raw = document.getElementById('ls-exclude-subs')?.value || '';
+    return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+}
+
 async function lsGenerateSelected() {
     const checks = document.querySelectorAll('.ls-sp-check:checked');
     if (!checks.length) { toast('Select at least one post', 'error'); return; }
-    const ids = [...checks].map(cb => parseInt(cb.dataset.id));
+    const excludeSubs = lsGetExcludedSubs();
+    const allIds = [...checks].map(cb => parseInt(cb.dataset.id));
+    const eligible = allIds.filter(id => {
+        const p = _lsSavedPosts.find(sp => sp.id === id);
+        return !p || !excludeSubs.has((p.subreddit||'').toLowerCase());
+    });
+    const skipped = allIds.length - eligible.length;
+    if (!eligible.length) { toast('All selected posts are in excluded subreddits', 'error'); return; }
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast(`Generating for ${ids.length} posts...`, 'info');
-    for (const id of ids) {
+    toast(`Generating for ${eligible.length} posts${skipped ? ` (${skipped} excluded)` : ''}...`, 'info');
+    for (const id of eligible) {
         try {
             await api(`/api/search/posts/${id}/generate`, { method: 'POST', body: { num_comments: numComments } });
         } catch(e) {}
@@ -4905,8 +5011,9 @@ async function lsGenerateSelected() {
 }
 
 async function lsGenerateAll() {
-    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating');
-    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating)', 'error'); return; }
+    const excludeSubs = lsGetExcludedSubs();
+    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
+    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating, not excluded)', 'error'); return; }
     if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     toast(`Starting generation for ${filtered.length} posts...`, 'info');
@@ -4991,11 +5098,16 @@ async function renderLsComments(c) {
     const active = _lsComments.filter(c => c.status !== 'deleted');
     if (!active.length) { c.innerHTML = '<p class="text-gray-500 py-4">No generated comments yet. Generate comments from the Saved Posts tab.</p>'; return; }
 
+    const brands = [...new Set(active.map(c => c.brand_name).filter(Boolean))];
     c.innerHTML = `
-        <div class="flex gap-3 mb-3 items-center">
+        <div class="flex gap-3 mb-3 items-center flex-wrap">
             <select id="ls-cf-post" onchange="lsFilterComments()" class="w-64">
                 <option value="">All Posts</option>
                 ${[...new Set(active.map(c=>JSON.stringify({id:c.search_post_id,title:c.post_title})))].map(s=>{const p=JSON.parse(s);return `<option value="${p.id}">${(p.title||'').substring(0,50)}</option>`;}).join('')}
+            </select>
+            <select id="ls-cf-brand" onchange="lsFilterComments()" class="w-40">
+                <option value="">All Brands</option>
+                ${brands.map(b => `<option value="${b}">${b}</option>`).join('')}
             </select>
             <select id="ls-cf-status" onchange="lsFilterComments()" class="w-36">
                 <option value="">All Status</option>
@@ -5012,9 +5124,11 @@ async function renderLsComments(c) {
 
 function lsFilterComments() {
     const postId = document.getElementById('ls-cf-post')?.value;
+    const brandName = document.getElementById('ls-cf-brand')?.value;
     const status = document.getElementById('ls-cf-status')?.value;
     let filtered = _lsComments.filter(c => c.status !== 'deleted');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
+    if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
     if (status) filtered = filtered.filter(c => c.status === status);
 
     const el = document.getElementById('ls-comments-list');
@@ -5045,6 +5159,7 @@ function lsFilterComments() {
                         <td style="max-width:400px"><span class="text-sm">${(c.body||'').substring(0,150)}${(c.body||'').length>150?'...':''}</span>
                             ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
                             ${c.mentions_brand ? '<span class="badge" style="background:#3a1a00;color:#FF8b60;margin-left:4px">Brand</span>' : ''}
+                            ${lsKeywordBadges(lsMatchKeywords(c.body, c.brand_id))}
                         </td>
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>

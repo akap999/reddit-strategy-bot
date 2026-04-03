@@ -109,8 +109,15 @@ def _reddit_get(path, timeout=15):
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
     url = f"{base}{path}"
-    print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'})", flush=True)
-    return _requests.get(url, headers={"User-Agent": REDDIT_USER_AGENT}, timeout=timeout)
+    ua = REDDIT_USER_AGENT
+    print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, ua={ua[:40]})", flush=True)
+    resp = _requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
+    # If we get 403, Reddit may be blocking the User-Agent — retry with bot-style UA
+    if resp.status_code == 403 and "Mozilla" in ua:
+        bot_ua = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
+        print(f"[REDDIT_GET] 403 with browser UA, retrying with bot UA", flush=True)
+        resp = _requests.get(url, headers={"User-Agent": bot_ua}, timeout=timeout)
+    return resp
 
 # ---------------------------------------------------------------------------
 # Background task system
@@ -293,15 +300,24 @@ def api_create_subreddit():
     db = get_db()
     try:
         data = request.json
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Subreddit name is required"}), 400
+        # Check for duplicate name
+        existing = db.conn.execute("SELECT id FROM subreddits WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
+        if existing:
+            return jsonify({"error": f"Subreddit '{name}' already exists"}), 409
         sid = db.create_subreddit(
-            name=data["name"],
-            domain=data["domain"],
+            name=name,
+            domain=data.get("domain", ""),
             description=data.get("description", ""),
             rules=data.get("rules", "[]"),
             sidebar=data.get("sidebar", ""),
             welcome_message=data.get("welcome_message", ""),
         )
         return jsonify({"id": sid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     finally:
         db.close()
 
@@ -1685,14 +1701,24 @@ def api_check_subreddit():
         elif r.status_code == 404:
             return jsonify({"exists": False})
         elif r.status_code == 403:
-            # Private or quarantined — still taken
-            return jsonify({
-                "exists": True,
-                "name": name,
-                "subscribers": 0,
-                "active_accounts": 0,
-                "description": "(Private or quarantined subreddit)",
-            })
+            # 403 can mean: (a) private/quarantined sub, or (b) Reddit blocking our request
+            # Try to distinguish by checking if the response body has subreddit info
+            try:
+                body = r.json()
+                reason = body.get("reason", "")
+                # Reddit returns {"reason": "private"} or {"reason": "quarantined"} for real subs
+                if reason in ("private", "quarantined", "banned"):
+                    return jsonify({
+                        "exists": True,
+                        "name": name,
+                        "subscribers": 0,
+                        "active_accounts": 0,
+                        "description": f"({reason.capitalize()} subreddit)",
+                    })
+            except Exception:
+                pass
+            # Generic 403 — likely Reddit blocking, can't determine status
+            return jsonify({"exists": None, "error": "Reddit returned 403 — could not verify"})
         else:
             return jsonify({"exists": None, "error": f"Reddit returned status {r.status_code}"})
     except Exception as e:

@@ -17,9 +17,14 @@ class SubredditGenerator:
         Returns True if the name is available (subreddit doesn't exist).
         """
         try:
+            # Use bot-style UA — Reddit blocks browser-like UAs on JSON API with 403
+            headers = dict(self.headers)
+            ua = headers.get("User-Agent", "")
+            if "Mozilla" in ua or "AppleWebKit" in ua:
+                headers["User-Agent"] = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
             resp = requests.get(
                 f"{self.reddit_base}/r/{name}/about.json",
-                headers=self.headers,
+                headers=headers,
                 timeout=10
             )
             # 404 = doesn't exist = available
@@ -58,9 +63,16 @@ class SubredditGenerator:
                     return True
 
                 return None  # ambiguous
-            # 403 = private/quarantined = taken
+            # 403 = could be private/quarantined (taken) or Reddit blocking us
             if resp.status_code == 403:
-                return False
+                try:
+                    body = resp.json()
+                    reason = body.get("reason", "")
+                    if reason in ("private", "quarantined", "banned"):
+                        return False  # genuinely taken
+                except Exception:
+                    pass
+                return None  # can't determine — Reddit may be blocking
             # 302/301 redirect — Reddit sometimes redirects non-existent subs
             if resp.status_code in (301, 302):
                 return True

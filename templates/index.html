@@ -5357,6 +5357,7 @@ async function renderLsSaved(c) {
             </select>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-sp-selectall" onchange="lsToggleSavedAll(this.checked)" class="mr-1"> Select All</label>
             <div class="ml-auto flex gap-2">
+                <button class="btn btn-danger btn-sm" onclick="lsDeleteSelected()">Delete Selected</button>
                 <button class="btn btn-accent btn-sm" onclick="lsGenerateSelected()">Generate Selected</button>
                 <button class="btn btn-primary btn-sm" onclick="lsGenerateAll()">Generate All</button>
             </div>
@@ -5531,6 +5532,19 @@ async function lsDeletePost(postId) {
     } catch(e) {}
 }
 
+async function lsDeleteSelected() {
+    const checks = document.querySelectorAll('.ls-sp-check:checked');
+    if (!checks.length) { toast('Select at least one post', 'error'); return; }
+    const ids = [...checks].map(cb => parseInt(cb.dataset.id));
+    if (!confirm(`Delete ${ids.length} post(s) and all their generated comments?`)) return;
+    let done = 0;
+    for (const id of ids) {
+        try { await api(`/api/search/posts/${id}`, { method: 'DELETE' }); done++; } catch(e) {}
+    }
+    toast(`Deleted ${done} post(s)`, 'success');
+    renderLsTabContent();
+}
+
 // --- Comments Tab ---
 async function renderLsComments(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
@@ -5576,15 +5590,19 @@ function lsFilterComments() {
     const el = document.getElementById('ls-comments-list');
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No comments match filters.</p>'; return; }
 
-    // Group by post
+    // Group by post, track newest comment date per group
     const groups = {};
     filtered.forEach(c => {
         const key = c.search_post_id;
-        if (!groups[key]) groups[key] = { title: c.post_title, subreddit: c.post_subreddit, url: c.post_url, brand: c.brand_name, comments: [] };
+        if (!groups[key]) groups[key] = { title: c.post_title, subreddit: c.post_subreddit, url: c.post_url, brand: c.brand_name, comments: [], newest: c.created_at || '' };
         groups[key].comments.push(c);
+        if ((c.created_at || '') > groups[key].newest) groups[key].newest = c.created_at;
     });
 
-    el.innerHTML = Object.entries(groups).map(([pid, g]) => `
+    // Sort groups by newest comment first
+    const sortedGroups = Object.entries(groups).sort((a, b) => (b[1].newest || '').localeCompare(a[1].newest || ''));
+
+    el.innerHTML = sortedGroups.map(([pid, g]) => `
         <div class="card p-4 mb-4">
             <div class="flex justify-between items-center mb-3" style="border-bottom:1px solid #343536;padding-bottom:8px">
                 <div>

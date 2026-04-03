@@ -2040,7 +2040,8 @@ class Database:
             return None  # duplicate URL
 
     def list_search_posts(self, brand_id=None, status=None):
-        q = """SELECT sp.*, b.name as brand_name
+        q = """SELECT sp.*, b.name as brand_name,
+                      (SELECT COUNT(*) FROM search_comments sc WHERE sc.search_post_id = sp.id AND sc.status != 'deleted') as comment_count
                FROM search_posts sp
                LEFT JOIN brands b ON sp.brand_id = b.id
                WHERE 1=1"""

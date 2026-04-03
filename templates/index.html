@@ -185,8 +185,16 @@ function _renderTaskBar() {
     if (mainEl) mainEl.style.paddingTop = '40px';
     bar.innerHTML = '<span style="color:#818384;font-weight:600;font-size:0.75rem">RUNNING:</span>' +
         [..._bgTasks.entries()].map(([id, t]) =>
-            `<span class="task-pill"><span class="spinner"></span>${t.label}</span>`
+            `<span class="task-pill"><span class="spinner"></span>${t.label}<button onclick="_killTask('${id}')" style="margin-left:6px;background:none;border:none;color:#ff4444;cursor:pointer;font-size:14px;line-height:1;padding:0" title="Cancel task">✕</button></span>`
         ).join('');
+}
+
+async function _killTask(taskId) {
+    try {
+        await api(`/api/tasks/${taskId}/cancel`, { method: 'POST' });
+    } catch(e) {}
+    _removeBgTask(taskId);
+    toast('Task cancelled', 'info');
 }
 
 function _addBgTask(taskId, label) {
@@ -5300,16 +5308,19 @@ async function lsSaveAndGenerateAll() {
         toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
     } catch(e) { toast('Failed to save posts', 'error'); return; }
 
-    // Step 2: Fetch saved posts and generate comments for all with brand (respecting exclude list)
+    // Step 2: Generate comments ONLY for the newly saved posts (not old pending ones)
     try {
         const saved = await api('/api/search/posts');
         const excludeSubs = lsGetExcludedSubs();
-        const eligible = saved.filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
+        // Build set of URLs we just saved to only generate for those
+        const savedUrls = new Set(posts.map(p => p.reddit_url));
+        const eligible = saved.filter(p => savedUrls.has(p.reddit_url) && p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
         if (!eligible.length) { toast('No new posts to generate for (may already be complete or excluded)', 'info'); _lsTab = 'saved'; renderLsTabContent(); return; }
+        const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
         toast(`Starting generation for ${eligible.length} posts...`, 'info');
         for (const p of eligible) {
             try {
-                const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: 2 } });
+                const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
                 _addBgTask(task_id, `Gen: ${(p.title||'').substring(0,20)}`);
             } catch(e) {}
         }
@@ -5431,7 +5442,9 @@ async function lsGenerateSelected() {
     toast(`Generating for ${eligible.length} posts${skipped ? ` (${skipped} excluded)` : ''}...`, 'info');
     for (const id of eligible) {
         try {
-            await api(`/api/search/posts/${id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+            const p = _lsSavedPosts.find(sp => sp.id === id);
+            const { task_id } = await api(`/api/search/posts/${id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+            _addBgTask(task_id, `Gen: ${(p?.title||'').substring(0,20)}`);
         } catch(e) {}
     }
     toast('Generation tasks started', 'success');
@@ -5440,14 +5453,15 @@ async function lsGenerateSelected() {
 
 async function lsGenerateAll() {
     const excludeSubs = lsGetExcludedSubs();
-    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
-    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating, not excluded)', 'error'); return; }
+    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
+    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating/complete, not excluded)', 'error'); return; }
     if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     toast(`Starting generation for ${filtered.length} posts...`, 'info');
     for (const p of filtered) {
         try {
-            await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+            const { task_id } = await api(`/api/search/posts/${p.id}/generate`, { method: 'POST', body: { num_comments: numComments } });
+            _addBgTask(task_id, `Gen: ${(p.title||'').substring(0,20)}`);
         } catch(e) {}
     }
     toast('All generation tasks started', 'success');

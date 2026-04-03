@@ -141,12 +141,15 @@ def run_task(task_id, func, *args, **kwargs):
         except Exception as e2:
             print(f"[TASK DB ERROR] {task_id}: {e2}", flush=True)
 
+_task_threads = {}  # task_id -> threading.Thread
+
 def start_task(task_type, func, *args, **kwargs):
     task_id = str(uuid.uuid4())
     db = get_db()
     db.create_task(task_id, task_type)
     db.close()
     t = threading.Thread(target=run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
+    _task_threads[task_id] = t
     t.start()
     return task_id
 
@@ -1389,10 +1392,30 @@ def api_gen_live_comments():
 @app.route("/api/tasks/<task_id>")
 def api_task_status(task_id):
     db = get_db()
-    t = db.get_task(task_id)
-    if not t:
-        return jsonify({"error": "Task not found"}), 404
-    return jsonify(t)
+    try:
+        t = db.get_task(task_id)
+        if not t:
+            return jsonify({"error": "Task not found"}), 404
+        return jsonify(t)
+    finally:
+        db.close()
+
+@app.route("/api/tasks/<task_id>/cancel", methods=["POST"])
+def api_cancel_task(task_id):
+    """Cancel a running background task by marking it as error in DB.
+    The thread itself is a daemon and will eventually die, but the client
+    will see it as cancelled immediately on next poll."""
+    db = get_db()
+    try:
+        t = db.get_task(task_id)
+        if not t:
+            return jsonify({"error": "Task not found"}), 404
+        if t["status"] == "running":
+            db.update_task(task_id, "error", error="Cancelled by user")
+        _task_threads.pop(task_id, None)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
 
 # ---------------------------------------------------------------------------
 # API: Export
@@ -1883,6 +1906,9 @@ def api_generate_search_comments(pid):
     if not post:
         db_check.close()
         return jsonify({"error": "Post not found"}), 404
+    if post.get("status") == "generating":
+        db_check.close()
+        return jsonify({"error": "Already generating comments for this post"}), 400
     brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
     db_check.close()
 

@@ -994,7 +994,9 @@ Return JSON only:
             brand = brand_or_brands
             if brand_mention_ratio is None:
                 brand_mention_ratio = DEFAULT_BRAND_MENTION_RATIO
-            mention_count = max(1, round(num_comments * brand_mention_ratio))
+            mention_count = round(num_comments * brand_mention_ratio)
+            if brand_mention_ratio > 0:
+                mention_count = max(1, mention_count)  # at least 1 if ratio > 0
             brands_config = [{"brand": brand, "mention_count": mention_count}]
 
         # Build per-comment brand assignments: None = organic, brand_dict = mention that brand
@@ -1546,8 +1548,10 @@ Return JSON only:
         tone_analysis = self.analyze_tone(post_title, post_body, subreddit_name, comments, comment_stats)
 
         # Decide brand mention allocation
-        num_brand = max(1, round(num_comments * brand_mention_ratio))
-        brand_indices = set(random.sample(range(num_comments), min(num_brand, num_comments)))
+        num_brand = round(num_comments * brand_mention_ratio)
+        if brand_mention_ratio > 0:
+            num_brand = max(1, num_brand)  # at least 1 if ratio > 0
+        brand_indices = set(random.sample(range(num_comments), min(num_brand, num_comments))) if num_brand > 0 else set()
         if 0 in brand_indices and num_comments > 1:
             brand_indices.discard(0)
             alternatives = [i for i in range(1, num_comments) if i not in brand_indices]

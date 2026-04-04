@@ -1011,6 +1011,12 @@ def api_comments_live_stats():
                 continue
             try:
                 clean = url.split("?")[0].rstrip("/")
+                # Reddit share URLs (/s/ short links) need redirect resolution
+                if "/s/" in clean:
+                    import requests as _requests
+                    head_resp = _requests.head(clean, allow_redirects=True, timeout=10,
+                                               headers={"User-Agent": REDDIT_USER_AGENT})
+                    clean = head_resp.url.split("?")[0].rstrip("/")
                 path = clean.replace("https://www.reddit.com", "") + ".json"
                 resp = _reddit_get(path)
                 if resp.status_code == 404:

@@ -88,7 +88,7 @@ def _get_post_toplevel_accounts(db, post_id):
 # Two-pool splitting
 # ---------------------------------------------------------------------------
 
-KARMA_THRESHOLD = 100   # accounts with total karma >= this go to High pool
+KARMA_THRESHOLD = 50    # accounts with total karma >= this go to High pool
 POOL_RATIO = 2          # 2 High picks per 1 Low pick (2:1 ratio)
 
 

@@ -150,9 +150,8 @@ async function api(url, opts = {}) {
 async function resolveRedditUrl(url) {
     if (!url || !url.includes('/s/')) return url;
     try {
-        const resp = await fetch(url, { redirect: 'follow' });
-        const resolved = resp.url.split('?')[0].replace(/\/$/, '');
-        if (resolved.includes('/comments/')) return resolved;
+        const resp = await api('/api/resolve-share-url', { method: 'POST', body: { url } });
+        if (resp.resolved) return resp.resolved;
     } catch(e) { console.warn('Failed to resolve share URL:', e); }
     return url;
 }

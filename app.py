@@ -1018,6 +1018,35 @@ def api_calendar_events():
     finally:
         db.close()
 
+@app.route("/api/resolve-share-url", methods=["POST"])
+def api_resolve_share_url():
+    """Resolve a Reddit /s/ share URL to canonical URL server-side."""
+    import requests as _requests
+    url = (request.json or {}).get("url", "")
+    if not url or "/s/" not in url:
+        return jsonify({"error": "Not a share URL"}), 400
+    try:
+        resp = _requests.get(url, allow_redirects=True, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        })
+        resolved = resp.url.split("?")[0].rstrip("/")
+        if "/comments/" in resolved:
+            return jsonify({"resolved": resolved})
+        # Reddit may have returned the page HTML — try to extract canonical URL from it
+        import re
+        match = re.search(r'<link rel="canonical" href="(https://www\.reddit\.com/r/[^"]+)"', resp.text[:5000])
+        if match:
+            canonical = match.group(1).split("?")[0].rstrip("/")
+            return jsonify({"resolved": canonical})
+        return jsonify({"error": "Could not resolve", "final_url": resolved}), 422
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/comments/live-stats", methods=["POST"])
 def api_comments_live_stats():
     """Fetch live Reddit stats (upvotes, replies) for a list of comment URLs server-side."""
@@ -1035,7 +1064,7 @@ def api_comments_live_stats():
                 continue
             try:
                 clean = url.split("?")[0].rstrip("/")
-                # Share URLs should be resolved client-side before reaching here
+                # Share URLs — skip, should be resolved via /api/resolve-share-url first
                 if "/s/" in clean:
                     results[str(cid)] = {"liveness": "share_link"}
                     continue

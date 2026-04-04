@@ -27,6 +27,9 @@
         .badge-deployed { background: #1a3320; color: #46d160; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
+        .brand-tab { color: #818384; border-bottom: 2px solid transparent; cursor: pointer; }
+        .brand-tab:hover { color: #D7DADC; }
+        .brand-tab.active { color: #FF8b60; border-bottom-color: #FF8b60; }
         .bar-fill { height: 20px; border-radius: 4px; transition: width 0.5s; }
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 50; display: flex; align-items: center; justify-content: center; }
         .modal-box { background: #1A1A1B; border: 1px solid #343536; border-radius: 12px; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; }
@@ -1267,87 +1270,92 @@ function renderBrandDetail(data) {
                 <button class="btn btn-sm btn-secondary" onclick="exportBrandCSV('${name.replace(/'/g, "\\'")}')">Export CSV</button>
             </div>
 
-            <!-- Overview stats -->
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold">${o.total_comments || 0}</p>
-                    <p class="text-xs text-gray-500">Total Comments</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold text-green-400">${o.deployed || 0}</p>
-                    <p class="text-xs text-gray-500">Deployed</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold text-yellow-400">${o.assigned || 0}</p>
-                    <p class="text-xs text-gray-500">Assigned</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold text-blue-400">${o.complete || 0}</p>
-                    <p class="text-xs text-gray-500">Complete</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold text-red-400">${o.deleted || 0}</p>
-                    <p class="text-xs text-gray-500">Deleted</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold text-blue-400">${o.mentions_brand || 0}</p>
-                    <p class="text-xs text-gray-500">Brand Mentions</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold">${o.ours || 0}</p>
-                    <p class="text-xs text-gray-500">Ours</p>
-                </div>
-                <div class="stat-card p-3 text-center">
-                    <p class="text-xl font-bold">${o.num_subreddits || 0}</p>
-                    <p class="text-xs text-gray-500">Subreddits</p>
-                </div>
+            <!-- Tabs -->
+            <div class="flex gap-1 mb-4 border-b border-gray-700">
+                <button class="px-4 py-2 text-sm font-medium brand-tab active" data-tab="overview" onclick="switchBrandTab('overview')">Overview</button>
+                <button class="px-4 py-2 text-sm font-medium brand-tab" data-tab="deployed" onclick="switchBrandTab('deployed')">Deployed</button>
+                <button class="px-4 py-2 text-sm font-medium brand-tab" data-tab="comments" onclick="switchBrandTab('comments')">Comments</button>
             </div>
 
-            <!-- Subreddit breakdown -->
-            <h4 class="text-sm font-bold text-gray-300 mb-2">Subreddit Breakdown <span class="text-xs text-gray-500 font-normal">(click a row to filter comments)</span></h4>
-            ${subStats.length ? `
-            <div class="overflow-x-auto mb-6">
-                <table class="text-sm">
-                    <thead><tr>
-                        <th>Subreddit</th><th>Total</th><th>Deployed</th><th>Assigned</th><th>Complete</th><th>Deleted</th><th>Brand Mentions</th><th>Ours</th>
-                    </tr></thead>
-                    <tbody>${subRows}</tbody>
-                </table>
-            </div>` : '<p class="text-xs text-gray-500 mb-6">No comments found for this date range.</p>'}
-
-            <!-- Deployed Overview (hierarchy) -->
-            <div class="mb-6">
-                <div class="flex gap-3 items-center mb-2">
-                    <h4 class="text-sm font-bold text-gray-300">Deployed Overview</h4>
-                    <button class="btn btn-sm btn-secondary" onclick="loadBrandDeployedHierarchy('${name.replace(/'/g, "\\'")}')">Load</button>
+            <!-- TAB: Overview -->
+            <div id="brand-tab-overview" class="brand-tab-content">
+                <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold">${o.total_comments || 0}</p>
+                        <p class="text-xs text-gray-500">Total Comments</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold text-green-400">${o.deployed || 0}</p>
+                        <p class="text-xs text-gray-500">Deployed</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold text-yellow-400">${o.assigned || 0}</p>
+                        <p class="text-xs text-gray-500">Assigned</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold text-blue-400">${o.complete || 0}</p>
+                        <p class="text-xs text-gray-500">Complete</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold text-red-400">${o.deleted || 0}</p>
+                        <p class="text-xs text-gray-500">Deleted</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold text-blue-400">${o.mentions_brand || 0}</p>
+                        <p class="text-xs text-gray-500">Brand Mentions</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold">${o.ours || 0}</p>
+                        <p class="text-xs text-gray-500">Ours</p>
+                    </div>
+                    <div class="stat-card p-3 text-center">
+                        <p class="text-xl font-bold">${o.num_subreddits || 0}</p>
+                        <p class="text-xs text-gray-500">Subreddits</p>
+                    </div>
                 </div>
-                <div id="brand-deployed-hierarchy"></div>
+
+                <h4 class="text-sm font-bold text-gray-300 mb-2">Subreddit Breakdown <span class="text-xs text-gray-500 font-normal">(click a row to filter comments)</span></h4>
+                ${subStats.length ? `
+                <div class="overflow-x-auto mb-6">
+                    <table class="text-sm">
+                        <thead><tr>
+                            <th>Subreddit</th><th>Total</th><th>Deployed</th><th>Assigned</th><th>Complete</th><th>Deleted</th><th>Brand Mentions</th><th>Ours</th>
+                        </tr></thead>
+                        <tbody>${subRows}</tbody>
+                    </table>
+                </div>` : '<p class="text-xs text-gray-500 mb-6">No comments found for this date range.</p>'}
             </div>
 
-            <!-- Comments table with filters -->
-            <div class="flex gap-3 items-end mb-3 flex-wrap">
-                <h4 class="text-sm font-bold text-gray-300">Comments</h4>
-                <select id="brand-comment-status-filter" onchange="_brandsViewState.commentFilter=this.value;renderBrandCommentTable()" class="text-sm">
-                    <option value="all">All Statuses</option>
-                    <option value="complete">Complete</option>
-                    <option value="assigned">Assigned</option>
-                    <option value="informed">Informed</option>
-                    <option value="deployed">Deployed</option>
-                    <option value="deleted">Deleted</option>
-                </select>
-                <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
-                    <option value="all">All Subreddits</option>
-                    ${subStats.map(s => `<option value="${s.subreddit_name}" ${_brandsViewState.subFilter === s.subreddit_name ? 'selected' : ''}>r/${s.subreddit_name}</option>`).join('')}
-                </select>
-                <select id="brand-comment-ours-filter" onchange="_brandsViewState.oursFilter=this.value;renderBrandCommentTable()" class="text-sm">
-                    <option value="all">All Comments</option>
-                    <option value="ours">Ours Only</option>
-                    <option value="not_ours">Not Ours</option>
-                </select>
-                <button class="btn btn-sm btn-secondary" onclick="refreshBrandLiveStats()" id="brand-refresh-stats-btn">Refresh Live Stats</button>
-                <span class="text-xs text-gray-500" id="brand-comment-count"></span>
+            <!-- TAB: Deployed -->
+            <div id="brand-tab-deployed" class="brand-tab-content" style="display:none">
+                <div id="brand-deployed-hierarchy"><p class="text-xs text-gray-500">Loading...</p></div>
             </div>
-            <div id="brand-comments-table"></div>
+
+            <!-- TAB: Comments -->
+            <div id="brand-tab-comments" class="brand-tab-content" style="display:none">
+                <div class="flex gap-3 items-end mb-3 flex-wrap">
+                    <select id="brand-comment-status-filter" onchange="_brandsViewState.commentFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                        <option value="all">All Statuses</option>
+                        <option value="complete">Complete</option>
+                        <option value="assigned">Assigned</option>
+                        <option value="informed">Informed</option>
+                        <option value="deployed">Deployed</option>
+                        <option value="deleted">Deleted</option>
+                    </select>
+                    <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                        <option value="all">All Subreddits</option>
+                        ${subStats.map(s => `<option value="${s.subreddit_name}" ${_brandsViewState.subFilter === s.subreddit_name ? 'selected' : ''}>r/${s.subreddit_name}</option>`).join('')}
+                    </select>
+                    <select id="brand-comment-ours-filter" onchange="_brandsViewState.oursFilter=this.value;renderBrandCommentTable()" class="text-sm">
+                        <option value="all">All Comments</option>
+                        <option value="ours">Ours Only</option>
+                        <option value="not_ours">Not Ours</option>
+                    </select>
+                    <button class="btn btn-sm btn-secondary" onclick="refreshBrandLiveStats()" id="brand-refresh-stats-btn">Refresh Live Stats</button>
+                    <span class="text-xs text-gray-500" id="brand-comment-count"></span>
+                </div>
+                <div id="brand-comments-table"></div>
+            </div>
         </div>
     `;
 
@@ -1357,7 +1365,23 @@ function renderBrandDetail(data) {
     const oursSel = document.getElementById('brand-comment-ours-filter');
     if (oursSel) oursSel.value = _brandsViewState.oursFilter;
 
+    switchBrandTab(_brandsViewState.activeTab || 'overview');
     renderBrandCommentTable();
+}
+
+function switchBrandTab(tab) {
+    _brandsViewState.activeTab = tab;
+    document.querySelectorAll('.brand-tab-content').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.brand-tab').forEach(el => el.classList.remove('active'));
+    const content = document.getElementById(`brand-tab-${tab}`);
+    if (content) content.style.display = '';
+    const btn = document.querySelector(`.brand-tab[data-tab="${tab}"]`);
+    if (btn) btn.classList.add('active');
+    // Auto-load deployed data when switching to deployed tab
+    if (tab === 'deployed') {
+        const name = _brandsViewState.selectedBrand;
+        if (name) loadBrandDeployedHierarchy(name);
+    }
 }
 
 async function editBrandContext(brandName) {
@@ -1782,62 +1806,11 @@ async function renderPosts(el) {
             <button class="btn btn-danger" onclick="unassignAllPosts()">Unassign All Posts</button>
         </div>
         <div id="posts-table"></div>
-        <div id="posts-brand-cards" class="mt-4"></div>
     `;
     loadPosts();
 }
 
-async function loadBrandPostCards(brandName) {
-    const container = document.getElementById('posts-brand-cards');
-    if (!container) return;
-    if (!brandName) { container.innerHTML = ''; return; }
 
-    container.innerHTML = '<div class="spinner mx-auto my-4"></div>';
-    const data = await api(`/api/brands/${encodeURIComponent(brandName)}/deployed-hierarchy`);
-    const subs = data.subreddits || [];
-    const allPosts = subs.flatMap(s => s.posts.map(p => ({ ...p, subreddit: s.name })));
-
-    if (!allPosts.length) {
-        container.innerHTML = '<p class="text-xs text-gray-500">No deployed posts for this brand.</p>';
-        return;
-    }
-
-    const totalPosts = allPosts.length;
-    const totalB = allPosts.reduce((s, p) => s + (p.branded_comments || []).length, 0);
-    const totalNB = allPosts.reduce((s, p) => s + (p.non_branded_comments || []).length, 0);
-
-    const cards = allPosts.map(p => {
-        const bc = (p.branded_comments || []).length;
-        const nbc = (p.non_branded_comments || []).length;
-        const postLink = p.reddit_url
-            ? `<a href="${p.reddit_url}" target="_blank" class="text-orange-400 hover:underline">${p.title}</a>`
-            : `<span class="text-gray-200">${p.title}</span>`;
-
-        return `
-            <div class="card p-3 mb-2">
-                <div class="flex justify-between items-start mb-1">
-                    <div class="text-sm">${postLink}</div>
-                    <div class="flex gap-2 items-center ml-2">
-                        <span class="text-xs text-gray-500">r/${p.subreddit}</span>
-                        <span class="text-xs text-gray-600">Day ${p.suggested_post_day || '-'}</span>
-                    </div>
-                </div>
-                <div class="flex gap-4 items-center text-xs mt-1">
-                    ${p.owner_account ? `<span class="text-yellow-400">Owner: ${p.owner_account}</span>` : ''}
-                    <span class="text-blue-400">Branded: ${bc}</span>
-                    <span class="text-gray-400">Non-Branded: ${nbc}</span>
-                    ${p.deployed_at ? `<span class="text-gray-600">Deployed: ${p.deployed_at.split(' ')[0]}</span>` : ''}
-                </div>
-            </div>`;
-    }).join('');
-
-    container.innerHTML = `
-        <h4 class="text-sm font-bold text-gray-300 mb-2">Deployed Posts for ${brandName}
-            <span class="text-xs text-gray-500 font-normal">(${totalPosts} posts, ${totalB} branded + ${totalNB} non-branded comments)</span>
-        </h4>
-        ${cards}
-    `;
-}
 
 function onPostsBrandChange() {
     const brandName = document.getElementById('posts-brand-filter').value;
@@ -1854,7 +1827,6 @@ function onPostsBrandChange() {
         subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     }
     loadPosts();
-    loadBrandPostCards(brandName);
 }
 
 async function loadPosts() {

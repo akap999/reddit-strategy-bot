@@ -352,6 +352,22 @@ def api_add_brand(sid):
     finally:
         db.close()
 
+@app.route("/api/brands", methods=["POST"])
+def api_add_brand_standalone():
+    db = get_db()
+    try:
+        data = request.json
+        bid = db.add_brand(
+            subreddit_id=data.get("subreddit_id") or None,
+            name=data["name"],
+            domain_url=data.get("domain_url", ""),
+            context=data.get("context", ""),
+            keywords=json.dumps(data.get("keywords", [])),
+        )
+        return jsonify({"id": bid})
+    finally:
+        db.close()
+
 @app.route("/api/brands/<int:bid>", methods=["PUT"])
 def api_update_brand(bid):
     db = get_db()

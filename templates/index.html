@@ -1109,7 +1109,6 @@ async function renderBrands(el) {
 
 async function showAddBrandStandalone() {
     const subs = subredditsCache || await api('/api/subreddits');
-    if (!subs.length) { toast('Create a subreddit first', 'error'); return; }
 
     let allBrands = [];
     try { allBrands = await api('/api/brands/all'); } catch(e) {}
@@ -1134,8 +1133,11 @@ async function showAddBrandStandalone() {
     showModal(`
         <h3 class="text-xl font-bold mb-4">Add Brand</h3>
         <div class="mb-3">
-            <label class="text-xs text-gray-400">Subreddit</label>
-            <select id="brand-standalone-sub" class="w-full">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
+            <label class="text-xs text-gray-400">Subreddit (optional)</label>
+            <select id="brand-standalone-sub" class="w-full">
+                <option value="">-- No Subreddit --</option>
+                ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
+            </select>
         </div>
         ${dropdownHtml}
         <div class="space-y-3">
@@ -1162,15 +1164,17 @@ async function submitAddBrandStandalone() {
     const name = document.getElementById('brand-name').value.trim();
     if (!name) { toast('Enter a brand name', 'error'); return; }
     const kw = document.getElementById('brand-keywords').value;
-    await api(`/api/subreddits/${subId}/brands`, {
-        method: 'POST',
-        body: {
-            name,
-            domain_url: document.getElementById('brand-url').value.trim(),
-            context: document.getElementById('brand-context').value.trim(),
-            keywords: kw ? kw.split(',').map(s => s.trim()) : [],
-        }
-    });
+    const body = {
+        name,
+        domain_url: document.getElementById('brand-url').value.trim(),
+        context: document.getElementById('brand-context').value.trim(),
+        keywords: kw ? kw.split(',').map(s => s.trim()) : [],
+    };
+    if (subId) {
+        await api(`/api/subreddits/${subId}/brands`, { method: 'POST', body });
+    } else {
+        await api('/api/brands', { method: 'POST', body });
+    }
     toast('Brand added!', 'success');
     closeModal();
     renderBrands(document.getElementById('app'));
@@ -4109,7 +4113,7 @@ function filterAccountComments(username) {
 // ACCOUNTS VIEW
 // =========================================================================
 
-let _accountsFilterState = { min_karma: '', min_age_days: '', reference: '' };
+let _accountsFilterState = { min_karma: '', min_age_days: '', reference: '', search: '' };
 let _accountsSort = { col: 'username', dir: 'asc' };
 let _accountsData = [];
 
@@ -4145,6 +4149,10 @@ async function renderAccounts(el) {
         </div>
         <div class="flex gap-3 items-end mb-4 flex-wrap">
             <div>
+                <label class="text-xs block" style="color:#818384">Search Username</label>
+                <input type="text" id="acct-filter-search" value="${_accountsFilterState.search}" placeholder="Search..." class="w-40 text-sm" oninput="applyAccountFilters()">
+            </div>
+            <div>
                 <label class="text-xs block" style="color:#818384">Min Karma</label>
                 <input type="number" id="acct-filter-karma" value="${_accountsFilterState.min_karma}" placeholder="e.g. 100" class="w-28 text-sm">
             </div>
@@ -4157,7 +4165,7 @@ async function renderAccounts(el) {
                 <input type="text" id="acct-filter-ref" value="${_accountsFilterState.reference}" placeholder="Search..." class="w-40 text-sm">
             </div>
             <button class="btn btn-sm btn-primary" onclick="applyAccountFilters()">Apply</button>
-            <button class="btn btn-sm btn-secondary" onclick="_accountsFilterState={min_karma:'',min_age_days:'',reference:''};renderAccounts(document.getElementById('app'))">Clear</button>
+            <button class="btn btn-sm btn-secondary" onclick="_accountsFilterState={min_karma:'',min_age_days:'',reference:'',search:''};renderAccounts(document.getElementById('app'))">Clear</button>
             <span class="text-xs" style="color:#818384" id="acct-count">${accounts.length} accounts</span>
         </div>
         <div id="accounts-table-area"></div>
@@ -4179,6 +4187,12 @@ function applyAccountFilters() {
     _accountsFilterState.min_karma = document.getElementById('acct-filter-karma')?.value || '';
     _accountsFilterState.min_age_days = document.getElementById('acct-filter-age')?.value || '';
     _accountsFilterState.reference = document.getElementById('acct-filter-ref')?.value || '';
+    _accountsFilterState.search = document.getElementById('acct-filter-search')?.value || '';
+    // If only search changed, filter client-side without re-fetching
+    if (_accountsData.length) {
+        renderAccountsTable();
+        return;
+    }
     renderAccounts(document.getElementById('app'));
 }
 
@@ -4191,8 +4205,15 @@ function renderAccountsTable() {
         return;
     }
 
+    // Client-side username search filter
+    let filtered = _accountsData;
+    const searchTerm = (_accountsFilterState.search || '').toLowerCase();
+    if (searchTerm) {
+        filtered = filtered.filter(a => a.username.toLowerCase().includes(searchTerm));
+    }
+
     // Sort
-    const sorted = [..._accountsData];
+    const sorted = [...filtered];
     const { col, dir } = _accountsSort;
     sorted.sort((a, b) => {
         let va, vb;
@@ -4232,6 +4253,10 @@ function renderAccountsTable() {
             </td>
         </tr>`;
     }).join('');
+
+    // Update count to reflect filtered results
+    const countEl = document.getElementById('acct-count');
+    if (countEl) countEl.textContent = searchTerm ? `${sorted.length} / ${_accountsData.length} accounts` : `${_accountsData.length} accounts`;
 
     container.innerHTML = `
         <div class="overflow-x-auto">

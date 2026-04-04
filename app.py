@@ -799,6 +799,30 @@ def api_deploy_comment(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/url", methods=["PATCH"])
+def api_update_comment_url(cid):
+    db = get_db()
+    try:
+        url = request.json.get("reddit_comment_url", "")
+        if not url:
+            return jsonify({"error": "URL required"}), 400
+        db.update_comment_url(cid, url)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/search/comments/<int:cid>/url", methods=["PATCH"])
+def api_update_search_comment_url(cid):
+    db = get_db()
+    try:
+        url = request.json.get("reddit_comment_url", "")
+        if not url:
+            return jsonify({"error": "URL required"}), 400
+        db.update_search_comment_url(cid, url)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/undeploy", methods=["POST"])
 def api_undeploy_comment(cid):
     db = get_db()
@@ -1011,9 +1035,9 @@ def api_comments_live_stats():
                 continue
             try:
                 clean = url.split("?")[0].rstrip("/")
-                # Reddit share URLs (/s/ short links) can't be resolved server-side
+                # Share URLs should be resolved client-side before reaching here
                 if "/s/" in clean:
-                    results[str(cid)] = {"liveness": "share_link", "error": "Share URL — replace with canonical Reddit URL"}
+                    results[str(cid)] = {"liveness": "share_link"}
                     continue
                 path = clean.replace("https://www.reddit.com", "") + ".json"
                 resp = _reddit_get(path)

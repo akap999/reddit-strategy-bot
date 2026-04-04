@@ -147,6 +147,16 @@ async function api(url, opts = {}) {
     }
 }
 
+async function resolveRedditUrl(url) {
+    if (!url || !url.includes('/s/')) return url;
+    try {
+        const resp = await fetch(url, { redirect: 'follow' });
+        const resolved = resp.url.split('?')[0].replace(/\/$/, '');
+        if (resolved.includes('/comments/')) return resolved;
+    } catch(e) { console.warn('Failed to resolve share URL:', e); }
+    return url;
+}
+
 // =========================================================================
 // Toast
 // =========================================================================
@@ -1618,19 +1628,39 @@ async function refreshBrandLiveStats() {
     if (!_brandsViewState.data) return;
     const comments = _brandsViewState.data.comments || [];
 
-    // Collect all comments with reddit_comment_url — use source-prefixed key to avoid ID collision
+    const btn = document.getElementById('brand-refresh-stats-btn');
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block"></span> Resolving URLs...'; btn.disabled = true; }
+
+    // Phase 1: Resolve any share URLs (/s/ links) client-side and update DB
+    const shareComments = comments.filter(c => c.reddit_comment_url && c.reddit_comment_url.includes('/s/'));
+    if (shareComments.length) {
+        toast(`Resolving ${shareComments.length} share URLs...`, 'info');
+        for (const c of shareComments) {
+            const resolved = await resolveRedditUrl(c.reddit_comment_url);
+            if (resolved !== c.reddit_comment_url) {
+                const endpoint = c.source === 'search_comment'
+                    ? `/api/search/comments/${c.id}/url`
+                    : `/api/comments/${c.id}/url`;
+                try {
+                    await api(endpoint, { method: 'PATCH', body: { reddit_comment_url: resolved } });
+                    c.reddit_comment_url = resolved; // update local data
+                } catch(e) { console.warn('Failed to update URL for', c.id, e); }
+            }
+        }
+    }
+
+    // Phase 2: Collect all comments with reddit_comment_url — use source-prefixed key
     const urlItems = comments
-        .filter(c => c.reddit_comment_url)
+        .filter(c => c.reddit_comment_url && !c.reddit_comment_url.includes('/s/'))
         .map(c => ({ id: `${c.source || 'comment'}_${c.id}`, reddit_comment_url: c.reddit_comment_url }));
 
     if (!urlItems.length) {
         toast('No deployed comments with Reddit URLs to check', 'info');
+        if (btn) { btn.innerHTML = 'Refresh Live Stats'; btn.disabled = false; }
         return;
     }
 
-    const btn = document.getElementById('brand-refresh-stats-btn');
-    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block"></span> Fetching...'; btn.disabled = true; }
-
+    if (btn) btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block"></span> Fetching...';
     toast(`Fetching live stats for ${urlItems.length} comments...`, 'info');
 
     try {
@@ -3321,9 +3351,10 @@ function deployCommentModal(cid) {
 }
 
 async function submitDeployComment(cid) {
-    const url = document.getElementById('deploy-url').value;
+    let url = document.getElementById('deploy-url').value.trim();
     const date = document.getElementById('deploy-date').value;
     if (!url) { toast('Enter the Reddit comment URL', 'error'); return; }
+    url = await resolveRedditUrl(url);
     await api(`/api/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url, deployed_at: date || undefined } });
     toast('Comment marked as deployed', 'success');
     closeModal();
@@ -5989,8 +6020,9 @@ async function lsDeployComment(cid) {
 }
 
 async function lsDoDeployComment(cid) {
-    const url = document.getElementById('ls-deploy-url').value.trim();
+    let url = document.getElementById('ls-deploy-url').value.trim();
     if (!url) { toast('Enter the Reddit comment URL', 'error'); return; }
+    url = await resolveRedditUrl(url);
     try {
         await api(`/api/search/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url } });
         closeModal();

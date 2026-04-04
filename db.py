@@ -962,6 +962,14 @@ class Database:
         )
         self.conn.commit()
 
+    def update_comment_url(self, comment_id, url):
+        self.conn.execute("UPDATE comments SET reddit_comment_url = ? WHERE id = ?", (url, comment_id))
+        self.conn.commit()
+
+    def update_search_comment_url(self, comment_id, url):
+        self.conn.execute("UPDATE search_comments SET reddit_comment_url = ? WHERE id = ?", (url, comment_id))
+        self.conn.commit()
+
     def undeploy_comment(self, comment_id):
         """Revert a deployed comment back to assigned status."""
         self.conn.execute(

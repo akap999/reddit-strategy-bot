@@ -1782,8 +1782,61 @@ async function renderPosts(el) {
             <button class="btn btn-danger" onclick="unassignAllPosts()">Unassign All Posts</button>
         </div>
         <div id="posts-table"></div>
+        <div id="posts-brand-cards" class="mt-4"></div>
     `;
     loadPosts();
+}
+
+async function loadBrandPostCards(brandName) {
+    const container = document.getElementById('posts-brand-cards');
+    if (!container) return;
+    if (!brandName) { container.innerHTML = ''; return; }
+
+    container.innerHTML = '<div class="spinner mx-auto my-4"></div>';
+    const data = await api(\`/api/brands/\${encodeURIComponent(brandName)}/deployed-hierarchy\`);
+    const subs = data.subreddits || [];
+    const allPosts = subs.flatMap(s => s.posts.map(p => ({ ...p, subreddit: s.name })));
+
+    if (!allPosts.length) {
+        container.innerHTML = '<p class="text-xs text-gray-500">No deployed posts for this brand.</p>';
+        return;
+    }
+
+    const totalPosts = allPosts.length;
+    const totalB = allPosts.reduce((s, p) => s + (p.branded_comments || []).length, 0);
+    const totalNB = allPosts.reduce((s, p) => s + (p.non_branded_comments || []).length, 0);
+
+    const cards = allPosts.map(p => {
+        const bc = (p.branded_comments || []).length;
+        const nbc = (p.non_branded_comments || []).length;
+        const postLink = p.reddit_url
+            ? \`<a href="\${p.reddit_url}" target="_blank" class="text-orange-400 hover:underline">\${p.title}</a>\`
+            : \`<span class="text-gray-200">\${p.title}</span>\`;
+
+        return \`
+            <div class="card p-3 mb-2">
+                <div class="flex justify-between items-start mb-1">
+                    <div class="text-sm">\${postLink}</div>
+                    <div class="flex gap-2 items-center ml-2">
+                        <span class="text-xs text-gray-500">r/\${p.subreddit}</span>
+                        <span class="text-xs text-gray-600">Day \${p.suggested_post_day || '-'}</span>
+                    </div>
+                </div>
+                <div class="flex gap-4 items-center text-xs mt-1">
+                    \${p.owner_account ? \`<span class="text-yellow-400">Owner: \${p.owner_account}</span>\` : ''}
+                    <span class="text-blue-400">Branded: \${bc}</span>
+                    <span class="text-gray-400">Non-Branded: \${nbc}</span>
+                    \${p.deployed_at ? \`<span class="text-gray-600">Deployed: \${p.deployed_at.split(' ')[0]}</span>\` : ''}
+                </div>
+            </div>\`;
+    }).join('');
+
+    container.innerHTML = \`
+        <h4 class="text-sm font-bold text-gray-300 mb-2">Deployed Posts for \${brandName}
+            <span class="text-xs text-gray-500 font-normal">(\${totalPosts} posts, \${totalB} branded + \${totalNB} non-branded comments)</span>
+        </h4>
+        \${cards}
+    \`;
 }
 
 function onPostsBrandChange() {
@@ -1801,6 +1854,7 @@ function onPostsBrandChange() {
         subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     }
     loadPosts();
+    loadBrandPostCards(brandName);
 }
 
 async function loadPosts() {

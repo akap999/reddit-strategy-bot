@@ -35,7 +35,7 @@ PERSONAS = [
     },
     {
         "id": "lurker",
-        "voice": "You rarely post. Open with something like 'usually just lurk but', 'don't post much but', 'made an account to say'. You're hesitant but felt compelled to share. Slightly awkward writing style.",
+        "voice": "You rarely post. You're hesitant but felt compelled to share. Slightly awkward writing style. Never open with cliches like 'usually just lurk' or 'made an account to say'.",
         "length": "medium",
     },
     {

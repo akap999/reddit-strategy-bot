@@ -7,6 +7,12 @@ Hard rules (never violated):
   3. Reply comments (is_reply=1) → normal scoring, exempt from uniqueness + OP exclusion
   4. Already-assigned / deployed comments are never touched
 
+Two-pool system:
+  - High pool (100+ total karma): picked 3 out of every 4 slots
+  - Low pool (<100 total karma): picked 1 out of every 4 slots
+  - Each pool scores and round-robins independently — no cross-assignment
+  - If one pool is empty, all picks from the other pool
+
 Soft scoring picks the best account among those that pass the hard rules.
 """
 
@@ -79,24 +85,56 @@ def _get_post_toplevel_accounts(db, post_id):
 
 
 # ---------------------------------------------------------------------------
+# Two-pool splitting
+# ---------------------------------------------------------------------------
+
+KARMA_THRESHOLD = 100   # accounts with total karma >= this go to High pool
+POOL_RATIO = 3          # 3 High picks per 1 Low pick (3:1 ratio)
+
+
+def _split_pools(accounts, threshold=KARMA_THRESHOLD):
+    """Split accounts into high-karma and low-karma pools."""
+    high, low = [], []
+    for a in accounts:
+        total_karma = (a.get("link_karma") or 0) + (a.get("comment_karma") or 0)
+        if total_karma >= threshold:
+            high.append(a)
+        else:
+            low.append(a)
+    return high, low
+
+
+
+def _pick_best_for_post(pool, lookups, batch_picks, sub_owner):
+    """Score and pick the best account from a pool for post ownership. Returns (score, account) or None."""
+    if not pool:
+        return None
+    scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in pool]
+    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+    return scores[0], scores
+
+
+def _is_low_slot(slot_counter):
+    """Returns True if this slot should pick from the Low pool (every POOL_RATIO+1 th pick)."""
+    return (slot_counter % (POOL_RATIO + 1)) == POOL_RATIO
+
+
+# ---------------------------------------------------------------------------
 # Scoring — comment assignment
 # ---------------------------------------------------------------------------
 
 def score_account(account, comment, lookups, batch_picks):
     """Score an (account, comment) pair. Higher = better fit.
 
-    Design principle: High-karma accounts are preferred and used more often.
-    Karma bonuses are large enough to survive 1-2 activity penalty rounds,
-    so high-karma accounts get picked before low-karma ones even with some load.
+    Used within a single pool (high or low karma). Karma/age bonuses are
+    small tiebreakers for ordering within the pool. The two-pool system
+    handles high-vs-low karma distribution.
     """
     username = account["username"]
     score = 100
 
     # =====================================================================
-    # HEAVY penalties — activity & load (these decide assignment)
-    # Goal: guarantee max participation / round-robin behavior.
-    # Each penalty is calibrated against karma bonuses (max +60) so that
-    # high-karma accounts get ~1-2 extra rounds before lower tiers.
+    # HEAVY penalties — activity & load (round-robin within pool)
     # =====================================================================
 
     # --- Subreddit cooldown: -40 per assignment in same sub within ±2 days ---
@@ -122,25 +160,21 @@ def score_account(account, comment, lookups, batch_picks):
     score -= 55 * picks
 
     # =====================================================================
-    # KARMA & AGE bonuses — credibility signals (large enough to matter)
+    # LIGHT bonuses — within-pool ordering (tiebreakers)
     # =====================================================================
 
-    # --- Karma bonus: scaled so 200+ karma survives 1 activity round,
-    #     5000+ survives 2 rounds vs a fresh <100-karma account.
-    #     Each bonus > 55 means that tier gets 1 extra round of assignments.
+    # --- Karma bonus: small, for ordering within the same pool ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
     if total_karma >= 5000:
-        score += 120   # survives 2 rounds vs <100
+        score += 10
     elif total_karma >= 3000:
-        score += 105
+        score += 8
     elif total_karma >= 1000:
-        score += 90
+        score += 6
     elif total_karma >= 500:
-        score += 75
-    elif total_karma >= 200:
-        score += 60    # survives 1 round vs <100
+        score += 4
     elif total_karma >= 100:
-        score += 30    # preferred when fresh, doesn't survive a round
+        score += 2
 
     # --- Account age: extended tiers, karma-dominant (max +5 < karma gap) ---
     created = account.get("created_utc")
@@ -204,11 +238,10 @@ def _build_post_lookups(context):
 
 
 def score_account_for_post(account, lookups, batch_picks, sub_owner):
-    """Score an account for post ownership. Activity penalties dominate.
+    """Score an account for post ownership.
 
-    Goal: prefer high-karma accounts while maintaining distribution.
-    Penalties calibrated against karma bonuses (max +60) so that
-    high-karma accounts get picked more often.
+    Used within a single pool. Karma/age are tiebreakers for within-pool
+    ordering. Two-pool system handles high-vs-low distribution.
     """
     username = account["username"]
     score = 100
@@ -228,7 +261,7 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     score -= 55 * picks
 
     # =====================================================================
-    # KARMA & AGE bonuses — credibility signals (large enough to matter)
+    # LIGHT bonuses — within-pool ordering (tiebreakers)
     # =====================================================================
 
     # --- Subreddit activity: +5 if account has comments here ---
@@ -239,20 +272,18 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     if username == sub_owner:
         score += 10
 
-    # --- Karma bonus: scaled so 200+ survives 1 round, 5000+ survives 2 ---
+    # --- Karma bonus: small, for ordering within the same pool ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
     if total_karma >= 5000:
-        score += 120
+        score += 10
     elif total_karma >= 3000:
-        score += 105
+        score += 8
     elif total_karma >= 1000:
-        score += 90
+        score += 6
     elif total_karma >= 500:
-        score += 75
-    elif total_karma >= 200:
-        score += 60
+        score += 4
     elif total_karma >= 100:
-        score += 30
+        score += 2
 
     # --- Account age: extended tiers, karma-dominant (max +5 < karma gap) ---
     created = account.get("created_utc")
@@ -297,19 +328,28 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available for assignment"}
 
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_post_lookups(context)
     sub_owner = sub.get("owner_account") or ""
     batch_picks = defaultdict(int)
     assignments = []
     warnings = []
+    slot = 0
 
     for post in draft_posts:
-        scores = [
-            (score_account_for_post(a, lookups, batch_picks, sub_owner), a)
-            for a in accounts
-        ]
-        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
-        best_score, best_account = scores[0]
+        # Determine which pool to pick from
+        use_low = _is_low_slot(slot) and low_pool
+        primary = low_pool if use_low else high_pool
+        fallback = high_pool if use_low else low_pool
+
+        result = _pick_best_for_post(primary, lookups, batch_picks, sub_owner)
+        if result is None:
+            result = _pick_best_for_post(fallback, lookups, batch_picks, sub_owner)
+        if result is None:
+            warnings.append(f"Post #{post['id']}: no eligible account available.")
+            continue
+
+        (best_score, best_account), _ = result
 
         if best_score < 0:
             warnings.append(
@@ -327,7 +367,9 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
             "post_id": post["id"],
             "account": username,
             "score": best_score,
+            "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
         })
+        slot += 1
 
     return {
         "assigned": len(assignments),
@@ -343,6 +385,8 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
 def auto_assign_post(db, post_id, exclude_accounts=None):
     """
     Auto-assign all draft comments for a post to accounts.
+
+    Uses two-pool system (high/low karma) with 3:1 interleaving.
 
     Hard rules enforced:
       - OP replies → post owner only
@@ -366,6 +410,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available for assignment"}
 
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
     assignments = []
@@ -426,6 +471,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
     # ---------------------------------------------------------------
     # 2. Top-level non-OP: unique account per post, never the OP
+    #    Two-pool interleaving with 3:1 ratio
     # ---------------------------------------------------------------
     op_to_exclude = op_account or post.get("owner_account") or ""
     blocked = set(used_on_post)
@@ -433,9 +479,24 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
         blocked.add(op_to_exclude)
 
     skipped = 0
+    slot = 0
     for comment in toplevel_comments:
-        eligible = [a for a in accounts if a["username"] not in blocked]
-        if not eligible:
+        # Determine pool for this slot
+        use_low = _is_low_slot(slot) and low_pool
+        primary = low_pool if use_low else high_pool
+        fallback = high_pool if use_low else low_pool
+
+        # Try primary pool, then fallback
+        eligible_primary = [a for a in primary if a["username"] not in blocked]
+        eligible_fallback = [a for a in fallback if a["username"] not in blocked]
+
+        if eligible_primary:
+            eligible = eligible_primary
+            picked_pool = "low" if use_low else "high"
+        elif eligible_fallback:
+            eligible = eligible_fallback
+            picked_pool = "high" if use_low else "low"
+        else:
             skipped += 1
             warnings.append(
                 f"Comment #{comment['id']}: skipped — no unique account available "
@@ -470,16 +531,25 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "account": username,
             "score": best_score,
             "type": "brand" if comment.get("mentions_brand") else "organic",
-            "_debug_scores": {s[1]["username"]: s[0] for s in scores[:10]},
-            "_debug_blocked": list(blocked),
+            "pool": picked_pool,
         })
+        slot += 1
 
     # ---------------------------------------------------------------
-    # 3. Reply comments: normal scoring, any account eligible
+    # 3. Reply comments: two-pool interleaving, any account eligible
     #    (exempt from uniqueness + OP exclusion)
     # ---------------------------------------------------------------
+    reply_slot = 0
     for comment in reply_comments:
-        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+        use_low = _is_low_slot(reply_slot) and low_pool
+        primary = low_pool if use_low else high_pool
+        fallback = high_pool if use_low else low_pool
+
+        pool_to_use = primary if primary else fallback
+        if not pool_to_use:
+            continue
+
+        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in pool_to_use]
         scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
 
@@ -502,7 +572,9 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "account": username,
             "score": best_score,
             "type": "reply",
+            "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
         })
+        reply_slot += 1
 
     return {
         "assigned": len(assignments),
@@ -722,10 +794,11 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
 
 
 def auto_assign_search_comments(db, exclude_accounts=None):
-    """Auto-assign all draft search comments using the same scoring as regular comments.
+    """Auto-assign all draft search comments using two-pool interleaving.
 
     Groups comments by search_post_id and enforces uniqueness per post for
     top-level comments. Reply comments are exempt from uniqueness.
+    Uses 3:1 high:low karma pool ratio.
     """
     context = db.get_search_auto_assign_context()
     draft_comments = context["draft_comments"]
@@ -738,11 +811,13 @@ def auto_assign_search_comments(db, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available after exclusions"}
 
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
     assignments = []
     skipped = 0
     warnings = []
+    slot = 0
 
     # Group by search_post_id
     by_post = defaultdict(list)
@@ -756,13 +831,26 @@ def auto_assign_search_comments(db, exclude_accounts=None):
         for comment in comments:
             is_reply = comment.get("is_reply", 0)
 
-            # Build eligible account list
-            if is_reply:
-                eligible = accounts  # replies: any account
-            else:
-                eligible = [a for a in accounts if a["username"] not in blocked]
+            # Determine pool for this slot
+            use_low = _is_low_slot(slot) and low_pool
+            primary = low_pool if use_low else high_pool
+            fallback = high_pool if use_low else low_pool
 
-            if not eligible:
+            # Build eligible account list from the selected pool
+            if is_reply:
+                eligible_primary = list(primary) if primary else []
+                eligible_fallback = list(fallback) if fallback else []
+            else:
+                eligible_primary = [a for a in primary if a["username"] not in blocked] if primary else []
+                eligible_fallback = [a for a in fallback if a["username"] not in blocked] if fallback else []
+
+            if eligible_primary:
+                eligible = eligible_primary
+                picked_pool = "low" if use_low else "high"
+            elif eligible_fallback:
+                eligible = eligible_fallback
+                picked_pool = "high" if use_low else "low"
+            else:
                 skipped += 1
                 warnings.append(f"No eligible account for comment {comment['id']} (all blocked on post)")
                 continue
@@ -783,6 +871,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
                 "account": username,
                 "score": best_score,
                 "subreddit": comment.get("subreddit", ""),
+                "pool": picked_pool,
             })
 
             # Update tracking
@@ -792,6 +881,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             lookups["sub_day"][username][comment_day] += 1
             if not is_reply:
                 blocked.add(username)
+            slot += 1
 
     return {
         "assigned": len(assignments),

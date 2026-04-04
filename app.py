@@ -1014,9 +1014,11 @@ def api_comments_live_stats():
                 # Reddit share URLs (/s/ short links) need redirect resolution
                 if "/s/" in clean:
                     import requests as _requests
-                    head_resp = _requests.head(clean, allow_redirects=True, timeout=10,
+                    redir_resp = _requests.get(clean, allow_redirects=True, timeout=10,
                                                headers={"User-Agent": REDDIT_USER_AGENT})
-                    clean = head_resp.url.split("?")[0].rstrip("/")
+                    resolved = redir_resp.url.split("?")[0].rstrip("/")
+                    print(f"[LIVE-STATS] Resolved share URL {clean} -> {resolved}", flush=True)
+                    clean = resolved
                 path = clean.replace("https://www.reddit.com", "") + ".json"
                 resp = _reddit_get(path)
                 if resp.status_code == 404:

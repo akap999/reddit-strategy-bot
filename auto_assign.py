@@ -138,15 +138,17 @@ def score_account(account, comment, lookups, batch_picks):
     elif total_karma >= 100:
         score += 2
 
-    # --- Account age: only penalize very new, minimal bonus for old ---
+    # --- Account age: bonus tiers, no penalties (karma-dominant) ---
     created = account.get("created_utc")
     if created:
         age_days = (time.time() - created) / 86400
-        if age_days < 30:
-            score -= 15   # Very new — suspicious
-        elif age_days < 90:
-            score -= 5    # Still building credibility
-        # No bonus for old accounts — age should not be an advantage
+        if age_days >= 730:
+            score += 3    # 2+ years
+        elif age_days >= 180:
+            score += 2    # 6+ months
+        elif age_days >= 90:
+            score += 1    # 3+ months
+        # < 3 months: +0
 
     # --- Subreddit familiarity: +5 if account has history here ---
     # (was +15 — too strong, made veterans always win)
@@ -243,14 +245,17 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     elif total_karma >= 100:
         score += 2
 
-    # --- Account age: only penalize very new ---
+    # --- Account age: bonus tiers, no penalties (karma-dominant) ---
     created = account.get("created_utc")
     if created:
         age_days = (time.time() - created) / 86400
-        if age_days < 30:
-            score -= 15
-        elif age_days < 90:
-            score -= 5
+        if age_days >= 730:
+            score += 3    # 2+ years
+        elif age_days >= 180:
+            score += 2    # 6+ months
+        elif age_days >= 90:
+            score += 1    # 3+ months
+        # < 3 months: +0
 
     # No random jitter — ties broken by username sort in caller
 

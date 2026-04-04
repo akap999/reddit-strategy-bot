@@ -120,7 +120,8 @@ def _is_low_slot(slot_counter):
 
 
 def _get_global_slot(db):
-    """Derive global slot counter from total assigned+informed comments across both tables."""
+    """Derive global slot counter from total assignments across all tables
+    (comments, search_comments, and post ownership)."""
     row = db.conn.execute(
         """SELECT COALESCE(SUM(cnt), 0) as total FROM (
                SELECT COUNT(*) as cnt FROM comments
@@ -128,6 +129,9 @@ def _get_global_slot(db):
                UNION ALL
                SELECT COUNT(*) as cnt FROM search_comments
                WHERE status IN ('assigned', 'informed') AND account_id IS NOT NULL
+               UNION ALL
+               SELECT COUNT(*) as cnt FROM posts
+               WHERE owner_account IS NOT NULL AND owner_account != ''
            )"""
     ).fetchone()
     return row["total"] if row else 0

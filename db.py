@@ -1418,21 +1418,21 @@ class Database:
         return dict(row) if row else {}
 
     def get_brand_deployed_hierarchy(self, brand_name):
-        """Get deployed posts and comments for a brand, grouped by subreddit.
+        """Get deployed posts/comments for a brand, grouped by subreddit.
 
-        Returns: { brand_name, subreddits: [ { name, subreddit_id, posts: [ { ..., branded_comments: [...], non_branded_comments: [...] } ] } ] }
+        Regular posts: subreddit → posts → branded/non-branded comments.
+        Search comments: flat summary stats (no subreddit grouping).
         """
-        # 1. Get all brand IDs for this brand name
         brand_rows = self.conn.execute(
             "SELECT id, subreddit_id FROM brands WHERE LOWER(name) = LOWER(?)", (brand_name,)
         ).fetchall()
         brand_ids = [r["id"] for r in brand_rows]
         if not brand_ids:
-            return {"brand_name": brand_name, "subreddits": []}
+            return {"brand_name": brand_name, "subreddits": [], "search_stats": {}}
 
         placeholders = ",".join("?" * len(brand_ids))
 
-        # 2. Get deployed posts that belong to this brand (via post_brands or posts.brand_id)
+        # Regular deployed posts
         posts = [dict(r) for r in self.conn.execute(f"""
             SELECT DISTINCT p.id, p.title, p.status, p.owner_account, p.suggested_post_day,
                    p.subreddit_id, p.deployed_at, s.name as subreddit_name,
@@ -1446,66 +1446,27 @@ class Database:
             ORDER BY s.name, p.suggested_post_day
         """, brand_ids + brand_ids).fetchall()]
 
-        if not posts:
-            # Also check search posts
-            pass
-
         post_ids = [p["id"] for p in posts]
 
-        # 3. Get deployed comments for those posts
+        # Deployed comments for those posts
         comments_by_post = {}
         if post_ids:
             pp = ",".join("?" * len(post_ids))
-            comment_rows = self.conn.execute(f"""
-                SELECT c.id, c.post_id, c.body, c.account_id, c.status, c.mentions_brand,
-                       c.deployed_at, c.reddit_comment_url, c.is_reply
+            for r in self.conn.execute(f"""
+                SELECT c.id, c.post_id, c.account_id, c.mentions_brand,
+                       c.deployed_at, c.reddit_comment_url
                 FROM comments c
-                WHERE c.post_id IN ({pp})
-                  AND c.status = 'deployed'
+                WHERE c.post_id IN ({pp}) AND c.status = 'deployed'
                 ORDER BY c.deployed_at
-            """, post_ids).fetchall()
-            for r in comment_rows:
+            """, post_ids).fetchall():
                 row = dict(r)
                 pid = row["post_id"]
                 if pid not in comments_by_post:
                     comments_by_post[pid] = {"branded": [], "non_branded": []}
-                if row.get("mentions_brand"):
-                    comments_by_post[pid]["branded"].append(row)
-                else:
-                    comments_by_post[pid]["non_branded"].append(row)
+                bucket = "branded" if row.get("mentions_brand") else "non_branded"
+                comments_by_post[pid][bucket].append(row)
 
-        # 4. Get deployed search comments for this brand
-        search_comments_by_sub = {}
-        sc_rows = self.conn.execute(f"""
-            SELECT sc.id, sc.body, sc.account_id, sc.status, sc.mentions_brand,
-                   sc.deployed_at, sc.reddit_comment_url, sc.is_reply,
-                   sp.title as post_title, sp.reddit_url as post_url, sp.subreddit
-            FROM search_comments sc
-            JOIN search_posts sp ON sc.search_post_id = sp.id
-            WHERE sc.brand_id IN ({placeholders})
-              AND sc.status = 'deployed'
-            ORDER BY sp.subreddit, sp.title, sc.deployed_at
-        """, brand_ids).fetchall()
-
-        # Group search comments by subreddit → post_url
-        for r in sc_rows:
-            row = dict(r)
-            sub = row["subreddit"]
-            post_url = row["post_url"]
-            if sub not in search_comments_by_sub:
-                search_comments_by_sub[sub] = {}
-            if post_url not in search_comments_by_sub[sub]:
-                search_comments_by_sub[sub][post_url] = {
-                    "title": row["post_title"],
-                    "reddit_url": row["post_url"],
-                    "source": "search",
-                    "branded": [],
-                    "non_branded": [],
-                }
-            bucket = "branded" if row.get("mentions_brand") else "non_branded"
-            search_comments_by_sub[sub][post_url][bucket].append(row)
-
-        # 5. Group regular posts by subreddit
+        # Group regular posts by subreddit
         subs = {}
         for p in posts:
             sname = p["subreddit_name"]
@@ -1520,31 +1481,28 @@ class Database:
                 "reddit_url": p.get("reddit_url") or "",
                 "deployed_at": p.get("deployed_at") or "",
                 "suggested_post_day": p.get("suggested_post_day"),
-                "source": "regular",
                 "branded_comments": cm["branded"],
                 "non_branded_comments": cm["non_branded"],
             })
 
-        # 6. Merge search posts into subreddit groups
-        for sub_name, post_map in search_comments_by_sub.items():
-            if sub_name not in subs:
-                subs[sub_name] = {"name": sub_name, "subreddit_id": None, "posts": []}
-            for post_url, post_data in post_map.items():
-                subs[sub_name]["posts"].append({
-                    "id": None,
-                    "title": post_data["title"],
-                    "status": "search",
-                    "owner_account": "",
-                    "reddit_url": post_data["reddit_url"],
-                    "deployed_at": "",
-                    "source": "search",
-                    "branded_comments": post_data["branded"],
-                    "non_branded_comments": post_data["non_branded"],
-                })
+        # Search comments: flat stats only (no subreddit grouping)
+        sc_row = self.conn.execute(f"""
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN sc.mentions_brand = 1 THEN 1 ELSE 0 END) as branded,
+                   SUM(CASE WHEN sc.mentions_brand = 0 OR sc.mentions_brand IS NULL THEN 1 ELSE 0 END) as non_branded,
+                   COUNT(DISTINCT sc.account_id) as accounts_used,
+                   COUNT(DISTINCT sp.subreddit) as subreddits
+            FROM search_comments sc
+            JOIN search_posts sp ON sc.search_post_id = sp.id
+            WHERE sc.brand_id IN ({placeholders}) AND sc.status = 'deployed'
+        """, brand_ids).fetchone()
+
+        search_stats = dict(sc_row) if sc_row else {}
 
         return {
             "brand_name": brand_name,
             "subreddits": sorted(subs.values(), key=lambda s: s["name"]),
+            "search_stats": search_stats,
         }
 
     # --- Accounts ---

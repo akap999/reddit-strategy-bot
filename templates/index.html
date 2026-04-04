@@ -1523,69 +1523,88 @@ async function loadBrandDeployedHierarchy(brandName) {
 
     const data = await api(`/api/brands/${encodeURIComponent(brandName)}/deployed-hierarchy`);
     const subs = data.subreddits || [];
+    const ss = data.search_stats || {};
+    const hasSubs = subs.length && subs.some(s => s.posts.length);
+    const hasSearch = ss.total > 0;
 
-    if (!subs.length || subs.every(s => !s.posts.length)) {
-        container.innerHTML = '<p class="text-xs text-gray-500">No deployed posts found for this brand.</p>';
+    if (!hasSubs && !hasSearch) {
+        container.innerHTML = '<p class="text-xs text-gray-500">No deployed data found for this brand.</p>';
         return;
     }
 
-    container.innerHTML = subs.map(sub => {
-        const postRows = sub.posts.map(p => {
-            const brandedRows = (p.branded_comments || []).map(c => `
-                <tr>
-                    <td class="text-xs text-gray-400 max-w-xs truncate">${(c.body || '').substring(0, 100)}</td>
-                    <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
-                    <td class="text-xs text-gray-500">${c.deployed_at ? c.deployed_at.split(' ')[0] : '-'}</td>
-                    <td class="text-xs">${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">view</a>` : '-'}</td>
-                </tr>`).join('');
+    // Search comments summary cards
+    const searchCards = hasSearch ? `
+        <h5 class="text-xs font-bold text-gray-400 mb-2">Live Search Comments</h5>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold text-green-400">${ss.total}</p>
+                <p class="text-xs text-gray-500">Total Deployed</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold text-blue-400">${ss.branded}</p>
+                <p class="text-xs text-gray-500">Branded</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold text-gray-300">${ss.non_branded}</p>
+                <p class="text-xs text-gray-500">Non-Branded</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold text-yellow-400">${ss.accounts_used}</p>
+                <p class="text-xs text-gray-500">Accounts Used</p>
+            </div>
+            <div class="stat-card p-3 text-center">
+                <p class="text-lg font-bold text-orange-400">${ss.subreddits}</p>
+                <p class="text-xs text-gray-500">Subreddits</p>
+            </div>
+        </div>` : '';
 
-            const nonBrandedRows = (p.non_branded_comments || []).map(c => `
-                <tr>
-                    <td class="text-xs text-gray-400 max-w-xs truncate">${(c.body || '').substring(0, 100)}</td>
-                    <td class="text-xs text-yellow-400">${c.account_id || '-'}</td>
-                    <td class="text-xs text-gray-500">${c.deployed_at ? c.deployed_at.split(' ')[0] : '-'}</td>
-                    <td class="text-xs">${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-orange-500 hover:underline">view</a>` : '-'}</td>
-                </tr>`).join('');
+    // Regular posts hierarchy as cards
+    const subCards = hasSubs ? subs.filter(s => s.posts.length).map(sub => {
+        const totalB = sub.posts.reduce((s, p) => s + (p.branded_comments || []).length, 0);
+        const totalNB = sub.posts.reduce((s, p) => s + (p.non_branded_comments || []).length, 0);
 
-            const brandedCount = (p.branded_comments || []).length;
-            const nonBrandedCount = (p.non_branded_comments || []).length;
-            const postLink = p.reddit_url ? `<a href="${p.reddit_url}" target="_blank" class="text-orange-500 hover:underline">${p.title}</a>` : p.title;
-            const sourceTag = p.source === 'search' ? '<span class="badge ml-1" style="background:#6366f1;color:white;font-size:0.6rem">Search</span>' : '';
-            const ownerTag = p.owner_account ? `<span class="text-xs text-yellow-400 ml-2">Owner: ${p.owner_account}</span>` : '';
+        const postCards = sub.posts.map(p => {
+            const bc = (p.branded_comments || []).length;
+            const nbc = (p.non_branded_comments || []).length;
+            const postLink = p.reddit_url
+                ? `<a href="${p.reddit_url}" target="_blank" class="text-orange-400 hover:underline">${p.title}</a>`
+                : `<span class="text-gray-200">${p.title}</span>`;
+
+            const commentTags = (list, color) => list.map(c =>
+                c.reddit_comment_url
+                    ? `<a href="${c.reddit_comment_url}" target="_blank" class="inline-block px-1.5 py-0.5 rounded text-xs ${color} hover:underline" style="background:rgba(255,255,255,0.05)">${c.account_id || '?'}</a>`
+                    : `<span class="inline-block px-1.5 py-0.5 rounded text-xs ${color}" style="background:rgba(255,255,255,0.05)">${c.account_id || '?'}</span>`
+            ).join(' ');
 
             return `
-                <div class="ml-6 mb-3 border-l-2 border-gray-700 pl-3">
-                    <div class="flex items-center gap-2 mb-1">
-                        <span class="text-sm text-gray-200">${postLink}</span>
-                        ${sourceTag}${ownerTag}
-                        <span class="text-xs text-gray-600">Day ${p.suggested_post_day || '-'}</span>
+                <div class="card p-3 mb-2">
+                    <div class="flex justify-between items-start mb-1">
+                        <div class="text-sm">${postLink}</div>
+                        <span class="text-xs text-gray-600 whitespace-nowrap ml-2">Day ${p.suggested_post_day || '-'}</span>
                     </div>
-                    ${brandedCount ? `
-                    <details open class="ml-4 mb-1">
-                        <summary class="text-xs text-blue-400 cursor-pointer mb-1">Branded (${brandedCount})</summary>
-                        <table class="text-xs w-full"><thead><tr><th>Comment</th><th>Account</th><th>Deployed</th><th>Link</th></tr></thead>
-                        <tbody>${brandedRows}</tbody></table>
-                    </details>` : ''}
-                    ${nonBrandedCount ? `
-                    <details open class="ml-4 mb-1">
-                        <summary class="text-xs text-gray-400 cursor-pointer mb-1">Non-Branded (${nonBrandedCount})</summary>
-                        <table class="text-xs w-full"><thead><tr><th>Comment</th><th>Account</th><th>Deployed</th><th>Link</th></tr></thead>
-                        <tbody>${nonBrandedRows}</tbody></table>
-                    </details>` : ''}
-                    ${!brandedCount && !nonBrandedCount ? '<p class="text-xs text-gray-600 ml-4">No deployed comments</p>' : ''}
+                    ${p.owner_account ? `<p class="text-xs text-yellow-400 mb-1">Owner: ${p.owner_account}</p>` : ''}
+                    <div class="flex gap-4 text-xs mt-1">
+                        <span class="text-blue-400">Branded: ${bc}</span>
+                        <span class="text-gray-400">Non-Branded: ${nbc}</span>
+                    </div>
+                    ${bc ? `<div class="mt-1 flex flex-wrap gap-1">${commentTags(p.branded_comments, 'text-blue-400')}</div>` : ''}
+                    ${nbc ? `<div class="mt-1 flex flex-wrap gap-1">${commentTags(p.non_branded_comments, 'text-gray-400')}</div>` : ''}
                 </div>`;
         }).join('');
 
-        const totalComments = sub.posts.reduce((sum, p) => sum + (p.branded_comments || []).length + (p.non_branded_comments || []).length, 0);
-
         return `
-            <details open class="mb-4">
-                <summary class="cursor-pointer text-sm font-bold text-orange-500 mb-2">
-                    r/${sub.name} <span class="text-xs text-gray-500 font-normal">(${sub.posts.length} posts, ${totalComments} comments)</span>
-                </summary>
-                ${postRows}
-            </details>`;
-    }).join('');
+            <div class="mb-4">
+                <div class="flex items-center gap-3 mb-2">
+                    <h5 class="text-sm font-bold text-orange-500">r/${sub.name}</h5>
+                    <span class="text-xs text-gray-500">${sub.posts.length} posts</span>
+                    <span class="text-xs text-blue-400">${totalB} branded</span>
+                    <span class="text-xs text-gray-400">${totalNB} non-branded</span>
+                </div>
+                ${postCards}
+            </div>`;
+    }).join('') : '';
+
+    container.innerHTML = searchCards + subCards;
 }
 
 async function refreshBrandLiveStats() {

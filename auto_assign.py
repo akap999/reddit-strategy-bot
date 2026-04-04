@@ -85,9 +85,9 @@ def _get_post_toplevel_accounts(db, post_id):
 def score_account(account, comment, lookups, batch_picks):
     """Score an (account, comment) pair. Higher = better fit.
 
-    Design principle: ACTIVITY-BASED penalties dominate.
-    Karma/age are only tiebreakers — they should never override
-    the fact that an account just posted or was recently assigned.
+    Design principle: High-karma accounts are preferred and used more often.
+    Karma bonuses are large enough to survive 1-2 activity penalty rounds,
+    so high-karma accounts get picked before low-karma ones even with some load.
     """
     username = account["username"]
     score = 100
@@ -95,8 +95,8 @@ def score_account(account, comment, lookups, batch_picks):
     # =====================================================================
     # HEAVY penalties — activity & load (these decide assignment)
     # Goal: guarantee max participation / round-robin behavior.
-    # Each penalty must exceed the max bonus gap between accounts (~53 pts)
-    # so that ANY fresh account always beats ANY account with 1+ assignment.
+    # Each penalty is calibrated against karma bonuses (max +60) so that
+    # high-karma accounts get ~1-2 extra rounds before lower tiers.
     # =====================================================================
 
     # --- Subreddit cooldown: -40 per assignment in same sub within ±2 days ---
@@ -122,36 +122,43 @@ def score_account(account, comment, lookups, batch_picks):
     score -= 55 * picks
 
     # =====================================================================
-    # LIGHT bonuses — credibility signals (only break ties)
+    # KARMA & AGE bonuses — credibility signals (large enough to matter)
     # =====================================================================
 
-    # --- Karma bonus: layered tiers, no penalty for low karma ---
+    # --- Karma bonus: scaled so 200+ karma survives 1 activity round,
+    #     5000+ survives 2 rounds vs a fresh <100-karma account.
+    #     Each bonus > 55 means that tier gets 1 extra round of assignments.
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
     if total_karma >= 5000:
-        score += 10
+        score += 120   # survives 2 rounds vs <100
     elif total_karma >= 3000:
-        score += 8
+        score += 105
     elif total_karma >= 1000:
-        score += 6
+        score += 90
     elif total_karma >= 500:
-        score += 4
+        score += 75
+    elif total_karma >= 200:
+        score += 60    # survives 1 round vs <100
     elif total_karma >= 100:
-        score += 2
+        score += 30    # preferred when fresh, doesn't survive a round
 
-    # --- Account age: bonus tiers, no penalties (karma-dominant) ---
+    # --- Account age: extended tiers, karma-dominant (max +5 < karma gap) ---
     created = account.get("created_utc")
     if created:
         age_days = (time.time() - created) / 86400
-        if age_days >= 730:
-            score += 3    # 2+ years
-        elif age_days >= 180:
-            score += 2    # 6+ months
-        elif age_days >= 90:
-            score += 1    # 3+ months
-        # < 3 months: +0
+        if age_days >= 2555:
+            score += 5    # 7+ years
+        elif age_days >= 1825:
+            score += 4    # 5+ years
+        elif age_days >= 1095:
+            score += 3    # 3+ years
+        elif age_days >= 730:
+            score += 2    # 2+ years
+        elif age_days >= 365:
+            score += 1    # 1+ year
+        # < 1 year: +0
 
     # --- Subreddit familiarity: +5 if account has history here ---
-    # (was +15 — too strong, made veterans always win)
     if username in lookups["veterans"]:
         score += 5
 
@@ -199,9 +206,9 @@ def _build_post_lookups(context):
 def score_account_for_post(account, lookups, batch_picks, sub_owner):
     """Score an account for post ownership. Activity penalties dominate.
 
-    Goal: guarantee max participation / round-robin behavior.
-    Each penalty exceeds the max bonus gap (~53 pts) so ANY fresh
-    account always beats ANY account with 1+ post.
+    Goal: prefer high-karma accounts while maintaining distribution.
+    Penalties calibrated against karma bonuses (max +60) so that
+    high-karma accounts get picked more often.
     """
     username = account["username"]
     score = 100
@@ -221,7 +228,7 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     score -= 55 * picks
 
     # =====================================================================
-    # LIGHT bonuses — tiebreakers only
+    # KARMA & AGE bonuses — credibility signals (large enough to matter)
     # =====================================================================
 
     # --- Subreddit activity: +5 if account has comments here ---
@@ -232,30 +239,36 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     if username == sub_owner:
         score += 10
 
-    # --- Karma bonus: layered tiers, no penalty for low karma ---
+    # --- Karma bonus: scaled so 200+ survives 1 round, 5000+ survives 2 ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
     if total_karma >= 5000:
-        score += 10
+        score += 120
     elif total_karma >= 3000:
-        score += 8
+        score += 105
     elif total_karma >= 1000:
-        score += 6
+        score += 90
     elif total_karma >= 500:
-        score += 4
+        score += 75
+    elif total_karma >= 200:
+        score += 60
     elif total_karma >= 100:
-        score += 2
+        score += 30
 
-    # --- Account age: bonus tiers, no penalties (karma-dominant) ---
+    # --- Account age: extended tiers, karma-dominant (max +5 < karma gap) ---
     created = account.get("created_utc")
     if created:
         age_days = (time.time() - created) / 86400
-        if age_days >= 730:
-            score += 3    # 2+ years
-        elif age_days >= 180:
-            score += 2    # 6+ months
-        elif age_days >= 90:
-            score += 1    # 3+ months
-        # < 3 months: +0
+        if age_days >= 2555:
+            score += 5    # 7+ years
+        elif age_days >= 1825:
+            score += 4    # 5+ years
+        elif age_days >= 1095:
+            score += 3    # 3+ years
+        elif age_days >= 730:
+            score += 2    # 2+ years
+        elif age_days >= 365:
+            score += 1    # 1+ year
+        # < 1 year: +0
 
     # No random jitter — ties broken by username sort in caller
 

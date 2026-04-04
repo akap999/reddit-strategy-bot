@@ -248,10 +248,16 @@ def _build_post_lookups(context):
     for r in context["account_sub_comment_counts"]:
         sub_comments[r["account_id"]] = r["cnt"]
 
+    # Pending comment assignments (so post scoring knows about recent comment assigns)
+    pending = defaultdict(int)
+    for r in context.get("account_pending_counts", []):
+        pending[r["account_id"]] = r["cnt"]
+
     return {
         "global_posts": global_posts,
         "sub_posts": sub_posts,
         "sub_comments": sub_comments,
+        "pending": pending,
     }
 
 
@@ -267,6 +273,10 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     # =====================================================================
     # HEAVY penalties — activity & load
     # =====================================================================
+
+    # --- Pending comment load: -55 per pending comment assignment ---
+    # Ensures an account that just got a comment doesn't also get a post
+    score -= 55 * lookups["pending"].get(username, 0)
 
     # --- Subreddit post concentration: -55 per post in this sub ---
     score -= 55 * lookups["sub_posts"].get(username, 0)

@@ -1671,6 +1671,19 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
+        # Cross-table: deployed comment counts across both tables
+        account_deployed_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
         return {
             "subreddit": dict(sub),
             "draft_posts": draft_posts,
@@ -1679,6 +1692,7 @@ class Database:
             "account_sub_post_counts": account_sub_post_counts,
             "account_sub_comment_counts": account_sub_comment_counts,
             "account_pending_counts": account_pending_counts,
+            "account_deployed_counts": account_deployed_counts,
         }
 
     def bulk_unassign_posts_in_subreddit(self, subreddit_id):

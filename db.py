@@ -1450,7 +1450,7 @@ class Database:
             LEFT JOIN post_urls pu ON pu.post_id = p.id
             LEFT JOIN post_brands pb ON pb.post_id = p.id
             WHERE (pb.brand_id IN ({placeholders}) OR p.brand_id IN ({placeholders}))
-              AND p.status IN ('published', 'informed', 'deployed')
+              AND p.status = 'published'
             ORDER BY s.name, p.suggested_post_day
         """, brand_ids + brand_ids).fetchall()]
 

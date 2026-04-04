@@ -1011,23 +1011,10 @@ def api_comments_live_stats():
                 continue
             try:
                 clean = url.split("?")[0].rstrip("/")
-                # Reddit share URLs (/s/ short links) need redirect resolution
+                # Reddit share URLs (/s/ short links) can't be resolved server-side
                 if "/s/" in clean:
-                    import requests as _requests
-                    try:
-                        # Reddit blocks bot UAs on share links — use browser UA
-                        redir_resp = _requests.get(clean, allow_redirects=True, timeout=10,
-                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
-                        resolved = redir_resp.url.split("?")[0].rstrip("/")
-                        print(f"[LIVE-STATS] Resolved share URL {clean} -> {resolved} (status={redir_resp.status_code})", flush=True)
-                        if "/s/" not in resolved and "/comments/" in resolved:
-                            clean = resolved
-                        else:
-                            print(f"[LIVE-STATS] Share URL did not resolve to a comment URL, skipping", flush=True)
-                            continue
-                    except Exception as e:
-                        print(f"[LIVE-STATS] Failed to resolve share URL {clean}: {e}", flush=True)
-                        continue
+                    results[str(cid)] = {"liveness": "share_link", "error": "Share URL — replace with canonical Reddit URL"}
+                    continue
                 path = clean.replace("https://www.reddit.com", "") + ".json"
                 resp = _reddit_get(path)
                 if resp.status_code == 404:

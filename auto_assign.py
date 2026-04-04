@@ -89,7 +89,7 @@ def _get_post_toplevel_accounts(db, post_id):
 # ---------------------------------------------------------------------------
 
 KARMA_THRESHOLD = 100   # accounts with total karma >= this go to High pool
-POOL_RATIO = 3          # 3 High picks per 1 Low pick (3:1 ratio)
+POOL_RATIO = 2          # 2 High picks per 1 Low pick (2:1 ratio)
 
 
 def _split_pools(accounts, threshold=KARMA_THRESHOLD):
@@ -117,6 +117,20 @@ def _pick_best_for_post(pool, lookups, batch_picks, sub_owner):
 def _is_low_slot(slot_counter):
     """Returns True if this slot should pick from the Low pool (every POOL_RATIO+1 th pick)."""
     return (slot_counter % (POOL_RATIO + 1)) == POOL_RATIO
+
+
+def _get_global_slot(db):
+    """Derive global slot counter from total assigned+informed comments across both tables."""
+    row = db.conn.execute(
+        """SELECT COALESCE(SUM(cnt), 0) as total FROM (
+               SELECT COUNT(*) as cnt FROM comments
+               WHERE status IN ('assigned', 'informed') AND account_id IS NOT NULL
+               UNION ALL
+               SELECT COUNT(*) as cnt FROM search_comments
+               WHERE status IN ('assigned', 'informed') AND account_id IS NOT NULL
+           )"""
+    ).fetchone()
+    return row["total"] if row else 0
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +605,8 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single unassigned comment to the best-scoring account.
 
+    Uses two-pool system with global slot counter for 2:1 ratio.
+
     Hard rules:
       - OP reply → post owner only
       - Top-level non-OP → unique account, never the post owner
@@ -614,6 +630,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No accounts available"}
 
     post = context["post"]
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
 
@@ -641,16 +658,26 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 
         return {"error": "No valid OP account available. Assign a post owner first."}
 
+    # Determine pool from global slot
+    slot = _get_global_slot(db)
+    use_low = _is_low_slot(slot) and low_pool
+    primary = low_pool if use_low else high_pool
+    fallback = high_pool if use_low else low_pool
+
     # ---------------------------------------------------------------
-    # Reply → normal scoring, all accounts eligible
+    # Reply → two-pool scoring, all accounts eligible
     # ---------------------------------------------------------------
     if comment.get("is_reply") and comment.get("parent_comment_id"):
-        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in accounts]
+        pool_to_use = primary if primary else fallback
+        scores = [(score_account(a, comment, lookups, batch_picks), a) for a in pool_to_use]
         scores.sort(key=lambda x: (-x[0], x[1]["username"]))
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
-        return {"ok": True, "account": username, "score": best_score, "type": "reply"}
+        return {
+            "ok": True, "account": username, "score": best_score, "type": "reply",
+            "pool": "low" if use_low and pool_to_use is primary else "high",
+        }
 
     # ---------------------------------------------------------------
     # Top-level non-OP → unique account, exclude OP + already used
@@ -661,8 +688,16 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     if op_account_name:
         blocked.add(op_account_name)
 
-    eligible = [a for a in accounts if a["username"] not in blocked]
-    if not eligible:
+    eligible_primary = [a for a in primary if a["username"] not in blocked] if primary else []
+    eligible_fallback = [a for a in fallback if a["username"] not in blocked] if fallback else []
+
+    if eligible_primary:
+        eligible = eligible_primary
+        picked_pool = "low" if use_low else "high"
+    elif eligible_fallback:
+        eligible = eligible_fallback
+        picked_pool = "high" if use_low else "low"
+    else:
         return {"error": "No unique account available — all accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
@@ -672,6 +707,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     db.assign_comment(comment_id, username)
     return {
         "ok": True, "account": username, "score": best_score,
+        "pool": picked_pool,
         "_debug_scores": {s[1]["username"]: s[0] for s in scores[:10]},
         "_debug_blocked": list(blocked),
     }
@@ -682,6 +718,8 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 # ---------------------------------------------------------------------------
 
 def auto_assign_single_post(db, post_id, exclude_accounts=None):
+    """Auto-assign a single post to the best-scoring account.
+    Uses two-pool system with global slot counter for 2:1 ratio."""
     post = db.get_post(post_id)
     if not post:
         return {"error": "Post not found"}
@@ -699,24 +737,32 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available"}
 
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_post_lookups(context)
     sub_owner = context["subreddit"].get("owner_account") or ""
     batch_picks = defaultdict(int)
 
-    scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in accounts]
-    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
-    best_score, best_account = scores[0]
+    # Determine pool from global slot
+    slot = _get_global_slot(db)
+    use_low = _is_low_slot(slot) and low_pool
+    primary = low_pool if use_low else high_pool
+    fallback = high_pool if use_low else low_pool
+
+    result = _pick_best_for_post(primary, lookups, batch_picks, sub_owner)
+    if result is None:
+        result = _pick_best_for_post(fallback, lookups, batch_picks, sub_owner)
+    if result is None:
+        return {"error": "No eligible account available."}
+
+    (best_score, best_account), all_scores = result
     username = best_account["username"]
     db.set_post_owner(post_id, username)
     return {
         "ok": True,
         "account": username,
         "score": best_score,
-        "_debug_scores": [{"account": a["username"], "score": s} for s, a in scores[:10]],
-        "_debug_lookups": {
-            "sub_posts": dict(lookups["sub_posts"]),
-            "global_posts": dict(lookups["global_posts"]),
-        },
+        "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
+        "_debug_scores": [{"account": a["username"], "score": s} for s, a in all_scores[:10]],
     }
 
 
@@ -740,6 +786,8 @@ def _get_search_post_toplevel_accounts(db, search_post_id):
 def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single search comment to the best-scoring account.
 
+    Uses two-pool system with global slot counter for 2:1 ratio.
+
     Rules:
       - Non-reply: unique account per search post (no account already used on that post)
       - Reply: normal scoring, any account eligible
@@ -762,15 +810,31 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available"}
 
+    high_pool, low_pool = _split_pools(accounts)
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
     is_reply = comment.get("is_reply", 0)
 
+    # Determine pool from global slot
+    slot = _get_global_slot(db)
+    use_low = _is_low_slot(slot) and low_pool
+    primary = low_pool if use_low else high_pool
+    fallback = high_pool if use_low else low_pool
+
     if is_reply:
-        eligible = accounts
+        pool_to_use = primary if primary else fallback
+        eligible = list(pool_to_use) if pool_to_use else []
+        blocked = set()
     else:
         blocked = _get_search_post_toplevel_accounts(db, comment["search_post_id"])
-        eligible = [a for a in accounts if a["username"] not in blocked]
+        eligible_primary = [a for a in primary if a["username"] not in blocked] if primary else []
+        eligible_fallback = [a for a in fallback if a["username"] not in blocked] if fallback else []
+        if eligible_primary:
+            eligible = eligible_primary
+        elif eligible_fallback:
+            eligible = eligible_fallback
+        else:
+            eligible = []
 
     if not eligible:
         return {"error": "No eligible account — all accounts already used on this post."}
@@ -783,13 +847,9 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     db.assign_search_comment(comment_id, username)
     return {
         "ok": True, "account": username, "score": best_score,
+        "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
         "_debug_all_scores": {s[1]["username"]: s[0] for s in scores},
-        "_debug_blocked": list(blocked) if not is_reply else [],
-        "_debug_lookups": {
-            "pending": dict(lookups["pending"]),
-            "deployed": dict(lookups["deployed"]),
-            "post_ownership": dict(lookups["post_ownership"]),
-        },
+        "_debug_blocked": list(blocked),
     }
 
 

@@ -1041,8 +1041,8 @@ def api_comments_live_stats():
                                     "liveness": "removed" if is_removed else "live",
                                 }
                                 break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[LIVE-STATS] Error fetching {url}: {e}", flush=True)
             _time.sleep(2)
         return results
 

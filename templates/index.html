@@ -1432,7 +1432,7 @@ function renderBrandCommentTable() {
     const liveStats = _brandsViewState.liveStats || {};
     let totalUpvotes = 0, totalReplies = 0, statsLoaded = 0;
     comments.forEach(c => {
-        const s = liveStats[String(c.id)];
+        const s = liveStats[`${c.source || 'comment'}_${c.id}`];
         if (s) { totalUpvotes += (s.score || 0); totalReplies += (s.num_replies || 0); statsLoaded++; }
     });
 
@@ -1461,8 +1461,9 @@ function renderBrandCommentTable() {
         const deployedDate = c.deployed_at ? new Date(c.deployed_at).toLocaleDateString() : '';
         const createdDate = c.created_at ? new Date(c.created_at).toLocaleDateString() : '';
 
-        // Live stats
-        const ls = liveStats[String(c.id)];
+        // Live stats — use source-prefixed key to match refreshBrandLiveStats
+        const lsKey = `${c.source || 'comment'}_${c.id}`;
+        const ls = liveStats[lsKey];
         const hasUrl = !!c.reddit_comment_url;
         let upvoteCell, replyCell, livenessCell;
         if (ls) {
@@ -1611,10 +1612,10 @@ async function refreshBrandLiveStats() {
     if (!_brandsViewState.data) return;
     const comments = _brandsViewState.data.comments || [];
 
-    // Collect all comments with reddit_comment_url
+    // Collect all comments with reddit_comment_url — use source-prefixed key to avoid ID collision
     const urlItems = comments
         .filter(c => c.reddit_comment_url)
-        .map(c => ({ id: c.id, reddit_comment_url: c.reddit_comment_url }));
+        .map(c => ({ id: `${c.source || 'comment'}_${c.id}`, reddit_comment_url: c.reddit_comment_url }));
 
     if (!urlItems.length) {
         toast('No deployed comments with Reddit URLs to check', 'info');
@@ -1672,7 +1673,7 @@ function exportBrandCSV(brandName) {
         const rows = comments.map(c => {
             let kw = '';
             try { kw = JSON.parse(c.matched_keywords || '[]').join(', '); } catch(e) {}
-            const ls = liveStats[String(c.id)];
+            const ls = liveStats[`${c.source || 'comment'}_${c.id}`];
             return [c.id, c.subreddit_name||'', c.post_title||'', c.post_reddit_url||'', c.body||'', c.reddit_comment_url||'', c.status, c.deployed_at||'', c.account_id||'', c.is_ours?'Yes':'No', c.mentions_brand?'Yes':'No', kw, ls?ls.score:'', ls?ls.num_replies:'', c.created_at||''].map(esc).join(',');
         });
         const csv = [header.join(','), ...rows].join('\n');

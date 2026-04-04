@@ -125,14 +125,18 @@ def score_account(account, comment, lookups, batch_picks):
     # LIGHT bonuses — credibility signals (only break ties)
     # =====================================================================
 
-    # --- Karma bonus: +2 per 1000 karma, capped at +10 ---
-    # (was +5/1000 capped at +35 — way too dominant)
+    # --- Karma bonus: layered tiers, no penalty for low karma ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(10, 2 * (total_karma // 1000))
-
-    # --- Low karma penalty: -10 if total < 500 ---
-    if total_karma < 500:
-        score -= 10
+    if total_karma >= 5000:
+        score += 10
+    elif total_karma >= 3000:
+        score += 8
+    elif total_karma >= 1000:
+        score += 6
+    elif total_karma >= 500:
+        score += 4
+    elif total_karma >= 100:
+        score += 2
 
     # --- Account age: only penalize very new, minimal bonus for old ---
     created = account.get("created_utc")
@@ -226,13 +230,18 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     if username == sub_owner:
         score += 10
 
-    # --- Karma bonus: +2 per 1000, capped at +10 ---
+    # --- Karma bonus: layered tiers, no penalty for low karma ---
     total_karma = (account.get("link_karma") or 0) + (account.get("comment_karma") or 0)
-    score += min(10, 2 * (total_karma // 1000))
-
-    # --- Low karma penalty ---
-    if total_karma < 500:
-        score -= 10
+    if total_karma >= 5000:
+        score += 10
+    elif total_karma >= 3000:
+        score += 8
+    elif total_karma >= 1000:
+        score += 6
+    elif total_karma >= 500:
+        score += 4
+    elif total_karma >= 100:
+        score += 2
 
     # --- Account age: only penalize very new ---
     created = account.get("created_utc")

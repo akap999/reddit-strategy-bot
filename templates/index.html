@@ -5377,7 +5377,9 @@ function renderLsSearch(c) {
                 <div><label class="text-xs text-gray-400">Sort Order</label><select id="ls-sortorder"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
                 <div><label class="text-xs text-gray-400">NSFW</label><select id="ls-nsfw"><option value="">Include All</option><option value="false">Exclude NSFW</option><option value="true">NSFW Only</option></select></div>
                 <div><label class="text-xs text-gray-400">Min Upvote Ratio</label><input id="ls-ratio" type="number" step="0.1" min="0" max="1" placeholder="e.g. 0.7"></div>
+                <div><label class="text-xs text-gray-400">Min Subscribers</label><input id="ls-minsubs" type="number" placeholder="e.g. 500"></div>
                 <div><label class="text-xs text-gray-400">Max Subscribers</label><input id="ls-maxsubs" type="number" placeholder="e.g. 5000"></div>
+                <div><label class="text-xs text-gray-400">Max Scrutiny</label><select id="ls-scrutiny"><option value="">Any</option><option value="40">Low (&lt;40)</option><option value="20">Very Low (&lt;20)</option></select></div>
             </div>
             <div class="flex gap-3 items-center">
                 <button class="btn btn-accent" onclick="lsRunSearch()">Search Reddit</button>
@@ -5459,6 +5461,8 @@ async function lsRunSearch() {
     const nsfwVal = document.getElementById('ls-nsfw').value;
     const ratioVal = parseFloat(document.getElementById('ls-ratio').value);
     const maxSubsVal = parseInt(document.getElementById('ls-maxsubs').value);
+    const minSubsVal = parseInt(document.getElementById('ls-minsubs').value);
+    const scrutinyVal = parseInt(document.getElementById('ls-scrutiny').value);
     const body = {
         keyword,
         subreddit: document.getElementById('ls-subreddit').value.trim() || undefined,
@@ -5472,6 +5476,8 @@ async function lsRunSearch() {
         nsfw: nsfwVal === '' ? undefined : nsfwVal === 'true',
         min_upvote_ratio: isNaN(ratioVal) ? undefined : ratioVal,
         max_subscribers: isNaN(maxSubsVal) ? undefined : maxSubsVal,
+        min_subscribers: isNaN(minSubsVal) ? undefined : minSubsVal,
+        max_scrutiny: isNaN(scrutinyVal) ? undefined : scrutinyVal,
     };
     document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit... (running in background)</p></div>';
     try {
@@ -5506,6 +5512,16 @@ async function lsRunSearch() {
     } catch(e) { document.getElementById('ls-results').innerHTML = ''; }
 }
 
+function lsScrutinyPill(score) {
+    if (score == null) return ' <span class="text-gray-600" title="scrutiny unknown">•</span>';
+    let bg, fg, label;
+    if (score < 20) { bg = '#0b3d1a'; fg = '#4ade80'; label = 'Very Low'; }
+    else if (score < 40) { bg = '#3d3a0b'; fg = '#facc15'; label = 'Low'; }
+    else if (score < 60) { bg = '#3d260b'; fg = '#fb923c'; label = 'Mod'; }
+    else { bg = '#3d0b1a'; fg = '#f87171'; label = 'High'; }
+    return ` <span style="background:${bg};color:${fg};padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px" title="Scrutiny score ${score} (lower = more lenient mods)">${label} ${score}</span>`;
+}
+
 function lsRenderResults() {
     const el = document.getElementById('ls-results');
     if (!_lsSearchResults.length) { el.innerHTML = '<p class="text-gray-500">No results found.</p>'; return; }
@@ -5526,7 +5542,7 @@ function lsRenderResults() {
                     <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
                     <td><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${(r.title||'').substring(0,80)}${(r.title||'').length>80?'...':''}</a></td>
                     <td>${lsKeywordBadges(kws)}</td>
-                    <td class="text-xs">r/${r.subreddit}${r.sub_subscribers != null ? ` <span class="text-gray-600">(${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers})</span>` : ''}</td>
+                    <td class="text-xs">r/${r.subreddit}${r.sub_subscribers != null ? ` <span class="text-gray-600">(${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers})</span>` : ''}${lsScrutinyPill(r.scrutiny_score)}</td>
                     <td>${r.score}</td>
                     <td>${r.comments}</td>
                     <td class="text-xs">${(r.date||'').substring(0,10)}</td>

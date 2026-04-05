@@ -314,6 +314,9 @@ class RedditSearchBot:
         nsfw=None,
         min_upvote_ratio=None,
         max_subscribers=None,
+        min_subscribers=None,
+        max_scrutiny=None,
+        db=None,
     ):
         """
         Search Reddit for posts matching the given criteria.
@@ -392,6 +395,7 @@ class RedditSearchBot:
         has_strict_filters = (min_comments > 0 or min_score > 0
                               or min_upvote_ratio is not None
                               or max_subscribers is not None
+                              or min_subscribers is not None
                               or nsfw is not None or excluded_set)
 
         for api_name in apis_to_try:
@@ -525,9 +529,10 @@ class RedditSearchBot:
 
             # Apply subscriber filter after each API batch so len(filtered)
             # reflects the true count and adaptive over-fetch works correctly
-            if max_subscribers and filtered:
+            if (max_subscribers or min_subscribers) and filtered:
                 before_sub = len(filtered)
-                filtered = self._filter_by_subscribers(filtered, max_subscribers)
+                filtered = self._filter_by_subscribers(
+                    filtered, max_subscribers, min_subscribers=min_subscribers)
                 removed = before_sub - len(filtered)
                 if removed:
                     print(f"    Subscriber filter: removed {removed}, {len(filtered)} remaining")
@@ -535,6 +540,13 @@ class RedditSearchBot:
         if not filtered:
             print("    ⚠ All APIs failed or returned no results")
             return []
+
+        # Always compute scrutiny scores (annotate every result);
+        # only drop posts when max_scrutiny is provided.
+        try:
+            filtered = self._filter_by_scrutiny(filtered, max_scrutiny=max_scrutiny, db=db)
+        except Exception as e:
+            print(f"    ⚠ scrutiny pass failed: {e}")
 
         # Sort locally (filtering already done above)
         sort_key_map = {
@@ -554,8 +566,8 @@ class RedditSearchBot:
     _sub_cache = {}  # sub_name_lower -> (subscriber_count, timestamp)
     _SUB_CACHE_TTL = 3600  # 1 hour
 
-    def _filter_by_subscribers(self, results, max_subscribers):
-        """Filter results to only include posts from subs with ≤ max_subscribers.
+    def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
+        """Filter results to posts from subs within [min_subscribers, max_subscribers].
 
         Fetches subscriber counts for each unique subreddit via Reddit API.
         Uses in-memory cache to avoid redundant lookups.
@@ -563,7 +575,9 @@ class RedditSearchBot:
         Posts from subs where the count can't be determined are kept.
         """
         unique_subs = list(set(r.get("subreddit", "") for r in results if r.get("subreddit")))
-        print(f"    Checking subscriber counts for {len(unique_subs)} subreddits (max: {max_subscribers:,})...")
+        max_disp = f"{max_subscribers:,}" if max_subscribers else "∞"
+        min_disp = f"{min_subscribers:,}" if min_subscribers else "0"
+        print(f"    Checking subscriber counts for {len(unique_subs)} subreddits (range: {min_disp}–{max_disp})...")
 
         # Use bot-style UA for Reddit JSON API
         headers = dict(self.headers)
@@ -616,16 +630,260 @@ class RedditSearchBot:
                     symbol = "✓" if count is not None and count <= max_subscribers else ("✗" if count is not None else "?")
                     print(f"      {symbol} r/{sub_name}: {count:,} subscribers" if count is not None else f"      ? r/{sub_name}: unknown (keeping)")
 
-        # Attach subscriber count to each result & filter
+        # Attach subscriber count to each result & filter by [min, max] range
         filtered = []
         for r in results:
             count = sub_info.get(r.get("subreddit", "").lower())
             r["sub_subscribers"] = count
-            if count is None or count <= max_subscribers:
+            if count is None:
                 filtered.append(r)
+                continue
+            if max_subscribers is not None and count > max_subscribers:
+                continue
+            if min_subscribers is not None and count < min_subscribers:
+                continue
+            filtered.append(r)
 
         removed = len(results) - len(filtered)
-        print(f"    Subscriber filter: kept {len(filtered)}, removed {removed} (from subs >{max_subscribers:,})")
+        print(f"    Subscriber filter: kept {len(filtered)}, removed {removed}")
+        return filtered
+
+    # Class-level scrutiny cache (in-memory, backed by DB if provided)
+    _scrutiny_cache = {}  # sub_name_lower -> (score_dict, timestamp)
+    _SCRUTINY_CACHE_TTL = 7 * 24 * 3600  # 7 days
+
+    def _compute_sub_scrutiny(self, sub_name, post_results, headers):
+        """Compute scrutiny signals for a single subreddit using ONLY
+        publicly-available unauthenticated endpoints.
+
+        Signals (0-100, higher = stricter moderation):
+          - rules_count (from /about/rules.json)  — weight 35
+          - submit_text length (from /about.json) — weight 25
+          - gate_penalty (submission_type/type)   — weight 20
+          - comment_removal_rate (from /comments.json, best-effort) — weight 20
+
+        Returns dict with metrics. Returns None if sub is private/quarantined.
+        """
+        base = self.apis["reddit"]
+        info = {
+            "subreddit_type": None,
+            "submission_type": None,
+            "rules_count": None,
+            "submit_text_len": None,
+            "comment_removal_rate": None,
+            "post_removal_rate": None,
+            "gate_penalty": 0.0,
+            "scrutiny_score": None,
+            "subscribers": None,
+        }
+
+        # 1) about.json — subreddit_type, submission_type, submit_text, subscribers
+        try:
+            resp = requests.get(f"{base}/r/{sub_name}/about.json",
+                                headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = (resp.json() or {}).get("data", {}) or {}
+                info["subreddit_type"] = data.get("subreddit_type")
+                info["submission_type"] = data.get("submission_type")
+                info["subscribers"] = data.get("subscribers")
+                info["submit_text_len"] = len((data.get("submit_text") or ""))
+                if info["subreddit_type"] in ("private", "quarantined"):
+                    return None
+        except Exception:
+            pass
+
+        # 2) about/rules.json — rules count
+        try:
+            resp = requests.get(f"{base}/r/{sub_name}/about/rules.json",
+                                headers=headers, timeout=8)
+            if resp.status_code == 200:
+                info["rules_count"] = len((resp.json() or {}).get("rules", []) or [])
+        except Exception:
+            pass
+
+        # 3) comments.json — best-effort comment removal rate (often 0 for
+        # logged-out because Reddit hides removed comments from listings,
+        # but still useful when it does surface them)
+        try:
+            resp = requests.get(f"{base}/r/{sub_name}/comments.json",
+                                params={"limit": 100}, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                children = ((resp.json() or {}).get("data", {}) or {}).get("children", []) or []
+                total = len(children)
+                if total:
+                    removed_ct = 0
+                    for c in children:
+                        cd = (c or {}).get("data", {}) or {}
+                        body = (cd.get("body") or "").strip()
+                        author = (cd.get("author") or "").strip()
+                        if body in ("[removed]", "[deleted]") or author == "[deleted]":
+                            removed_ct += 1
+                    info["comment_removal_rate"] = removed_ct / total
+        except Exception:
+            pass
+
+        # 4) post_removal_rate from already-fetched results for this sub (free)
+        if post_results:
+            total_p = len(post_results)
+            removed_p = 0
+            for p in post_results:
+                body = (p.get("text") or "").strip()
+                author = (p.get("author") or "").strip()
+                if body in ("[removed]", "[deleted]") or author == "[deleted]":
+                    removed_p += 1
+            if total_p:
+                info["post_removal_rate"] = removed_p / total_p
+
+        # 5) gate penalty (0-1)
+        gate = 0.0
+        if info["submission_type"] and info["submission_type"] != "any":
+            gate += 0.4
+        if info["subreddit_type"] in ("restricted", "gold_only"):
+            gate += 0.6
+        info["gate_penalty"] = min(gate, 1.0)
+
+        # 6) Final score (0-100):
+        #    rules  (35) : 0 rules → 0, 12+ rules → 35
+        #    submit (25) : 0 chars → 0, 500+ chars → 25
+        #    gate   (20) : 0 → 0, 1.0 → 20
+        #    crr    (20) : 0 → 0, 1.0 → 20  (bonus signal when present)
+        rules_n = min((info["rules_count"] or 0) / 12.0, 1.0)
+        submit_n = min((info["submit_text_len"] or 0) / 500.0, 1.0)
+        crr = info["comment_removal_rate"] or 0.0
+        info["scrutiny_score"] = round(
+            rules_n * 35 + submit_n * 25 + info["gate_penalty"] * 20 + crr * 20, 1
+        )
+        return info
+
+    def _filter_by_scrutiny(self, results, max_scrutiny=None, db=None):
+        """Annotate each result with scrutiny_score; optionally drop results
+        whose sub scores above `max_scrutiny`.
+
+        - Always computes/attaches scores (UI opt-in filtering).
+        - Uses DB cache (7-day TTL) via `db.get_scrutiny`/`db.upsert_scrutiny`
+          when available, plus an in-memory class cache.
+        - Drops posts from private/quarantined subs unconditionally.
+        """
+        if not results:
+            return results
+
+        # Group posts by subreddit (case-insensitive)
+        by_sub = {}
+        for r in results:
+            sub = r.get("subreddit", "")
+            if not sub:
+                continue
+            by_sub.setdefault(sub.lower(), {"name": sub, "posts": []})["posts"].append(r)
+
+        unique_subs = list(by_sub.values())
+        print(f"    Computing scrutiny for {len(unique_subs)} subreddits...")
+
+        headers = dict(self.headers)
+        ua = headers.get("User-Agent", "")
+        if "Mozilla" in ua or "AppleWebKit" in ua:
+            headers["User-Agent"] = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
+
+        now = time.time()
+        scores = {}  # key -> info dict or None (blocked)
+        to_fetch = []
+
+        # Check in-memory cache, then DB cache
+        for entry in unique_subs:
+            key = entry["name"].lower()
+            mem = self._scrutiny_cache.get(key)
+            if mem and (now - mem[1]) < self._SCRUTINY_CACHE_TTL:
+                scores[key] = mem[0]
+                print(f"      r/{entry['name']}: {mem[0].get('scrutiny_score') if mem[0] else 'BLOCKED'} (mem cache)")
+                continue
+            if db is not None:
+                try:
+                    cached = db.get_scrutiny(entry["name"], max_age_days=7)
+                except Exception:
+                    cached = None
+                if cached:
+                    info = {
+                        "subreddit_type": cached.get("subreddit_type"),
+                        "submission_type": None,
+                        "comment_removal_rate": cached.get("comment_removal_rate"),
+                        "post_removal_rate": cached.get("post_removal_rate"),
+                        "gate_penalty": cached.get("gate_penalty") or 0.0,
+                        "scrutiny_score": cached.get("scrutiny_score"),
+                        "subscribers": cached.get("subscribers"),
+                    }
+                    if info["subreddit_type"] in ("private", "quarantined"):
+                        scores[key] = None
+                    else:
+                        scores[key] = info
+                    self._scrutiny_cache[key] = (scores[key], now)
+                    print(f"      r/{entry['name']}: {info.get('scrutiny_score')} (db cached)")
+                    continue
+            to_fetch.append(entry)
+
+        # Fetch uncached subs concurrently
+        if to_fetch:
+            def fetch_one(entry):
+                name = entry["name"]
+                try:
+                    info = self._compute_sub_scrutiny(name, entry["posts"], headers)
+                    return name, info
+                except Exception:
+                    return name, {"scrutiny_score": 50.0, "gate_penalty": 0.0,
+                                  "comment_removal_rate": None, "post_removal_rate": None,
+                                  "subreddit_type": None, "subscribers": None}
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_one, e): e for e in to_fetch}
+                for future in as_completed(futures):
+                    name, info = future.result()
+                    key = name.lower()
+                    scores[key] = info
+                    self._scrutiny_cache[key] = (info, now)
+                    if info is None:
+                        print(f"      r/{name}: BLOCKED (private/quarantined)")
+                    else:
+                        print(f"      r/{name}: {info.get('scrutiny_score')} "
+                              f"(crr={info.get('comment_removal_rate')}, "
+                              f"gate={info.get('gate_penalty')})")
+                    # Persist to DB
+                    if db is not None and info is not None:
+                        try:
+                            db.upsert_scrutiny(
+                                name,
+                                subscribers=info.get("subscribers"),
+                                comment_removal_rate=info.get("comment_removal_rate"),
+                                post_removal_rate=info.get("post_removal_rate"),
+                                gate_penalty=info.get("gate_penalty"),
+                                scrutiny_score=info.get("scrutiny_score"),
+                                subreddit_type=info.get("subreddit_type"),
+                            )
+                        except Exception as e:
+                            print(f"      ⚠ failed to cache r/{name}: {e}")
+
+        # Annotate results & filter
+        filtered = []
+        for r in results:
+            sub = r.get("subreddit", "")
+            key = sub.lower()
+            info = scores.get(key)
+            if info is None and key in scores:
+                # Hard-exclude private/quarantined
+                continue
+            if info is not None:
+                r["scrutiny_score"] = info.get("scrutiny_score")
+                r["scrutiny_comment_removal_rate"] = info.get("comment_removal_rate")
+            else:
+                r["scrutiny_score"] = None
+            if (max_scrutiny is not None
+                    and r.get("scrutiny_score") is not None
+                    and r["scrutiny_score"] > max_scrutiny):
+                continue
+            filtered.append(r)
+
+        removed = len(results) - len(filtered)
+        if max_scrutiny is not None:
+            print(f"    Scrutiny filter (max={max_scrutiny}): kept {len(filtered)}, removed {removed}")
+        else:
+            print(f"    Scrutiny computed for {len(filtered)} posts (no filter)")
         return filtered
 
     def search_multiple_keywords(self, keywords, delay=2, concurrent=False, **kwargs):

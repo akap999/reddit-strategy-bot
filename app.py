@@ -1990,21 +1990,30 @@ def api_search_reddit():
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
         bot = RedditSearchBot(reddit_base=proxy.rstrip("/") if proxy else None)
-        results = bot.search(
-            keyword=keyword,
-            subreddit=data.get("subreddit"),
-            subreddits=data.get("subreddits"),
-            excluded_subreddits=data.get("excluded_subreddits"),
-            min_comments=data.get("min_comments", 0),
-            min_score=data.get("min_score", 0),
-            max_days_old=data.get("max_days_old"),
-            sort_by=data.get("sort_by", "relevance"),
-            sort_order=data.get("sort_order", "desc"),
-            limit=min(data.get("limit", 50), 200),
-            nsfw=data.get("nsfw"),
-            min_upvote_ratio=data.get("min_upvote_ratio"),
-            max_subscribers=data.get("max_subscribers"),
-        )
+        # Dedicated DB connection for the scrutiny cache (lives in background thread)
+        task_db = Database(DB_PATH)
+        task_db.connect()
+        try:
+            results = bot.search(
+                keyword=keyword,
+                subreddit=data.get("subreddit"),
+                subreddits=data.get("subreddits"),
+                excluded_subreddits=data.get("excluded_subreddits"),
+                min_comments=data.get("min_comments", 0),
+                min_score=data.get("min_score", 0),
+                max_days_old=data.get("max_days_old"),
+                sort_by=data.get("sort_by", "relevance"),
+                sort_order=data.get("sort_order", "desc"),
+                limit=min(data.get("limit", 50), 200),
+                nsfw=data.get("nsfw"),
+                min_upvote_ratio=data.get("min_upvote_ratio"),
+                max_subscribers=data.get("max_subscribers"),
+                min_subscribers=data.get("min_subscribers"),
+                max_scrutiny=data.get("max_scrutiny"),
+                db=task_db,
+            )
+        finally:
+            task_db.close()
         return results
 
     tid = start_task("search-reddit", task)

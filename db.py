@@ -871,6 +871,21 @@ class Database:
             self.conn.execute("ALTER TABLE posts ADD COLUMN deployed_at TEXT")
             self.conn.commit()
 
+        # Subreddit scrutiny cache (comment removal rate + gate penalty)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS subreddit_scrutiny (
+                name TEXT PRIMARY KEY,
+                subscribers INTEGER,
+                comment_removal_rate REAL,
+                post_removal_rate REAL,
+                gate_penalty REAL,
+                scrutiny_score REAL,
+                subreddit_type TEXT,
+                computed_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        self.conn.commit()
+
         # Backfill post_brands from posts.brand_id for existing data
         if self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_brands'").fetchone():
             existing = self.conn.execute("SELECT COUNT(*) as c FROM post_brands").fetchone()["c"]
@@ -2582,4 +2597,44 @@ class Database:
         self.conn.execute(
             "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
             (comment_id,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Subreddit scrutiny cache
+    # ------------------------------------------------------------------
+    def get_scrutiny(self, name, max_age_days=7):
+        """Return cached scrutiny dict for a subreddit, or None if missing/stale."""
+        row = self.conn.execute(
+            """SELECT name, subscribers, comment_removal_rate, post_removal_rate,
+                      gate_penalty, scrutiny_score, subreddit_type, computed_at,
+                      CAST((julianday('now') - julianday(computed_at)) AS REAL) AS age_days
+               FROM subreddit_scrutiny WHERE name = ? COLLATE NOCASE""",
+            (name,)
+        ).fetchone()
+        if not row:
+            return None
+        if row["age_days"] is not None and row["age_days"] > max_age_days:
+            return None
+        return dict(row)
+
+    def upsert_scrutiny(self, name, subscribers=None, comment_removal_rate=None,
+                        post_removal_rate=None, gate_penalty=None,
+                        scrutiny_score=None, subreddit_type=None):
+        """Insert or update a subreddit scrutiny row."""
+        self.conn.execute(
+            """INSERT INTO subreddit_scrutiny
+                 (name, subscribers, comment_removal_rate, post_removal_rate,
+                  gate_penalty, scrutiny_score, subreddit_type, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(name) DO UPDATE SET
+                 subscribers = excluded.subscribers,
+                 comment_removal_rate = excluded.comment_removal_rate,
+                 post_removal_rate = excluded.post_removal_rate,
+                 gate_penalty = excluded.gate_penalty,
+                 scrutiny_score = excluded.scrutiny_score,
+                 subreddit_type = excluded.subreddit_type,
+                 computed_at = datetime('now')""",
+            (name, subscribers, comment_removal_rate, post_removal_rate,
+             gate_penalty, scrutiny_score, subreddit_type)
+        )
         self.conn.commit()

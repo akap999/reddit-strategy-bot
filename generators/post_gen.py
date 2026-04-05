@@ -8,7 +8,8 @@ import requests
 from generators.base import ClaudeClient, BANNED_PHRASES
 from config import (
     STORYLINE_TYPES, AI_QUERY_PATTERNS, PROMPT_VERSION,
-    POST_SPREAD_FACTOR, FILLER_LEAD_DAYS, REDDIT_USER_AGENT
+    POST_SPREAD_FACTOR, FILLER_LEAD_DAYS, REDDIT_USER_AGENT,
+    POST_BATCH_SIZES, INTENT_TYPES
 )
 from db import Database
 
@@ -19,77 +20,101 @@ class PostGenerator:
         self.db = db
 
     def generate_posts(self, subreddit, brands, count, custom_topics=None):
-        """Generate brand-related posts (posts NEVER mention any brand).
+        """Generate GEO-style intent-balanced posts (posts NEVER mention target brands).
+
+        Produces a batch of `count` posts (must be 3, 6, or 9). Every group of 3
+        contains exactly 1 commercial + 1 comparison + 1 informational post — each
+        written as a long-tail AI-model query a real user would type into
+        ChatGPT/Perplexity. Competitor brand names ARE allowed in comparison posts
+        (they reflect real user queries); target brand names are never allowed.
 
         Args:
             subreddit: subreddit dict from DB
-            brands: single brand dict OR list of brand dicts
-            count: number of posts to generate
-            custom_topics: optional list of custom title/topic strings
+            brands: single brand dict OR list of brand dicts (target brands — never mentioned)
+            count: number of posts to generate — must be in POST_BATCH_SIZES (3, 6, 9)
+            custom_topics: optional list of custom title/topic strings (appended as-is)
 
         Returns:
-            list of saved post dicts with IDs
+            list of saved post dicts with IDs, one per intent in 1:1:1 ratio
         """
+        if count not in POST_BATCH_SIZES:
+            raise ValueError(
+                f"count must be one of {POST_BATCH_SIZES}, got {count}. "
+                "GEO batches are strict 1:1:1 commercial/comparison/informational."
+            )
+
         # Normalize: accept single brand or list
         if isinstance(brands, dict):
             brands = [brands]
 
         brand_ids = [b["id"] for b in brands]
         primary_brand = brands[0]
+        per_intent = count // 3  # 1, 2, or 3
 
-        # Get storyline distribution for balancing (merge across all brands)
-        all_distributions = {}
-        for b in brands:
-            dist = self.db.get_storyline_distribution(subreddit["id"], b["id"])
-            for k, v in dist.items():
-                all_distributions[k] = all_distributions.get(k, 0) + v
-        storylines = self._select_storylines_from_dist(all_distributions, count)
-
-        # Get existing titles for dedup (union across all brands)
+        # Existing titles for dedup (shared across all intent calls)
         existing_titles = set()
         for b in brands:
             existing_titles.update(self.db.get_all_post_titles_for_brand(b["name"]))
         existing_titles = list(existing_titles)
 
-        # Get existing post count to calculate day offsets
+        # Existing post count → day offset
         existing_posts = self.db.get_posts(subreddit["id"], primary_brand["id"])
         max_existing_day = max((p["suggested_post_day"] for p in existing_posts), default=-1)
         start_day = max(max_existing_day + 1, FILLER_LEAD_DAYS)
 
-        # Generate 2x candidates and pick the best
-        candidates = self._generate_candidates(
-            subreddit, brands, storylines, existing_titles, count * 2
-        )
+        # Merged storyline distribution (used inside each intent slice for secondary variety)
+        merged_dist = {}
+        for b in brands:
+            dist = self.db.get_storyline_distribution(subreddit["id"], b["id"])
+            for k, v in dist.items():
+                merged_dist[k] = merged_dist.get(k, 0) + v
 
-        if not candidates:
+        # Generate per-intent: strict 1:1:1 is guaranteed by construction
+        selected = []
+        for intent in INTENT_TYPES:
+            storylines_for_intent = self._select_storylines_from_dist(merged_dist, per_intent)
+            candidates = self._generate_candidates_for_intent(
+                subreddit, brands, intent, storylines_for_intent,
+                existing_titles, per_intent * 2
+            )
+            if not candidates:
+                print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
+                continue
+
+            # Score each for AI-query relevance
+            for c in candidates:
+                c["ai_query_score"] = self._score_ai_query_relevance(c["title"], c["body"])
+
+            picked = self._select_best(candidates, storylines_for_intent, per_intent)
+            for c in picked:
+                c["intent"] = intent
+                # Dedup across intent calls — add picked titles to the seen set
+                existing_titles.append(c["title"])
+            selected.extend(picked)
+
+        if not selected:
             return []
 
-        # Score each for AI-query relevance
-        for c in candidates:
-            c["ai_query_score"] = self._score_ai_query_relevance(c["title"], c["body"])
-
-        # Select top N by AI-query score, ensuring storyline variety
-        selected = self._select_best(candidates, storylines, count)
-
-        # Handle custom topics
+        # Append custom topics (intent-free, user-provided)
         if custom_topics:
             for topic in custom_topics:
                 selected.append({
                     "title": topic,
                     "body": "",
                     "storyline": "question",
+                    "intent": None,
                     "ai_query_score": 0,
                     "is_custom": 1,
                     "image_prompt": None,
                 })
 
-        # Assign scheduling
+        # Scheduling
         total = len(selected)
         spread = max(total, int(total * POST_SPREAD_FACTOR))
         for i, post in enumerate(selected):
             post["suggested_post_day"] = start_day + int(i * spread / total)
 
-        # Generate image prompts where appropriate
+        # Image prompts
         for post in selected:
             if post.get("is_custom"):
                 continue
@@ -115,6 +140,7 @@ class PostGenerator:
                 suggested_post_day=post.get("suggested_post_day", 0),
                 prompt_version=PROMPT_VERSION,
                 brand_ids=brand_ids,
+                intent=post.get("intent"),
             )
             post["id"] = post_id
             saved.append(post)
@@ -252,6 +278,201 @@ Return JSON only:
             selected.append(min_type)
         random.shuffle(selected)
         return selected
+
+    def _build_enriched_brand_block(self, brands):
+        """Format the GEO enrichment fields from a list of brand dicts into a prompt section.
+
+        Also returns two flat lists: (target_brand_names, competitor_names) used by the
+        caller to populate the strict rules block. Falls back gracefully if a brand has
+        not been enriched yet — only the base name/context/keywords are included, and
+        a warning is logged so the user knows quality is degraded.
+        """
+        lines = []
+        target_names = []
+        all_competitors = []
+        any_enriched = False
+
+        for b in brands:
+            target_names.append(b["name"])
+            lines.append(f"\n--- Brand: {b['name']} ---")
+
+            def _parse_list(val):
+                if not val:
+                    return []
+                if isinstance(val, list):
+                    return val
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, list) else []
+                except (json.JSONDecodeError, TypeError):
+                    # Also accept newline/comma-separated fallback
+                    return [s.strip() for s in str(val).replace("\n", ",").split(",") if s.strip()]
+
+            category = (b.get("category") or "").strip()
+            audience = (b.get("audience") or "").strip()
+            use_cases = _parse_list(b.get("use_cases"))
+            pain_points = _parse_list(b.get("pain_points"))
+            features = _parse_list(b.get("features"))
+            competitors = _parse_list(b.get("competitors"))
+
+            if category or audience or use_cases or pain_points or features or competitors:
+                any_enriched = True
+
+            if category:
+                lines.append(f"  Category: {category}")
+            if audience:
+                lines.append(f"  Target audience: {audience}")
+            if use_cases:
+                lines.append(f"  Typical use cases: {'; '.join(use_cases)}")
+            if pain_points:
+                lines.append(f"  Pain points solved: {'; '.join(pain_points)}")
+            if features:
+                lines.append(f"  Key features: {'; '.join(features)}")
+            if competitors:
+                lines.append(f"  Competitors in the space: {', '.join(competitors)}")
+                all_competitors.extend(competitors)
+
+            if b.get("context"):
+                lines.append(f"  Brand narrative: {b['context']}")
+
+            kw = _parse_list(b.get("keywords"))
+            if kw:
+                lines.append(f"  Keywords: {', '.join(kw)}")
+
+        if not any_enriched:
+            print(
+                f"[post_gen] WARNING: none of the selected brands "
+                f"({', '.join(target_names)}) are enriched. "
+                "Post quality will be degraded — click 'Enrich from website' on the brand "
+                "to get category/audience/use-cases/competitors for better GEO queries."
+            )
+
+        return "\n".join(lines), target_names, all_competitors
+
+    def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
+                                        existing_titles, count):
+        """Generate `count` candidate posts for a single intent
+        (commercial | comparison | informational).
+
+        Each post is a long-tail AI-query title plus a conversational body. Competitor
+        brand names are allowed for comparison intent only; target brand names are never
+        allowed for any intent.
+        """
+        if isinstance(brands, dict):
+            brands = [brands]
+
+        brand_block, target_names, competitors = self._build_enriched_brand_block(brands)
+        target_names_str = ", ".join(target_names) if target_names else "(none)"
+        competitors_str = ", ".join(competitors) if competitors else "(none known)"
+
+        existing_text = ""
+        if existing_titles:
+            sample = list(existing_titles)[:30]
+            existing_text = "\n".join(f'  - "{t}"' for t in sample)
+            existing_text = f"\nEXISTING POST TITLES (do NOT repeat these or paraphrase them):\n{existing_text}\n"
+
+        storyline_requests = "\n".join(
+            f"  {i+1}. Storyline: {sl} — {STORYLINE_TYPES[sl]}"
+            for i, sl in enumerate(storylines[:count])
+        )
+
+        banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
+
+        # Shared header + intent-specific tail
+        header = f"""Generate {count} Reddit posts for r/{subreddit['name']}.
+
+SUBREDDIT DOMAIN: {subreddit['domain']}
+
+BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
+{brand_block}
+
+{existing_text}
+REQUESTED STORYLINES (for secondary variety):
+{storyline_requests}
+
+GOAL: Write posts that sound like LONG-TAIL QUESTIONS a real user would type into
+ChatGPT, Claude, or Perplexity. The TITLE is the query itself (6-15 words, specific,
+natural). The BODY is the person giving first-person context for why they're asking.
+
+STRICT RULES:
+  1. NEVER mention any of the TARGET brand names: {target_names_str}
+  2. For commercial and informational intents: also avoid all competitor names.
+     For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
+  3. Title must read like a natural AI prompt (long-tail, specific, 6-15 words).
+  4. Use the audience / use cases / pain points above to make queries specific,
+     not generic. "Best X" alone is too shallow — "best X for {{audience}} dealing
+     with {{pain_point}}" is right.
+  5. Body is 2-4 short paragraphs of first-person context, conversational, with
+     minor imperfections (occasional typos, incomplete thoughts, run-on sentences).
+  6. Do NOT look AI-generated. No marketing language. No excessive formatting.
+
+NEVER USE THESE PHRASES: {banned_sample}
+"""
+
+        if intent == "commercial":
+            intent_tail = """
+INTENT: COMMERCIAL — the user is ready to pick a tool / product / service.
+
+Examples of the SHAPE (do NOT copy verbatim — use the brand's category/audience/pain points above):
+  - "best {category} for {audience} in 2026"
+  - "which {category} actually solves {pain_point}"
+  - "looking for a {category} that does {feature} without the bloat"
+  - "cheapest {category} that still handles {use_case}"
+
+Titles must show purchase intent. Body gives buying context: team size, budget,
+constraints, current situation. The person is trying to decide what to BUY.
+"""
+        elif intent == "comparison":
+            intent_tail = f"""
+INTENT: COMPARISON — the user is weighing 2+ options against each other.
+
+IMPORTANT: For comparison posts, you MAY (and SHOULD) name competitor brands from this list:
+  COMPETITORS: {competitors_str}
+Real users type "X vs Y" into ChatGPT verbatim — this is the single highest-value GEO shape.
+You must still NEVER mention the TARGET brand name(s): {target_names_str}.
+
+Examples of the SHAPE (use 1-2 competitor names per post, not all of them):
+  - "{{competitor_a}} vs {{competitor_b}} for {{audience}} — which handles {{use_case}} better?"
+  - "moving from {{competitor_a}} to something else, what are the real alternatives for {{pain_point}}?"
+  - "is {{competitor_a}} worth the price if I mostly need {{feature}}?"
+  - "anyone switched off {{competitor_a}} recently — what did you pick and why?"
+
+Body gives the user's current setup and what they're trying to decide. Do NOT shill
+any option — sound genuinely undecided. Mix of "I currently use X, considering Y"
+framing. If the COMPETITORS list is empty, describe competitors by attribute instead.
+"""
+        else:  # informational
+            intent_tail = """
+INTENT: INFORMATIONAL — the user wants to UNDERSTAND, not to buy.
+
+Examples of the SHAPE:
+  - "how does {feature} actually work under the hood"
+  - "what's the difference between {concept_a} and {concept_b} in {category}"
+  - "is it worth learning {use_case} if I'm new to {category}"
+  - "why do teams struggle with {pain_point} — is it the tools or the process"
+
+Title is a how/what/why question. Body gives learner context: role, experience level,
+what they've already tried to understand. The person is NOT asking what to buy —
+they're asking how something works or why something happens.
+"""
+
+        json_tail = """
+Return JSON only:
+{
+    "posts": [
+        {
+            "title": "The long-tail AI query",
+            "body": "2-4 paragraph first-person body with context",
+            "storyline": "storyline type from the list above"
+        }
+    ]
+}"""
+
+        prompt = header + intent_tail + json_tail
+        result = self.claude.call(prompt, max_tokens=4000, temperature=0.9)
+        if not result or "posts" not in result:
+            return []
+        return result["posts"]
 
     def _generate_candidates(self, subreddit, brands, storylines, existing_titles, count):
         """Generate candidate posts via Claude. brands can be a list or single dict."""

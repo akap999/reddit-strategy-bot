@@ -162,27 +162,37 @@ class Database:
 
     # --- Brands ---
 
-    def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]"):
+    def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]",
+                  category=None, audience=None, use_cases=None, pain_points=None,
+                  features=None, competitors=None, enriched_at=None):
         cur = self.conn.execute(
-            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords) VALUES (?, ?, ?, ?, ?)",
-            (subreddit_id, name, domain_url, context, keywords)
+            """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
+                                   category, audience, use_cases, pain_points,
+                                   features, competitors, enriched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (subreddit_id, name, domain_url, context, keywords,
+             category, audience, use_cases, pain_points,
+             features, competitors, enriched_at)
         )
         self.conn.commit()
         return cur.lastrowid
 
-    def update_brand(self, brand_id, context=None, domain_url=None, keywords=None):
-        """Update a brand's editable fields."""
+    def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
+                     category=None, audience=None, use_cases=None, pain_points=None,
+                     features=None, competitors=None, enriched_at=None):
+        """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
-        if context is not None:
-            updates.append("context = ?")
-            params.append(context)
-        if domain_url is not None:
-            updates.append("domain_url = ?")
-            params.append(domain_url)
-        if keywords is not None:
-            updates.append("keywords = ?")
-            params.append(keywords)
+        field_map = {
+            "context": context, "domain_url": domain_url, "keywords": keywords,
+            "category": category, "audience": audience, "use_cases": use_cases,
+            "pain_points": pain_points, "features": features,
+            "competitors": competitors, "enriched_at": enriched_at,
+        }
+        for col, val in field_map.items():
+            if val is not None:
+                updates.append(f"{col} = ?")
+                params.append(val)
         if not updates:
             return
         params.append(brand_id)
@@ -274,15 +284,16 @@ class Database:
     def save_post(self, subreddit_id, brand_id, title, body, storyline,
                   image_prompt=None, image_url=None, ai_query_score=0,
                   is_custom=0, is_filler=0, status="draft",
-                  suggested_post_day=0, prompt_version=None, brand_ids=None):
+                  suggested_post_day=0, prompt_version=None, brand_ids=None,
+                  intent=None):
         cur = self.conn.execute(
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
-               status, suggested_post_day, prompt_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               status, suggested_post_day, prompt_version, intent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, brand_id, title, body, storyline,
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
-             status, suggested_post_day, prompt_version)
+             status, suggested_post_day, prompt_version, intent)
         )
         post_id = cur.lastrowid
         # Populate junction table
@@ -949,6 +960,28 @@ class Database:
                                   WHERE owner_account = accounts.username), 0)
                    )"""
             )
+            self.conn.commit()
+
+        # ----- brands: GEO enrichment columns -----
+        brand_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(brands)").fetchall()]
+        brand_enrichment_cols = {
+            "category":    "ALTER TABLE brands ADD COLUMN category TEXT",
+            "audience":    "ALTER TABLE brands ADD COLUMN audience TEXT",
+            "use_cases":   "ALTER TABLE brands ADD COLUMN use_cases TEXT",
+            "pain_points": "ALTER TABLE brands ADD COLUMN pain_points TEXT",
+            "features":    "ALTER TABLE brands ADD COLUMN features TEXT",
+            "competitors": "ALTER TABLE brands ADD COLUMN competitors TEXT",
+            "enriched_at": "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
+        }
+        for col, sql in brand_enrichment_cols.items():
+            if col not in brand_cols:
+                self.conn.execute(sql)
+                self.conn.commit()
+
+        # ----- posts: intent column for GEO-style 1:1:1 batches -----
+        post_cols3 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]
+        if "intent" not in post_cols3:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN intent TEXT")
             self.conn.commit()
 
         # ----- app_meta: small key/value store for one-time startup flags -----

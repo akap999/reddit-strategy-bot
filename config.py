@@ -41,6 +41,11 @@ STORYLINE_TYPES = {
     "psa": "Public service announcement or tip for the community",
 }
 
+# --- GEO Post Generation: Intent-Balanced Batches ---
+# Only these batch sizes are allowed; each group of 3 gets exactly 1 of each intent.
+POST_BATCH_SIZES = (3, 6, 9)
+INTENT_TYPES = ("commercial", "comparison", "informational")
+
 # --- AI Query Patterns (high-value for AI model answers) ---
 AI_QUERY_PATTERNS = [
     "best {category} for {use_case}",

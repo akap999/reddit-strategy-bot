@@ -383,6 +383,32 @@ def api_create_subreddit():
 # API: Brands
 # ---------------------------------------------------------------------------
 
+def _extract_brand_enrichment_fields(data):
+    """Pull the 7 GEO enrichment fields out of a request payload.
+
+    List fields (use_cases/pain_points/features/competitors) are JSON-stringified
+    for storage. Missing keys map to None so `update_brand` leaves them unchanged.
+    """
+    out = {}
+    for scalar in ("category", "audience"):
+        if scalar in data:
+            val = data.get(scalar)
+            out[scalar] = val.strip() if isinstance(val, str) else val
+    for listf in ("use_cases", "pain_points", "features", "competitors"):
+        if listf in data:
+            v = data.get(listf)
+            if v is None:
+                out[listf] = None
+            elif isinstance(v, list):
+                out[listf] = json.dumps([str(x).strip() for x in v if str(x).strip()])
+            elif isinstance(v, str):
+                # Accept newline- or comma-separated free text from the form
+                items = [s.strip() for s in v.replace("\n", ",").split(",") if s.strip()]
+                out[listf] = json.dumps(items)
+    if "enriched_at" in data:
+        out["enriched_at"] = data.get("enriched_at")
+    return out
+
 @app.route("/api/subreddits/<int:sid>/brands")
 def api_list_brands(sid):
     db = get_db()
@@ -396,12 +422,14 @@ def api_add_brand(sid):
     db = get_db()
     try:
         data = request.json
+        enrich_fields = _extract_brand_enrichment_fields(data)
         bid = db.add_brand(
             subreddit_id=sid,
             name=data["name"],
             domain_url=data.get("domain_url", ""),
             context=data.get("context", ""),
             keywords=json.dumps(data.get("keywords", [])),
+            **enrich_fields,
         )
         return jsonify({"id": bid})
     finally:
@@ -412,12 +440,14 @@ def api_add_brand_standalone():
     db = get_db()
     try:
         data = request.json
+        enrich_fields = _extract_brand_enrichment_fields(data)
         bid = db.add_brand(
             subreddit_id=data.get("subreddit_id") or None,
             name=data["name"],
             domain_url=data.get("domain_url", ""),
             context=data.get("context", ""),
             keywords=json.dumps(data.get("keywords", [])),
+            **enrich_fields,
         )
         return jsonify({"id": bid})
     finally:
@@ -428,15 +458,63 @@ def api_update_brand(bid):
     db = get_db()
     try:
         data = request.json
+        enrich_fields = _extract_brand_enrichment_fields(data)
         db.update_brand(
             brand_id=bid,
             context=data.get("context"),
             domain_url=data.get("domain_url"),
             keywords=json.dumps(data["keywords"]) if "keywords" in data else None,
+            **enrich_fields,
         )
         return jsonify({"ok": True})
     finally:
         db.close()
+
+@app.route("/api/brands/enrich", methods=["POST"])
+def api_enrich_brand_draft():
+    """Enrich a brand from its homepage + LLM. Returns a draft dict — does NOT save.
+
+    Payload: { "name": str, "domain_url": str }
+    Response: { category, audience, use_cases[], pain_points[], features[],
+                competitors[], context_summary, _page_fetched }
+    """
+    from generators.brand_enrichment import enrich_brand
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    domain_url = (data.get("domain_url") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    claude = ClaudeClient(ANTHROPIC_API_KEY)
+    draft = enrich_brand(claude, name, domain_url)
+    if not draft:
+        return jsonify({
+            "error": "Enrichment failed — LLM returned no usable data. "
+                     "Check the URL and try again, or fill fields manually."
+        }), 502
+    return jsonify(draft)
+
+@app.route("/api/brands/<int:bid>/enrich", methods=["POST"])
+def api_enrich_existing_brand(bid):
+    """Enrich an existing brand by its ID. Uses the brand's stored name + domain_url.
+    Returns a draft dict (does NOT save)."""
+    from generators.brand_enrichment import enrich_brand
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+    finally:
+        db.close()
+
+    claude = ClaudeClient(ANTHROPIC_API_KEY)
+    draft = enrich_brand(claude, brand["name"], brand.get("domain_url") or "")
+    if not draft:
+        return jsonify({
+            "error": "Enrichment failed — LLM returned no usable data. "
+                     "Check the brand's domain URL and try again."
+        }), 502
+    return jsonify(draft)
 
 # ---------------------------------------------------------------------------
 # API: Posts
@@ -1411,7 +1489,14 @@ def api_gen_welcome_post():
 
 @app.route("/api/generate/posts", methods=["POST"])
 def api_gen_posts():
+    from config import POST_BATCH_SIZES
     data = request.json
+    count = int(data.get("count", 3))
+    if count not in POST_BATCH_SIZES:
+        return jsonify({
+            "error": f"count must be one of {list(POST_BATCH_SIZES)} (GEO batches are "
+                     f"strict 1:1:1 commercial/comparison/informational)"
+        }), 400
 
     def task():
         db, claude, _, post_gen, _ = make_generators()
@@ -1423,8 +1508,16 @@ def api_gen_posts():
             brands = [b for b in brands if b]  # filter None
             if not sub or not brands:
                 raise ValueError("Subreddit or brand(s) not found")
-            posts = post_gen.generate_posts(sub, brands, data.get("count", 3))
-            return [{"id": p["id"], "title": p["title"], "storyline": p.get("storyline", "")} for p in posts]
+            posts = post_gen.generate_posts(sub, brands, count)
+            return [
+                {
+                    "id": p["id"],
+                    "title": p["title"],
+                    "storyline": p.get("storyline", ""),
+                    "intent": p.get("intent") or "",
+                }
+                for p in posts
+            ]
         finally:
             db.close()
 

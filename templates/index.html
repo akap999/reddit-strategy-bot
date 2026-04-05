@@ -5248,6 +5248,7 @@ function downloadExport(type) {
 let _lsTab = 'search';
 let _lsBrands = [];
 let _lsSearchResults = [];
+let _lsGeneratedKeywords = null;
 let _lsSavedPosts = [];
 let _lsComments = [];
 
@@ -5349,7 +5350,12 @@ function renderLsSearch(c) {
         <div class="card p-5 mb-4">
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
                 <div class="col-span-2">
-                    <label class="text-xs text-gray-400">Keyword *</label>
+                    <label class="text-xs text-gray-400 flex items-center justify-between">
+                        <span>Keyword <span id="ls-keyword-req">*</span></span>
+                        <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+                            <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
+                        </label>
+                    </label>
                     <input id="ls-keyword" placeholder="e.g. best testosterone clinic">
                 </div>
                 <div>
@@ -5362,7 +5368,24 @@ function renderLsSearch(c) {
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Brand (for saving)</label>
-                    <select id="ls-brand"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
+                    <select id="ls-brand" onchange="lsOnBrandChange()"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
+                </div>
+            </div>
+            <div id="ls-auto-panel" class="mb-3 p-3" style="display:none;background:#1a1a1a;border:1px solid #333;border-radius:6px">
+                <div class="text-xs text-gray-400 mb-2">Auto-keyword mode — Claude will generate 6 diverse search queries from the brand info below. Pick a saved brand above (pre-fills fields) or enter ad-hoc details.</div>
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
+                    <div>
+                        <label class="text-xs text-gray-400">Brand Name</label>
+                        <input id="ls-auto-name" placeholder="e.g. TestoPrime">
+                    </div>
+                    <div class="lg:col-span-2">
+                        <label class="text-xs text-gray-400">Brand Context</label>
+                        <textarea id="ls-auto-context" rows="2" placeholder="What the brand does, who it's for, key differentiators..."></textarea>
+                    </div>
+                </div>
+                <div class="flex gap-2 items-center mt-2">
+                    <button class="btn btn-secondary btn-sm" onclick="lsRegenerateKeywords()" title="Force a fresh Claude call on next search (overwrites stored keywords for saved brands)">🔄 Regenerate next search</button>
+                    <span id="ls-regen-flag" class="text-xs text-yellow-400" style="display:none">Will regenerate on next search</span>
                 </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
@@ -5416,6 +5439,56 @@ function lsSetLowScrutiny() {
     toast('Low scrutiny filters applied: max 5K subs, min 2 comments, min 1 score', 'info');
 }
 
+// --- Auto-keyword (brand-driven) search helpers ---
+let _lsForceRegenerate = false;
+
+function lsToggleAutoKeywords(on) {
+    const panel = document.getElementById('ls-auto-panel');
+    const kwInput = document.getElementById('ls-keyword');
+    const kwReq = document.getElementById('ls-keyword-req');
+    if (on) {
+        panel.style.display = '';
+        kwInput.disabled = true;
+        kwInput.placeholder = 'Disabled — keywords auto-generated from brand';
+        kwInput.style.opacity = 0.4;
+        if (kwReq) kwReq.style.display = 'none';
+        lsOnBrandChange(); // prefill if a brand is already selected
+    } else {
+        panel.style.display = 'none';
+        kwInput.disabled = false;
+        kwInput.placeholder = 'e.g. best testosterone clinic';
+        kwInput.style.opacity = 1;
+        if (kwReq) kwReq.style.display = '';
+    }
+}
+
+function lsOnBrandChange() {
+    // Prefill auto-panel fields when a saved brand is picked (but don't clobber user edits).
+    const autoOn = document.getElementById('ls-auto-kw')?.checked;
+    if (!autoOn) return;
+    const brandId = document.getElementById('ls-brand').value;
+    const nameEl = document.getElementById('ls-auto-name');
+    const ctxEl = document.getElementById('ls-auto-context');
+    if (!brandId) return;
+    const brand = _lsBrands.find(b => b.id == brandId);
+    if (!brand) return;
+    // Only prefill if fields are empty or still contain the previously-prefilled brand values
+    if (!nameEl.value || nameEl.dataset.prefilledFor) {
+        nameEl.value = brand.name || '';
+        nameEl.dataset.prefilledFor = brandId;
+    }
+    if (!ctxEl.value || ctxEl.dataset.prefilledFor) {
+        ctxEl.value = brand.context || '';
+        ctxEl.dataset.prefilledFor = brandId;
+    }
+}
+
+function lsRegenerateKeywords() {
+    _lsForceRegenerate = true;
+    document.getElementById('ls-regen-flag').style.display = '';
+    toast('Keywords will be regenerated on the next search', 'info');
+}
+
 async function lsSuggestSubreddits() {
     const keyword = document.getElementById('ls-keyword').value.trim();
     const brandId = document.getElementById('ls-brand').value;
@@ -5455,8 +5528,27 @@ async function lsSuggestSubreddits() {
 }
 
 async function lsRunSearch() {
+    const autoOn = document.getElementById('ls-auto-kw')?.checked;
     const keyword = document.getElementById('ls-keyword').value.trim();
-    if (!keyword) { toast('Enter a keyword', 'error'); return; }
+    let autoBrand = undefined;
+    let labelForBgTask = keyword;
+    if (autoOn) {
+        const brandId = document.getElementById('ls-brand').value;
+        const autoName = document.getElementById('ls-auto-name').value.trim();
+        const autoCtx = document.getElementById('ls-auto-context').value.trim();
+        if (!brandId && !autoName && !autoCtx) {
+            toast('Pick a brand or enter brand name + context', 'error'); return;
+        }
+        autoBrand = {
+            brand_id: brandId ? parseInt(brandId) : undefined,
+            brand_name: autoName || undefined,
+            brand_context: autoCtx || undefined,
+            force_regenerate: _lsForceRegenerate || undefined,
+        };
+        labelForBgTask = autoName || 'auto brand';
+    } else {
+        if (!keyword) { toast('Enter a keyword', 'error'); return; }
+    }
     const excludeRaw = document.getElementById('ls-exclude').value.trim();
     const nsfwVal = document.getElementById('ls-nsfw').value;
     const ratioVal = parseFloat(document.getElementById('ls-ratio').value);
@@ -5464,7 +5556,8 @@ async function lsRunSearch() {
     const minSubsVal = parseInt(document.getElementById('ls-minsubs').value);
     const scrutinyVal = parseInt(document.getElementById('ls-scrutiny').value);
     const body = {
-        keyword,
+        keyword: autoOn ? undefined : keyword,
+        auto_brand: autoBrand,
         subreddit: document.getElementById('ls-subreddit').value.trim() || undefined,
         excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,
         min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
@@ -5482,7 +5575,7 @@ async function lsRunSearch() {
     document.getElementById('ls-results').innerHTML = '<div class="text-center py-8"><div class="spinner mx-auto mb-3"></div><p class="text-gray-400">Searching Reddit... (running in background)</p></div>';
     try {
         const { task_id } = await api('/api/search/reddit', { method: 'POST', body });
-        _addBgTask(task_id, `Search: ${keyword.substring(0, 20)}`);
+        _addBgTask(task_id, `Search: ${(labelForBgTask||'').substring(0, 20)}`);
         let retries = 0;
         const poll = setInterval(async () => {
             try {
@@ -5491,7 +5584,20 @@ async function lsRunSearch() {
                 if (t.status === 'complete') {
                     clearInterval(poll);
                     _removeBgTask(task_id);
-                    _lsSearchResults = t.result || [];
+                    // New shape: { results, generated_keywords, keywords_source }
+                    // Old shape (fallback): list of results
+                    const payload = t.result;
+                    if (Array.isArray(payload)) {
+                        _lsSearchResults = payload;
+                        _lsGeneratedKeywords = null;
+                    } else {
+                        _lsSearchResults = (payload && payload.results) || [];
+                        _lsGeneratedKeywords = (payload && payload.generated_keywords) || null;
+                    }
+                    // Clear regenerate flag after successful request
+                    _lsForceRegenerate = false;
+                    const regFlag = document.getElementById('ls-regen-flag');
+                    if (regFlag) regFlag.style.display = 'none';
                     lsRenderResults();
                     toast(`Search complete: ${_lsSearchResults.length} results`, 'success');
                 } else if (t.status === 'error') {
@@ -5527,7 +5633,14 @@ function lsRenderResults() {
     if (!_lsSearchResults.length) { el.innerHTML = '<p class="text-gray-500">No results found.</p>'; return; }
     document.getElementById('ls-save-btn').style.display = '';
     document.getElementById('ls-save-gen-btn').style.display = '';
+    const genChips = (_lsGeneratedKeywords && _lsGeneratedKeywords.length) ? `
+        <div class="mb-2 p-2" style="background:#1a1a1a;border:1px solid #333;border-radius:6px">
+            <span class="text-xs text-gray-400 mr-2">🤖 Auto-generated keywords:</span>
+            ${_lsGeneratedKeywords.map(k => `<span style="background:#0b2a3d;color:#60a5fa;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px;display:inline-block;margin-bottom:2px">${k}</span>`).join('')}
+        </div>
+    ` : '';
     el.innerHTML = `
+        ${genChips}
         <div class="flex justify-between items-center mb-2">
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>

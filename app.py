@@ -1860,6 +1860,111 @@ def api_export_brand(name):
 # Live Search — Search, Save, Generate, Manage
 # ---------------------------------------------------------------------------
 
+def _resolve_brand_keywords(data, db=None):
+    """Resolve a list of search keywords from brand info.
+
+    Input dict fields (any subset):
+      - brand_id:       int, if provided and brand has stored keywords + no
+                        force_regenerate, returns cached keywords.
+      - brand_name:     str, used for ad-hoc or regen.
+      - brand_context:  str, used for ad-hoc or regen.
+      - force_regenerate: bool, ignore cached keywords and call Claude fresh.
+
+    Returns: (keywords: list[str], source: "cached" | "generated")
+    Raises: ValueError on missing inputs or Claude failure.
+    """
+    brand_id = data.get("brand_id")
+    brand_name = (data.get("brand_name") or "").strip()
+    brand_context = (data.get("brand_context") or "").strip()
+    force_regen = bool(data.get("force_regenerate"))
+
+    own_db = False
+    if brand_id and db is None:
+        db = Database(DB_PATH)
+        db.connect()
+        own_db = True
+
+    try:
+        brand_row = None
+        if brand_id:
+            brand_row = db.get_brand(int(brand_id))
+            if not brand_row:
+                raise ValueError(f"brand_id {brand_id} not found")
+            if not brand_name:
+                brand_name = brand_row.get("name") or ""
+            if not brand_context:
+                brand_context = brand_row.get("context") or ""
+
+            # Cached keywords path
+            if not force_regen:
+                try:
+                    stored = json.loads(brand_row.get("keywords") or "[]")
+                except Exception:
+                    stored = []
+                if isinstance(stored, list) and len(stored) >= 3 and all(isinstance(k, str) for k in stored):
+                    return stored, "cached"
+
+        if not brand_name and not brand_context:
+            raise ValueError("brand_id or (brand_name + brand_context) required")
+
+        # Generate via Claude
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        import anthropic
+        import re
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = (
+            "You are generating Reddit search queries for a brand. Given the brand "
+            "name and context, return 6 diverse SHORT search queries (2-5 words each) "
+            "that cover different user intents: pain-points people post about, "
+            "competitor/alternative searches, 'looking for' / recommendation posts, "
+            "comparison questions, and use-case descriptions. Prefer phrasing real "
+            "Reddit users would write. Avoid the brand name itself.\n\n"
+            f"Brand: {brand_name or '(unnamed)'}\n"
+            f"Context: {brand_context or '(none)'}\n\n"
+            "Return ONLY a JSON array of 6 lowercase strings. No other text."
+        )
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip()
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        raw = json.loads(match.group() if match else text)
+        keywords = [str(k).strip() for k in raw if str(k).strip()]
+        if not keywords:
+            raise ValueError("Claude returned no usable keywords")
+        # Cap at 8 to bound API load
+        keywords = keywords[:8]
+
+        # Persist back onto the brand for free reuse
+        if brand_id:
+            try:
+                db.update_brand(int(brand_id), keywords=json.dumps(keywords))
+            except Exception as e:
+                print(f"⚠ failed to cache keywords on brand {brand_id}: {e}")
+
+        return keywords, "generated"
+    finally:
+        if own_db and db is not None:
+            db.close()
+
+
+@app.route("/api/search/generate-brand-keywords", methods=["POST"])
+def api_generate_brand_keywords():
+    """Generate (or return cached) Reddit search keywords for a brand."""
+    data = request.json or {}
+    try:
+        keywords, source = _resolve_brand_keywords(data)
+        return jsonify({"keywords": keywords, "source": source})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"generation failed: {e}"}), 500
+
+
 @app.route("/api/search/suggest-subreddits", methods=["POST"])
 def api_suggest_subreddits():
     """Suggest active subreddits for a keyword/brand using Claude."""
@@ -1980,22 +2085,32 @@ def api_check_subreddit():
 
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
-    """Run a Reddit keyword search via RedditSearchBot (background task)."""
+    """Run a Reddit keyword search via RedditSearchBot (background task).
+
+    Accepts either a manual `keyword` string OR an `auto_brand` dict that
+    triggers multi-keyword search with keywords auto-generated from a brand's
+    name/context (saved or ad-hoc).
+    """
     from search.reddit_bot import RedditSearchBot
-    data = request.json
-    keyword = data.get("keyword", "").strip()
-    if not keyword:
-        return jsonify({"error": "keyword is required"}), 400
+    import math
+    data = request.json or {}
+    keyword = (data.get("keyword") or "").strip()
+    auto_brand = data.get("auto_brand")
+    if not keyword and not auto_brand:
+        return jsonify({"error": "keyword or auto_brand is required"}), 400
+    if keyword and auto_brand:
+        return jsonify({"error": "provide either keyword or auto_brand, not both"}), 400
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
         bot = RedditSearchBot(reddit_base=proxy.rstrip("/") if proxy else None)
-        # Dedicated DB connection for the scrutiny cache (lives in background thread)
         task_db = Database(DB_PATH)
         task_db.connect()
         try:
-            results = bot.search(
-                keyword=keyword,
+            requested_limit = min(data.get("limit", 50), 200)
+            # Use db_path (not db instance) so the scrutiny pass can open
+            # per-thread SQLite connections when running concurrent sub-searches.
+            common_filters = dict(
                 subreddit=data.get("subreddit"),
                 subreddits=data.get("subreddits"),
                 excluded_subreddits=data.get("excluded_subreddits"),
@@ -2004,17 +2119,32 @@ def api_search_reddit():
                 max_days_old=data.get("max_days_old"),
                 sort_by=data.get("sort_by", "relevance"),
                 sort_order=data.get("sort_order", "desc"),
-                limit=min(data.get("limit", 50), 200),
                 nsfw=data.get("nsfw"),
                 min_upvote_ratio=data.get("min_upvote_ratio"),
                 max_subscribers=data.get("max_subscribers"),
                 min_subscribers=data.get("min_subscribers"),
                 max_scrutiny=data.get("max_scrutiny"),
-                db=task_db,
+                db_path=DB_PATH,
             )
+
+            if keyword:
+                results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)
+                return {"results": results, "generated_keywords": None}
+
+            # Auto-brand path
+            keywords, source = _resolve_brand_keywords(auto_brand, db=task_db)
+            n = max(len(keywords), 1)
+            per_kw_limit = max(10, math.ceil(requested_limit / n * 1.5))
+            print(f"    Auto-brand search: {n} keywords, per_kw_limit={per_kw_limit}, source={source}")
+            print(f"    Keywords: {keywords}")
+            merged = bot.search_multiple_keywords(
+                keywords, concurrent=True, limit=per_kw_limit, **common_filters
+            )
+            # Trim merged (already sorted by score desc) to the requested limit
+            trimmed = merged[:requested_limit]
+            return {"results": trimmed, "generated_keywords": keywords, "keywords_source": source}
         finally:
             task_db.close()
-        return results
 
     tid = start_task("search-reddit", task)
     return jsonify({"task_id": tid})

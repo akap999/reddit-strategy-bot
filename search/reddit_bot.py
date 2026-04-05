@@ -317,6 +317,7 @@ class RedditSearchBot:
         min_subscribers=None,
         max_scrutiny=None,
         db=None,
+        db_path=None,
     ):
         """
         Search Reddit for posts matching the given criteria.
@@ -544,7 +545,8 @@ class RedditSearchBot:
         # Always compute scrutiny scores (annotate every result);
         # only drop posts when max_scrutiny is provided.
         try:
-            filtered = self._filter_by_scrutiny(filtered, max_scrutiny=max_scrutiny, db=db)
+            filtered = self._filter_by_scrutiny(
+                filtered, max_scrutiny=max_scrutiny, db=db, db_path=db_path)
         except Exception as e:
             print(f"    ⚠ scrutiny pass failed: {e}")
 
@@ -755,7 +757,7 @@ class RedditSearchBot:
         )
         return info
 
-    def _filter_by_scrutiny(self, results, max_scrutiny=None, db=None):
+    def _filter_by_scrutiny(self, results, max_scrutiny=None, db=None, db_path=None):
         """Annotate each result with scrutiny_score; optionally drop results
         whose sub scores above `max_scrutiny`.
 
@@ -763,9 +765,28 @@ class RedditSearchBot:
         - Uses DB cache (7-day TTL) via `db.get_scrutiny`/`db.upsert_scrutiny`
           when available, plus an in-memory class cache.
         - Drops posts from private/quarantined subs unconditionally.
+
+        Thread-safety: when called from a worker thread (e.g. via
+        `search_multiple_keywords(concurrent=True)`), pass `db_path` instead
+        of `db` — the method will open its own per-call SQLite connection.
+        SQLite connections are single-thread only; passing a shared `db`
+        instance from a different thread will raise and cache writes will fail.
         """
         if not results:
             return results
+
+        # If we only have a db_path (thread-safe case), open a fresh connection
+        # for this call and close it at the end.
+        _own_db = False
+        if db is None and db_path:
+            try:
+                from db import Database as _Database
+                db = _Database(db_path)
+                db.connect()
+                _own_db = True
+            except Exception as e:
+                print(f"    ⚠ scrutiny: failed to open db_path: {e}")
+                db = None
 
         # Group posts by subreddit (case-insensitive)
         by_sub = {}
@@ -884,6 +905,14 @@ class RedditSearchBot:
             print(f"    Scrutiny filter (max={max_scrutiny}): kept {len(filtered)}, removed {removed}")
         else:
             print(f"    Scrutiny computed for {len(filtered)} posts (no filter)")
+
+        # Close per-call thread-local connection if we opened it
+        if _own_db and db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
         return filtered
 
     def search_multiple_keywords(self, keywords, delay=2, concurrent=False, **kwargs):

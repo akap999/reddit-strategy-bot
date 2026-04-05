@@ -420,6 +420,21 @@ class Database:
         self.conn.commit()
 
     def delete_post(self, post_id):
+        # Free rotation slots: (a) owner_account of the post itself, (b) every
+        # child comment that still had an account_id.
+        owner_row = self.conn.execute(
+            "SELECT owner_account FROM posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        if owner_row and owner_row["owner_account"]:
+            self._decrement_lifetime(owner_row["owner_account"])
+        comment_rows = self.conn.execute(
+            """SELECT account_id, COUNT(*) AS cnt FROM comments
+               WHERE post_id = ? AND account_id IS NOT NULL AND status != 'draft'
+               GROUP BY account_id""",
+            (post_id,)
+        ).fetchall()
+        for r in comment_rows:
+            self._decrement_lifetime(r["account_id"], r["cnt"])
         self.conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
         self.conn.execute("DELETE FROM post_urls WHERE post_id = ?", (post_id,))
         self.conn.execute("DELETE FROM post_brands WHERE post_id = ?", (post_id,))
@@ -519,6 +534,18 @@ class Database:
         self.conn.commit()
 
     def delete_comment(self, comment_id):
+        # Free the rotation slot for any child replies + this comment itself,
+        # for every row that had a non-null account_id and wasn't already a draft.
+        rows = self.conn.execute(
+            """SELECT account_id, COUNT(*) AS cnt FROM comments
+               WHERE (id = ? OR parent_comment_id = ?)
+                 AND account_id IS NOT NULL
+                 AND status != 'draft'
+               GROUP BY account_id""",
+            (comment_id, comment_id)
+        ).fetchall()
+        for r in rows:
+            self._decrement_lifetime(r["account_id"], r["cnt"])
         # Delete child replies first
         self.conn.execute("DELETE FROM comments WHERE parent_comment_id = ?", (comment_id,))
         self.conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
@@ -896,6 +923,43 @@ class Database:
                 """)
                 self.conn.commit()
 
+        # ----- accounts: karma-refresh diagnostics + lifetime rotation counter -----
+        acct_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(accounts)").fetchall()]
+        if "last_refresh_attempt" not in acct_cols:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN last_refresh_attempt TEXT")
+            self.conn.commit()
+        if "last_refresh_error" not in acct_cols:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN last_refresh_error TEXT")
+            self.conn.commit()
+        if "lifetime_assignments" not in acct_cols:
+            self.conn.execute(
+                "ALTER TABLE accounts ADD COLUMN lifetime_assignments INTEGER NOT NULL DEFAULT 0"
+            )
+            # One-time backfill from existing state (runs exactly once because the
+            # ALTER TABLE guard above only fires on first migration).
+            self.conn.execute(
+                """UPDATE accounts SET lifetime_assignments = (
+                       COALESCE((SELECT COUNT(*) FROM comments
+                                  WHERE account_id = accounts.username
+                                    AND status != 'draft'), 0)
+                     + COALESCE((SELECT COUNT(*) FROM search_comments
+                                  WHERE account_id = accounts.username
+                                    AND status NOT IN ('draft','deleted')), 0)
+                     + COALESCE((SELECT COUNT(*) FROM posts
+                                  WHERE owner_account = accounts.username), 0)
+                   )"""
+            )
+            self.conn.commit()
+
+        # ----- app_meta: small key/value store for one-time startup flags -----
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        self.conn.commit()
+
         # Performance indexes
         perf_indexes = [
             "CREATE INDEX IF NOT EXISTS idx_brands_subreddit ON brands(subreddit_id)",
@@ -955,17 +1019,33 @@ class Database:
     # --- Comment Lifecycle ---
 
     def assign_comment(self, comment_id, account_id):
+        # Read prior account so we can correctly adjust the lifetime counter
+        # if the comment was already assigned to someone else (reassignment).
+        row = self.conn.execute(
+            "SELECT account_id FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
         self.conn.execute(
             "UPDATE comments SET account_id = ?, status = 'assigned' WHERE id = ?",
             (account_id, comment_id)
         )
+        if prior and prior != account_id:
+            self._decrement_lifetime(prior)
+        if account_id and account_id != prior:
+            self._increment_lifetime(account_id)
         self.conn.commit()
 
     def unassign_comment(self, comment_id):
+        row = self.conn.execute(
+            "SELECT account_id FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL, status = 'complete' WHERE id = ?",
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE id = ?",
             (comment_id,)
         )
+        if prior:
+            self._decrement_lifetime(prior)
         self.conn.commit()
 
     def deploy_comment(self, comment_id, reddit_comment_url, deployed_at=None):
@@ -1572,11 +1652,77 @@ class Database:
 
     def update_account_reddit_data(self, username, link_karma, comment_karma, created_utc):
         self.conn.execute(
-            """UPDATE accounts SET link_karma = ?, comment_karma = ?, created_utc = ?, last_refreshed = datetime('now')
+            """UPDATE accounts
+               SET link_karma = ?, comment_karma = ?, created_utc = ?,
+                   last_refreshed = datetime('now'),
+                   last_refresh_attempt = datetime('now'),
+                   last_refresh_error = NULL
                WHERE username = ?""",
             (link_karma, comment_karma, created_utc, username)
         )
         self.conn.commit()
+
+    def record_refresh_failure(self, username, error_msg):
+        """Mark a refresh attempt as failed (last_refreshed stays untouched)."""
+        self.conn.execute(
+            """UPDATE accounts
+               SET last_refresh_attempt = datetime('now'),
+                   last_refresh_error = ?
+               WHERE username = ?""",
+            ((error_msg or "")[:500], username)
+        )
+        self.conn.commit()
+
+    # --- Global lifetime rotation counter (one number per account) ---
+
+    def _increment_lifetime(self, username):
+        """Bump the global rotation counter when an account is assigned something.
+        Called from every assignment path — comments, search comments, post-ownership.
+        Caller is responsible for commit (this method does not commit on its own)."""
+        if not username:
+            return
+        self.conn.execute(
+            "UPDATE accounts SET lifetime_assignments = lifetime_assignments + 1 WHERE username = ?",
+            (username,)
+        )
+
+    def _decrement_lifetime(self, username, n=1):
+        """Roll the global rotation counter back when an account is unassigned or
+        its assigned row is deleted. Floors at 0 so the counter cannot go negative."""
+        if not username or n <= 0:
+            return
+        self.conn.execute(
+            "UPDATE accounts SET lifetime_assignments = MAX(0, lifetime_assignments - ?) WHERE username = ?",
+            (n, username)
+        )
+
+    # --- app_meta helpers (one-time flags for startup tasks) ---
+
+    def meta_get(self, key):
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def meta_set(self, key, value):
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value))
+        )
+        self.conn.commit()
+
+    def list_stale_accounts(self):
+        """Return usernames of accounts that look like they need a (re)fresh:
+        never refreshed, stale >7 days, last refresh errored, or total karma < 10
+        (a strong signal of a prior silently-failed refresh)."""
+        rows = self.conn.execute(
+            """SELECT username FROM accounts
+               WHERE last_refreshed IS NULL
+                  OR last_refreshed < datetime('now','-7 days')
+                  OR last_refresh_error IS NOT NULL
+                  OR (COALESCE(link_karma,0) + COALESCE(comment_karma,0)) < 10
+               ORDER BY username"""
+        ).fetchall()
+        return [r["username"] for r in rows]
 
     def update_account_reference(self, username, reference):
         self.conn.execute("UPDATE accounts SET reference = ? WHERE username = ?", (reference, username))
@@ -1632,7 +1778,15 @@ class Database:
         self.conn.commit()
 
     def set_post_owner(self, post_id, username):
+        row = self.conn.execute(
+            "SELECT owner_account FROM posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        prior = row["owner_account"] if row else None
         self.conn.execute("UPDATE posts SET owner_account = ? WHERE id = ?", (username, post_id))
+        if prior and prior != username:
+            self._decrement_lifetime(prior)
+        if username and username != prior:
+            self._increment_lifetime(username)
         self.conn.commit()
 
     def get_post_auto_assign_context(self, subreddit_id):
@@ -1720,35 +1874,70 @@ class Database:
 
     def bulk_unassign_posts_in_subreddit(self, subreddit_id):
         """Remove owner_account from posts in a subreddit. Skips informed, published (deployed)."""
+        # Collect affected (owner_account, cnt) first so the lifetime counter can
+        # be rolled back for every freed owner slot.
+        freed = self.conn.execute(
+            """SELECT owner_account, COUNT(*) AS cnt FROM posts
+               WHERE subreddit_id = ?
+                 AND status NOT IN ('published', 'informed')
+                 AND owner_account IS NOT NULL AND owner_account != ''
+               GROUP BY owner_account""",
+            (subreddit_id,)
+        ).fetchall()
         cur = self.conn.execute(
             "UPDATE posts SET owner_account = '' WHERE subreddit_id = ? AND status NOT IN ('published', 'informed') AND owner_account IS NOT NULL AND owner_account != ''",
             (subreddit_id,)
         )
+        for r in freed:
+            self._decrement_lifetime(r["owner_account"], r["cnt"])
         self.conn.commit()
         return cur.rowcount
 
     def bulk_unassign_comments_in_subreddit(self, subreddit_id):
         """Unassign all assigned comments across all posts in a subreddit. Skips informed and deployed."""
+        freed = self.conn.execute(
+            """SELECT account_id, COUNT(*) AS cnt FROM comments
+               WHERE post_id IN (SELECT id FROM posts WHERE subreddit_id = ?)
+                 AND status = 'assigned' AND account_id IS NOT NULL
+               GROUP BY account_id""",
+            (subreddit_id,)
+        ).fetchall()
         cur = self.conn.execute(
-            """UPDATE comments SET account_id = NULL, status = 'complete'
+            """UPDATE comments SET account_id = NULL, status = 'draft'
                WHERE post_id IN (SELECT id FROM posts WHERE subreddit_id = ?)
                  AND status = 'assigned'""",
             (subreddit_id,)
         )
+        for r in freed:
+            self._decrement_lifetime(r["account_id"], r["cnt"])
         self.conn.commit()
         return cur.rowcount
 
     def bulk_unassign_post_comments(self, post_id):
         """Unassign all assigned comments for a post, setting them back to draft. Skips informed and deployed."""
+        freed = self.conn.execute(
+            """SELECT account_id, COUNT(*) AS cnt FROM comments
+               WHERE post_id = ? AND status = 'assigned' AND account_id IS NOT NULL
+               GROUP BY account_id""",
+            (post_id,)
+        ).fetchall()
         self.conn.execute(
-            "UPDATE comments SET account_id = NULL, status = 'complete' WHERE post_id = ? AND status = 'assigned'",
+            "UPDATE comments SET account_id = NULL, status = 'draft' WHERE post_id = ? AND status = 'assigned'",
             (post_id,)
         )
+        for r in freed:
+            self._decrement_lifetime(r["account_id"], r["cnt"])
         self.conn.commit()
 
     def unassign_post_owner(self, post_id):
         """Remove owner_account from a post."""
+        row = self.conn.execute(
+            "SELECT owner_account FROM posts WHERE id = ?", (post_id,)
+        ).fetchone()
+        prior = row["owner_account"] if row else None
         self.conn.execute("UPDATE posts SET owner_account = '' WHERE id = ?", (post_id,))
+        if prior:
+            self._decrement_lifetime(prior)
         self.conn.commit()
 
     def bulk_unassign_all_for_post(self, post_id):
@@ -2511,6 +2700,18 @@ class Database:
         self.conn.commit()
 
     def delete_search_post(self, post_id):
+        # Decrement the global rotation counter once for each child search_comment
+        # that still has an account attached. The UPDATE below does this in a
+        # single round-trip: (count of affected rows) per distinct account_id.
+        rows = self.conn.execute(
+            """SELECT account_id, COUNT(*) AS cnt FROM search_comments
+               WHERE search_post_id = ? AND account_id IS NOT NULL
+                 AND status != 'deleted'
+               GROUP BY account_id""",
+            (post_id,)
+        ).fetchall()
+        for r in rows:
+            self._decrement_lifetime(r["account_id"], r["cnt"])
         self.conn.execute("DELETE FROM search_comments WHERE search_post_id = ?", (post_id,))
         self.conn.execute("DELETE FROM search_posts WHERE id = ?", (post_id,))
         self.conn.commit()
@@ -2547,15 +2748,29 @@ class Database:
         return [dict(r) for r in rows]
 
     def assign_search_comment(self, comment_id, account_id):
+        row = self.conn.execute(
+            "SELECT account_id FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
         self.conn.execute(
             "UPDATE search_comments SET account_id = ?, status = 'assigned' WHERE id = ?",
             (account_id, comment_id))
+        if prior and prior != account_id:
+            self._decrement_lifetime(prior)
+        if account_id and account_id != prior:
+            self._increment_lifetime(account_id)
         self.conn.commit()
 
     def unassign_search_comment(self, comment_id):
+        row = self.conn.execute(
+            "SELECT account_id FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
         self.conn.execute(
             "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE id = ?",
             (comment_id,))
+        if prior:
+            self._decrement_lifetime(prior)
         self.conn.commit()
 
     def deploy_search_comment(self, comment_id, reddit_url):
@@ -2587,9 +2802,19 @@ class Database:
 
     def delete_search_comment(self, comment_id):
         deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # If the comment still has an owner, free its rotation slot.
+        row = self.conn.execute(
+            "SELECT account_id, status FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
+        prior_status = row["status"] if row else None
         self.conn.execute(
             "UPDATE search_comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
             (deleted_at, comment_id))
+        # Only decrement if this row was counted toward lifetime (i.e. had an
+        # account attached and wasn't already deleted).
+        if prior and prior_status != 'deleted':
+            self._decrement_lifetime(prior)
         self.conn.commit()
 
     def mark_search_comment_removed(self, comment_id):

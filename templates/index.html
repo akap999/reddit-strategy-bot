@@ -4156,6 +4156,7 @@ async function renderAccounts(el) {
             <div class="flex gap-2">
                 <button class="btn btn-primary" onclick="showAddAccountModal()">+ Add Account</button>
                 <button class="btn btn-secondary" onclick="showImportAccountsCsvModal()">Import CSV</button>
+                <button class="btn btn-secondary" onclick="refreshStaleAccounts()" title="Refresh accounts that look stale, never refreshed, previously errored, or have suspiciously low karma">Refresh Stale</button>
                 <button class="btn btn-secondary" onclick="refreshAllAccounts()">Refresh All</button>
                 <button class="btn btn-danger" onclick="deleteAllAccounts()">Delete All</button>
             </div>
@@ -4247,8 +4248,23 @@ function renderAccountsTable() {
         const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
         const age = formatAccountAge(a.created_utc);
         const refreshed = a.last_refreshed ? new Date(a.last_refreshed + 'Z').toLocaleDateString() : '—';
+        // Refresh health signals: explicit error, never refreshed, >14 days old,
+        // or suspiciously low total karma (likely a silent-failure victim).
+        let refreshWarn = null;
+        if (a.last_refresh_error) {
+            refreshWarn = `Refresh error: ${a.last_refresh_error}`;
+        } else if (!a.last_refreshed) {
+            refreshWarn = 'Never refreshed';
+        } else {
+            const ageDays = (Date.now() - new Date(a.last_refreshed + 'Z').getTime()) / 86400000;
+            if (ageDays > 14) refreshWarn = `Stale: last refreshed ${Math.round(ageDays)} days ago`;
+            else if (totalKarma < 10) refreshWarn = `Suspicious: total karma is only ${totalKarma}. Click Refresh.`;
+        }
+        const warnBadge = refreshWarn
+            ? `<span title="${refreshWarn.replace(/"/g,'&quot;')}" style="color:#f59e0b;margin-left:4px;cursor:help">⚠</span>`
+            : '';
         return `<tr>
-            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline">${a.username}</a></td>
+            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline">${a.username}</a>${warnBadge}</td>
             <td class="text-sm text-gray-400">${(a.link_karma || 0).toLocaleString()}</td>
             <td class="text-sm text-gray-400">${(a.comment_karma || 0).toLocaleString()}</td>
             <td class="text-sm font-medium">${totalKarma.toLocaleString()}</td>
@@ -4488,6 +4504,35 @@ async function refreshAllAccounts() {
         toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
         if (currentView === 'accounts') renderAccounts(document.getElementById('app'));
     })();
+}
+
+async function refreshStaleAccounts() {
+    if (!confirm('Refresh all stale / errored / low-karma accounts in the background? This runs sequentially with ~1.5s between each call.')) return;
+    const bgId = 'refresh-stale-' + Date.now();
+    _addBgTask(bgId, 'Refreshing stale accounts...');
+    toast('Refreshing stale accounts in background', 'info');
+    try {
+        const { task_id } = await api('/api/accounts/refresh-stale', { method: 'POST' });
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    _removeBgTask(bgId);
+                    const r = t.result || {};
+                    toast(`Refreshed ${r.refreshed || 0} / ${r.total || 0}${r.failed ? ` (${r.failed} failed)` : ''}`, r.refreshed ? 'success' : 'info');
+                    if (currentView === 'accounts') renderAccounts(document.getElementById('app'));
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    _removeBgTask(bgId);
+                    toast(`Refresh stale failed: ${t.error}`, 'error');
+                }
+            } catch(e) {}
+        }, 2500);
+    } catch(e) {
+        _removeBgTask(bgId);
+        toast('Failed to start refresh-stale task', 'error');
+    }
 }
 
 async function deleteAllAccounts() {

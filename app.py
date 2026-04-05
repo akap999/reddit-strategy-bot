@@ -86,6 +86,57 @@ def set_security_headers(response):
 # ---------------------------------------------------------------------------
 
 _db_initialized = False
+_karma_backfill_started = False
+
+def _maybe_kick_off_karma_backfill(db):
+    """One-time-ever background refresh of accounts that look like silent-failure
+    victims (low karma + no recorded error). Runs exactly once per DB because it
+    is guarded by the app_meta flag `karma_backfill_done`."""
+    global _karma_backfill_started
+    if _karma_backfill_started:
+        return
+    try:
+        if db.meta_get("karma_backfill_done") == "1":
+            _karma_backfill_started = True
+            return
+    except Exception:
+        return
+    _karma_backfill_started = True
+
+    def task():
+        import time as _time
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        try:
+            rows = db2.conn.execute(
+                """SELECT username FROM accounts
+                   WHERE (COALESCE(link_karma,0) + COALESCE(comment_karma,0)) < 10
+                     AND (last_refresh_error IS NULL OR last_refresh_error = '')"""
+            ).fetchall()
+            refreshed = 0
+            failed = 0
+            for r in rows:
+                uname = r["username"]
+                data = _fetch_reddit_user_data(uname)
+                if data and "_error" not in data:
+                    db2.update_account_reddit_data(
+                        uname, data["link_karma"], data["comment_karma"], data["created_utc"]
+                    )
+                    refreshed += 1
+                else:
+                    db2.record_refresh_failure(uname, (data or {}).get("_error", "Unknown"))
+                    failed += 1
+                _time.sleep(1.5)
+            db2.meta_set("karma_backfill_done", "1")
+            return {"ok": True, "refreshed": refreshed, "failed": failed, "total": len(rows)}
+        finally:
+            db2.close()
+
+    try:
+        start_task("karma-backfill-once", task)
+    except Exception as e:
+        print(f"[karma-backfill] failed to enqueue: {e}", flush=True)
 
 def get_db():
     global _db_initialized
@@ -94,6 +145,10 @@ def get_db():
     if not _db_initialized:
         db.initialize()
         _db_initialized = True
+        try:
+            _maybe_kick_off_karma_backfill(db)
+        except Exception as e:
+            print(f"[karma-backfill] init error: {e}", flush=True)
     return db
 
 # ---------------------------------------------------------------------------
@@ -2794,11 +2849,23 @@ def _fetch_reddit_user_data(username):
         resp = _reddit_get(f"/user/{username}/about.json")
         print(f"[REDDIT] u/{username} → status {resp.status_code}", flush=True)
         if resp.status_code == 200:
-            data = resp.json().get("data", {})
+            try:
+                body = resp.json()
+            except Exception as je:
+                return {"_error": f"Invalid JSON from Reddit: {je}"}
+            data = (body or {}).get("data") or {}
+            # Reddit returns {} / partial data for suspended / gated / NSFW-hidden
+            # accounts. Missing created_utc is a strong signal the payload is not
+            # a real profile — treat it as a soft error so the refresh path can
+            # record the failure instead of silently writing 0/0 karma.
+            if not data or data.get("created_utc") is None:
+                preview = json.dumps(body)[:200] if body else "<empty>"
+                return {"_error": f"Empty/degraded profile payload: {preview}"}
             return {
-                "link_karma": data.get("link_karma", 0),
-                "comment_karma": data.get("comment_karma", 0),
+                "link_karma": int(data.get("link_karma") or 0),
+                "comment_karma": int(data.get("comment_karma") or 0),
                 "created_utc": data.get("created_utc"),
+                "is_suspended": bool(data.get("is_suspended")),
             }
         else:
             print(f"[REDDIT] u/{username} response: {resp.text[:300]}", flush=True)
@@ -2887,8 +2954,6 @@ def api_delete_account(username):
 
 @app.route("/api/accounts/<username>/refresh", methods=["POST"])
 def api_refresh_account(username):
-    import time as _time
-
     def task():
         db2 = Database(DB_PATH)
         db2.connect()
@@ -2897,6 +2962,13 @@ def api_refresh_account(username):
             reddit_data = _fetch_reddit_user_data(username)
             if not reddit_data or "_error" in reddit_data:
                 err = reddit_data.get("_error", "Unknown") if reddit_data else "No response"
+                # Persist the failure so the UI can surface it (instead of the
+                # old silent-failure behavior that only advanced last_refreshed
+                # on success).
+                try:
+                    db2.record_refresh_failure(username, err)
+                except Exception:
+                    pass
                 raise Exception(f"Could not fetch data for u/{username}: {err}")
             db2.update_account_reddit_data(
                 username,
@@ -2909,6 +2981,49 @@ def api_refresh_account(username):
             db2.close()
 
     tid = start_task("refresh-account", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/accounts/refresh-stale", methods=["POST"])
+def api_refresh_stale_accounts():
+    """Bulk-refresh every account that looks stale or previously failed.
+    Covers: never-refreshed, >7 days old, last_refresh_error set, or total
+    karma < 10 (a strong signal of a prior silent failure)."""
+    import time as _time
+
+    def task():
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        try:
+            usernames = db2.list_stale_accounts()
+            refreshed = 0
+            failed = 0
+            errors = []
+            for uname in usernames:
+                data = _fetch_reddit_user_data(uname)
+                if data and "_error" not in data:
+                    db2.update_account_reddit_data(
+                        uname, data["link_karma"], data["comment_karma"], data["created_utc"]
+                    )
+                    refreshed += 1
+                else:
+                    err = (data or {}).get("_error", "Unknown")
+                    db2.record_refresh_failure(uname, err)
+                    failed += 1
+                    errors.append({"username": uname, "error": err})
+                _time.sleep(1.5)  # gentle on the proxy / Reddit rate limits
+            return {
+                "ok": True,
+                "total": len(usernames),
+                "refreshed": refreshed,
+                "failed": failed,
+                "errors": errors[:50],
+            }
+        finally:
+            db2.close()
+
+    tid = start_task("refresh-stale-accounts", task)
     return jsonify({"task_id": tid})
 
 def _parse_accounts_csv(content):

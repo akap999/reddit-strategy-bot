@@ -17,6 +17,7 @@ Soft scoring picks the best account among those that pass the hard rules.
 """
 
 import hashlib
+import random
 import time
 from collections import defaultdict
 
@@ -58,6 +59,13 @@ def _build_lookups(context):
     for r in context.get("account_sub_spread", []):
         sub_spread[r["account_id"]] = r["cnt"]
 
+    # Global lifetime rotation counter (one number per account, sourced directly
+    # from the accounts row — incremented on every assign, decremented on every
+    # unassign/delete, floored at 0). Drives long-term fairness across all
+    # accounts in both High and Low pools for both comment and post scoring.
+    lifetime = {a["username"]: (a.get("lifetime_assignments") or 0)
+                for a in context.get("all_accounts", [])}
+
     return {
         "sub_day": sub_day,
         "pending": pending,
@@ -67,6 +75,7 @@ def _build_lookups(context):
         "deployed": deployed,
         "post_ownership": post_ownership,
         "sub_spread": sub_spread,
+        "lifetime": lifetime,
     }
 
 
@@ -109,8 +118,13 @@ def _pick_best_for_post(pool, lookups, batch_picks, sub_owner):
     """Score and pick the best account from a pool for post ownership. Returns (score, account) or None."""
     if not pool:
         return None
-    scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in pool]
-    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+    # Randomize before scoring so that ties break uniformly at random instead of
+    # by case-sensitive username. Python's list.sort is stable, so the shuffle
+    # order is preserved within each score group.
+    shuffled = list(pool)
+    random.shuffle(shuffled)
+    scores = [(score_account_for_post(a, lookups, batch_picks, sub_owner), a) for a in shuffled]
+    scores.sort(key=lambda x: -x[0])
     return scores[0], scores
 
 
@@ -177,6 +191,12 @@ def score_account(account, comment, lookups, batch_picks):
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
 
+    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
+    # One canonical counter sourced from accounts.lifetime_assignments. Grows on
+    # every assign, shrinks on every unassign/delete. Applies identically in
+    # both High and Low pools and to post scoring — the long-term fairness floor.
+    score -= 8 * lookups.get("lifetime", {}).get(username, 0)
+
     # =====================================================================
     # LIGHT bonuses — within-pool ordering (tiebreakers)
     # =====================================================================
@@ -226,7 +246,7 @@ def score_account(account, comment, lookups, batch_picks):
             if ratio > 0.35:
                 score -= int(50 * (ratio - 0.35))
 
-    # No random jitter — ties are broken by username sort in the caller
+    # Ties are broken randomly in the caller (random.shuffle + stable sort).
 
     return score
 
@@ -258,12 +278,17 @@ def _build_post_lookups(context):
     for r in context.get("account_deployed_counts", []):
         deployed[r["account_id"]] = r["cnt"]
 
+    # Global lifetime rotation counter — same source as _build_lookups.
+    lifetime = {a["username"]: (a.get("lifetime_assignments") or 0)
+                for a in context.get("all_accounts", [])}
+
     return {
         "global_posts": global_posts,
         "sub_posts": sub_posts,
         "sub_comments": sub_comments,
         "pending": pending,
         "deployed": deployed,
+        "lifetime": lifetime,
     }
 
 
@@ -296,6 +321,11 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     # --- Batch spread: -55 per pick (flat, use all before reusing) ---
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
+
+    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
+    # Same weight & source as score_account — one counter, one penalty,
+    # identical behavior across comment and post assignment.
+    score -= 8 * lookups.get("lifetime", {}).get(username, 0)
 
     # =====================================================================
     # LIGHT bonuses — within-pool ordering (tiebreakers)
@@ -338,7 +368,7 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
             score += 1    # 1+ year
         # < 1 year: +0
 
-    # No random jitter — ties broken by username sort in caller
+    # Ties broken randomly in the caller (random.shuffle + stable sort).
 
     return score
 
@@ -487,7 +517,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
                 op_account = existing_op["account_id"]
             else:
                 scores = [(score_account(a, op_comments[0], lookups, batch_picks), a) for a in accounts]
-                scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+                random.shuffle(scores); scores.sort(key=lambda x: -x[0])
                 op_account = scores[0][1]["username"]
 
         if not post.get("owner_account"):
@@ -542,7 +572,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             continue
 
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+        random.shuffle(scores); scores.sort(key=lambda x: -x[0])
         best_score, best_account = scores[0]
 
         if best_score < 0:
@@ -587,7 +617,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             continue
 
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in pool_to_use]
-        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+        random.shuffle(scores); scores.sort(key=lambda x: -x[0])
         best_score, best_account = scores[0]
 
         if best_score < 0:
@@ -693,7 +723,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     if comment.get("is_reply") and comment.get("parent_comment_id"):
         pool_to_use = primary if primary else fallback
         scores = [(score_account(a, comment, lookups, batch_picks), a) for a in pool_to_use]
-        scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+        random.shuffle(scores); scores.sort(key=lambda x: -x[0])
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
@@ -724,7 +754,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No unique account available — all accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+    random.shuffle(scores); scores.sort(key=lambda x: -x[0])
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
@@ -863,7 +893,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No eligible account — all accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
-    scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+    random.shuffle(scores); scores.sort(key=lambda x: -x[0])
     best_score, best_account = scores[0]
     username = best_account["username"]
 
@@ -943,7 +973,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             for a in eligible:
                 s = score_account(a, comment, lookups, batch_picks)
                 scores.append((s, a))
-            scores.sort(key=lambda x: (-x[0], x[1]["username"]))
+            random.shuffle(scores); scores.sort(key=lambda x: -x[0])
             best_score, best_account = scores[0]
             username = best_account["username"]
 

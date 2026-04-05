@@ -995,6 +995,14 @@ class Database:
         )
         self.conn.commit()
 
+    def mark_comment_removed(self, comment_id):
+        """Mark a deployed comment as removed/deleted on Reddit."""
+        self.conn.execute(
+            "UPDATE comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            (comment_id,)
+        )
+        self.conn.commit()
+
     # --- Keyword Matching ---
 
     def update_matched_keywords(self, comment_id, keywords_json):
@@ -1675,11 +1683,11 @@ class Database:
         account_deployed_counts = [dict(r) for r in self.conn.execute(
             """SELECT account_id, SUM(cnt) as cnt FROM (
                    SELECT account_id, COUNT(*) as cnt FROM comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                    UNION ALL
                    SELECT account_id, COUNT(*) as cnt FROM search_comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                ) GROUP BY account_id"""
         ).fetchall()]
@@ -1827,11 +1835,11 @@ class Database:
         account_deployed_counts = [dict(r) for r in self.conn.execute(
             """SELECT account_id, SUM(cnt) as cnt FROM (
                    SELECT account_id, COUNT(*) as cnt FROM comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                    UNION ALL
                    SELECT account_id, COUNT(*) as cnt FROM search_comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                ) GROUP BY account_id"""
         ).fetchall()]
@@ -1967,11 +1975,11 @@ class Database:
         account_deployed_counts = [dict(r) for r in self.conn.execute(
             """SELECT account_id, SUM(cnt) as cnt FROM (
                    SELECT account_id, COUNT(*) as cnt FROM comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                    UNION ALL
                    SELECT account_id, COUNT(*) as cnt FROM search_comments
-                   WHERE status = 'deployed' AND account_id IS NOT NULL
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
                    GROUP BY account_id
                ) GROUP BY account_id"""
         ).fetchall()]
@@ -2567,4 +2575,11 @@ class Database:
         self.conn.execute(
             "UPDATE search_comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
             (deleted_at, comment_id))
+        self.conn.commit()
+
+    def mark_search_comment_removed(self, comment_id):
+        """Mark a deployed search comment as removed/deleted on Reddit."""
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            (comment_id,))
         self.conn.commit()

@@ -77,7 +77,7 @@ def _get_post_toplevel_accounts(db, post_id):
     rows = db.conn.execute(
         """SELECT DISTINCT account_id FROM comments
            WHERE post_id = ? AND account_id IS NOT NULL AND account_id != ''
-             AND status IN ('assigned', 'informed', 'deployed')
+             AND status IN ('assigned', 'informed', 'deployed', 'removed')
              AND is_reply = 0 AND comment_type != 'op_reply'""",
         (post_id,)
     ).fetchall()
@@ -799,7 +799,7 @@ def _get_search_post_toplevel_accounts(db, search_post_id):
     rows = db.conn.execute(
         """SELECT DISTINCT account_id FROM search_comments
            WHERE search_post_id = ? AND account_id IS NOT NULL AND account_id != ''
-             AND status IN ('assigned', 'informed', 'deployed')
+             AND status IN ('assigned', 'informed', 'deployed', 'removed')
              AND is_reply = 0""",
         (search_post_id,)
     ).fetchall()

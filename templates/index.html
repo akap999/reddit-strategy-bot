@@ -26,6 +26,7 @@
         .badge-informed { background: #4a2a00; color: #FF8b60; }
         .badge-deployed { background: #1a3320; color: #46d160; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
+        .badge-removed { background: #4a1a2a; color: #ff6b9b; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
         .brand-tab { color: #818384; border-bottom: 2px solid transparent; cursor: pointer; }
         .brand-tab:hover { color: #D7DADC; }
@@ -1344,6 +1345,7 @@ function renderBrandDetail(data) {
                         <option value="assigned">Assigned</option>
                         <option value="informed">Informed</option>
                         <option value="deployed">Deployed</option>
+                        <option value="removed">Removed</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
@@ -1482,7 +1484,7 @@ function renderBrandCommentTable() {
     }
 
     const statusBadge = (s) => {
-        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', deleted: 'badge-deleted', draft: 'badge-draft' };
+        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', deleted: 'badge-deleted', removed: 'badge-removed', draft: 'badge-draft' };
         return `<span class="badge ${map[s] || 'badge-draft'}">${s}</span>`;
     };
 
@@ -1869,9 +1871,9 @@ async function loadPosts() {
                     <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td class="text-xs">
-                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand | Assigned: ${p.assigned_brand||0} brand + ${p.assigned_non_brand||0} non-brand | Total generated: ${p.total_comments||0}">
+                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand / ${p.comment_count||0} total deployed | Assigned: ${p.assigned_brand||0} brand + ${p.assigned_non_brand||0} non-brand | Total generated: ${p.total_comments||0}">
                             <span style="color:#FF8b60">${p.deployed_brand||0}B</span>+<span style="color:#818384">${p.deployed_non_brand||0}NB</span>
-                            <span class="text-gray-600">/ ${p.total_comments||0}</span>
+                            <span class="text-gray-600">/ ${p.comment_count||0}</span>
                         </span>
                     </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
@@ -2391,6 +2393,7 @@ async function renderCommentTreeTab(container) {
                 <option value="assigned">Assigned</option>
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
+                <option value="removed">Removed</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="comments-sort-filter" onchange="loadCommentTree()" class="w-36">
@@ -2912,7 +2915,7 @@ function renderCommentNodeFlat(c) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const deployedDate = c.deployed_at ? `<span class="text-xs text-gray-500">${c.deployed_at.substring(0, 10)}</span>` : '';
 
@@ -2957,7 +2960,7 @@ function renderCommentNode(c, depth) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -3397,6 +3400,14 @@ async function markCommentDeleted(cid) {
     loadCommentTree();
 }
 
+async function markCommentRemoved(cid) {
+    if (!confirm('Mark this comment as removed/deleted on Reddit?')) return;
+    await api(`/api/comments/${cid}/mark-removed`, { method: 'POST', body: {} });
+    toast('Comment marked as removed', 'success');
+    if (currentView === 'comments') loadCommentTree();
+    else loadManagedComments();
+}
+
 async function markCommentPaid(cid) {
     await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
     toast('Marked as paid', 'success');
@@ -3701,6 +3712,7 @@ async function renderCommentManagementTab(container) {
                 <option value="assigned">Assigned</option>
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
+                <option value="removed">Removed</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="mgmt-brand-filter" onchange="loadManagedComments()" class="w-40">
@@ -3748,7 +3760,7 @@ async function loadManagedComments() {
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
                 else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
-                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
 
                 return `<tr>
                     <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
@@ -4091,6 +4103,7 @@ function renderAccountCommentsPanel(username, cell, allComments) {
                     <option value="assigned" ${currentFilter==='assigned' ? 'selected' : ''}>Assigned</option>
                     <option value="informed" ${currentFilter==='informed' ? 'selected' : ''}>Informed</option>
                     <option value="deployed" ${currentFilter==='deployed' ? 'selected' : ''}>Deployed</option>
+                    <option value="removed" ${currentFilter==='removed' ? 'selected' : ''}>Removed</option>
                     <option value="complete" ${currentFilter==='complete' ? 'selected' : ''}>Complete</option>
                     <option value="deleted" ${currentFilter==='deleted' ? 'selected' : ''}>Deleted</option>
                 </select>
@@ -5196,6 +5209,7 @@ async function renderExport(el) {
                         <option value="assigned">Assigned</option>
                         <option value="informed">Informed</option>
                         <option value="deployed">Deployed</option>
+                        <option value="removed">Removed</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="export-cmt-brand" class="w-40">
@@ -5813,6 +5827,7 @@ async function renderLsComments(c) {
                 <option value="assigned">Assigned</option>
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
+                <option value="removed">Removed</option>
             </select>
             <span style="margin-left:auto" class="flex gap-2">
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
@@ -5873,7 +5888,7 @@ function lsFilterComments() {
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                         <td>
                             <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
-                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsAssignComment(${c.id})">Assign</button>` : ''}
+                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>` : ''}
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
@@ -5888,6 +5903,7 @@ function lsFilterComments() {
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     ${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                 ` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
@@ -5907,6 +5923,15 @@ async function lsMarkPaid(cid) {
         toast('Marked as paid', 'success');
         renderLsTabContent();
     } catch(e) { toast('Failed to mark paid', 'error'); }
+}
+
+async function lsMarkRemoved(cid) {
+    if (!confirm('Mark this comment as removed/deleted on Reddit?')) return;
+    try {
+        await api(`/api/search/comments/${cid}/mark-removed`, { method: 'POST' });
+        toast('Comment marked as removed', 'success');
+        renderLsTabContent();
+    } catch(e) { toast('Failed to mark removed', 'error'); }
 }
 
 async function lsUndeployComment(cid) {
@@ -5929,6 +5954,64 @@ async function lsAssignComment(cid) {
     window._lsAsgCid = cid;
     window._lsAsgSortBy = 'default';
     _renderLsAssignModal();
+}
+
+async function lsManualAssignComment(cid) {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+    let accounts;
+    try { accounts = await api('/api/accounts'); } catch(e) { closeModal(); toast('Failed to load accounts', 'error'); return; }
+    if (!accounts.length) { closeModal(); toast('No accounts available', 'error'); return; }
+
+    window._lsManualAccounts = accounts;
+    window._lsManualCid = cid;
+
+    const rows = accounts.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-sm text-orange-500">u/${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td><button class="btn btn-sm btn-accent" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
+        </tr>`;
+    }).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Manual Assign Comment</h3>
+        <div class="mb-3">
+            <input id="ls-manual-search" placeholder="Search username or reference..." class="text-sm" oninput="_filterLsManualAccounts(this.value)">
+        </div>
+        <div class="overflow-y-auto" style="max-height:50vh">
+            <table class="text-sm" id="ls-manual-table">
+                <thead><tr><th>Username</th><th>Karma</th><th>Age</th><th>Reference</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="flex gap-2 mt-4 border-t pt-3" style="border-color:#343536">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+function _filterLsManualAccounts(query) {
+    const q = query.toLowerCase();
+    const accounts = window._lsManualAccounts || [];
+    const cid = window._lsManualCid;
+    const filtered = q ? accounts.filter(a => a.username.toLowerCase().includes(q) || (a.reference || '').toLowerCase().includes(q)) : accounts;
+    const tbody = document.querySelector('#ls-manual-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = filtered.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-sm text-orange-500">u/${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td><button class="btn btn-sm btn-accent" onclick="lsDoAssign(${cid},'${a.username}')">Assign</button></td>
+        </tr>`;
+    }).join('');
 }
 
 function _renderLsAssignModal() {
@@ -6382,6 +6465,7 @@ async function lsToggleAccountDetail(username) {
                         <td>${c.deployed_at ? new Date(c.deployed_at+'Z').toLocaleDateString() : '-'}</td>
                         <td>
                             ${c.status === 'deployed' && !c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                            ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>` : ''}
                             ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="lsUndeployComment(${c.id})">Undeploy</button>` : ''}
                             ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                         </td>

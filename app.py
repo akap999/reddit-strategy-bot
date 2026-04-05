@@ -866,6 +866,15 @@ def api_mark_comment_deleted(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/mark-removed", methods=["POST"])
+def api_mark_comment_removed(cid):
+    db = get_db()
+    try:
+        db.mark_comment_removed(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/mark-paid", methods=["POST"])
 def api_mark_comment_paid(cid):
     db = get_db()
@@ -2482,6 +2491,15 @@ def api_mark_search_comment_paid(cid):
     db = get_db()
     try:
         db.mark_search_comment_paid(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/search/comments/<int:cid>/mark-removed", methods=["POST"])
+def api_mark_search_comment_removed(cid):
+    db = get_db()
+    try:
+        db.mark_search_comment_removed(cid)
         return jsonify({"ok": True})
     finally:
         db.close()

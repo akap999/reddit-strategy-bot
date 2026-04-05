@@ -2554,7 +2554,7 @@ class Database:
 
     def unassign_search_comment(self, comment_id):
         self.conn.execute(
-            "UPDATE search_comments SET account_id = NULL, status = 'complete' WHERE id = ?",
+            "UPDATE search_comments SET account_id = NULL, status = 'draft' WHERE id = ?",
             (comment_id,))
         self.conn.commit()
 

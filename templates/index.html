@@ -5251,6 +5251,17 @@ let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
 let _lsSavedPosts = [];
 let _lsComments = [];
+let _lsSelectedSubs = null; // null = all selected (default)
+
+function _lsUpdateCommentLocal(cid, patch) {
+    const i = _lsComments.findIndex(c => c.id === cid);
+    if (i >= 0) Object.assign(_lsComments[i], patch);
+    if (typeof lsFilterComments === 'function') lsFilterComments();
+}
+function _lsRemoveCommentLocal(cid) {
+    _lsComments = _lsComments.filter(c => c.id !== cid);
+    if (typeof lsFilterComments === 'function') lsFilterComments();
+}
 
 function lsMatchKeywords(text, brandId) {
     const lower = (text || '').toLowerCase();
@@ -5933,6 +5944,7 @@ async function lsDeleteSelected() {
 // --- Comments Tab ---
 async function renderLsComments(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    _lsSelectedSubs = null; // reset on tab entry → defaults to all selected
     try {
         _lsComments = await api('/api/search/comments');
     } catch(e) { _lsComments = []; }
@@ -5950,6 +5962,16 @@ async function renderLsComments(c) {
                 <option value="">All Brands</option>
                 ${brands.map(b => `<option value="${b}">${b}</option>`).join('')}
             </select>
+            <div class="relative" style="display:inline-block">
+                <button type="button" id="ls-cf-sub-btn" class="btn btn-secondary btn-sm" onclick="lsToggleSubFilter(event)">Subreddits <span id="ls-cf-sub-count"></span></button>
+                <div id="ls-cf-sub-panel" class="hidden card p-3" style="position:absolute;top:100%;left:0;margin-top:4px;z-index:1000;max-height:320px;overflow-y:auto;min-width:240px;background:#1a1a1b;border:1px solid #343536">
+                    <div class="flex gap-2 mb-2">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="lsSubFilterAll(true)">All</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="lsSubFilterAll(false)">None</button>
+                    </div>
+                    <div id="ls-cf-sub-list"></div>
+                </div>
+            </div>
             <select id="ls-cf-status" onchange="lsFilterComments()" class="w-36">
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
@@ -5966,17 +5988,85 @@ async function renderLsComments(c) {
         </div>
         <div id="ls-comments-list"></div>
     `;
+    lsBuildSubList();
     lsFilterComments();
 }
+
+// --- Subreddit multi-select filter ---
+function lsAllSubsInComments() {
+    return [...new Set(_lsComments.filter(c => c.status !== 'deleted').map(c => c.post_subreddit).filter(Boolean))].sort();
+}
+function lsBuildSubList() {
+    const subs = lsAllSubsInComments();
+    if (_lsSelectedSubs === null) _lsSelectedSubs = new Set(subs);
+    else _lsSelectedSubs = new Set([...subs].filter(s => _lsSelectedSubs.has(s)));
+    const list = document.getElementById('ls-cf-sub-list');
+    if (list) {
+        list.innerHTML = subs.map(s => `
+            <label class="flex items-center gap-2 py-1" style="cursor:pointer">
+                <input type="checkbox" ${_lsSelectedSubs.has(s)?'checked':''} onchange="lsToggleSub('${s.replace(/'/g,"\\'")}')">
+                <span class="text-sm">r/${s}</span>
+            </label>
+        `).join('') || '<span class="text-xs text-gray-500">No subreddits</span>';
+    }
+    lsUpdateSubCountBadge();
+}
+function lsToggleSubFilter(ev) {
+    if (ev) ev.stopPropagation();
+    const panel = document.getElementById('ls-cf-sub-panel');
+    if (panel) panel.classList.toggle('hidden');
+}
+function lsToggleSub(s) {
+    if (!_lsSelectedSubs) _lsSelectedSubs = new Set(lsAllSubsInComments());
+    if (_lsSelectedSubs.has(s)) _lsSelectedSubs.delete(s); else _lsSelectedSubs.add(s);
+    lsUpdateSubCountBadge();
+    lsFilterComments();
+}
+function lsSubFilterAll(on) {
+    const subs = lsAllSubsInComments();
+    _lsSelectedSubs = new Set(on ? subs : []);
+    lsBuildSubList();
+    lsFilterComments();
+}
+function lsUpdateSubCountBadge() {
+    const el = document.getElementById('ls-cf-sub-count');
+    if (!el) return;
+    const t = lsAllSubsInComments().length;
+    const n = _lsSelectedSubs ? _lsSelectedSubs.size : t;
+    el.textContent = (n === t) ? ' (All)' : ` (${n}/${t})`;
+}
+document.addEventListener('click', function(e) {
+    const panel = document.getElementById('ls-cf-sub-panel');
+    const btn = document.getElementById('ls-cf-sub-btn');
+    if (!panel || panel.classList.contains('hidden')) return;
+    if (panel.contains(e.target) || (btn && btn.contains(e.target))) return;
+    panel.classList.add('hidden');
+});
 
 function lsFilterComments() {
     const postId = document.getElementById('ls-cf-post')?.value;
     const brandName = document.getElementById('ls-cf-brand')?.value;
     const status = document.getElementById('ls-cf-status')?.value;
+
+    // Post-level aggregate status (highest-ranked status among a post's comments)
+    const STATUS_RANK = { draft:0, assigned:1, informed:2, deployed:3, removed:4 };
+    const postStatus = {};
+    _lsComments.filter(c => c.status !== 'deleted').forEach(c => {
+        const cur = postStatus[c.search_post_id];
+        const r = STATUS_RANK[c.status] ?? -1;
+        if (cur == null || r > (STATUS_RANK[cur] ?? -1)) postStatus[c.search_post_id] = c.status;
+    });
+
     let filtered = _lsComments.filter(c => c.status !== 'deleted');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
-    if (status) filtered = filtered.filter(c => c.status === status);
+    // Status filter applies at the POST level — keep all comments of posts whose aggregate status matches
+    if (status) filtered = filtered.filter(c => postStatus[c.search_post_id] === status);
+    // Subreddit multi-select filter
+    const allSubsCount = lsAllSubsInComments().length;
+    if (_lsSelectedSubs && _lsSelectedSubs.size < allSubsCount) {
+        filtered = filtered.filter(c => _lsSelectedSubs.has(c.post_subreddit));
+    }
 
     const el = document.getElementById('ls-comments-list');
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No comments match filters.</p>'; return; }
@@ -6001,6 +6091,7 @@ function lsFilterComments() {
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
                     <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
+                    ${postStatus[pid] ? `<span class="badge badge-${postStatus[pid]} ml-2" title="Post aggregate status">${postStatus[pid]}</span>` : ''}
                 </div>
                 <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
             </div>
@@ -6050,7 +6141,7 @@ async function lsMarkPaid(cid) {
     try {
         await api(`/api/search/comments/${cid}/mark-paid`, { method: 'POST' });
         toast('Marked as paid', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { paid_at: new Date().toISOString() });
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
@@ -6059,7 +6150,7 @@ async function lsMarkRemoved(cid) {
     try {
         await api(`/api/search/comments/${cid}/mark-removed`, { method: 'POST' });
         toast('Comment marked as removed', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'removed' });
     } catch(e) { toast('Failed to mark removed', 'error'); }
 }
 
@@ -6068,7 +6159,7 @@ async function lsUndeployComment(cid) {
     try {
         await api(`/api/search/comments/${cid}/undeploy`, { method: 'POST' });
         toast('Comment undeployed', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'assigned', reddit_comment_url: null });
     } catch(e) { toast('Failed to undeploy', 'error'); }
 }
 
@@ -6234,7 +6325,7 @@ async function _lsAutoAssignSingle() {
         if (result.error) { toast(result.error, 'error'); return; }
         toast(`Assigned to ${result.account} (score: ${result.score})`, 'success');
         closeModal();
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: result.account });
     } catch(e) {
         toast('Auto-assign failed', 'error');
     } finally {
@@ -6247,7 +6338,7 @@ async function lsDoAssign(cid, username) {
         await api(`/api/search/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
         closeModal();
         toast(`Assigned to u/${username}`, 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: username });
     } catch(e) {}
 }
 
@@ -6255,7 +6346,7 @@ async function lsUnassignComment(cid) {
     try {
         await api(`/api/search/comments/${cid}/unassign`, { method: 'POST' });
         toast('Unassigned', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'draft', account_id: null });
     } catch(e) {}
 }
 
@@ -6263,7 +6354,7 @@ async function lsInformComment(cid) {
     try {
         await api(`/api/search/comments/${cid}/inform`, { method: 'POST' });
         toast('Marked as informed', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'informed' });
     } catch(e) {}
 }
 
@@ -6289,7 +6380,7 @@ async function lsDoDeployComment(cid) {
         await api(`/api/search/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url } });
         closeModal();
         toast('Marked as deployed', 'success');
-        renderLsTabContent();
+        _lsUpdateCommentLocal(cid, { status: 'deployed', reddit_comment_url: url });
     } catch(e) {}
 }
 
@@ -6298,7 +6389,7 @@ async function lsDeleteComment(cid) {
     try {
         await api(`/api/search/comments/${cid}`, { method: 'DELETE' });
         toast('Deleted', 'success');
-        renderLsTabContent();
+        _lsRemoveCommentLocal(cid);
     } catch(e) {}
 }
 

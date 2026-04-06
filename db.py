@@ -1355,10 +1355,10 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_all_brands(self):
-        """Get all brands across all subreddits."""
+        """Get all brands across all subreddits (includes standalone brands)."""
         rows = self.conn.execute(
             """SELECT b.*, s.name as subreddit_name FROM brands b
-               JOIN subreddits s ON b.subreddit_id = s.id
+               LEFT JOIN subreddits s ON b.subreddit_id = s.id
                ORDER BY b.name"""
         ).fetchall()
         return [dict(r) for r in rows]
@@ -1539,14 +1539,15 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_unique_brand_names(self):
-        """Get distinct brand names across all subreddits with aggregated info."""
+        """Get distinct brand names across all subreddits with aggregated info.
+        Uses LEFT JOIN to include standalone brands (subreddit_id IS NULL)."""
         rows = self.conn.execute(
             """SELECT b.name,
                       GROUP_CONCAT(DISTINCT s.name) as subreddit_names,
                       b.domain_url, b.context, b.keywords,
                       COUNT(DISTINCT b.subreddit_id) as num_subreddits
                FROM brands b
-               JOIN subreddits s ON b.subreddit_id = s.id
+               LEFT JOIN subreddits s ON b.subreddit_id = s.id
                GROUP BY LOWER(b.name)
                ORDER BY b.name"""
         ).fetchall()

@@ -7,9 +7,9 @@ Hard rules (never violated):
   3. Reply comments (is_reply=1) → normal scoring, exempt from uniqueness + OP exclusion
   4. Already-assigned / deployed comments are never touched
 
-Two-pool system:
-  - High pool (50+ total karma): picked 1 out of every 2 slots
-  - Low pool (<50 total karma): picked 1 out of every 2 slots (1:1 ratio)
+Two-pool system (1:1 ratio via random 50/50 coin-flip per assignment):
+  - High pool (50+ total karma): ~50% of picks
+  - Low pool (<50 total karma): ~50% of picks
   - Each pool scores and round-robins independently — no cross-assignment
   - If one pool is empty, all picks from the other pool
 
@@ -98,7 +98,6 @@ def _get_post_toplevel_accounts(db, post_id):
 # ---------------------------------------------------------------------------
 
 KARMA_THRESHOLD = 50    # accounts with total karma >= this go to High pool
-POOL_RATIO = 1          # 1 High pick per 1 Low pick (1:1 ratio)
 
 
 def _split_pools(accounts, threshold=KARMA_THRESHOLD):
@@ -128,27 +127,11 @@ def _pick_best_for_post(pool, lookups, batch_picks, sub_owner):
     return scores[0], scores
 
 
-def _is_low_slot(slot_counter):
-    """Returns True if this slot should pick from the Low pool (every POOL_RATIO+1 th pick)."""
-    return (slot_counter % (POOL_RATIO + 1)) == POOL_RATIO
-
-
-def _get_global_slot(db):
-    """Derive global slot counter from total assignments across all tables
-    (comments, search_comments, and post ownership)."""
-    row = db.conn.execute(
-        """SELECT COALESCE(SUM(cnt), 0) as total FROM (
-               SELECT COUNT(*) as cnt FROM comments
-               WHERE status IN ('assigned', 'informed') AND account_id IS NOT NULL
-               UNION ALL
-               SELECT COUNT(*) as cnt FROM search_comments
-               WHERE status IN ('assigned', 'informed') AND account_id IS NOT NULL
-               UNION ALL
-               SELECT COUNT(*) as cnt FROM posts
-               WHERE owner_account IS NOT NULL AND owner_account != ''
-           )"""
-    ).fetchone()
-    return row["total"] if row else 0
+def _pick_low_pool():
+    """Randomly returns True (pick low pool) with 50% probability for 1:1 ratio.
+    This replaces the old slot-counter approach which was fragile and broke when
+    assignment counts changed (deploys, deletions, etc.)."""
+    return random.random() < 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -401,11 +384,10 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
     batch_picks = defaultdict(int)
     assignments = []
     warnings = []
-    slot = 0
 
     for post in draft_posts:
         # Determine which pool to pick from
-        use_low = _is_low_slot(slot) and low_pool
+        use_low = _pick_low_pool() and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -436,7 +418,6 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
             "score": best_score,
             "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
         })
-        slot += 1
 
     return {
         "assigned": len(assignments),
@@ -546,10 +527,9 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
         blocked.add(op_to_exclude)
 
     skipped = 0
-    slot = 0
     for comment in toplevel_comments:
         # Determine pool for this slot
-        use_low = _is_low_slot(slot) and low_pool
+        use_low = _pick_low_pool() and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -600,15 +580,13 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "type": "brand" if comment.get("mentions_brand") else "organic",
             "pool": picked_pool,
         })
-        slot += 1
 
     # ---------------------------------------------------------------
     # 3. Reply comments: two-pool interleaving, any account eligible
     #    (exempt from uniqueness + OP exclusion)
     # ---------------------------------------------------------------
-    reply_slot = 0
     for comment in reply_comments:
-        use_low = _is_low_slot(reply_slot) and low_pool
+        use_low = _pick_low_pool() and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -641,7 +619,6 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
             "type": "reply",
             "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
         })
-        reply_slot += 1
 
     return {
         "assigned": len(assignments),
@@ -658,7 +635,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single unassigned comment to the best-scoring account.
 
-    Uses two-pool system with global slot counter for 2:1 ratio.
+    Uses two-pool system with random 50/50 pool selection for 1:1 ratio.
 
     Hard rules:
       - OP reply → post owner only
@@ -712,8 +689,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No valid OP account available. Assign a post owner first."}
 
     # Determine pool from global slot
-    slot = _get_global_slot(db)
-    use_low = _is_low_slot(slot) and low_pool
+    use_low = _pick_low_pool() and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -772,7 +748,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 
 def auto_assign_single_post(db, post_id, exclude_accounts=None):
     """Auto-assign a single post to the best-scoring account.
-    Uses two-pool system with global slot counter for 2:1 ratio."""
+    Uses two-pool system with random 50/50 pool selection for 1:1 ratio."""
     post = db.get_post(post_id)
     if not post:
         return {"error": "Post not found"}
@@ -796,8 +772,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     batch_picks = defaultdict(int)
 
     # Determine pool from global slot
-    slot = _get_global_slot(db)
-    use_low = _is_low_slot(slot) and low_pool
+    use_low = _pick_low_pool() and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -839,7 +814,7 @@ def _get_search_post_toplevel_accounts(db, search_post_id):
 def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single search comment to the best-scoring account.
 
-    Uses two-pool system with global slot counter for 2:1 ratio.
+    Uses two-pool system with random 50/50 pool selection for 1:1 ratio.
 
     Rules:
       - Non-reply: unique account per search post (no account already used on that post)
@@ -869,8 +844,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     is_reply = comment.get("is_reply", 0)
 
     # Determine pool from global slot
-    slot = _get_global_slot(db)
-    use_low = _is_low_slot(slot) and low_pool
+    use_low = _pick_low_pool() and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -930,7 +904,6 @@ def auto_assign_search_comments(db, exclude_accounts=None):
     assignments = []
     skipped = 0
     warnings = []
-    slot = 0
 
     # Group by search_post_id
     by_post = defaultdict(list)
@@ -945,7 +918,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             is_reply = comment.get("is_reply", 0)
 
             # Determine pool for this slot
-            use_low = _is_low_slot(slot) and low_pool
+            use_low = _pick_low_pool() and low_pool
             primary = low_pool if use_low else high_pool
             fallback = high_pool if use_low else low_pool
 
@@ -994,7 +967,6 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             lookups["sub_day"][username][comment_day] += 1
             if not is_reply:
                 blocked.add(username)
-            slot += 1
 
     return {
         "assigned": len(assignments),

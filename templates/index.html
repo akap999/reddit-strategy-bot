@@ -4389,15 +4389,15 @@ async function renderAccounts(el) {
             </div>
             <div>
                 <label class="text-xs block" style="color:#818384">Min Karma</label>
-                <input type="number" id="acct-filter-karma" value="${_accountsFilterState.min_karma}" placeholder="e.g. 100" class="w-28 text-sm">
+                <input type="number" id="acct-filter-karma" value="${_accountsFilterState.min_karma}" placeholder="e.g. 100" class="w-28 text-sm" oninput="applyAccountFilters()">
             </div>
             <div>
                 <label class="text-xs block" style="color:#818384">Min Age (days)</label>
-                <input type="number" id="acct-filter-age" value="${_accountsFilterState.min_age_days}" placeholder="e.g. 365" class="w-28 text-sm">
+                <input type="number" id="acct-filter-age" value="${_accountsFilterState.min_age_days}" placeholder="e.g. 365" class="w-28 text-sm" oninput="applyAccountFilters()">
             </div>
             <div>
                 <label class="text-xs block" style="color:#818384">Reference</label>
-                <input type="text" id="acct-filter-ref" value="${_accountsFilterState.reference}" placeholder="Search..." class="w-40 text-sm">
+                <input type="text" id="acct-filter-ref" value="${_accountsFilterState.reference}" placeholder="Search..." class="w-40 text-sm" oninput="applyAccountFilters()">
             </div>
             <button class="btn btn-sm btn-primary" onclick="applyAccountFilters()">Apply</button>
             <button class="btn btn-sm btn-secondary" onclick="_accountsFilterState={min_karma:'',min_age_days:'',reference:'',search:''};renderAccounts(document.getElementById('app'))">Clear</button>
@@ -4410,12 +4410,7 @@ async function renderAccounts(el) {
 }
 
 async function loadAccountsList() {
-    const params = [];
-    if (_accountsFilterState.min_karma) params.push(`min_karma=${_accountsFilterState.min_karma}`);
-    if (_accountsFilterState.min_age_days) params.push(`min_age_days=${_accountsFilterState.min_age_days}`);
-    if (_accountsFilterState.reference) params.push(`reference=${encodeURIComponent(_accountsFilterState.reference)}`);
-    const url = '/api/accounts' + (params.length ? '?' + params.join('&') : '');
-    return await api(url);
+    return await api('/api/accounts');
 }
 
 function applyAccountFilters() {
@@ -4423,12 +4418,7 @@ function applyAccountFilters() {
     _accountsFilterState.min_age_days = document.getElementById('acct-filter-age')?.value || '';
     _accountsFilterState.reference = document.getElementById('acct-filter-ref')?.value || '';
     _accountsFilterState.search = document.getElementById('acct-filter-search')?.value || '';
-    // If only search changed, filter client-side without re-fetching
-    if (_accountsData.length) {
-        renderAccountsTable();
-        return;
-    }
-    renderAccounts(document.getElementById('app'));
+    renderAccountsTable();
 }
 
 function renderAccountsTable() {
@@ -4440,11 +4430,23 @@ function renderAccountsTable() {
         return;
     }
 
-    // Client-side username search filter
+    // Client-side filters (all applied locally — no re-fetch needed)
     let filtered = _accountsData;
     const searchTerm = (_accountsFilterState.search || '').toLowerCase();
     if (searchTerm) {
         filtered = filtered.filter(a => a.username.toLowerCase().includes(searchTerm));
+    }
+    const minKarma = parseInt(_accountsFilterState.min_karma) || 0;
+    if (minKarma > 0) {
+        filtered = filtered.filter(a => ((a.link_karma||0) + (a.comment_karma||0)) >= minKarma);
+    }
+    const minAgeDays = parseInt(_accountsFilterState.min_age_days) || 0;
+    if (minAgeDays > 0) {
+        filtered = filtered.filter(a => a.created_utc && ((Date.now()/1000 - a.created_utc) / 86400) >= minAgeDays);
+    }
+    const refSearch = (_accountsFilterState.reference || '').toLowerCase();
+    if (refSearch) {
+        filtered = filtered.filter(a => (a.reference || '').toLowerCase().includes(refSearch));
     }
 
     // Sort

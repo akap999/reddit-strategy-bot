@@ -200,8 +200,9 @@ class Database:
         self.conn.commit()
 
     def list_brands(self, subreddit_id):
+        """List brands for a subreddit, plus any standalone brands (subreddit_id IS NULL)."""
         rows = self.conn.execute(
-            "SELECT * FROM brands WHERE subreddit_id = ? ORDER BY added_at DESC",
+            "SELECT * FROM brands WHERE subreddit_id = ? OR subreddit_id IS NULL ORDER BY added_at DESC",
             (subreddit_id,)
         ).fetchall()
         return [dict(r) for r in rows]

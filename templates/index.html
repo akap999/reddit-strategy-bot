@@ -4456,6 +4456,7 @@ function renderAccountsTable() {
         else if (col === 'total_karma') { va = (a.link_karma||0)+(a.comment_karma||0); vb = (b.link_karma||0)+(b.comment_karma||0); }
         else if (col === 'age') { va = a.created_utc||Infinity; vb = b.created_utc||Infinity; }
         else if (col === 'assigned') { va = a.assignment_count||0; vb = b.assignment_count||0; }
+        else if (col === 'lifetime') { va = a.lifetime_assignments||0; vb = b.lifetime_assignments||0; }
         else { va = a[col]||0; vb = b[col]||0; }
         if (va < vb) return dir === 'asc' ? -1 : 1;
         if (va > vb) return dir === 'asc' ? 1 : -1;
@@ -4492,6 +4493,7 @@ function renderAccountsTable() {
             <td class="text-sm text-gray-400">${age}</td>
             <td class="text-sm text-gray-300">${a.reference || ''}</td>
             <td class="text-sm text-center">${a.assignment_count || 0}</td>
+            <td class="text-sm text-center">${a.lifetime_assignments || 0}</td>
             <td class="text-xs text-gray-500">${refreshed}</td>
             <td class="text-sm">${(a.owned_subreddits||0) > 0 || (a.owned_posts||0) > 0 ? `<span class="badge" style="background:#0079D3;color:white">Owner: ${a.owned_subreddits||0} subs, ${a.owned_posts||0} posts</span>` : ''}</td>
             <td class="text-xs">
@@ -4518,6 +4520,7 @@ function renderAccountsTable() {
                     <th class="cursor-pointer" ${sortClick('total_karma')}>Total${sortIcon('total_karma')}</th>
                     <th class="cursor-pointer" ${sortClick('age')}>Age${sortIcon('age')}</th><th>Reference</th>
                     <th class="cursor-pointer" ${sortClick('assigned')}>Assigned${sortIcon('assigned')}</th>
+                    <th class="cursor-pointer" ${sortClick('lifetime')}>Lifetime${sortIcon('lifetime')}</th>
                     <th>Refreshed</th><th>Owner</th><th>Actions</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>

@@ -1954,7 +1954,7 @@ function renderPostsFromCache() {
 
     container.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Deployed: Brand + Non-Brand / Total generated">Comments (B+NB/Total)</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => `
                 <tr>
                     <td>${p.suggested_post_day}</td>
@@ -1967,7 +1967,13 @@ function renderPostsFromCache() {
                     <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td class="text-xs">
-                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand / ${p.comment_count||0} total deployed | Assigned: ${p.assigned_brand||0} brand + ${p.assigned_non_brand||0} non-brand | Total generated: ${p.total_comments||0}">
+                        <span title="Assigned+Informed: ${(p.assigned_brand||0)-(p.deployed_brand||0)} brand + ${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)} non-brand / ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)} total">
+                            <span style="color:#4a9eff">${(p.assigned_brand||0)-(p.deployed_brand||0)}B</span>+<span style="color:#818384">${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)}NB</span>
+                            <span class="text-gray-600">/ ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)}</span>
+                        </span>
+                    </td>
+                    <td class="text-xs">
+                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand / ${p.comment_count||0} total deployed | Total generated: ${p.total_comments||0}">
                             <span style="color:#FF8b60">${p.deployed_brand||0}B</span>+<span style="color:#818384">${p.deployed_non_brand||0}NB</span>
                             <span class="text-gray-600">/ ${p.comment_count||0}</span>
                         </span>

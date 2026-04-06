@@ -404,6 +404,25 @@ class Database:
         ).fetchall()]
         if post_ids:
             placeholders = ",".join("?" * len(post_ids))
+            # Adjust lifetime counters before deleting comments
+            comment_accounts = self.conn.execute(
+                f"""SELECT account_id, COUNT(*) AS cnt FROM comments
+                    WHERE post_id IN ({placeholders}) AND account_id IS NOT NULL
+                      AND status NOT IN ('draft','complete')
+                    GROUP BY account_id""",
+                post_ids
+            ).fetchall()
+            for r in comment_accounts:
+                self._decrement_lifetime(r["account_id"], r["cnt"])
+            # Adjust lifetime counters for post owners
+            post_owners = self.conn.execute(
+                f"""SELECT owner_account, COUNT(*) AS cnt FROM posts
+                    WHERE id IN ({placeholders}) AND owner_account IS NOT NULL AND owner_account != ''
+                    GROUP BY owner_account""",
+                post_ids
+            ).fetchall()
+            for r in post_owners:
+                self._decrement_lifetime(r["owner_account"], r["cnt"])
             self.conn.execute(f"DELETE FROM comments WHERE post_id IN ({placeholders})", post_ids)
             self.conn.execute(f"DELETE FROM post_urls WHERE post_id IN ({placeholders})", post_ids)
             self.conn.execute(f"DELETE FROM post_brands WHERE post_id IN ({placeholders})", post_ids)
@@ -961,6 +980,24 @@ class Database:
                    )"""
             )
             self.conn.commit()
+        # Re-sync lifetime_assignments from actual DB state (fixes drift caused
+        # by delete_subreddit/delete_account paths that previously skipped
+        # _decrement_lifetime calls).
+        if not self.meta_get("lifetime_backfill_v2"):
+            self.conn.execute(
+                """UPDATE accounts SET lifetime_assignments = (
+                       COALESCE((SELECT COUNT(*) FROM comments
+                                  WHERE account_id = accounts.username
+                                    AND status NOT IN ('draft', 'complete')), 0)
+                     + COALESCE((SELECT COUNT(*) FROM search_comments
+                                  WHERE account_id = accounts.username
+                                    AND status NOT IN ('draft','deleted')), 0)
+                     + COALESCE((SELECT COUNT(*) FROM posts
+                                  WHERE owner_account = accounts.username), 0)
+                   )"""
+            )
+            self.conn.commit()
+            self.meta_set("lifetime_backfill_v2", "1")
 
         # ----- brands: GEO enrichment columns -----
         brand_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(brands)").fetchall()]
@@ -1762,6 +1799,22 @@ class Database:
         self.conn.commit()
 
     def delete_account(self, username):
+        # Adjust lifetime counter before clearing assignments
+        comment_cnt = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM comments WHERE account_id = ? AND status NOT IN ('draft','complete')",
+            (username,)
+        ).fetchone()["cnt"]
+        search_cnt = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM search_comments WHERE account_id = ? AND status NOT IN ('draft','deleted')",
+            (username,)
+        ).fetchone()["cnt"]
+        post_cnt = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM posts WHERE owner_account = ?",
+            (username,)
+        ).fetchone()["cnt"]
+        total = comment_cnt + search_cnt + post_cnt
+        if total > 0:
+            self._decrement_lifetime(username, total)
         # Unassign comments owned by this account (back to draft)
         self.conn.execute(
             "UPDATE comments SET account_id = NULL, status = 'draft' WHERE account_id = ? AND status IN ('assigned','informed')",

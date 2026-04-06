@@ -1859,17 +1859,17 @@ async function renderPosts(el) {
                 <option value="">All Brands</option>
                 ${uniqueBrands.map(b => `<option value="${b.name}" data-sub-ids="${b.sub_ids.join(',')}">${b.name}</option>`).join('')}
             </select>
-            <select id="posts-sub-filter" onchange="loadPosts()" class="w-48">
+            <select id="posts-sub-filter" onchange="loadPosts()" class="w-48"><!-- sub change needs refetch -->
                 ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
             </select>
-            <select id="posts-status-filter" onchange="loadPosts()" class="w-32">
+            <select id="posts-status-filter" onchange="renderPostsFromCache()" class="w-32">
                 <option value="all">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="complete">Complete</option>
                 <option value="informed">Informed</option>
                 <option value="published">Deployed</option>
             </select>
-            <select id="posts-intent-filter" onchange="loadPosts()" class="w-36" title="GEO intent filter">
+            <select id="posts-intent-filter" onchange="renderPostsFromCache()" class="w-36" title="GEO intent filter">
                 <option value="all">All Intents</option>
                 <option value="commercial">Commercial</option>
                 <option value="comparison">Comparison</option>
@@ -1902,10 +1902,27 @@ function onPostsBrandChange() {
     loadPosts();
 }
 
+let _postsCache = [];
+
+function _postsUpdateLocal(pid, patch) {
+    const i = _postsCache.findIndex(p => p.id === pid);
+    if (i >= 0) Object.assign(_postsCache[i], patch);
+    renderPostsFromCache();
+}
+
+function _postsRemoveLocal(pid) {
+    _postsCache = _postsCache.filter(p => p.id !== pid);
+    renderPostsFromCache();
+}
+
+function _postsUpdateManyLocal(predicate, patch) {
+    _postsCache.forEach(p => { if (predicate(p)) Object.assign(p, patch); });
+    renderPostsFromCache();
+}
+
 async function loadPosts() {
     const sid = document.getElementById('posts-sub-filter').value;
     if (!sid) { document.getElementById('posts-table').innerHTML = '<p class="text-gray-500">No subreddit selected.</p>'; return; }
-    const status = document.getElementById('posts-status-filter').value;
     const brandName = document.getElementById('posts-brand-filter')?.value;
     const container = document.getElementById('posts-table');
     container.innerHTML = '<div class="spinner"></div>';
@@ -1916,13 +1933,22 @@ async function loadPosts() {
         const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
         if (brand) url += `?brand_id=${brand.id}`;
     }
-    const posts = await api(url);
+    _postsCache = await api(url);
+    renderPostsFromCache();
+}
+
+function renderPostsFromCache() {
+    const container = document.getElementById('posts-table');
+    if (!container) return;
+    const scrollY = window.scrollY;
+    const status = document.getElementById('posts-status-filter')?.value || 'all';
     const intent = document.getElementById('posts-intent-filter')?.value || 'all';
-    let filtered = status === 'all' ? posts : posts.filter(p => p.status === status);
+    let filtered = status === 'all' ? _postsCache : _postsCache.filter(p => p.status === status);
     if (intent !== 'all') filtered = filtered.filter(p => (p.intent || '') === intent);
 
     if (!filtered.length) {
         container.innerHTML = '<p class="text-gray-500 mt-4">No posts found.</p>';
+        window.scrollTo(0, scrollY);
         return;
     }
 
@@ -1955,6 +1981,7 @@ async function loadPosts() {
             `).join('')}</tbody>
         </table>
     `;
+    window.scrollTo(0, scrollY);
 }
 
 async function showPostDetail(pid) {
@@ -2003,14 +2030,14 @@ async function submitPublish(pid) {
     await api(`/api/posts/${pid}/publish`, { method: 'POST', body: { reddit_url: url, owner_account: ownerAcct } });
     toast('Post marked as published', 'success');
     closeModal();
-    loadPosts();
+    _postsUpdateLocal(pid, { status: 'published', reddit_url: url, owner_account: ownerAcct, published_at: new Date().toISOString() });
 }
 
 async function deletePost(pid) {
     if (!confirm('Delete this post and all its comments?')) return;
     await api(`/api/posts/${pid}`, { method: 'DELETE' });
     toast('Post deleted', 'success');
-    loadPosts();
+    _postsRemoveLocal(pid);
 }
 
 // --- Post Owner Assignment ---
@@ -2072,33 +2099,33 @@ async function submitPostOwner(pid, username) {
     await api(`/api/posts/${pid}/owner`, { method: 'PUT', body: { username } });
     toast(`Post assigned to u/${username}`, 'success');
     closeModal();
-    loadPosts();
+    _postsUpdateLocal(pid, { owner_account: username });
 }
 
 async function unassignPostOwner(pid) {
     if (!confirm('Remove owner from this post?')) return;
     await api(`/api/posts/${pid}/unassign-owner`, { method: 'POST', body: {} });
     toast('Post owner removed', 'success');
-    loadPosts();
+    _postsUpdateLocal(pid, { owner_account: null });
 }
 
 async function informPost(pid) {
     await api(`/api/posts/${pid}/status`, { method: 'POST', body: { status: 'informed' } });
     toast('Post marked as informed', 'success');
-    loadPosts();
+    _postsUpdateLocal(pid, { status: 'informed' });
 }
 
 async function markPostPaid(pid) {
     await api(`/api/posts/${pid}/mark-paid`, { method: 'POST', body: {} });
     toast('Post marked as paid', 'success');
-    loadPosts();
+    _postsUpdateLocal(pid, { paid_at: new Date().toISOString() });
 }
 
 async function undeployPost(pid) {
     if (!confirm('Undeploy this post? It will revert to "complete" status.')) return;
     await api(`/api/posts/${pid}/undeploy`, { method: 'POST', body: {} });
     toast('Post undeployed', 'success');
-    loadPosts();
+    _postsUpdateLocal(pid, { status: 'complete', reddit_url: null });
 }
 
 async function autoAssignPost(pid) {
@@ -2121,7 +2148,7 @@ async function unassignAllPosts() {
     try {
         const result = await api(`/api/subreddits/${sid}/unassign-all-posts`, { method: 'POST', body: {} });
         toast(`Unassigned ${result.unassigned} posts`, 'success');
-        loadPosts();
+        _postsUpdateManyLocal(p => p.owner_account && p.status !== 'informed' && p.status !== 'published', { owner_account: null });
     } catch(e) { toast('Failed to unassign posts', 'error'); }
 }
 
@@ -2221,7 +2248,7 @@ async function submitAutoAssignPosts() {
             result.warnings.forEach(w => toast(w, 'warning'));
         }
         closeModal();
-        loadPosts();
+        loadPosts(); // refetch: bulk auto-assign changes many posts at once
     } finally {
         btn.disabled = false;
         btn.textContent = 'Auto Assign Posts';
@@ -2376,7 +2403,7 @@ async function submitCustomPost() {
     });
     toast('Custom post added', 'success');
     closeModal();
-    loadPosts();
+    loadPosts(); // refetch: new post created
 }
 
 function showGenFillerModal() {
@@ -2481,8 +2508,8 @@ async function renderCommentTreeTab(container) {
             </select>
             <select id="comments-sub-filter" onchange="loadBrandsAndPostsForComments()" class="w-48"><option value="">All Subreddits</option>${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
             <select id="comments-brand-filter" onchange="filterPostsByBrand()" class="w-44"><option value="">All Brands</option></select>
-            <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">All Comments</option></select>
-            <select id="comments-status-filter" onchange="loadCommentTree()" class="w-32">
+            <select id="comments-post-filter" onchange="loadCommentTree()"><option value="">All Comments</option></select><!-- post change needs refetch -->
+            <select id="comments-status-filter" onchange="renderCommentTreeFromCache()" class="w-32">
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="complete">Complete</option>
@@ -2492,7 +2519,7 @@ async function renderCommentTreeTab(container) {
                 <option value="removed">Removed</option>
                 <option value="deleted">Deleted</option>
             </select>
-            <select id="comments-sort-filter" onchange="loadCommentTree()" class="w-36">
+            <select id="comments-sort-filter" onchange="loadCommentTree()" class="w-36"><!-- sort change needs refetch -->
                 <option value="">Default Sort</option>
                 <option value="deployed_at">By Deploy Date</option>
             </select>
@@ -2904,6 +2931,82 @@ function exportAnalysisCSV() {
 }
 
 let _ctPostRedditUrl = '';
+let _commentsTreeCache = [];
+let _commentsTreeIsFlat = false; // whether last load was flat (no post selected) or tree
+
+function _commentsTreeUpdateLocal(cid, patch) {
+    // Update in flat cache
+    const i = _commentsTreeCache.findIndex(c => c.id === cid);
+    if (i >= 0) Object.assign(_commentsTreeCache[i], patch);
+    // Also update inside nested replies if tree mode
+    function _deepUpdate(nodes) {
+        for (const n of nodes) {
+            if (n.id === cid) { Object.assign(n, patch); return true; }
+            if (n.replies && _deepUpdate(n.replies)) return true;
+        }
+        return false;
+    }
+    if (!_commentsTreeIsFlat) _deepUpdate(_commentsTreeCache);
+    renderCommentTreeFromCache();
+}
+
+function _commentsTreeRemoveLocal(cid) {
+    // Remove from flat cache
+    _commentsTreeCache = _commentsTreeCache.filter(c => c.id !== cid);
+    // Remove from nested replies
+    function _deepRemove(nodes) {
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].id === cid) { nodes.splice(i, 1); return true; }
+            if (nodes[i].replies && _deepRemove(nodes[i].replies)) return true;
+        }
+        return false;
+    }
+    if (!_commentsTreeIsFlat) _deepRemove(_commentsTreeCache);
+    renderCommentTreeFromCache();
+}
+
+function renderCommentTreeFromCache() {
+    const container = document.getElementById('comment-tree');
+    if (!container) return;
+    const scrollY = window.scrollY;
+    const statusFilter = document.getElementById('comments-status-filter')?.value;
+
+    if (_commentsTreeIsFlat) {
+        // Flat mode: apply status filter client-side
+        let filtered = _commentsTreeCache;
+        if (statusFilter) filtered = filtered.filter(c => c.status === statusFilter);
+        if (!filtered.length) {
+            container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
+        } else {
+            container.innerHTML = `
+                <p class="text-xs text-gray-500 mb-3">${filtered.length} comments</p>
+                ${filtered.map(c => renderCommentNodeFlat(c)).join('')}
+            `;
+        }
+    } else {
+        // Tree mode: apply status filter
+        let filteredTree = _commentsTreeCache;
+        if (statusFilter) {
+            function filterNodes(nodes) {
+                return nodes.reduce((acc, n) => {
+                    const filteredReplies = n.replies ? filterNodes(n.replies) : [];
+                    if (n.status === statusFilter || filteredReplies.length > 0) {
+                        acc.push({...n, replies: filteredReplies});
+                    }
+                    return acc;
+                }, []);
+            }
+            filteredTree = filterNodes(_commentsTreeCache);
+        }
+        if (!filteredTree.length) {
+            container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
+        } else {
+            container.innerHTML = filteredTree.map(c => renderCommentNode(c, 0)).join('');
+        }
+    }
+    window.scrollTo(0, scrollY);
+}
+
 async function loadCommentTree() {
     const pid = document.getElementById('comments-post-filter')?.value;
     const sid = document.getElementById('comments-sub-filter')?.value;
@@ -2918,6 +3021,7 @@ async function loadCommentTree() {
 
     if (!sid && !brandId) {
         container.innerHTML = ''; _ctPostRedditUrl = '';
+        _commentsTreeCache = [];
         if (autoBtn) autoBtn.style.display = 'none';
         if (removeAllBtn) removeAllBtn.style.display = 'none';
         if (autoAllBtn) autoAllBtn.style.display = 'none';
@@ -2946,27 +3050,9 @@ async function loadCommentTree() {
         if (autoAllBtn) autoAllBtn.style.display = 'none';
         if (unassignAllBtn) unassignAllBtn.style.display = 'none';
 
-        // Apply status filter to tree
-        let filteredTree = tree;
-        if (statusFilter) {
-            function filterNodes(nodes) {
-                return nodes.reduce((acc, n) => {
-                    const filteredReplies = n.replies ? filterNodes(n.replies) : [];
-                    if (n.status === statusFilter || filteredReplies.length > 0) {
-                        acc.push({...n, replies: filteredReplies});
-                    }
-                    return acc;
-                }, []);
-            }
-            filteredTree = filterNodes(tree);
-        }
-
-        if (!filteredTree.length) {
-            container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
-            return;
-        }
-
-        container.innerHTML = filteredTree.map(c => renderCommentNode(c, 0)).join('');
+        _commentsTreeCache = tree;
+        _commentsTreeIsFlat = false;
+        renderCommentTreeFromCache();
         return;
     }
 
@@ -2988,16 +3074,9 @@ async function loadCommentTree() {
     if (statusFilter) url += `status=${statusFilter}&`;
     if (sortBy) url += `sort_by=${sortBy}&`;
 
-    const comments = await api(url);
-    if (!comments.length) {
-        container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
-        return;
-    }
-
-    container.innerHTML = `
-        <p class="text-xs text-gray-500 mb-3">${comments.length} comments</p>
-        ${comments.map(c => renderCommentNodeFlat(c)).join('')}
-    `;
+    _commentsTreeCache = await api(url);
+    _commentsTreeIsFlat = true;
+    renderCommentTreeFromCache();
 }
 
 function renderCommentNodeFlat(c) {
@@ -3093,20 +3172,25 @@ function renderCommentNode(c, depth) {
 }
 
 async function assignCommentPrompt(cid) {
-    showAssignmentModal(cid, () => loadCommentTree());
+    showAssignmentModal(cid, (assignedAccount) => {
+        if (assignedAccount) _commentsTreeUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount });
+        else loadCommentTree();
+    });
 }
 
 async function unassignComment(cid) {
     if (!confirm('Unassign this comment from its account?')) return;
     await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
     toast('Comment unassigned', 'success');
-    loadCommentTree();
+    _commentsTreeUpdateLocal(cid, { status: 'draft', account_id: null });
 }
 
 async function informComment(cid) {
     await api(`/api/comments/${cid}/inform`, { method: 'POST', body: {} });
     toast('Comment marked as informed', 'success');
-    loadCommentTree();
+    if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, { status: 'informed' });
+    else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, { status: 'informed' });
+    else loadCommentTree();
 }
 
 async function autoAssignComment(cid) {
@@ -3171,17 +3255,23 @@ async function submitSingleAutoAssign() {
     const excluded = allAccounts.filter(a => !window._aaChecked.has(a.username)).map(a => a.username);
 
     closeModal();
+    let res = null;
     try {
         const endpoint = type === 'post' ? `/api/posts/${id}/auto-assign` : `/api/comments/${id}/auto-assign`;
-        const res = await api(endpoint, { method: 'POST', body: { exclude_accounts: excluded } });
+        res = await api(endpoint, { method: 'POST', body: { exclude_accounts: excluded } });
         if (res.ok) {
             toast(`Auto-assigned to u/${res.account}`, 'success');
         } else {
             toast(res.error || 'Auto-assign failed', 'error');
         }
     } catch(e) { toast('Auto-assign failed', 'error'); }
-    if (type === 'post') loadPosts();
-    else loadCommentTree();
+    if (type === 'post') {
+        if (res && res.ok) _postsUpdateLocal(id, { owner_account: res.account });
+        else loadPosts();
+    } else {
+        if (res && res.ok) _commentsTreeUpdateLocal(id, { status: 'assigned', account_id: res.account });
+        else loadCommentTree();
+    }
 }
 
 // --- Auto Assign Modal ---
@@ -3297,7 +3387,7 @@ async function submitAutoAssign() {
             r.warnings.forEach(w => toast(w, 'warning'));
         }
         closeModal();
-        loadCommentTree();
+        loadCommentTree(); // refetch: bulk auto-assign changes many comments
     } finally {
         btn.disabled = false;
         btn.textContent = 'Auto Assign';
@@ -3310,7 +3400,7 @@ async function removeAllAssigns() {
     if (!confirm('Remove all assignments (post owner + assigned comments) for this post? Informed and deployed items will NOT be affected.')) return;
     await api(`/api/posts/${pid}/unassign-all`, { method: 'POST', body: {} });
     toast('All assignments removed', 'success');
-    loadCommentTree();
+    loadCommentTree(); // refetch: bulk unassign
 }
 
 async function autoAssignAllComments() {
@@ -3444,7 +3534,7 @@ async function submitAutoAssignAll() {
         if (breakdown) msg += `\n${breakdown}`;
         toast(msg, 'success', 8000);
         closeModal();
-        loadCommentTree();
+        loadCommentTree(); // refetch: bulk auto-assign across posts
     } catch(e) {
         toast('Failed to auto-assign', 'error');
     } finally {
@@ -3460,7 +3550,7 @@ async function unassignAllComments() {
     try {
         const result = await api(`/api/subreddits/${sid}/unassign-all-comments`, { method: 'POST', body: {} });
         toast(`Unassigned ${result.unassigned} comments`, 'success');
-        loadCommentTree();
+        loadCommentTree(); // refetch: bulk unassign
     } catch(e) { toast('Failed to unassign comments', 'error'); }
 }
 
@@ -3486,37 +3576,45 @@ async function submitDeployComment(cid) {
     await api(`/api/comments/${cid}/deploy`, { method: 'POST', body: { reddit_comment_url: url, deployed_at: date || undefined } });
     toast('Comment marked as deployed', 'success');
     closeModal();
-    loadCommentTree();
+    const patch = { status: 'deployed', reddit_comment_url: url, deployed_at: date || new Date().toISOString() };
+    if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, patch);
+    else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
+    else loadCommentTree();
 }
 
 async function markCommentDeleted(cid) {
     if (!confirm('Mark this comment as deleted from Reddit?')) return;
     await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
     toast('Comment marked as deleted', 'success');
-    loadCommentTree();
+    _commentsTreeUpdateLocal(cid, { status: 'deleted' });
 }
 
 async function markCommentRemoved(cid) {
     if (!confirm('Mark this comment as removed/deleted on Reddit?')) return;
     await api(`/api/comments/${cid}/mark-removed`, { method: 'POST', body: {} });
     toast('Comment marked as removed', 'success');
-    if (currentView === 'comments') loadCommentTree();
-    else loadManagedComments();
+    if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, { status: 'removed' });
+    else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, { status: 'removed' });
+    else loadCommentTree();
 }
 
 async function markCommentPaid(cid) {
     await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
     toast('Marked as paid', 'success');
-    if (currentView === 'comments') loadCommentTree();
-    else loadManagedComments();
+    const patch = { paid_at: new Date().toISOString() };
+    if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
+    else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
+    else loadCommentTree();
 }
 
 async function undeployComment(cid) {
     if (!confirm('Undeploy this comment? It will revert to "assigned" status.')) return;
     await api(`/api/comments/${cid}/undeploy`, { method: 'POST', body: {} });
     toast('Comment undeployed', 'success');
-    if (currentView === 'comments') loadCommentTree();
-    else loadManagedComments();
+    const patch = { status: 'assigned', reddit_comment_url: null, deployed_at: null };
+    if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
+    else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
+    else loadCommentTree();
 }
 
 async function copyCommentMessage(cid) {
@@ -3567,14 +3665,14 @@ async function saveCommentEdit(cid) {
     await api(`/api/comments/${cid}/body`, { method: 'PUT', body: { body } });
     toast('Comment updated', 'success');
     closeModal();
-    loadCommentTree();
+    _commentsTreeUpdateLocal(cid, { body });
 }
 
 async function deleteComment(cid) {
     if (!confirm('Delete this comment and its replies from DB?')) return;
     await api(`/api/comments/${cid}`, { method: 'DELETE' });
     toast('Comment deleted', 'success');
-    loadCommentTree();
+    _commentsTreeRemoveLocal(cid);
 }
 
 function showGenCommentsModal() {
@@ -3801,8 +3899,8 @@ async function renderCommentManagementTab(container) {
     const subs = subredditsCache || [];
     container.innerHTML = `
         <div class="flex gap-3 mb-4 items-center flex-wrap">
-            <select id="mgmt-sub-filter" onchange="loadManagedComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select>
-            <select id="mgmt-status-filter" onchange="loadManagedComments()" class="w-36">
+            <select id="mgmt-sub-filter" onchange="loadManagedComments()" class="w-48">${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}</select><!-- sub change needs refetch -->
+            <select id="mgmt-status-filter" onchange="loadManagedComments()" class="w-36"><!-- status filter needs refetch (server-side filter) -->
                 <option value="">All Status</option>
                 <option value="complete">Complete</option>
                 <option value="assigned">Assigned</option>
@@ -3825,6 +3923,19 @@ async function renderCommentManagementTab(container) {
     loadManagedComments();
 }
 
+let _managedCommentsCache = [];
+
+function _managedCommentsUpdateLocal(cid, patch) {
+    const i = _managedCommentsCache.findIndex(c => c.id === cid);
+    if (i >= 0) Object.assign(_managedCommentsCache[i], patch);
+    renderManagedCommentsFromCache();
+}
+
+function _managedCommentsRemoveLocal(cid) {
+    _managedCommentsCache = _managedCommentsCache.filter(c => c.id !== cid);
+    renderManagedCommentsFromCache();
+}
+
 async function loadManagedComments() {
     const sid = document.getElementById('mgmt-sub-filter').value;
     const status = document.getElementById('mgmt-status-filter').value;
@@ -3836,9 +3947,19 @@ async function loadManagedComments() {
     if (status) url += `status=${status}&`;
     if (mb) url += `mentions_brand=${mb}&`;
 
-    const comments = await api(url);
+    _managedCommentsCache = await api(url);
+    renderManagedCommentsFromCache();
+}
+
+function renderManagedCommentsFromCache() {
+    const container = document.getElementById('mgmt-results');
+    if (!container) return;
+    const scrollY = window.scrollY;
+    const comments = _managedCommentsCache;
+
     if (!comments.length) {
         container.innerHTML = '<p class="text-gray-500 mt-4">No comments match filters.</p>';
+        window.scrollTo(0, scrollY);
         return;
     }
 
@@ -3875,31 +3996,35 @@ async function loadManagedComments() {
             }).join('')}</tbody>
         </table>
     `;
+    window.scrollTo(0, scrollY);
 }
 
 async function assignCommentPromptMgmt(cid) {
-    showAssignmentModal(cid, () => loadManagedComments());
+    showAssignmentModal(cid, (assignedAccount) => {
+        if (assignedAccount) _managedCommentsUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount });
+        else loadManagedComments();
+    });
 }
 
 async function unassignCommentMgmt(cid) {
     if (!confirm('Unassign this comment from its account?')) return;
     await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
     toast('Comment unassigned', 'success');
-    loadManagedComments();
+    _managedCommentsUpdateLocal(cid, { status: 'draft', account_id: null });
 }
 
 async function markCommentDeletedMgmt(cid) {
     if (!confirm('Mark this comment as deleted?')) return;
     await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
     toast('Marked deleted', 'success');
-    loadManagedComments();
+    _managedCommentsUpdateLocal(cid, { status: 'deleted' });
 }
 
 async function checkLiveComments() {
     const sid = document.getElementById('mgmt-sub-filter').value;
     runTask(`/api/subreddits/${sid}/check-live`, {}, (result) => {
         toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
-        loadManagedComments();
+        loadManagedComments(); // refetch: bulk status changes from live check
     }, 'Check Live');
 }
 
@@ -3907,7 +4032,7 @@ async function backfillKeywords() {
     const sid = document.getElementById('mgmt-sub-filter').value;
     runTask(`/api/subreddits/${sid}/backfill-keywords`, {}, (result) => {
         toast(`Processed ${result.processed} comments, ${result.with_keywords} had keywords`, 'success');
-        loadManagedComments();
+        loadManagedComments(); // refetch: bulk keyword changes
     }, 'Backfill Keywords');
 }
 
@@ -4431,7 +4556,8 @@ async function submitAddAccount() {
         const result = await api('/api/accounts', { method: 'POST', body: { username, reference } });
         toast(`Added u/${result.username} — ${(result.link_karma||0)+(result.comment_karma||0)} karma`, 'success');
         closeModal();
-        renderAccounts(document.getElementById('app'));
+        _accountsData.push(result);
+        renderAccountsTable();
     } catch(e) {
         if (btn) { btn.innerHTML = 'Add Account'; btn.disabled = false; }
     }
@@ -4509,7 +4635,7 @@ async function submitImportCsv() {
                     _removeBgTask(task_id);
                     const r = t.result;
                     toast(`Imported: ${r.imported}, Skipped: ${r.skipped}, Errors: ${r.errors}${r.error_usernames?.length ? ' (' + r.error_usernames.join(', ') + ')' : ''}`, r.errors ? 'info' : 'success');
-                    renderAccounts(document.getElementById('app'));
+                    if (currentView === 'accounts') { _accountsData = await loadAccountsList(); renderAccountsTable(); }
                 } else if (t.status === 'error') {
                     clearInterval(poll);
                     _removeBgTask(task_id);
@@ -4537,7 +4663,12 @@ async function refreshAccountData(username) {
                 if (t.status === 'complete') {
                     clearInterval(poll);
                     toast(`Refreshed u/${username}`, 'success');
-                    renderAccounts(document.getElementById('app'));
+                    // Update local cache with fresh data
+                    if (t.result) {
+                        const idx = _accountsData.findIndex(a => a.username === username);
+                        if (idx >= 0) Object.assign(_accountsData[idx], t.result);
+                    }
+                    renderAccountsTable();
                 } else if (t.status === 'error') {
                     clearInterval(poll);
                     toast(`Refresh failed: ${t.error}`, 'error');
@@ -4557,7 +4688,9 @@ function editAccountRef(username, currentRef) {
     if (newRef === null) return;
     api(`/api/accounts/${encodeURIComponent(username)}`, { method: 'PUT', body: { reference: newRef } }).then(() => {
         toast('Reference updated', 'success');
-        renderAccounts(document.getElementById('app'));
+        const idx = _accountsData.findIndex(a => a.username === username);
+        if (idx >= 0) _accountsData[idx].reference = newRef;
+        renderAccountsTable();
     });
 }
 
@@ -4565,7 +4698,8 @@ async function deleteAccountConfirm(username) {
     if (!confirm(`Delete account u/${username}? Existing comment assignments will be preserved.`)) return;
     await api(`/api/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' });
     toast(`Deleted u/${username}`, 'success');
-    renderAccounts(document.getElementById('app'));
+    _accountsData = _accountsData.filter(a => a.username !== username);
+    renderAccountsTable();
 }
 
 async function refreshAllAccounts() {
@@ -4598,7 +4732,7 @@ async function refreshAllAccounts() {
         }
         _removeBgTask(bgId);
         toast(`Refreshed ${done} accounts${failed ? `, ${failed} failed` : ''}`, done ? 'success' : 'error');
-        if (currentView === 'accounts') renderAccounts(document.getElementById('app'));
+        if (currentView === 'accounts') { _accountsData = await loadAccountsList(); renderAccountsTable(); }
     })();
 }
 
@@ -4617,7 +4751,7 @@ async function refreshStaleAccounts() {
                     _removeBgTask(bgId);
                     const r = t.result || {};
                     toast(`Refreshed ${r.refreshed || 0} / ${r.total || 0}${r.failed ? ` (${r.failed} failed)` : ''}`, r.refreshed ? 'success' : 'info');
-                    if (currentView === 'accounts') renderAccounts(document.getElementById('app'));
+                    if (currentView === 'accounts') { _accountsData = await loadAccountsList(); renderAccountsTable(); }
                 } else if (t.status === 'error') {
                     clearInterval(poll);
                     _removeBgTask(bgId);
@@ -4643,7 +4777,8 @@ async function deleteAllAccounts() {
         } catch(e) {}
     }
     toast(`Deleted ${done} accounts`, 'success');
-    renderAccounts(document.getElementById('app'));
+    _accountsData = [];
+    renderAccountsTable();
 }
 
 // --- Assignment Modal (shared by tree + management tabs) ---
@@ -4754,7 +4889,7 @@ async function selectAccountForAssignment(username) {
     await api(`/api/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
     toast(`Assigned to u/${username}`, 'success');
     closeModal();
-    if (window._assignOnSuccess) window._assignOnSuccess();
+    if (window._assignOnSuccess) window._assignOnSuccess(username);
 }
 
 async function quickAddAccountInModal() {
@@ -5170,6 +5305,9 @@ async function loadPayItems() {
         const items = data.items || [];
         const total = data.total || 0;
         const totalPages = Math.ceil(total / limit);
+        _payItemsCache = items;
+        _payItemsSummary = s;
+        _payItemsTotal = total;
 
         // Stats cards
         statsEl.innerHTML = `
@@ -5259,6 +5397,61 @@ async function loadPayItems() {
     }
 }
 
+let _payItemsCache = [];
+let _payItemsSummary = {};
+let _payItemsTotal = 0;
+
+function _payItemsUpdateLocal(type, id, patch) {
+    const i = _payItemsCache.findIndex(item => item.type === type && item.id === id);
+    if (i >= 0) Object.assign(_payItemsCache[i], patch);
+    renderPayItemsFromCache();
+}
+
+function renderPayItemsFromCache() {
+    const el = document.getElementById('pay-items');
+    if (!el) return;
+    const scrollY = window.scrollY;
+    const items = _payItemsCache;
+
+    if (!items.length) {
+        el.innerHTML = `<p class="text-gray-500 py-4">No ${_payFilter || ''} items found.</p>`;
+    } else {
+        el.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Type</th><th>Post / Content</th><th>Brand</th><th>Subreddit</th>
+                    <th>Account</th><th>Deployed</th><th>Paid</th><th>Action</th>
+                </tr></thead>
+                <tbody>${items.map(item => {
+                    const typeLabel = item.type === 'post' ? '<span class="badge badge-brand">Post</span>'
+                        : item.type === 'search_comment' ? '<span class="badge" style="background:#1a3a2a;color:#4ade80">Search</span>'
+                        : `<span class="badge ${item.mentions_brand ? 'badge-assigned' : 'badge-draft'}">${item.mentions_brand ? 'Brand' : 'Comment'}</span>`;
+                    const content = item.type === 'post'
+                        ? (item.post_title||'').substring(0,60)
+                        : `<span class="text-gray-400 text-xs">${(item.post_title||'').substring(0,30)}</span><br>${(item.body||'').substring(0,80)}`;
+                    const paidBadge = item.paid_at
+                        ? `<span class="badge" style="background:#00A86B;color:white">${item.paid_at.substring(0,10)}</span>`
+                        : '<span class="text-red-400 text-xs">Unpaid</span>';
+                    const action = item.paid_at
+                        ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPayItem('${item.type}',${item.id})">Undeploy</button>`
+                        : `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="payItem('${item.type}',${item.id})">Pay</button><button class="btn btn-sm ml-1" style="background:#8B0000;color:white" onclick="undeployPayItem('${item.type}',${item.id})">Undeploy</button>`;
+                    return `<tr>
+                        <td>${typeLabel}</td>
+                        <td style="max-width:300px">${content}</td>
+                        <td class="text-xs">${item.brand_name || '-'}</td>
+                        <td class="text-xs">${item.subreddit_name ? 'r/'+item.subreddit_name : '-'}</td>
+                        <td class="text-xs text-yellow-400">${item.account_id || '-'}</td>
+                        <td class="text-xs">${(item.deployed_at||'').substring(0,10)}</td>
+                        <td>${paidBadge}</td>
+                        <td>${action}</td>
+                    </tr>`;
+                }).join('')}</tbody>
+            </table>
+        `;
+    }
+    window.scrollTo(0, scrollY);
+}
+
 async function payItem(type, id) {
     try {
         if (type === 'comment') {
@@ -5269,7 +5462,7 @@ async function payItem(type, id) {
             await api(`/api/search/comments/${id}/mark-paid`, { method: 'POST' });
         }
         toast('Marked as paid', 'success');
-        loadPayItems();
+        _payItemsUpdateLocal(type, id, { paid_at: new Date().toISOString() });
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
@@ -5284,7 +5477,9 @@ async function undeployPayItem(type, id) {
             await api(`/api/search/comments/${id}/undeploy`, { method: 'POST' });
         }
         toast('Item undeployed', 'success');
-        loadPayItems();
+        // Remove from cache since it's no longer deployed
+        _payItemsCache = _payItemsCache.filter(item => !(item.type === type && item.id === id));
+        renderPayItemsFromCache();
     } catch(e) { toast('Failed to undeploy', 'error'); }
 }
 
@@ -5310,7 +5505,7 @@ async function markAllVisiblePaid() {
         } catch(e) {}
     }
     toast(`Marked ${count} items as paid`, 'success');
-    loadPayItems();
+    loadPayItems(); // refetch: bulk mark-paid changes summary stats
 }
 
 // =========================================================================

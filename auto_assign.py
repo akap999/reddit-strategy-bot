@@ -8,8 +8,8 @@ Hard rules (never violated):
   4. Already-assigned / deployed comments are never touched
 
 Two-pool system:
-  - High pool (100+ total karma): picked 3 out of every 4 slots
-  - Low pool (<100 total karma): picked 1 out of every 4 slots
+  - High pool (50+ total karma): picked 1 out of every 2 slots
+  - Low pool (<50 total karma): picked 1 out of every 2 slots (1:1 ratio)
   - Each pool scores and round-robins independently — no cross-assignment
   - If one pool is empty, all picks from the other pool
 
@@ -98,7 +98,7 @@ def _get_post_toplevel_accounts(db, post_id):
 # ---------------------------------------------------------------------------
 
 KARMA_THRESHOLD = 50    # accounts with total karma >= this go to High pool
-POOL_RATIO = 2          # 2 High picks per 1 Low pick (2:1 ratio)
+POOL_RATIO = 1          # 1 High pick per 1 Low pick (1:1 ratio)
 
 
 def _split_pools(accounts, threshold=KARMA_THRESHOLD):

@@ -7,11 +7,12 @@ Hard rules (never violated):
   3. Reply comments (is_reply=1) → normal scoring, exempt from uniqueness + OP exclusion
   4. Already-assigned / deployed comments are never touched
 
-Two-pool system (1:1 ratio via random 50/50 coin-flip per assignment):
-  - High pool (50+ total karma): ~50% of picks
-  - Low pool (<50 total karma): ~50% of picks
-  - Each pool scores and round-robins independently — no cross-assignment
-  - If one pool is empty, all picks from the other pool
+Two-pool system (strict 1:1 alternation via persistent monotonic counter):
+  - High pool (50+ total karma): every even slot (0, 2, 4, …)
+  - Low pool (<50 total karma): every odd slot (1, 3, 5, …)
+  - Counter stored in app_meta("pool_slot"), only increments on new assignments
+  - Deploy/undeploy/unassign/delete never affect the counter
+  - If the target pool is empty, falls back to the other pool
 
 Soft scoring picks the best account among those that pass the hard rules.
 """
@@ -127,11 +128,21 @@ def _pick_best_for_post(pool, lookups, batch_picks, sub_owner):
     return scores[0], scores
 
 
-def _pick_low_pool():
-    """Randomly returns True (pick low pool) with 50% probability for 1:1 ratio.
-    This replaces the old slot-counter approach which was fragile and broke when
-    assignment counts changed (deploys, deletions, etc.)."""
-    return random.random() < 0.5
+def _next_pool_is_low(db):
+    """Return True if the next assignment should pick from the LOW pool.
+    Uses a persistent monotonic counter in app_meta that only increments on
+    new assignments — deploy/undeploy/unassign/delete never touch it.
+    Even slot → HIGH, odd slot → LOW  →  strict 1:1 alternation."""
+    val = db.meta_get("pool_slot")
+    slot = int(val) if val else 0
+    return (slot % 2) == 1
+
+
+def _increment_pool_slot(db):
+    """Bump the persistent pool slot counter by 1. Call after every successful assignment."""
+    val = db.meta_get("pool_slot")
+    slot = int(val) if val else 0
+    db.meta_set("pool_slot", str(slot + 1))
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +398,7 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
 
     for post in draft_posts:
         # Determine which pool to pick from
-        use_low = _pick_low_pool() and low_pool
+        use_low = _next_pool_is_low(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -408,6 +419,7 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.set_post_owner(post["id"], username)
+        _increment_pool_slot(db)
         batch_picks[username] += 1
         lookups["sub_posts"][username] = lookups["sub_posts"].get(username, 0) + 1
         lookups["global_posts"][username] = lookups["global_posts"].get(username, 0) + 1
@@ -529,7 +541,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     skipped = 0
     for comment in toplevel_comments:
         # Determine pool for this slot
-        use_low = _pick_low_pool() and low_pool
+        use_low = _next_pool_is_low(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -563,6 +575,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
+        _increment_pool_slot(db)
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
@@ -586,7 +599,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     #    (exempt from uniqueness + OP exclusion)
     # ---------------------------------------------------------------
     for comment in reply_comments:
-        use_low = _pick_low_pool() and low_pool
+        use_low = _next_pool_is_low(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -606,6 +619,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
+        _increment_pool_slot(db)
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
@@ -635,7 +649,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single unassigned comment to the best-scoring account.
 
-    Uses two-pool system with random 50/50 pool selection for 1:1 ratio.
+    Uses two-pool system with persistent monotonic counter for strict 1:1 alternation.
 
     Hard rules:
       - OP reply → post owner only
@@ -689,7 +703,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         return {"error": "No valid OP account available. Assign a post owner first."}
 
     # Determine pool from global slot
-    use_low = _pick_low_pool() and low_pool
+    use_low = _next_pool_is_low(db) and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -703,6 +717,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
+        _increment_pool_slot(db)
         return {
             "ok": True, "account": username, "score": best_score, "type": "reply",
             "pool": "low" if use_low and pool_to_use is primary else "high",
@@ -734,6 +749,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
+    _increment_pool_slot(db)
     return {
         "ok": True, "account": username, "score": best_score,
         "pool": picked_pool,
@@ -748,7 +764,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 
 def auto_assign_single_post(db, post_id, exclude_accounts=None):
     """Auto-assign a single post to the best-scoring account.
-    Uses two-pool system with random 50/50 pool selection for 1:1 ratio."""
+    Uses two-pool system with persistent monotonic counter for strict 1:1 alternation."""
     post = db.get_post(post_id)
     if not post:
         return {"error": "Post not found"}
@@ -772,7 +788,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     batch_picks = defaultdict(int)
 
     # Determine pool from global slot
-    use_low = _pick_low_pool() and low_pool
+    use_low = _next_pool_is_low(db) and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -785,6 +801,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     (best_score, best_account), all_scores = result
     username = best_account["username"]
     db.set_post_owner(post_id, username)
+    _increment_pool_slot(db)
     return {
         "ok": True,
         "account": username,
@@ -814,7 +831,7 @@ def _get_search_post_toplevel_accounts(db, search_post_id):
 def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     """Auto-assign a single search comment to the best-scoring account.
 
-    Uses two-pool system with random 50/50 pool selection for 1:1 ratio.
+    Uses two-pool system with persistent monotonic counter for strict 1:1 alternation.
 
     Rules:
       - Non-reply: unique account per search post (no account already used on that post)
@@ -844,7 +861,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     is_reply = comment.get("is_reply", 0)
 
     # Determine pool from global slot
-    use_low = _pick_low_pool() and low_pool
+    use_low = _next_pool_is_low(db) and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -872,6 +889,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     username = best_account["username"]
 
     db.assign_search_comment(comment_id, username)
+    _increment_pool_slot(db)
     return {
         "ok": True, "account": username, "score": best_score,
         "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
@@ -885,7 +903,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
 
     Groups comments by search_post_id and enforces uniqueness per post for
     top-level comments. Reply comments are exempt from uniqueness.
-    Uses 3:1 high:low karma pool ratio.
+    Uses persistent monotonic counter for strict 1:1 high:low alternation.
     """
     context = db.get_search_auto_assign_context()
     draft_comments = context["draft_comments"]
@@ -918,7 +936,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             is_reply = comment.get("is_reply", 0)
 
             # Determine pool for this slot
-            use_low = _pick_low_pool() and low_pool
+            use_low = _next_pool_is_low(db) and low_pool
             primary = low_pool if use_low else high_pool
             fallback = high_pool if use_low else low_pool
 
@@ -952,6 +970,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
 
             # Assign
             db.assign_search_comment(comment["id"], username)
+            _increment_pool_slot(db)
             assignments.append({
                 "comment_id": comment["id"],
                 "account": username,

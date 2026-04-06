@@ -1642,6 +1642,117 @@ def api_gen_op_replies():
     tid = start_task("op-replies", task)
     return jsonify({"task_id": tid})
 
+@app.route("/api/generate/reply-to-comment", methods=["POST"])
+def api_gen_reply_to_comment():
+    """Generate a single reply to a specific existing comment."""
+    data = request.json
+    comment_id = data.get("comment_id")
+    brand_id = data.get("brand_id")
+    mention_brand = data.get("mention_brand", False)
+
+    if not comment_id:
+        return jsonify({"error": "comment_id required"}), 400
+
+    db = get_db()
+    try:
+        comment = db.get_comment(comment_id)
+        if not comment:
+            return jsonify({"error": "Comment not found"}), 404
+
+        post = db.get_post(comment["post_id"])
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+
+        brand = db.get_brand(brand_id) if brand_id else None
+        if not brand:
+            brands = db.get_brands_for_post(post["id"])
+            brand = brands[0] if brands else None
+        if not brand:
+            return jsonify({"error": "No brand found for this post"}), 400
+
+        subreddit = db.get_subreddit(post["subreddit_id"])
+
+        from generators.comment_gen import CommentGenerator
+        from generators.base import ClaudeClient
+        from config import ANTHROPIC_API_KEY, PROMPT_VERSION
+        claude = ClaudeClient(ANTHROPIC_API_KEY)
+        comment_gen = CommentGenerator(db, claude)
+
+        mock_tone = {
+            "formality": "casual to semi-formal",
+            "humor_style": "occasional dry humor",
+            "technical_level": "moderate",
+            "common_phrases": [],
+            "overall_vibe": "helpful community discussion",
+            "sentence_structure": "mix of short and medium",
+            "capitalization": "mostly lowercase with normal caps",
+            "punctuation_style": "casual, minimal",
+            "emotional_tone": "generally supportive",
+        }
+        mock_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250, "min_chars": 50, "max_chars": 600}
+
+        target = {
+            "body": comment["body"],
+            "score": 5,
+            "author": comment.get("account_id") or "community_member",
+            "id": "",
+            "permalink": "",
+        }
+
+        result = comment_gen.generate_comments(
+            post_title=post["title"],
+            post_body=post.get("body", ""),
+            subreddit=subreddit["name"],
+            comments=[target],
+            brand_name=brand["name"],
+            brand_context=brand.get("context", ""),
+            num_comments=1,
+            tone_analysis=mock_tone,
+            comment_stats=mock_stats,
+            mention_brand_flags=[mention_brand],
+            reply_targets={0: target},
+            relevance={"best_angle": "replying to comment", "natural_fit": 2},
+            brand_assignments=[brand if mention_brand else None],
+            all_brand_names=[brand["name"]],
+        )
+
+        bodies = result.get("generated_comments", [])
+        if not bodies:
+            return jsonify({"error": "Failed to generate reply"})
+
+        body = bodies[0]
+        mentions = mention_brand and brand["name"].lower() in body.lower()
+        r_personas = result.get("_personas", [])
+        r_structures = result.get("_structures", [])
+
+        # Use the parent's day + 1 for scheduling
+        parent_day = comment.get("suggested_post_day", 0) or 0
+
+        new_id = db.save_comment(
+            post_id=post["id"],
+            brand_id=brand["id"],
+            body=body,
+            persona_id=r_personas[0] if r_personas else None,
+            structure_id=r_structures[0] if r_structures else None,
+            is_reply=1,
+            parent_comment_id=comment_id,
+            mentions_brand=1 if mentions else 0,
+            status="complete",
+            suggested_post_day=parent_day + 1,
+            suggested_order=0,
+            prompt_version=PROMPT_VERSION,
+        )
+
+        return jsonify({
+            "ok": True,
+            "comment_id": new_id,
+            "body": body[:200],
+            "mentions_brand": mentions,
+        })
+    finally:
+        db.close()
+
+
 @app.route("/api/generate/live-comments", methods=["POST"])
 def api_gen_live_comments():
     data = request.json

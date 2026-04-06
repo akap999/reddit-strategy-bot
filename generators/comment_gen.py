@@ -16,6 +16,16 @@ from generators.base import (
     ClaudeClient, PERSONAS, STRUCTURE_TEMPLATES, BANNED_PHRASES,
     GENERATION_SYSTEM_PROMPTS, FEW_SHOT_POOL, select_few_shot_examples,
 )
+
+# Multipliers applied to avg_words to compute per-persona word-count ranges.
+# Ensures concrete targets in the prompt instead of vague labels.
+LENGTH_MULTIPLIERS = {
+    "short":        (0.2, 0.4),    # e.g. 12-24 words when avg=60
+    "short-medium": (0.35, 0.6),   # e.g. 21-36 words
+    "medium":       (0.6, 1.0),    # e.g. 36-60 words
+    "medium-long":  (1.0, 1.5),    # e.g. 60-90 words
+    "long":         (1.4, 2.2),    # e.g. 84-132 words
+}
 from config import (
     PROMPT_VERSION, DEFAULT_BRAND_MENTION_RATIO,
     COMMENT_SPREAD_DAYS, REDDIT_USER_AGENT
@@ -733,11 +743,15 @@ Return JSON only:
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 
+            avg_w = (comment_stats or {}).get("avg_words", 60)
+            lo_m, hi_m = LENGTH_MULTIPLIERS.get(persona['length'], (0.6, 1.0))
+            lo_w, hi_w = max(8, int(avg_w * lo_m)), int(avg_w * hi_m)
+
             comment_instructions.append(
                 f"  Comment {idx+1}:\n"
                 f"    PERSONA: {persona['voice']}\n"
                 f"    STRUCTURE: {structure['instruction']}\n"
-                f"    LENGTH: {persona['length']}{brand_line}{angle_line}{reply_line}"
+                f"    LENGTH: {lo_w}-{hi_w} words ({persona['length']}){brand_line}{angle_line}{reply_line}"
             )
         per_comment_section = "\n".join(comment_instructions)
 
@@ -757,13 +771,9 @@ TONE ANALYSIS (match this style):
         else:
             tone_section = "\nTONE: Match the exact style of the existing comments above."
 
-        # Length constraint
-        if comment_stats and comment_stats.get("avg_words", 0) > 0:
-            min_words = max(10, int(comment_stats["avg_words"] * 0.5))
-            max_words = int(comment_stats["avg_words"] * 1.6)
-            length_section = f"\nLENGTH: Average comment here is {comment_stats['avg_words']} words. Aim for {min_words}-{max_words} words but vary widely."
-        else:
-            length_section = ""
+        # Length constraint — each comment gets its own word-count target via
+        # per-comment LENGTH lines. The global section just reinforces variety.
+        length_section = "\nLENGTH: Each comment has its own word-count target in its assignment below. Some MUST be very short (1-2 sentences) and others much longer. Do NOT make all comments similar length — length variety is critical."
 
         retry_section = ""
         if retry_feedback:

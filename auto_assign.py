@@ -138,17 +138,36 @@ def _next_pool_is_low(db):
     """Return True if the next assignment should pick from the LOW pool.
     Uses a persistent monotonic counter in app_meta that only increments on
     new assignments — deploy/undeploy/unassign/delete never touch it.
-    Even slot → HIGH, odd slot → LOW  →  strict 1:1 alternation."""
+    Even slot → HIGH, odd slot → LOW  →  strict 1:1 alternation.
+    Used for: live search comment assignments."""
     val = db.meta_get("pool_slot")
     slot = int(val) if val else 0
     return (slot % 2) == 1
 
 
 def _increment_pool_slot(db):
-    """Bump the persistent pool slot counter by 1. Call after every successful assignment."""
+    """Bump the persistent pool slot counter by 1. Call after every successful assignment.
+    Used for: live search comment assignments (1:1 ratio)."""
     val = db.meta_get("pool_slot")
     slot = int(val) if val else 0
     db.meta_set("pool_slot", str(slot + 1))
+
+
+def _next_pool_is_low_1to3(db):
+    """Return True if the next assignment should pick from the LOW pool.
+    1:3 ratio: slot%4==0 → HIGH, slot%4 in {1,2,3} → LOW.
+    Used for: normal comment + post assignments."""
+    val = db.meta_get("pool_slot_comments")
+    slot = int(val) if val else 0
+    return (slot % 4) != 0
+
+
+def _increment_pool_slot_comments(db):
+    """Bump the comment/post pool slot counter by 1.
+    Used for: normal comment + post assignments (1:3 ratio)."""
+    val = db.meta_get("pool_slot_comments")
+    slot = int(val) if val else 0
+    db.meta_set("pool_slot_comments", str(slot + 1))
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +422,8 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
     warnings = []
 
     for post in draft_posts:
-        # Determine which pool to pick from
-        use_low = _next_pool_is_low(db) and low_pool
+        # Determine which pool to pick from (1:3 ratio for posts)
+        use_low = _next_pool_is_low_1to3(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -425,7 +444,7 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.set_post_owner(post["id"], username)
-        _increment_pool_slot(db)
+        _increment_pool_slot_comments(db)
         batch_picks[username] += 1
         lookups["sub_posts"][username] = lookups["sub_posts"].get(username, 0) + 1
         lookups["global_posts"][username] = lookups["global_posts"].get(username, 0) + 1
@@ -537,7 +556,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
     # ---------------------------------------------------------------
     # 2. Top-level non-OP: unique account per post, never the OP
-    #    Two-pool interleaving with 3:1 ratio
+    #    Two-pool interleaving with 1:3 ratio (HIGH:LOW)
     # ---------------------------------------------------------------
     op_to_exclude = op_account or post.get("owner_account") or ""
     blocked = set(used_on_post)
@@ -546,8 +565,8 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
     skipped = 0
     for comment in toplevel_comments:
-        # Determine pool for this slot
-        use_low = _next_pool_is_low(db) and low_pool
+        # Determine pool for this slot (1:3 ratio for normal comments)
+        use_low = _next_pool_is_low_1to3(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -581,7 +600,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
-        _increment_pool_slot(db)
+        _increment_pool_slot_comments(db)
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
@@ -605,7 +624,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
     #    (exempt from uniqueness + OP exclusion)
     # ---------------------------------------------------------------
     for comment in reply_comments:
-        use_low = _next_pool_is_low(db) and low_pool
+        use_low = _next_pool_is_low_1to3(db) and low_pool
         primary = low_pool if use_low else high_pool
         fallback = high_pool if use_low else low_pool
 
@@ -625,7 +644,7 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
-        _increment_pool_slot(db)
+        _increment_pool_slot_comments(db)
         batch_picks[username] += 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
@@ -708,8 +727,8 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 
         return {"error": "No valid OP account available. Assign a post owner first."}
 
-    # Determine pool from global slot
-    use_low = _next_pool_is_low(db) and low_pool
+    # Determine pool from comment/post slot (1:3 ratio)
+    use_low = _next_pool_is_low_1to3(db) and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -723,7 +742,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
-        _increment_pool_slot(db)
+        _increment_pool_slot_comments(db)
         return {
             "ok": True, "account": username, "score": best_score, "type": "reply",
             "pool": "low" if use_low and pool_to_use is primary else "high",
@@ -755,7 +774,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
-    _increment_pool_slot(db)
+    _increment_pool_slot_comments(db)
     return {
         "ok": True, "account": username, "score": best_score,
         "pool": picked_pool,
@@ -793,8 +812,8 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     sub_owner = context["subreddit"].get("owner_account") or ""
     batch_picks = defaultdict(int)
 
-    # Determine pool from global slot
-    use_low = _next_pool_is_low(db) and low_pool
+    # Determine pool from comment/post slot (1:3 ratio)
+    use_low = _next_pool_is_low_1to3(db) and low_pool
     primary = low_pool if use_low else high_pool
     fallback = high_pool if use_low else low_pool
 
@@ -807,7 +826,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     (best_score, best_account), all_scores = result
     username = best_account["username"]
     db.set_post_owner(post_id, username)
-    _increment_pool_slot(db)
+    _increment_pool_slot_comments(db)
     return {
         "ok": True,
         "account": username,

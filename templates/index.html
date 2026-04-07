@@ -304,6 +304,7 @@ function navigate(view) {
     document.querySelectorAll('.nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.view === view);
     });
+    _updateHash();
     renderView(view);
 }
 
@@ -311,6 +312,111 @@ function renderView(view) {
     const app = document.getElementById('app');
     const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
     (views[view] || views.dashboard)(app);
+}
+
+// =========================================================================
+// URL hash state persistence
+// =========================================================================
+const _hashFilterMap = {
+    posts: ['posts-brand-filter', 'posts-sub-filter', 'posts-status-filter', 'posts-intent-filter'],
+    comments: ['comments-brand-top-filter', 'comments-sub-filter', 'comments-brand-filter',
+                'comments-post-filter', 'comments-status-filter', 'comments-sort-filter'],
+    accounts: ['acct-filter-search', 'acct-filter-karma', 'acct-filter-age', 'acct-filter-ref'],
+};
+
+function _updateHash() {
+    const params = new URLSearchParams();
+    const ids = _hashFilterMap[currentView] || [];
+    for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el && el.value) params.set(id, el.value);
+    }
+    if (currentView === 'livesearch') params.set('tab', _lsTab);
+    const hash = params.toString() ? `${currentView}?${params}` : currentView;
+    history.replaceState(null, '', '#' + hash);
+}
+
+function _restoreFromHash() {
+    const hash = location.hash.slice(1);
+    if (!hash) return null;
+    const qIdx = hash.indexOf('?');
+    const view = qIdx >= 0 ? hash.slice(0, qIdx) : hash;
+    const queryStr = qIdx >= 0 ? hash.slice(qIdx + 1) : '';
+    if (!view) return null;
+    return { view, params: new URLSearchParams(queryStr) };
+}
+
+async function _applyRestoredFilters(view, params) {
+    if (!params || !params.toString()) return;
+
+    if (view === 'livesearch') {
+        const tab = params.get('tab');
+        if (tab) { _lsTab = tab; renderLsTabContent(); }
+        return;
+    }
+
+    if (view === 'accounts') {
+        for (const [id, val] of params) {
+            const el = document.getElementById(id);
+            if (el) el.value = val;
+        }
+        applyAccountFilters();
+        return;
+    }
+
+    if (view === 'posts') {
+        // Brand filter → populates sub dropdown → then set sub + load
+        const brand = params.get('posts-brand-filter');
+        if (brand) {
+            const el = document.getElementById('posts-brand-filter');
+            if (el) el.value = brand;
+            onPostsBrandChange();  // populates sub dropdown + calls loadPosts
+            // Wait for loadPosts to finish, then set remaining filters
+            await new Promise(r => setTimeout(r, 300));
+        }
+        const sub = params.get('posts-sub-filter');
+        if (sub) {
+            const el = document.getElementById('posts-sub-filter');
+            if (el) el.value = sub;
+        }
+        await loadPosts();
+        // Set client-side filters after data is loaded
+        const status = params.get('posts-status-filter');
+        if (status) { const el = document.getElementById('posts-status-filter'); if (el) el.value = status; }
+        const intent = params.get('posts-intent-filter');
+        if (intent) { const el = document.getElementById('posts-intent-filter'); if (el) el.value = intent; }
+        renderPostsFromCache();
+        return;
+    }
+
+    if (view === 'comments') {
+        // Cascade: brand-top → sub → brand → post → status/sort
+        const brandTop = params.get('comments-brand-top-filter');
+        if (brandTop) {
+            const el = document.getElementById('comments-brand-top-filter');
+            if (el) el.value = brandTop;
+        }
+        onCtBrandFilterChange();  // populates sub dropdown
+        await new Promise(r => setTimeout(r, 300));
+
+        const sub = params.get('comments-sub-filter');
+        if (sub) {
+            const el = document.getElementById('comments-sub-filter');
+            if (el) el.value = sub;
+        }
+        await loadBrandsAndPostsForComments();  // populates brand + post dropdowns
+
+        const brand = params.get('comments-brand-filter');
+        if (brand) { const el = document.getElementById('comments-brand-filter'); if (el) el.value = brand; }
+        const post = params.get('comments-post-filter');
+        if (post) { const el = document.getElementById('comments-post-filter'); if (el) el.value = post; }
+        const status = params.get('comments-status-filter');
+        if (status) { const el = document.getElementById('comments-status-filter'); if (el) el.value = status; }
+        const sort = params.get('comments-sort-filter');
+        if (sort) { const el = document.getElementById('comments-sort-filter'); if (el) el.value = sort; }
+        await loadCommentTree();
+        return;
+    }
 }
 
 // =========================================================================
@@ -1956,6 +2062,7 @@ async function loadPosts() {
     }
     _postsCache = await api(url);
     renderPostsFromCache();
+    _updateHash();
 }
 
 function renderPostsFromCache() {
@@ -2009,6 +2116,7 @@ function renderPostsFromCache() {
         </table>
     `;
     window.scrollTo(0, scrollY);
+    _updateHash();
 }
 
 async function showPostDetail(pid) {
@@ -2574,6 +2682,7 @@ function onCtBrandFilterChange() {
         subFilter.innerHTML = '<option value="">All Subreddits</option>' + filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     }
     loadBrandsAndPostsForComments();
+    _updateHash();
 }
 
 let _commentsPosts = []; // cached for brand filtering
@@ -3032,6 +3141,7 @@ function renderCommentTreeFromCache() {
         }
     }
     window.scrollTo(0, scrollY);
+    _updateHash();
 }
 
 async function loadCommentTree() {
@@ -4490,6 +4600,7 @@ function applyAccountFilters() {
     _accountsFilterState.reference = document.getElementById('acct-filter-ref')?.value || '';
     _accountsFilterState.search = document.getElementById('acct-filter-search')?.value || '';
     renderAccountsTable();
+    _updateHash();
 }
 
 function renderAccountsTable() {
@@ -5782,6 +5893,7 @@ function renderLsTabContent() {
     else if (_lsTab === 'saved') renderLsSaved(c);
     else if (_lsTab === 'comments') renderLsComments(c);
     else if (_lsTab === 'assigned') renderLsAssignedAccounts(c);
+    _updateHash();
 }
 
 // --- Search Tab ---
@@ -7467,7 +7579,16 @@ function updateCalMonthLabel() {
 // Initialize
 // =========================================================================
 _restoreBgTasks();
-navigate('dashboard');
+const _hashState = _restoreFromHash();
+if (_hashState) {
+    navigate(_hashState.view);
+    // Restore filters after the view renders (DOM needs to exist first)
+    if (_hashState.params.toString()) {
+        setTimeout(() => _applyRestoredFilters(_hashState.view, _hashState.params), 200);
+    }
+} else {
+    navigate('dashboard');
+}
 </script>
 </body>
 </html>

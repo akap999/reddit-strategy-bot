@@ -210,11 +210,11 @@ def score_account(account, comment, lookups, batch_picks):
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
 
-    # --- Global lifetime rotation: -20 per lifetime assignment, platform-wide ---
-    # Must exceed the max bonus gap within a pool (karma +2, age +5, spread +8 = 15)
-    # so that any account with 1+ assignment always loses to a fresh account.
-    # This forces true round-robin through all ~130 LOW accounts before reuse.
-    score -= 20 * lookups.get("lifetime", {}).get(username, 0)
+    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
+    # One canonical counter sourced from accounts.lifetime_assignments. Grows on
+    # every assign, shrinks on every unassign/delete. Applies identically in
+    # both High and Low pools and to post scoring — the long-term fairness floor.
+    score -= 8 * lookups.get("lifetime", {}).get(username, 0)
 
     # =====================================================================
     # LIGHT bonuses — within-pool ordering (tiebreakers)
@@ -341,10 +341,10 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
 
-    # --- Global lifetime rotation: -20 per lifetime assignment, platform-wide ---
+    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
     # Same weight & source as score_account — one counter, one penalty,
     # identical behavior across comment and post assignment.
-    score -= 20 * lookups.get("lifetime", {}).get(username, 0)
+    score -= 8 * lookups.get("lifetime", {}).get(username, 0)
 
     # =====================================================================
     # LIGHT bonuses — within-pool ordering (tiebreakers)

@@ -356,11 +356,21 @@ async function _applyRestoredFilters(view, params) {
     }
 
     if (view === 'accounts') {
+        // Set state directly (DOM may not exist yet if API call is still pending)
+        const idToState = {
+            'acct-filter-search': 'search',
+            'acct-filter-karma': 'min_karma',
+            'acct-filter-age': 'min_age_days',
+            'acct-filter-ref': 'reference',
+        };
         for (const [id, val] of params) {
+            const stateKey = idToState[id];
+            if (stateKey) _accountsFilterState[stateKey] = val;
             const el = document.getElementById(id);
             if (el) el.value = val;
         }
-        applyAccountFilters();
+        // If table already rendered, re-apply filters; otherwise renderAccounts() will pick up state
+        if (document.getElementById('accounts-table-area')) applyAccountFilters();
         return;
     }
 
@@ -4706,7 +4716,8 @@ function renderAccountsTable() {
 
     // Update count to reflect filtered results
     const countEl = document.getElementById('acct-count');
-    if (countEl) countEl.textContent = searchTerm ? `${sorted.length} / ${_accountsData.length} accounts` : `${_accountsData.length} accounts`;
+    const hasAnyFilter = searchTerm || minKarma > 0 || minAgeDays > 0 || refSearch;
+    if (countEl) countEl.textContent = hasAnyFilter ? `${sorted.length} / ${_accountsData.length} accounts` : `${_accountsData.length} accounts`;
 
     container.innerHTML = `
         <div class="overflow-x-auto">

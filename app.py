@@ -3156,6 +3156,17 @@ def api_delete_account(username):
     finally:
         db.close()
 
+@app.route("/api/accounts/<username>/toggle-exclude", methods=["POST"])
+def api_toggle_account_exclude(username):
+    db = get_db()
+    try:
+        new_val = db.toggle_account_excluded(username)
+        if new_val is None:
+            return jsonify({"error": "Account not found"}), 404
+        return jsonify({"ok": True, "excluded": new_val})
+    finally:
+        db.close()
+
 @app.route("/api/accounts/<username>/refresh", methods=["POST"])
 def api_refresh_account(username):
     def task():

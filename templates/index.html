@@ -4558,8 +4558,14 @@ function renderAccountsTable() {
         const warnBadge = refreshWarn
             ? `<span title="${refreshWarn.replace(/"/g,'&quot;')}" style="color:#f59e0b;margin-left:4px;cursor:help">⚠</span>`
             : '';
-        return `<tr>
-            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline">${a.username}</a>${warnBadge}</td>
+        const isExcluded = a.excluded ? true : false;
+        const rowStyle = isExcluded ? ' style="opacity:0.45"' : '';
+        const excludeBadge = isExcluded ? '<span class="badge ml-1" style="background:#4a1a2a;color:#ff6b9b">Excluded</span>' : '';
+        const excludeBtn = isExcluded
+            ? `<button class="btn btn-sm" style="background:#1a4a2a;color:#4ade80" onclick="toggleAccountExclude('${a.username}')">Include</button>`
+            : `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="toggleAccountExclude('${a.username}')">Exclude</button>`;
+        return `<tr${rowStyle}>
+            <td class="text-sm"><a href="https://www.reddit.com/user/${a.username}" target="_blank" class="text-orange-500 hover:underline">${a.username}</a>${warnBadge}${excludeBadge}</td>
             <td class="text-sm text-gray-400">${(a.link_karma || 0).toLocaleString()}</td>
             <td class="text-sm text-gray-400">${(a.comment_karma || 0).toLocaleString()}</td>
             <td class="text-sm font-medium">${totalKarma.toLocaleString()}</td>
@@ -4571,6 +4577,7 @@ function renderAccountsTable() {
             <td class="text-sm">${(a.owned_subreddits||0) > 0 || (a.owned_posts||0) > 0 ? `<span class="badge" style="background:#0079D3;color:white">Owner: ${a.owned_subreddits||0} subs, ${a.owned_posts||0} posts</span>` : ''}</td>
             <td class="text-xs">
                 <div class="flex gap-1">
+                    ${excludeBtn}
                     <button class="btn btn-sm btn-secondary" onclick="refreshAccountData('${a.username}')" id="refresh-btn-${a.username}">Refresh</button>
                     <button class="btn btn-sm btn-secondary" onclick="editAccountRef('${a.username}', '${(a.reference || '').replace(/'/g, "\\'")}')">Edit Ref</button>
                     <button class="btn btn-sm btn-danger" onclick="deleteAccountConfirm('${a.username}')">Del</button>
@@ -4768,6 +4775,16 @@ function editAccountRef(username, currentRef) {
         if (idx >= 0) _accountsData[idx].reference = newRef;
         renderAccountsTable();
     });
+}
+
+async function toggleAccountExclude(username) {
+    try {
+        const res = await api(`/api/accounts/${encodeURIComponent(username)}/toggle-exclude`, { method: 'POST' });
+        const acct = _accountsData.find(a => a.username === username);
+        if (acct) acct.excluded = res.excluded;
+        toast(res.excluded ? `u/${username} excluded from assignments` : `u/${username} included back in assignments`, 'success');
+        renderAccountsTable();
+    } catch(e) {}
 }
 
 async function deleteAccountConfirm(username) {

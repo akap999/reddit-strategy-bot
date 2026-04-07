@@ -981,6 +981,9 @@ class Database:
                    )"""
             )
             self.conn.commit()
+        if "excluded" not in acct_cols:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
         # Re-sync lifetime_assignments from actual DB state (fixes drift caused
         # by delete_subreddit/delete_account paths that previously skipped
         # _decrement_lifetime calls).
@@ -1800,6 +1803,16 @@ class Database:
         self.conn.execute("UPDATE accounts SET reference = ? WHERE username = ?", (reference, username))
         self.conn.commit()
 
+    def toggle_account_excluded(self, username):
+        """Toggle the excluded flag on an account. Returns new excluded value."""
+        row = self.conn.execute("SELECT excluded FROM accounts WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return None
+        new_val = 0 if row["excluded"] else 1
+        self.conn.execute("UPDATE accounts SET excluded = ? WHERE username = ?", (new_val, username))
+        self.conn.commit()
+        return new_val
+
     def delete_account(self, username):
         # Adjust lifetime counter before clearing assignments
         comment_cnt = self.conn.execute(
@@ -1888,7 +1901,9 @@ class Database:
             (subreddit_id,)
         ).fetchall()]
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM accounts WHERE excluded = 0 ORDER BY username"
+        ).fetchall()]
 
         # Per-account count of posts they already own across ALL subreddits
         account_post_counts = [dict(r) for r in self.conn.execute(
@@ -2048,7 +2063,9 @@ class Database:
             (post_id,)
         ).fetchall()]
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM accounts WHERE excluded = 0 ORDER BY username"
+        ).fetchall()]
 
         # Cross-table: subreddit day assignments from BOTH comments and search_comments
         sub_name = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (sub_id,)).fetchone()
@@ -2207,7 +2224,9 @@ class Database:
                     "account_deployed_counts": [], "subreddit_deployed_counts": [],
                     "account_post_ownership": [], "account_sub_spread": []}
 
-        all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
+        all_accounts = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM accounts WHERE excluded = 0 ORDER BY username"
+        ).fetchall()]
 
         # Distinct subreddits in the draft batch
         sub_names = list(set(c["subreddit"] for c in draft_comments if c.get("subreddit")))

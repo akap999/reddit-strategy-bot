@@ -4648,7 +4648,7 @@ function renderAllCommentCard(c) {
             ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
             ${c.mentions_brand ? '<span class="badge" style="background:#FF4500;color:white;font-size:0.6rem">brand</span>' : ''}
             ${kwPills}
-            <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
+            <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}
             ${c.account_id ? `<span class="text-xs font-medium" style="color:#FFD700">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
             ${_commentStatusDate(c)}
             ${redditLink}
@@ -6915,7 +6915,7 @@ function lsFilterComments() {
                             ${lsKeywordBadges(lsMatchKeywords(c.body, c.brand_id))}
                         </td>
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
-                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}<br>${_commentStatusDate(c)}</td>
+                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}<br>${_commentStatusDate(c)}</td>
                         <td>
                             <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                                 ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>` : ''}

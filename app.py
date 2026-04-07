@@ -155,6 +155,23 @@ def get_db():
 # Reddit proxy helper
 # ---------------------------------------------------------------------------
 
+def _normalize_reddit_comment_url(url):
+    """Normalize a Reddit comment URL to a path suitable for .json fetch.
+    Returns the path (e.g. /r/sub/comments/id/.../cid.json) or None if unrecognizable."""
+    import re
+    if not url:
+        return None
+    clean = url.split("?")[0].rstrip("/")
+    # Strip any reddit domain variant (www, old, new, np, m, etc.)
+    path = re.sub(r'^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com', '', clean)
+    # If the path still starts with http, it's an unrecognized domain (e.g. redd.it)
+    if path.startswith('http://') or path.startswith('https://'):
+        return None
+    # Ensure path starts with /
+    if not path.startswith('/'):
+        return None
+    return path + ".json"
+
 def _reddit_get(path, timeout=15):
     """GET a Reddit API path, routing through Cloudflare proxy if configured.
     path should start with / e.g. /user/spez/about.json
@@ -1118,17 +1135,23 @@ def api_check_live(sid):
             for item in deployed:
                 checked += 1
                 url = item["reddit_comment_url"]
+                path = _normalize_reddit_comment_url(url)
+                if not path:
+                    print(f"[CHECK-LIVE] Skipping #{item['id']}: unrecognizable URL {url}", flush=True)
+                    errors += 1
+                    continue
                 try:
-                    # Fetch the comment JSON from Reddit via proxy
-                    clean = url.split("?")[0].rstrip("/")
-                    path = clean.replace("https://www.reddit.com", "") + ".json"
                     resp = _reddit_get(path)
+                    if resp.status_code == 429:
+                        print(f"[CHECK-LIVE] Rate limited, waiting 10s", flush=True)
+                        _time.sleep(10)
+                        errors += 1
+                        continue
                     if resp.status_code == 404:
                         db.mark_comment_deleted(item["id"])
                         dead += 1
                     elif resp.status_code == 200:
                         data = resp.json()
-                        # Reddit comment URL .json returns a list of listings
                         found_deleted = False
                         if isinstance(data, list) and len(data) > 1:
                             children = data[1].get("data", {}).get("children", [])
@@ -1141,10 +1164,13 @@ def api_check_live(sid):
                             db.mark_comment_deleted(item["id"])
                             dead += 1
                         else:
+                            db.set_comment_live_check(item["id"])
                             live += 1
                     else:
+                        print(f"[CHECK-LIVE] #{item['id']} got HTTP {resp.status_code}", flush=True)
                         errors += 1
-                except Exception:
+                except Exception as e:
+                    print(f"[CHECK-LIVE] Error checking #{item['id']} ({url}): {e}", flush=True)
                     errors += 1
                 _time.sleep(2)
             return {"checked": checked, "live": live, "dead": dead, "errors": errors}
@@ -1172,10 +1198,18 @@ def api_check_live_search_comments():
             for item in deployed:
                 checked += 1
                 url = item["reddit_comment_url"]
+                path = _normalize_reddit_comment_url(url)
+                if not path:
+                    print(f"[CHECK-LIVE-SEARCH] Skipping #{item['id']}: unrecognizable URL {url}", flush=True)
+                    errors += 1
+                    continue
                 try:
-                    clean = url.split("?")[0].rstrip("/")
-                    path = clean.replace("https://www.reddit.com", "") + ".json"
                     resp = _reddit_get(path)
+                    if resp.status_code == 429:
+                        print(f"[CHECK-LIVE-SEARCH] Rate limited, waiting 10s", flush=True)
+                        _time.sleep(10)
+                        errors += 1
+                        continue
                     if resp.status_code == 404:
                         db.mark_search_comment_removed(item["id"])
                         dead += 1
@@ -1193,10 +1227,13 @@ def api_check_live_search_comments():
                             db.mark_search_comment_removed(item["id"])
                             dead += 1
                         else:
+                            db.set_search_comment_live_check(item["id"])
                             live += 1
                     else:
+                        print(f"[CHECK-LIVE-SEARCH] #{item['id']} got HTTP {resp.status_code}", flush=True)
                         errors += 1
-                except Exception:
+                except Exception as e:
+                    print(f"[CHECK-LIVE-SEARCH] Error checking #{item['id']} ({url}): {e}", flush=True)
                     errors += 1
                 _time.sleep(2)
             return {"checked": checked, "live": live, "dead": dead, "errors": errors}

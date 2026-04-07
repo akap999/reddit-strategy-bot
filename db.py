@@ -822,6 +822,7 @@ class Database:
             "paid_at": "ALTER TABLE comments ADD COLUMN paid_at TEXT",
             "assigned_at": "ALTER TABLE comments ADD COLUMN assigned_at TEXT",
             "informed_at": "ALTER TABLE comments ADD COLUMN informed_at TEXT",
+            "last_live_check": "ALTER TABLE comments ADD COLUMN last_live_check TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -922,6 +923,7 @@ class Database:
             "paid_at": "ALTER TABLE search_comments ADD COLUMN paid_at TEXT",
             "assigned_at": "ALTER TABLE search_comments ADD COLUMN assigned_at TEXT",
             "informed_at": "ALTER TABLE search_comments ADD COLUMN informed_at TEXT",
+            "last_live_check": "ALTER TABLE search_comments ADD COLUMN last_live_check TEXT",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -1380,6 +1382,7 @@ class Database:
                         c.paid_at, c.reddit_comment_url, c.comment_type,
                         c.suggested_post_day, c.suggested_order,
                         c.is_ours, c.matched_keywords, c.assigned_at, c.informed_at,
+                        c.last_live_check,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name, b.name as brand_name,
@@ -1395,6 +1398,7 @@ class Database:
                         sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                         0 as suggested_post_day, 0 as suggested_order,
                         1 as is_ours, NULL as matched_keywords, sc.assigned_at, sc.informed_at,
+                        sc.last_live_check,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,
@@ -3058,6 +3062,20 @@ class Database:
         """Mark a deployed search comment as removed/deleted on Reddit."""
         self.conn.execute(
             "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            (comment_id,))
+        self.conn.commit()
+
+    def set_comment_live_check(self, comment_id):
+        """Record that a regular comment was verified live on Reddit."""
+        self.conn.execute(
+            "UPDATE comments SET last_live_check = datetime('now') WHERE id = ?",
+            (comment_id,))
+        self.conn.commit()
+
+    def set_search_comment_live_check(self, comment_id):
+        """Record that a search comment was verified live on Reddit."""
+        self.conn.execute(
+            "UPDATE search_comments SET last_live_check = datetime('now') WHERE id = ?",
             (comment_id,))
         self.conn.commit()
 

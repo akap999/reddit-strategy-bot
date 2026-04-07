@@ -3216,6 +3216,14 @@ async function loadCommentTree() {
     renderCommentTreeFromCache();
 }
 
+function _commentStatusDate(c) {
+    if (c.paid_at) return `<span class="text-xs text-gray-500">Paid ${c.paid_at.substring(0,10)}</span>`;
+    if (c.status === 'deployed' && c.deployed_at) return `<span class="text-xs text-gray-500">Deployed ${c.deployed_at.substring(0,10)}</span>`;
+    if (c.status === 'informed' && c.informed_at) return `<span class="text-xs text-gray-500">Informed ${c.informed_at.substring(0,10)}</span>`;
+    if (c.assigned_at && (c.status === 'assigned' || c.status === 'informed')) return `<span class="text-xs text-gray-500">Assigned ${c.assigned_at.substring(0,10)}</span>`;
+    return '';
+}
+
 function renderCommentNodeFlat(c) {
     let kwPills = '';
     try {
@@ -3228,8 +3236,6 @@ function renderCommentNodeFlat(c) {
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
-
-    const deployedDate = c.deployed_at ? `<span class="text-xs text-gray-500">${c.deployed_at.substring(0, 10)}</span>` : '';
 
     return `
         <div class="mb-2">
@@ -3245,7 +3251,7 @@ function renderCommentNodeFlat(c) {
                     ${kwPills}
                     <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
                     ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
-                    ${deployedDate}
+                    ${_commentStatusDate(c)}
                     <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
                         <button class="btn btn-sm btn-secondary" onclick="generateReplyToComment(${c.id}, ${c.post_id})">Reply</button>
                         <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
@@ -3293,7 +3299,7 @@ function renderCommentNode(c, depth) {
                     <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
                     ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
                     <span class="text-xs text-gray-500">Day ${c.suggested_post_day}</span>
-                    ${c.deployed_at ? `<span class="text-xs text-gray-500">${c.deployed_at.substring(0, 10)}</span>` : ''}
+                    ${_commentStatusDate(c)}
                     ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
                     ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-orange-500 hover:underline">reddit</a>` : ''}
                     <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
@@ -3312,7 +3318,7 @@ function renderCommentNode(c, depth) {
 
 async function assignCommentPrompt(cid) {
     showAssignmentModal(cid, (assignedAccount) => {
-        if (assignedAccount) _commentsTreeUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount });
+        if (assignedAccount) _commentsTreeUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
         else loadCommentTree();
     });
 }
@@ -3327,8 +3333,9 @@ async function unassignComment(cid) {
 async function informComment(cid) {
     await api(`/api/comments/${cid}/inform`, { method: 'POST', body: {} });
     toast('Comment marked as informed', 'success');
-    if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, { status: 'informed' });
-    else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, { status: 'informed' });
+    const patch = { status: 'informed', informed_at: new Date().toISOString() };
+    if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, patch);
+    else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else loadCommentTree();
 }
 
@@ -3408,7 +3415,7 @@ async function submitSingleAutoAssign() {
         if (res && res.ok) _postsUpdateLocal(id, { owner_account: res.account });
         else loadPosts();
     } else {
-        if (res && res.ok) _commentsTreeUpdateLocal(id, { status: 'assigned', account_id: res.account });
+        if (res && res.ok) _commentsTreeUpdateLocal(id, { status: 'assigned', account_id: res.account, assigned_at: new Date().toISOString() });
         else loadCommentTree();
     }
 }
@@ -4182,7 +4189,7 @@ function renderManagedCommentsFromCache() {
 
 async function assignCommentPromptMgmt(cid) {
     showAssignmentModal(cid, (assignedAccount) => {
-        if (assignedAccount) _managedCommentsUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount });
+        if (assignedAccount) _managedCommentsUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
         else loadManagedComments();
     });
 }
@@ -6646,7 +6653,7 @@ function lsFilterComments() {
                             ${lsKeywordBadges(lsMatchKeywords(c.body, c.brand_id))}
                         </td>
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
-                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                        <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}<br>${_commentStatusDate(c)}</td>
                         <td>
                             <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                                 ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>` : ''}
@@ -6866,7 +6873,7 @@ async function _lsAutoAssignSingle() {
         if (result.error) { toast(result.error, 'error'); return; }
         toast(`Assigned to ${result.account} (score: ${result.score})`, 'success');
         closeModal();
-        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: result.account });
+        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: result.account, assigned_at: new Date().toISOString() });
     } catch(e) {
         toast('Auto-assign failed', 'error');
     } finally {
@@ -6879,7 +6886,7 @@ async function lsDoAssign(cid, username) {
         await api(`/api/search/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
         closeModal();
         toast(`Assigned to u/${username}`, 'success');
-        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: username });
+        _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: username, assigned_at: new Date().toISOString() });
     } catch(e) {}
 }
 
@@ -6895,7 +6902,7 @@ async function lsInformComment(cid) {
     try {
         await api(`/api/search/comments/${cid}/inform`, { method: 'POST' });
         toast('Marked as informed', 'success');
-        _lsUpdateCommentLocal(cid, { status: 'informed' });
+        _lsUpdateCommentLocal(cid, { status: 'informed', informed_at: new Date().toISOString() });
     } catch(e) {}
 }
 

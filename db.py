@@ -820,6 +820,8 @@ class Database:
             "deleted_at": "ALTER TABLE comments ADD COLUMN deleted_at TEXT",
             "comment_type": "ALTER TABLE comments ADD COLUMN comment_type TEXT DEFAULT ''",
             "paid_at": "ALTER TABLE comments ADD COLUMN paid_at TEXT",
+            "assigned_at": "ALTER TABLE comments ADD COLUMN assigned_at TEXT",
+            "informed_at": "ALTER TABLE comments ADD COLUMN informed_at TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -914,11 +916,16 @@ class Database:
         """)
         self.conn.commit()
 
-        # paid_at migration for search_comments
+        # search_comments migrations
         sc_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(search_comments)").fetchall()]
-        if "paid_at" not in sc_cols:
-            self.conn.execute("ALTER TABLE search_comments ADD COLUMN paid_at TEXT")
-            self.conn.commit()
+        for col, sql in {
+            "paid_at": "ALTER TABLE search_comments ADD COLUMN paid_at TEXT",
+            "assigned_at": "ALTER TABLE search_comments ADD COLUMN assigned_at TEXT",
+            "informed_at": "ALTER TABLE search_comments ADD COLUMN informed_at TEXT",
+        }.items():
+            if col not in sc_cols:
+                self.conn.execute(sql)
+                self.conn.commit()
 
         # paid_at migration for posts
         post_cols2 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]
@@ -1100,7 +1107,7 @@ class Database:
         ).fetchone()
         prior = row["account_id"] if row else None
         self.conn.execute(
-            "UPDATE comments SET account_id = ?, status = 'assigned' WHERE id = ?",
+            "UPDATE comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now') WHERE id = ?",
             (account_id, comment_id)
         )
         if prior and prior != account_id:
@@ -1151,7 +1158,7 @@ class Database:
 
     def inform_comment(self, comment_id):
         self.conn.execute(
-            "UPDATE comments SET status = 'informed' WHERE id = ? AND status = 'assigned'",
+            "UPDATE comments SET status = 'informed', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
             (comment_id,)
         )
         self.conn.commit()
@@ -2900,7 +2907,7 @@ class Database:
         ).fetchone()
         prior = row["account_id"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET account_id = ?, status = 'assigned' WHERE id = ?",
+            "UPDATE search_comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now') WHERE id = ?",
             (account_id, comment_id))
         if prior and prior != account_id:
             self._decrement_lifetime(prior)
@@ -2943,7 +2950,7 @@ class Database:
 
     def inform_search_comment(self, comment_id):
         self.conn.execute(
-            "UPDATE search_comments SET status = 'informed' WHERE id = ? AND status = 'assigned'",
+            "UPDATE search_comments SET status = 'informed', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
             (comment_id,))
         self.conn.commit()
 

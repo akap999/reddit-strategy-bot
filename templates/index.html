@@ -218,14 +218,48 @@ async function _killTask(taskId) {
     toast('Task cancelled', 'info');
 }
 
+function _syncTasksToStorage() {
+    const arr = [..._bgTasks.entries()].map(([id, t]) => ({ id, label: t.label }));
+    localStorage.setItem('_bgTasks', JSON.stringify(arr));
+}
+
 function _addBgTask(taskId, label) {
     _bgTasks.set(taskId, { label });
+    _syncTasksToStorage();
     _renderTaskBar();
 }
 
 function _removeBgTask(taskId) {
     _bgTasks.delete(taskId);
+    _syncTasksToStorage();
     _renderTaskBar();
+}
+
+function _pollTask(taskId, label, onComplete) {
+    let retries = 0;
+    const poll = setInterval(async () => {
+        try {
+            const t = await api(`/api/tasks/${taskId}`);
+            retries = 0;
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                _removeBgTask(taskId);
+                toast(`${label} complete!`, 'success');
+                if (onComplete) onComplete(t.result);
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                _removeBgTask(taskId);
+                toast(`${label} failed: ${t.error}`, 'error');
+            }
+        } catch (e) {
+            retries++;
+            if (retries > 5) {
+                clearInterval(poll);
+                _removeBgTask(taskId);
+                toast(`${label} lost — please try again`, 'error');
+            }
+        }
+    }, 2000);
 }
 
 async function runTask(url, body, onComplete, label) {
@@ -234,33 +268,20 @@ async function runTask(url, body, onComplete, label) {
     try {
         const { task_id } = await api(url, { method: 'POST', body });
         _addBgTask(task_id, taskLabel);
-        let retries = 0;
-        const poll = setInterval(async () => {
-            try {
-                const t = await api(`/api/tasks/${task_id}`);
-                retries = 0;
-                if (t.status === 'complete') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    toast(`${taskLabel} complete!`, 'success');
-                    if (onComplete) onComplete(t.result);
-                } else if (t.status === 'error') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    toast(`${taskLabel} failed: ${t.error}`, 'error');
-                }
-            } catch (e) {
-                retries++;
-                if (retries > 5) {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    toast(`${taskLabel} lost — please try again`, 'error');
-                }
-            }
-        }, 2000);
+        _pollTask(task_id, taskLabel, onComplete);
     } catch (e) {
         toast(`Failed to start ${taskLabel}`, 'error');
     }
+}
+
+function _restoreBgTasks() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('_bgTasks') || '[]');
+        for (const { id, label } of saved) {
+            _addBgTask(id, label);
+            _pollTask(id, label, null);
+        }
+    } catch(e) { localStorage.removeItem('_bgTasks'); }
 }
 
 function _batchGenComplete(result) {
@@ -7428,6 +7449,7 @@ function updateCalMonthLabel() {
 // =========================================================================
 // Initialize
 // =========================================================================
+_restoreBgTasks();
 navigate('dashboard');
 </script>
 </body>

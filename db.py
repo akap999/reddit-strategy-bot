@@ -1459,6 +1459,15 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_deployed_search_comment_urls(self):
+        """Get all deployed search comments with their Reddit URLs."""
+        rows = self.conn.execute(
+            """SELECT sc.id, sc.reddit_comment_url
+               FROM search_comments sc
+               WHERE sc.status = 'deployed' AND sc.reddit_comment_url IS NOT NULL"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_published_posts_with_urls(self, subreddit_id):
         """Get posts that have Reddit URLs linked (published posts)."""
         rows = self.conn.execute(

@@ -1154,6 +1154,59 @@ def api_check_live(sid):
     tid = start_task("check-live", task)
     return jsonify({"task_id": tid})
 
+@app.route("/api/search/comments/check-live", methods=["POST"])
+def api_check_live_search_comments():
+    """Check deployed search comments against Reddit to find removed/deleted ones."""
+    import time as _time
+
+    def task():
+        db = Database(DB_PATH)
+        db.connect()
+        db.initialize()
+        try:
+            deployed = db.get_deployed_search_comment_urls()
+            checked = 0
+            live = 0
+            dead = 0
+            errors = 0
+            for item in deployed:
+                checked += 1
+                url = item["reddit_comment_url"]
+                try:
+                    clean = url.split("?")[0].rstrip("/")
+                    path = clean.replace("https://www.reddit.com", "") + ".json"
+                    resp = _reddit_get(path)
+                    if resp.status_code == 404:
+                        db.mark_search_comment_removed(item["id"])
+                        dead += 1
+                    elif resp.status_code == 200:
+                        data = resp.json()
+                        found_deleted = False
+                        if isinstance(data, list) and len(data) > 1:
+                            children = data[1].get("data", {}).get("children", [])
+                            for child in children:
+                                body = child.get("data", {}).get("body", "")
+                                if body in ("[deleted]", "[removed]"):
+                                    found_deleted = True
+                                    break
+                        if found_deleted:
+                            db.mark_search_comment_removed(item["id"])
+                            dead += 1
+                        else:
+                            live += 1
+                    else:
+                        errors += 1
+                except Exception:
+                    errors += 1
+                _time.sleep(2)
+            return {"checked": checked, "live": live, "dead": dead, "errors": errors}
+        finally:
+            db.close()
+
+    tid = start_task("check-live-search", task)
+    return jsonify({"task_id": tid})
+
+
 @app.route("/api/subreddits/<int:sid>/backfill-keywords", methods=["POST"])
 def api_backfill_keywords(sid):
     def task():

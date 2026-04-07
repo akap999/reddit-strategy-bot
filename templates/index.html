@@ -4678,7 +4678,10 @@ async function renderAllComments(el) {
     el.innerHTML = `
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-2xl font-bold" style="color:#FF8b60">All Comments</h2>
-            <span id="ac-count" class="text-sm" style="color:#818384"></span>
+            <div class="flex gap-2 items-center">
+                <span id="ac-count" class="text-sm" style="color:#818384"></span>
+                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live (Search)</button>
+            </div>
         </div>
         <div class="flex gap-3 mb-4 items-center flex-wrap">
             <div>
@@ -6787,6 +6790,7 @@ async function renderLsComments(c) {
                 <option value="removed">Removed</option>
             </select>
             <span style="margin-left:auto" class="flex gap-2">
+                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
@@ -7219,6 +7223,13 @@ async function lsDeleteSelectedPostComments() {
     }
     toast(`Deleted ${done} comment(s)`, 'success');
     renderLsTabContent();
+}
+
+async function checkLiveSearchComments() {
+    runTask('/api/search/comments/check-live', {}, (result) => {
+        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
+        renderLsTabContent();
+    }, 'Check Live (Search)');
 }
 
 async function lsDeleteAllComments() {

@@ -67,6 +67,11 @@ def _build_lookups(context):
     lifetime = {a["username"]: (a.get("lifetime_assignments") or 0)
                 for a in context.get("all_accounts", [])}
 
+    # Subreddit-specific deployed count (for familiarity bonus)
+    sub_deployed = defaultdict(int)
+    for r in context.get("subreddit_deployed_counts", []):
+        sub_deployed[r["account_id"]] = r["cnt"]
+
     return {
         "sub_day": sub_day,
         "pending": pending,
@@ -77,6 +82,7 @@ def _build_lookups(context):
         "post_ownership": post_ownership,
         "sub_spread": sub_spread,
         "lifetime": lifetime,
+        "sub_deployed": sub_deployed,
     }
 
 
@@ -224,9 +230,9 @@ def score_account(account, comment, lookups, batch_picks):
             score += 1    # 1+ year
         # < 1 year: +0
 
-    # --- Subreddit familiarity: +5 if account has history here ---
-    if username in lookups["veterans"]:
-        score += 5
+    # --- Subreddit familiarity: +15 per deployed comment in this sub (max +45) ---
+    sub_deployed = lookups["sub_deployed"].get(username, 0)
+    score += min(45, 15 * sub_deployed)
 
     # --- Subreddit spread bonus: +2 per distinct sub active in (max +8) ---
     score += min(8, 2 * lookups["sub_spread"].get(username, 0))

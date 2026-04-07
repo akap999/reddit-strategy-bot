@@ -6965,7 +6965,7 @@ async function lsSaveCommentEdit(cid) {
     await api(`/api/search/comments/${cid}/body`, { method: 'PUT', body: { body } });
     toast('Comment updated', 'success');
     closeModal();
-    renderLsTabContent();
+    _lsUpdateCommentLocal(cid, { body });
 }
 
 // --- Assigned Accounts Tab (Live Search) ---

@@ -200,9 +200,9 @@ class Database:
         self.conn.commit()
 
     def list_brands(self, subreddit_id):
-        """List brands for a subreddit, plus any standalone brands (subreddit_id IS NULL)."""
+        """List brands for a specific subreddit only."""
         rows = self.conn.execute(
-            "SELECT * FROM brands WHERE subreddit_id = ? OR subreddit_id IS NULL ORDER BY added_at DESC",
+            "SELECT * FROM brands WHERE subreddit_id = ? ORDER BY added_at DESC",
             (subreddit_id,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -2136,6 +2136,24 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
+        # Subreddit-specific deployed count per account (for familiarity bonus)
+        subreddit_deployed_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, COUNT(*) as cnt FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
+                     AND c.status = 'deployed'
+                   GROUP BY c.account_id
+                   UNION ALL
+                   SELECT sc.account_id, COUNT(*) as cnt FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+                     AND sc.status = 'deployed'
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id""",
+            (sub_id, sub_name_val)
+        ).fetchall()]
+
         # Post ownership count per account (all subreddits)
         account_post_ownership = [dict(r) for r in self.conn.execute(
             """SELECT owner_account as account_id, COUNT(*) as cnt FROM posts
@@ -2166,6 +2184,7 @@ class Database:
             "account_total_mentions": account_total_mentions,
             "subreddit_veterans": set(subreddit_veterans),
             "account_deployed_counts": account_deployed_counts,
+            "subreddit_deployed_counts": subreddit_deployed_counts,
             "account_post_ownership": account_post_ownership,
             "account_sub_spread": account_sub_spread,
         }
@@ -2185,8 +2204,8 @@ class Database:
             return {"draft_comments": [], "all_accounts": [], "subreddit_day_assignments": [],
                     "account_pending_counts": [], "account_brand_mentions": [],
                     "account_total_mentions": [], "subreddit_veterans": set(),
-                    "account_deployed_counts": [], "account_post_ownership": [],
-                    "account_sub_spread": []}
+                    "account_deployed_counts": [], "subreddit_deployed_counts": [],
+                    "account_post_ownership": [], "account_sub_spread": []}
 
         all_accounts = [dict(r) for r in self.conn.execute("SELECT * FROM accounts ORDER BY username").fetchall()]
 
@@ -2294,6 +2313,26 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
+        # Subreddit-specific deployed count per account (for familiarity bonus)
+        # For search comments, we query across all subreddits in the batch
+        subreddit_deployed_counts = [dict(r) for r in self.conn.execute(
+            f"""SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, COUNT(*) as cnt FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   JOIN subreddits s ON p.subreddit_id = s.id
+                   WHERE s.name IN ({placeholders}) AND c.account_id IS NOT NULL
+                     AND c.status = 'deployed'
+                   GROUP BY c.account_id
+                   UNION ALL
+                   SELECT sc.account_id, COUNT(*) as cnt FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit IN ({placeholders}) AND sc.account_id IS NOT NULL
+                     AND sc.status = 'deployed'
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id""",
+            sub_names + sub_names
+        ).fetchall()]
+
         return {
             "draft_comments": draft_comments,
             "all_accounts": all_accounts,
@@ -2303,6 +2342,7 @@ class Database:
             "account_total_mentions": account_total_mentions,
             "subreddit_veterans": set(subreddit_veterans),
             "account_deployed_counts": account_deployed_counts,
+            "subreddit_deployed_counts": subreddit_deployed_counts,
             "account_post_ownership": account_post_ownership,
             "account_sub_spread": account_sub_spread,
         }

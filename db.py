@@ -1347,6 +1347,80 @@ class Database:
         rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
+    def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,
+                                account_id=None, sort_by=None, limit=200, offset=0):
+        """Get all comments (regular + search) globally with optional filters and pagination."""
+        # Build WHERE clauses dynamically
+        w1, w2 = ["c.status != 'deleted'"], ["sc.status != 'deleted'"]
+        p1, p2 = [], []
+
+        if status:
+            w1 = ["c.status = ?"]; p1.append(status)
+            w2 = ["sc.status = ?"]; p2.append(status)
+        if brand_id:
+            w1.append("c.brand_id = ?"); p1.append(brand_id)
+            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+        if account_id:
+            w1.append("c.account_id = ?"); p1.append(account_id)
+            w2.append("sc.account_id = ?"); p2.append(account_id)
+
+        # Subreddit filter: ID for regular, name for search
+        sub_name = None
+        if subreddit_id:
+            w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
+            row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+            sub_name = row["name"] if row else ""
+            w2.append("LOWER(sp.subreddit) = LOWER(?)"); p2.append(sub_name)
+
+        where1 = " AND ".join(w1)
+        where2 = " AND ".join(w2)
+
+        q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
+                        c.paid_at, c.reddit_comment_url, c.comment_type,
+                        c.suggested_post_day, c.suggested_order,
+                        c.is_ours, c.matched_keywords, c.assigned_at, c.informed_at,
+                        'comment' as source,
+                        p.title as post_title, p.id as p_id,
+                        s.name as subreddit_name, b.name as brand_name,
+                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
+                 WHERE {where1}"""
+
+        q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
+                        sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
+                        0 as suggested_post_day, 0 as suggested_order,
+                        1 as is_ours, NULL as matched_keywords, sc.assigned_at, sc.informed_at,
+                        'search_comment' as source,
+                        sp.title as post_title, sp.id as p_id,
+                        sp.subreddit as subreddit_name, b.name as brand_name,
+                        sp.reddit_url as post_reddit_url
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
+                 WHERE {where2}"""
+
+        if sort_by == 'deployed_at':
+            order = "ORDER BY deployed_at DESC, id DESC"
+        else:
+            order = "ORDER BY created_at DESC, id DESC"
+
+        union = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
+        all_params = p1 + p2
+
+        # Count
+        count_query = f"SELECT COUNT(*) as cnt FROM ({q1} UNION ALL {q2}) combined"
+        total = self.conn.execute(count_query, all_params).fetchone()["cnt"]
+
+        # Paginated results
+        paginated = f"{union} LIMIT ? OFFSET ?"
+        rows = self.conn.execute(paginated, all_params + [limit, offset]).fetchall()
+        return {"items": [dict(r) for r in rows], "total": total}
+
     def get_deployed_comments_by_brand(self, brand_id=None, brand_name=None):
         """Get all deployed comments for a brand, with post info."""
         query = """SELECT c.*, p.title as post_title, pu.reddit_url as post_reddit_url

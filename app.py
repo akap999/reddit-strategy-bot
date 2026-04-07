@@ -1075,6 +1075,32 @@ def api_brand_all_comments(bid):
         db.close()
 
 
+@app.route("/api/all-comments")
+def api_global_all_comments():
+    """Get all comments (regular + search) globally with filters and pagination."""
+    db = get_db()
+    try:
+        status = request.args.get("status") or None
+        brand_id = request.args.get("brand_id")
+        subreddit_id = request.args.get("subreddit_id")
+        account_id = request.args.get("account_id") or None
+        sort_by = request.args.get("sort_by") or None
+        limit = int(request.args.get("limit", 200))
+        offset = int(request.args.get("offset", 0))
+        result = db.get_all_comments_global(
+            status=status,
+            brand_id=int(brand_id) if brand_id else None,
+            subreddit_id=int(subreddit_id) if subreddit_id else None,
+            account_id=account_id,
+            sort_by=sort_by,
+            limit=limit,
+            offset=offset,
+        )
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
     import time as _time

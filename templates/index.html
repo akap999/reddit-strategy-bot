@@ -99,6 +99,7 @@
             <a onclick="navigate('posts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="posts">Posts</a>
             <a onclick="navigate('comments')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="comments">Comments</a>
             <a onclick="navigate('accounts')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="accounts">Accounts</a>
+            <a onclick="navigate('allcomments')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="allcomments" style="color:#FF8b60">All Comments</a>
             <div style="border-top:1px solid #343536;margin:8px 16px"></div>
             <a onclick="navigate('livesearch')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesearch" style="color:#0079D3">Live Search</a>
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
@@ -310,7 +311,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
     (views[view] || views.dashboard)(app);
 }
 
@@ -322,6 +323,7 @@ const _hashFilterMap = {
     comments: ['comments-brand-top-filter', 'comments-sub-filter', 'comments-brand-filter',
                 'comments-post-filter', 'comments-status-filter', 'comments-sort-filter'],
     accounts: ['acct-filter-search', 'acct-filter-karma', 'acct-filter-age', 'acct-filter-ref'],
+    allcomments: ['ac-brand-filter', 'ac-sub-filter', 'ac-status-filter', 'ac-account-filter', 'ac-sort-filter'],
 };
 
 function _updateHash() {
@@ -425,6 +427,15 @@ async function _applyRestoredFilters(view, params) {
         const sort = params.get('comments-sort-filter');
         if (sort) { const el = document.getElementById('comments-sort-filter'); if (el) el.value = sort; }
         await loadCommentTree();
+        return;
+    }
+
+    if (view === 'allcomments') {
+        for (const [id, val] of params) {
+            const el = document.getElementById(id);
+            if (el) el.value = val;
+        }
+        loadAllComments();
         return;
     }
 }
@@ -3330,6 +3341,7 @@ async function assignCommentPrompt(cid) {
     showAssignmentModal(cid, (assignedAccount) => {
         if (assignedAccount) _commentsTreeUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
         else loadCommentTree();
+        _acRefreshIfActive();
     });
 }
 
@@ -3338,6 +3350,7 @@ async function unassignComment(cid) {
     await api(`/api/comments/${cid}/unassign`, { method: 'POST', body: {} });
     toast('Comment unassigned', 'success');
     _commentsTreeUpdateLocal(cid, { status: 'draft', account_id: null });
+    _acRefreshIfActive();
 }
 
 async function informComment(cid) {
@@ -3347,6 +3360,7 @@ async function informComment(cid) {
     if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, patch);
     else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else loadCommentTree();
+    _acRefreshIfActive();
 }
 
 async function autoAssignComment(cid) {
@@ -3427,6 +3441,7 @@ async function submitSingleAutoAssign() {
     } else {
         if (res && res.ok) _commentsTreeUpdateLocal(id, { status: 'assigned', account_id: res.account, assigned_at: new Date().toISOString() });
         else loadCommentTree();
+        _acRefreshIfActive();
     }
 }
 
@@ -3736,6 +3751,7 @@ async function submitDeployComment(cid) {
     if (currentView === 'comments' && commentsTab === 'tree') _commentsTreeUpdateLocal(cid, patch);
     else if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else loadCommentTree();
+    _acRefreshIfActive();
 }
 
 async function markCommentDeleted(cid) {
@@ -3743,6 +3759,7 @@ async function markCommentDeleted(cid) {
     await api(`/api/comments/${cid}/mark-deleted`, { method: 'POST', body: {} });
     toast('Comment marked as deleted', 'success');
     _commentsTreeUpdateLocal(cid, { status: 'deleted' });
+    _acRefreshIfActive();
 }
 
 async function markCommentRemoved(cid) {
@@ -3752,6 +3769,7 @@ async function markCommentRemoved(cid) {
     if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, { status: 'removed' });
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, { status: 'removed' });
     else loadCommentTree();
+    _acRefreshIfActive();
 }
 
 async function markCommentPaid(cid) {
@@ -3761,6 +3779,7 @@ async function markCommentPaid(cid) {
     if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
     else loadCommentTree();
+    _acRefreshIfActive();
 }
 
 async function undeployComment(cid) {
@@ -3771,6 +3790,7 @@ async function undeployComment(cid) {
     if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
     else loadCommentTree();
+    _acRefreshIfActive();
 }
 
 async function copyCommentMessage(cid) {
@@ -3822,6 +3842,7 @@ async function saveCommentEdit(cid) {
     toast('Comment updated', 'success');
     closeModal();
     _commentsTreeUpdateLocal(cid, { body });
+    _acRefreshIfActive();
 }
 
 async function deleteComment(cid) {
@@ -3829,6 +3850,7 @@ async function deleteComment(cid) {
     await api(`/api/comments/${cid}`, { method: 'DELETE' });
     toast('Comment deleted', 'success');
     _commentsTreeRemoveLocal(cid);
+    _acRefreshIfActive();
 }
 
 async function generateReplyToComment(commentId, postId) {
@@ -4539,6 +4561,231 @@ function filterAccountComments(username) {
     const cell = document.getElementById(`aa-comments-${username}`)?.querySelector('td');
     if (!cell || !_acctCommentsCache[username]) return;
     renderAccountCommentsPanel(username, cell, _acctCommentsCache[username]);
+}
+
+// =========================================================================
+// ALL COMMENTS VIEW (unified normal + search)
+// =========================================================================
+
+let _acData = [], _acTotal = 0, _acPage = 0;
+const _acPageSize = 200;
+let _acLastFilterKey = '';
+
+function _acRefreshIfActive() {
+    if (currentView === 'allcomments') loadAllComments(true);
+}
+
+function _acAction(source, cid, action) {
+    if (source === 'search_comment') {
+        const map = {
+            auto_assign: `lsAssignComment(${cid})`,
+            manual_assign: `lsManualAssignComment(${cid})`,
+            inform: `lsInformComment(${cid})`,
+            deploy: `lsDeployComment(${cid})`,
+            unassign: `lsUnassignComment(${cid})`,
+            undeploy: `lsUndeployComment(${cid})`,
+            paid: `lsMarkPaid(${cid})`,
+            removed: `lsMarkRemoved(${cid})`,
+            copy: `lsCopyMessage(${cid})`,
+            edit: `lsEditComment(${cid})`,
+            delete: `lsDeleteComment(${cid})`,
+        };
+        return map[action] || '';
+    } else {
+        const map = {
+            auto_assign: `autoAssignComment(${cid})`,
+            manual_assign: `assignCommentPrompt(${cid})`,
+            inform: `informComment(${cid})`,
+            deploy: `deployCommentModal(${cid})`,
+            unassign: `unassignComment(${cid})`,
+            undeploy: `undeployComment(${cid})`,
+            paid: `markCommentPaid(${cid})`,
+            removed: `markCommentRemoved(${cid})`,
+            copy: `copyCommentMessage(${cid})`,
+            edit: `editComment(${cid})`,
+            delete: `markCommentDeleted(${cid})`,
+        };
+        return map[action] || '';
+    }
+}
+
+function renderAllCommentCard(c) {
+    let kwPills = '';
+    try {
+        const kws = c.matched_keywords ? JSON.parse(c.matched_keywords) : [];
+        kwPills = kws.map(k => `<span class="badge" style="background:#2d2d2d;color:#ccc;font-size:0.6rem">${k}</span>`).join('');
+    } catch(e) {}
+
+    const src = c.source;
+    const srcBadge = src === 'search_comment'
+        ? '<span class="badge" style="background:#0079D3;color:white;font-size:0.6rem">LS</span>'
+        : '<span class="badge" style="background:#343536;color:#818384;font-size:0.6rem">REG</span>';
+
+    let actionBtns = '';
+    if (c.status === 'draft' || c.status === 'complete') {
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button>`;
+    } else if (c.status === 'assigned') {
+        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
+    } else if (c.status === 'informed') {
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
+    } else if (c.status === 'deployed') {
+        actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
+    }
+
+    const redditLink = c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-blue-400 hover:underline">view</a>` : '';
+
+    const escapedBody = (c.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    return `<div class="mb-2"><div class="card p-3">
+        <div class="flex gap-2 items-center mb-2 flex-wrap">
+            <span class="text-xs text-gray-600">#${c.id}</span>
+            ${srcBadge}
+            ${c.subreddit_name ? `<span class="text-xs" style="color:#0079D3">r/${c.subreddit_name}</span>` : ''}
+            ${c.brand_name ? `<span class="badge" style="background:#FF4500;color:white;font-size:0.6rem">${c.brand_name}</span>` : ''}
+            <span class="text-xs text-gray-500 truncate" style="max-width:200px" title="${(c.post_title || '').replace(/"/g, '&quot;')}">${(c.post_title || '').substring(0, 50)}</span>
+            ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0079D3;color:white">HQ</span>' : ''}
+            ${c.comment_type === 'op_reply' ? '<span class="badge" style="background:#0e8a16;color:white">OP</span>' : ''}
+            ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
+            ${c.mentions_brand ? '<span class="badge" style="background:#FF4500;color:white;font-size:0.6rem">brand</span>' : ''}
+            ${kwPills}
+            <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
+            ${c.account_id ? `<span class="text-xs font-medium" style="color:#FFD700">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
+            ${_commentStatusDate(c)}
+            ${redditLink}
+            <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
+                <button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit')}">Edit</button>
+                ${actionBtns}
+                ${c.status !== 'deployed' ? `<button class="btn btn-sm btn-danger" onclick="${_acAction(src, c.id, 'delete')}">Del</button>` : ''}
+            </span>
+        </div>
+        <p class="text-sm text-gray-300 whitespace-pre-wrap">${escapedBody}</p>
+    </div></div>`;
+}
+
+async function renderAllComments(el) {
+    el.innerHTML = '<div class="spinner"></div>';
+    const [subs, brands, accounts] = await Promise.all([
+        api('/api/subreddits'),
+        api('/api/brands/all'),
+        api('/api/accounts'),
+    ]);
+
+    // Deduplicate brands by name (brands can exist per-subreddit)
+    const brandMap = {};
+    brands.forEach(b => { if (!brandMap[b.name]) brandMap[b.name] = b; });
+    const uniqueBrands = Object.values(brandMap).sort((a, b) => a.name.localeCompare(b.name));
+
+    el.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-bold" style="color:#FF8b60">All Comments</h2>
+            <span id="ac-count" class="text-sm" style="color:#818384"></span>
+        </div>
+        <div class="flex gap-3 mb-4 items-center flex-wrap">
+            <div>
+                <label class="text-xs block" style="color:#818384">Brand</label>
+                <select id="ac-brand-filter" onchange="_acPage=0;loadAllComments()" class="w-44 text-sm">
+                    <option value="">All Brands</option>
+                    ${uniqueBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Subreddit</label>
+                <select id="ac-sub-filter" onchange="_acPage=0;loadAllComments()" class="w-48 text-sm">
+                    <option value="">All Subreddits</option>
+                    ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Status</label>
+                <select id="ac-status-filter" onchange="_acPage=0;loadAllComments()" class="w-32 text-sm">
+                    <option value="">All Status</option>
+                    <option value="draft">Draft</option>
+                    <option value="complete">Complete</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="informed">Informed</option>
+                    <option value="deployed">Deployed</option>
+                    <option value="removed">Removed</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Account</label>
+                <select id="ac-account-filter" onchange="_acPage=0;loadAllComments()" class="w-44 text-sm">
+                    <option value="">All Accounts</option>
+                    ${accounts.map(a => `<option value="${a.username}">u/${a.username}</option>`).join('')}
+                </select>
+            </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Sort</label>
+                <select id="ac-sort-filter" onchange="_acPage=0;loadAllComments()" class="w-36 text-sm">
+                    <option value="">Newest First</option>
+                    <option value="deployed_at">By Deploy Date</option>
+                </select>
+            </div>
+        </div>
+        <div id="ac-list"></div>
+        <div id="ac-pagination" class="flex gap-2 mt-3 justify-center items-center"></div>
+    `;
+
+    loadAllComments();
+}
+
+async function loadAllComments(keepPage) {
+    const listEl = document.getElementById('ac-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    _updateHash();
+
+    const brandId = document.getElementById('ac-brand-filter')?.value || '';
+    const subId = document.getElementById('ac-sub-filter')?.value || '';
+    const status = document.getElementById('ac-status-filter')?.value || '';
+    const accountId = document.getElementById('ac-account-filter')?.value || '';
+    const sortBy = document.getElementById('ac-sort-filter')?.value || '';
+
+    // Reset page if filters changed
+    const filterKey = `${brandId}|${subId}|${status}|${accountId}|${sortBy}`;
+    if (!keepPage && filterKey !== _acLastFilterKey) _acPage = 0;
+    _acLastFilterKey = filterKey;
+
+    let url = `/api/all-comments?limit=${_acPageSize}&offset=${_acPage * _acPageSize}`;
+    if (brandId) url += `&brand_id=${brandId}`;
+    if (subId) url += `&subreddit_id=${subId}`;
+    if (status) url += `&status=${status}`;
+    if (accountId) url += `&account_id=${encodeURIComponent(accountId)}`;
+    if (sortBy) url += `&sort_by=${sortBy}`;
+
+    const result = await api(url);
+    _acData = result.items;
+    _acTotal = result.total;
+
+    const countEl = document.getElementById('ac-count');
+    if (countEl) countEl.textContent = `${_acTotal} comment${_acTotal !== 1 ? 's' : ''}`;
+
+    renderAllCommentsList();
+    renderAcPagination();
+}
+
+function renderAllCommentsList() {
+    const listEl = document.getElementById('ac-list');
+    if (!listEl) return;
+    if (!_acData.length) {
+        listEl.innerHTML = '<p class="text-center py-8" style="color:#818384">No comments found.</p>';
+        return;
+    }
+    listEl.innerHTML = _acData.map(c => renderAllCommentCard(c)).join('');
+}
+
+function renderAcPagination() {
+    const el = document.getElementById('ac-pagination');
+    if (!el) return;
+    const totalPages = Math.ceil(_acTotal / _acPageSize);
+    if (totalPages <= 1) { el.innerHTML = ''; return; }
+    let html = '';
+    if (_acPage > 0) html += `<button class="btn btn-sm btn-secondary" onclick="_acPage=0;loadAllComments(true)">First</button>`;
+    if (_acPage > 0) html += `<button class="btn btn-sm btn-secondary" onclick="_acPage--;loadAllComments(true)">Prev</button>`;
+    html += `<span class="text-sm px-2" style="color:#818384">Page ${_acPage + 1} of ${totalPages}</span>`;
+    if (_acPage < totalPages - 1) html += `<button class="btn btn-sm btn-secondary" onclick="_acPage++;loadAllComments(true)">Next</button>`;
+    if (_acPage < totalPages - 1) html += `<button class="btn btn-sm btn-secondary" onclick="_acPage=${totalPages-1};loadAllComments(true)">Last</button>`;
+    el.innerHTML = html;
 }
 
 // =========================================================================
@@ -6701,6 +6948,7 @@ async function lsMarkPaid(cid) {
         await api(`/api/search/comments/${cid}/mark-paid`, { method: 'POST' });
         toast('Marked as paid', 'success');
         _lsUpdateCommentLocal(cid, { paid_at: new Date().toISOString() });
+        _acRefreshIfActive();
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
@@ -6710,6 +6958,7 @@ async function lsMarkRemoved(cid) {
         await api(`/api/search/comments/${cid}/mark-removed`, { method: 'POST' });
         toast('Comment marked as removed', 'success');
         _lsUpdateCommentLocal(cid, { status: 'removed' });
+        _acRefreshIfActive();
     } catch(e) { toast('Failed to mark removed', 'error'); }
 }
 
@@ -6719,6 +6968,7 @@ async function lsUndeployComment(cid) {
         await api(`/api/search/comments/${cid}/undeploy`, { method: 'POST' });
         toast('Comment undeployed', 'success');
         _lsUpdateCommentLocal(cid, { status: 'assigned', reddit_comment_url: null });
+        _acRefreshIfActive();
     } catch(e) { toast('Failed to undeploy', 'error'); }
 }
 
@@ -6898,6 +7148,7 @@ async function lsDoAssign(cid, username) {
         closeModal();
         toast(`Assigned to u/${username}`, 'success');
         _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: username, assigned_at: new Date().toISOString() });
+        _acRefreshIfActive();
     } catch(e) {}
 }
 
@@ -6906,6 +7157,7 @@ async function lsUnassignComment(cid) {
         await api(`/api/search/comments/${cid}/unassign`, { method: 'POST' });
         toast('Unassigned', 'success');
         _lsUpdateCommentLocal(cid, { status: 'draft', account_id: null });
+        _acRefreshIfActive();
     } catch(e) {}
 }
 
@@ -6914,6 +7166,7 @@ async function lsInformComment(cid) {
         await api(`/api/search/comments/${cid}/inform`, { method: 'POST' });
         toast('Marked as informed', 'success');
         _lsUpdateCommentLocal(cid, { status: 'informed', informed_at: new Date().toISOString() });
+        _acRefreshIfActive();
     } catch(e) {}
 }
 
@@ -6940,6 +7193,7 @@ async function lsDoDeployComment(cid) {
         closeModal();
         toast('Marked as deployed', 'success');
         _lsUpdateCommentLocal(cid, { status: 'deployed', reddit_comment_url: url });
+        _acRefreshIfActive();
     } catch(e) {}
 }
 
@@ -6949,6 +7203,7 @@ async function lsDeleteComment(cid) {
         await api(`/api/search/comments/${cid}`, { method: 'DELETE' });
         toast('Deleted', 'success');
         _lsRemoveCommentLocal(cid);
+        _acRefreshIfActive();
     } catch(e) {}
 }
 
@@ -7134,6 +7389,7 @@ async function lsSaveCommentEdit(cid) {
     toast('Comment updated', 'success');
     closeModal();
     _lsUpdateCommentLocal(cid, { body });
+    _acRefreshIfActive();
 }
 
 // --- Assigned Accounts Tab (Live Search) ---

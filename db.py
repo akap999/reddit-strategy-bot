@@ -320,7 +320,7 @@ class Database:
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_posts_with_details(self, subreddit_id, brand_id=None, limit=200, include_filler=True):
+    def get_posts_with_details(self, subreddit_id, brand_id=None, limit=200, include_filler=True, date=None):
         """Get posts with comment counts, reddit_url, and brand names in a single query."""
         comment_counts = """
                        COUNT(DISTINCT CASE WHEN c.status != 'deleted' THEN c.id END) as total_comments,
@@ -356,6 +356,9 @@ class Database:
             params = [subreddit_id]
         if not include_filler:
             query += " AND p.is_filler = 0"
+        if date:
+            query += " AND DATE(COALESCE(p.deployed_at, p.created_at)) = ?"
+            params.append(date)
         query += " GROUP BY p.id ORDER BY p.suggested_post_day ASC, p.created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
@@ -363,6 +366,63 @@ class Database:
         for r in rows:
             p = dict(r)
             # Parse brand_info into brands list
+            brand_info = p.pop("brand_info", None)
+            if brand_info:
+                brands = []
+                for item in brand_info.split(","):
+                    parts = item.split(":", 1)
+                    if len(parts) == 2:
+                        brands.append({"id": int(parts[0]), "name": parts[1]})
+                p["brands"] = brands
+            else:
+                p["brands"] = []
+            if not p.get("brand_names"):
+                p["brand_names"] = ""
+            if not p.get("reddit_url"):
+                p["reddit_url"] = ""
+            results.append(p)
+        return results
+
+    def get_all_posts(self, brand_id=None, subreddit_id=None, status=None, date=None, limit=200):
+        """Get all posts across all subreddits with comment counts."""
+        comment_counts = """
+                       COUNT(DISTINCT CASE WHEN c.status != 'deleted' THEN c.id END) as total_comments,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed','paid') AND c.mentions_brand = 1 THEN c.id END) as assigned_brand,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN c.id END) as deployed_brand,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed','paid') AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as assigned_non_brand,
+                       COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as deployed_non_brand,"""
+        query = f"""SELECT p.*,{comment_counts}
+                       pu.reddit_url,
+                       s.name as subreddit_name,
+                       GROUP_CONCAT(DISTINCT b2.name) as brand_names,
+                       GROUP_CONCAT(DISTINCT b2.id || ':' || b2.name) as brand_info
+                FROM posts p
+                JOIN subreddits s ON s.id = p.subreddit_id
+                LEFT JOIN comments c ON c.post_id = p.id
+                LEFT JOIN post_urls pu ON pu.post_id = p.id
+                LEFT JOIN post_brands pb ON pb.post_id = p.id
+                LEFT JOIN brands b2 ON b2.id = pb.brand_id
+                WHERE 1=1"""
+        params = []
+        if brand_id:
+            query += " AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?)"
+            params.append(brand_id)
+        if subreddit_id:
+            query += " AND p.subreddit_id = ?"
+            params.append(subreddit_id)
+        if status:
+            query += " AND p.status = ?"
+            params.append(status)
+        if date:
+            query += " AND DATE(COALESCE(p.deployed_at, p.created_at)) = ?"
+            params.append(date)
+        query += " GROUP BY p.id ORDER BY p.created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        results = []
+        for r in rows:
+            p = dict(r)
             brand_info = p.pop("brand_info", None)
             if brand_info:
                 brands = []
@@ -1356,7 +1416,7 @@ class Database:
 
     def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,
                                 account_id=None, sort_by=None, source=None,
-                                limit=200, offset=0):
+                                date=None, limit=200, offset=0):
         """Get all comments (regular + search) globally with optional filters and pagination."""
         # Build WHERE clauses dynamically
         w1, w2 = ["c.status != 'deleted'"], ["sc.status != 'deleted'"]
@@ -1378,6 +1438,11 @@ class Database:
             row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
             sub_name = row["name"] if row else ""
             w2.append("LOWER(sp.subreddit) = LOWER(?)"); p2.append(sub_name)
+        if date:
+            date_expr1 = "DATE(CASE WHEN c.status = 'paid' THEN COALESCE(c.paid_at, c.deployed_at, c.created_at) ELSE COALESCE(c.deployed_at, c.created_at) END)"
+            date_expr2 = "DATE(CASE WHEN sc.status = 'paid' THEN COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) ELSE COALESCE(sc.deployed_at, sc.created_at) END)"
+            w1.append(f"{date_expr1} = ?"); p1.append(date)
+            w2.append(f"{date_expr2} = ?"); p2.append(date)
 
         where1 = " AND ".join(w1)
         where2 = " AND ".join(w2)

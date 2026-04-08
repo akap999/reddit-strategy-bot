@@ -540,13 +540,29 @@ def api_enrich_existing_brand(bid):
 # API: Posts
 # ---------------------------------------------------------------------------
 
+@app.route("/api/posts/all")
+def api_all_posts():
+    db = get_db()
+    try:
+        posts = db.get_all_posts(
+            brand_id=request.args.get("brand_id", type=int),
+            subreddit_id=request.args.get("subreddit_id", type=int),
+            status=request.args.get("status") or None,
+            date=request.args.get("date") or None,
+            limit=200,
+        )
+        return jsonify(posts)
+    finally:
+        db.close()
+
 @app.route("/api/subreddits/<int:sid>/posts")
 def api_list_posts(sid):
     db = get_db()
     try:
         brand_id = request.args.get("brand_id", type=int)
         include_filler = request.args.get("include_filler", "true") == "true"
-        posts = db.get_posts_with_details(sid, brand_id=brand_id, include_filler=include_filler, limit=200)
+        date = request.args.get("date") or None
+        posts = db.get_posts_with_details(sid, brand_id=brand_id, include_filler=include_filler, limit=200, date=date)
         return jsonify(posts)
     finally:
         db.close()
@@ -1108,6 +1124,7 @@ def api_global_all_comments():
         source = request.args.get("source") or None
         limit = int(request.args.get("limit", 200))
         offset = int(request.args.get("offset", 0))
+        date = request.args.get("date") or None
         result = db.get_all_comments_global(
             status=status,
             brand_id=int(brand_id) if brand_id else None,
@@ -1115,6 +1132,7 @@ def api_global_all_comments():
             account_id=account_id,
             sort_by=sort_by,
             source=source,
+            date=date,
             limit=limit,
             offset=offset,
         )

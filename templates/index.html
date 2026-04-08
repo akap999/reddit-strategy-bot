@@ -321,11 +321,11 @@ function renderView(view) {
 // URL hash state persistence
 // =========================================================================
 const _hashFilterMap = {
-    posts: ['posts-brand-filter', 'posts-sub-filter', 'posts-status-filter', 'posts-intent-filter'],
+    posts: ['posts-brand-filter', 'posts-sub-filter', 'posts-status-filter', 'posts-intent-filter', 'posts-date-filter'],
     comments: ['comments-brand-top-filter', 'comments-sub-filter', 'comments-brand-filter',
                 'comments-post-filter', 'comments-status-filter', 'comments-sort-filter'],
     accounts: ['acct-filter-search', 'acct-filter-karma', 'acct-filter-age', 'acct-filter-ref'],
-    allcomments: ['ac-brand-filter', 'ac-sub-filter', 'ac-status-filter', 'ac-account-filter', 'ac-sort-filter', 'ac-source-filter'],
+    allcomments: ['ac-brand-filter', 'ac-sub-filter', 'ac-status-filter', 'ac-account-filter', 'ac-sort-filter', 'ac-source-filter', 'ac-date-filter'],
 };
 
 function _updateHash() {
@@ -2010,6 +2010,7 @@ async function renderPosts(el) {
                 ${uniqueBrands.map(b => `<option value="${b.name}" data-sub-ids="${b.sub_ids.join(',')}">${b.name}</option>`).join('')}
             </select>
             <select id="posts-sub-filter" onchange="loadPosts()" class="w-48"><!-- sub change needs refetch -->
+                <option value="">All Subreddits</option>
                 ${subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('')}
             </select>
             <select id="posts-status-filter" onchange="renderPostsFromCache()" class="w-32">
@@ -2018,7 +2019,9 @@ async function renderPosts(el) {
                 <option value="complete">Complete</option>
                 <option value="informed">Informed</option>
                 <option value="published">Deployed</option>
+                <option value="paid">Paid</option>
             </select>
+            <input type="date" id="posts-date-filter" onchange="loadPosts()" class="w-36 text-sm" title="Filter by date" style="background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:4px 8px">
             <select id="posts-intent-filter" onchange="renderPostsFromCache()" class="w-36" title="GEO intent filter">
                 <option value="all">All Intents</option>
                 <option value="commercial">Commercial</option>
@@ -2042,12 +2045,12 @@ function onPostsBrandChange() {
 
     if (!brandName) {
         // Show all subreddits
-        subFilter.innerHTML = subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + subs.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     } else {
         // Filter to subreddits that have this brand
         const brandSubs = _postsBrands.filter(b => b.name === brandName).map(b => b.subreddit_id);
         const filtered = subs.filter(s => brandSubs.includes(s.id));
-        subFilter.innerHTML = filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
+        subFilter.innerHTML = '<option value="">All Subreddits</option>' + filtered.map(s => `<option value="${s.id}">r/${s.name}</option>`).join('');
     }
     loadPosts();
 }
@@ -2072,17 +2075,29 @@ function _postsUpdateManyLocal(predicate, patch) {
 
 async function loadPosts() {
     const sid = document.getElementById('posts-sub-filter').value;
-    if (!sid) { document.getElementById('posts-table').innerHTML = '<p class="text-gray-500">No subreddit selected.</p>'; return; }
     const brandName = document.getElementById('posts-brand-filter')?.value;
+    const dateVal = document.getElementById('posts-date-filter')?.value || '';
     const container = document.getElementById('posts-table');
     container.innerHTML = '<div class="spinner"></div>';
 
-    let url = `/api/subreddits/${sid}/posts`;
-    // If brand selected, find the brand_id for this subreddit
-    if (brandName) {
-        const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
-        if (brand) url += `?brand_id=${brand.id}`;
+    let url;
+    let params = [];
+    if (sid) {
+        url = `/api/subreddits/${sid}/posts`;
+        if (brandName) {
+            const brand = _postsBrands.find(b => b.name === brandName && b.subreddit_id == sid);
+            if (brand) params.push(`brand_id=${brand.id}`);
+        }
+    } else {
+        url = '/api/posts/all';
+        if (brandName) {
+            const brand = _postsBrands.find(b => b.name === brandName);
+            if (brand) params.push(`brand_id=${brand.id}`);
+        }
     }
+    if (dateVal) params.push(`date=${dateVal}`);
+    if (params.length) url += '?' + params.join('&');
+
     _postsCache = await api(url);
     renderPostsFromCache();
     _updateHash();
@@ -2103,19 +2118,21 @@ function renderPostsFromCache() {
         return;
     }
 
+    const showSub = filtered.some(p => p.subreddit_name);
     container.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Day</th>${showSub ? '<th>Subreddit</th>' : ''}<th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => `
                 <tr>
                     <td>${p.suggested_post_day}</td>
+                    ${showSub ? `<td class="text-xs text-gray-400">r/${p.subreddit_name}</td>` : ''}
                     <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
                     <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
                     <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : 'Brand'}</span></td>
                     <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                     <td class="text-gray-400">${p.storyline}</td>
                     <td>${p.ai_query_score || '-'}</td>
-                    <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                    <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span> ${_postStatusDate(p)}</td>
                     <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
                     <td class="text-xs">
                         <span title="Assigned+Informed: ${(p.assigned_brand||0)-(p.deployed_brand||0)} brand + ${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)} non-brand / ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)} total">
@@ -3237,6 +3254,12 @@ async function loadCommentTree() {
     _commentsTreeCache = await api(url);
     _commentsTreeIsFlat = true;
     renderCommentTreeFromCache();
+}
+
+function _postStatusDate(p) {
+    if (p.paid_at) return `<span class="text-xs text-gray-500">Paid ${p.paid_at.substring(0,10)}</span>`;
+    if (p.status === 'published' && p.deployed_at) return `<span class="text-xs text-gray-500">Deployed ${p.deployed_at.substring(0,10)}</span>`;
+    return '';
 }
 
 function _commentStatusDate(c) {
@@ -4749,6 +4772,10 @@ async function renderAllComments(el) {
                     <option value="search_comment">Live Search (LS)</option>
                 </select>
             </div>
+            <div>
+                <label class="text-xs block" style="color:#818384">Date</label>
+                <input type="date" id="ac-date-filter" onchange="_acPage=0;loadAllComments()" class="w-36 text-sm" style="background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+            </div>
         </div>
         <div id="ac-list"></div>
         <div id="ac-pagination" class="flex gap-2 mt-3 justify-center items-center"></div>
@@ -4769,9 +4796,10 @@ async function loadAllComments(keepPage) {
     const accountId = document.getElementById('ac-account-filter')?.value || '';
     const sortBy = document.getElementById('ac-sort-filter')?.value || '';
     const sourceFilter = document.getElementById('ac-source-filter')?.value || '';
+    const dateFilter = document.getElementById('ac-date-filter')?.value || '';
 
     // Reset page if filters changed
-    const filterKey = `${brandId}|${subId}|${status}|${accountId}|${sortBy}|${sourceFilter}`;
+    const filterKey = `${brandId}|${subId}|${status}|${accountId}|${sortBy}|${sourceFilter}|${dateFilter}`;
     if (!keepPage && filterKey !== _acLastFilterKey) _acPage = 0;
     _acLastFilterKey = filterKey;
 
@@ -4782,6 +4810,7 @@ async function loadAllComments(keepPage) {
     if (accountId) url += `&account_id=${encodeURIComponent(accountId)}`;
     if (sortBy) url += `&sort_by=${sortBy}`;
     if (sourceFilter) url += `&source=${sourceFilter}`;
+    if (dateFilter) url += `&date=${dateFilter}`;
 
     const result = await api(url);
     _acData = result.items;

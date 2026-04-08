@@ -82,6 +82,7 @@
         .cal-dot-post { background: #FF4500; }
         .cal-dot-deployed { background: #46d160; }
         .cal-dot-assigned { background: #FFD635; }
+        .cal-dot-paid { background: #00A86B; }
         .cal-count { font-size: 0.65rem; color: #818384; margin-top: 2px; }
     </style>
 </head>
@@ -7553,7 +7554,8 @@ let _calYear = new Date().getFullYear();
 let _calMonth = new Date().getMonth();
 let _calEvents = [];
 let _calSelectedDate = null;
-let _calFilters = { brand: '', subreddit_id: '', account_id: '', status: '', event_type: '' };
+let _calFilters = { brand: '', subreddit_id: '', account_id: '', status: '', event_type: '', ref: '' };
+let _calDayView = 'events'; // 'events' or 'accounts'
 let _calBrands = [];
 let _calSubs = [];
 let _calAccounts = [];
@@ -7609,12 +7611,17 @@ async function renderCalendar(el) {
                 </select>
             </div>
             <div>
+                <label class="text-xs block" style="color:#818384">Ref</label>
+                <input id="cal-ref-filter" placeholder="Search ref..." class="w-32 text-sm" oninput="onCalFilterChange()">
+            </div>
+            <div>
                 <label class="text-xs block" style="color:#818384">Status</label>
                 <select id="cal-status-filter" class="w-32 text-sm" onchange="onCalFilterChange()">
                     <option value="">All</option>
                     <option value="assigned">Assigned</option>
                     <option value="informed">Informed</option>
                     <option value="deployed">Deployed</option>
+                    <option value="paid">Paid</option>
                     <option value="published">Deployed (Posts)</option>
                 </select>
             </div>
@@ -7662,6 +7669,7 @@ async function loadCalendarEvents() {
     const brandName = document.getElementById('cal-brand-filter')?.value;
     const subId = document.getElementById('cal-sub-filter')?.value;
     const acctId = document.getElementById('cal-acct-filter')?.value;
+    const refVal = document.getElementById('cal-ref-filter')?.value?.trim();
     const status = document.getElementById('cal-status-filter')?.value;
     const evType = document.getElementById('cal-type-filter')?.value;
 
@@ -7671,6 +7679,7 @@ async function loadCalendarEvents() {
     }
     if (subId) params.push('subreddit_id=' + subId);
     if (acctId) params.push('account_id=' + encodeURIComponent(acctId));
+    if (refVal) params.push('ref=' + encodeURIComponent(refVal));
     if (status) params.push('status=' + status);
     if (evType) params.push('event_type=' + evType);
 
@@ -7696,8 +7705,9 @@ function renderCalendarGrid() {
     _calEvents.forEach(ev => {
         const d = (ev.event_date || '').substring(0, 10);
         if (!d) return;
-        if (!dateCounts[d]) dateCounts[d] = { posts: 0, assigned: 0, deployed: 0, total: 0 };
-        if (ev.event_type === 'post') dateCounts[d].posts++;
+        if (!dateCounts[d]) dateCounts[d] = { posts: 0, assigned: 0, deployed: 0, paid: 0, total: 0 };
+        if (ev.paid_at) dateCounts[d].paid++;
+        else if (ev.event_type === 'post') dateCounts[d].posts++;
         else if (ev.status === 'assigned') dateCounts[d].assigned++;
         else dateCounts[d].deployed++;
         dateCounts[d].total++;
@@ -7725,7 +7735,7 @@ function renderCalendarGrid() {
     // Current month days
     for (let d = 1; d <= daysInMonth; d++) {
         const dateStr = `${_calYear}-${String(_calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-        const counts = dateCounts[dateStr] || { posts: 0, assigned: 0, deployed: 0, total: 0 };
+        const counts = dateCounts[dateStr] || { posts: 0, assigned: 0, deployed: 0, paid: 0, total: 0 };
         const isToday = dateStr === todayStr;
         const isSelected = dateStr === _calSelectedDate;
 
@@ -7733,6 +7743,7 @@ function renderCalendarGrid() {
         if (counts.posts > 0) dots += `<span class="cal-dot cal-dot-post" title="${counts.posts} post(s)"></span>`;
         if (counts.deployed > 0) dots += `<span class="cal-dot cal-dot-deployed" title="${counts.deployed} deployed"></span>`;
         if (counts.assigned > 0) dots += `<span class="cal-dot cal-dot-assigned" title="${counts.assigned} assigned"></span>`;
+        if (counts.paid > 0) dots += `<span class="cal-dot cal-dot-paid" title="${counts.paid} paid"></span>`;
 
         let countLabel = counts.total > 0 ? `<div class="cal-count">${counts.total} event${counts.total > 1 ? 's' : ''}</div>` : '';
 
@@ -7757,6 +7768,7 @@ function renderCalendarGrid() {
             <span><span class="cal-dot cal-dot-post"></span> Posts</span>
             <span><span class="cal-dot cal-dot-deployed"></span> Deployed</span>
             <span><span class="cal-dot cal-dot-assigned"></span> Assigned</span>
+            <span><span class="cal-dot cal-dot-paid"></span> Paid</span>
             <span class="ml-auto">${_calEvents.length} total events this month</span>
         </div>
     `;
@@ -7777,13 +7789,27 @@ function renderCalendarDayDetail(dateStr) {
     if (!container) return;
 
     const dayEvents = _calEvents.filter(ev => (ev.event_date || '').substring(0, 10) === dateStr);
+    const dateLabel = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
-    if (!dayEvents.length) {
-        container.innerHTML = `<p class="text-sm text-gray-500 mt-2">No events on ${dateStr}</p>`;
+    const toggleHtml = `
+        <div class="flex items-center gap-2 mb-3">
+            <h3 class="text-lg font-bold">${dateLabel} <span class="text-sm font-normal text-gray-500">(${dayEvents.length} event${dayEvents.length !== 1 ? 's' : ''})</span></h3>
+            <div class="ml-auto flex gap-1">
+                <button class="btn btn-sm ${_calDayView === 'events' ? 'btn-primary' : 'btn-secondary'}" onclick="_calDayView='events';renderCalendarDayDetail('${dateStr}')">Events</button>
+                <button class="btn btn-sm ${_calDayView === 'accounts' ? 'btn-primary' : 'btn-secondary'}" onclick="_calDayView='accounts';renderCalendarDayDetail('${dateStr}')">Account Summary</button>
+            </div>
+        </div>`;
+
+    if (_calDayView === 'accounts') {
+        container.innerHTML = toggleHtml + '<div id="cal-acct-summary"><div class="spinner mx-auto my-4"></div></div>';
+        loadCalendarAccountSummary(dateStr);
         return;
     }
 
-    const dateLabel = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    if (!dayEvents.length) {
+        container.innerHTML = toggleHtml + `<p class="text-sm text-gray-500 mt-2">No events on ${dateStr}</p>`;
+        return;
+    }
 
     const cards = dayEvents.map(ev => {
         const typeBadge = ev.event_type === 'post'
@@ -7793,6 +7819,7 @@ function renderCalendarDayDetail(dateStr) {
             : '<span class="badge" style="background:#0079D3;color:white">Comment</span>';
 
         const statusBadge = `<span class="badge badge-${ev.status === 'published' ? 'deployed' : ev.status}">${ev.status}</span>`;
+        const paidBadge = ev.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : '';
 
         const mentionBadge = ev.mentions_brand ? '<span class="badge badge-brand">brand mention</span>' : '<span class="badge badge-draft">general</span>';
 
@@ -7819,7 +7846,7 @@ function renderCalendarDayDetail(dateStr) {
         return `
         <div class="card p-4 mb-3">
             <div class="flex gap-2 items-center mb-2 flex-wrap">
-                ${typeBadge} ${statusBadge} ${mentionBadge} ${replyBadge}
+                ${typeBadge} ${statusBadge}${paidBadge} ${mentionBadge} ${replyBadge}
                 <span class="text-xs text-gray-500 ml-auto">${time}</span>
             </div>
             ${bodyPreview}
@@ -7833,10 +7860,97 @@ function renderCalendarDayDetail(dateStr) {
         </div>`;
     }).join('');
 
+    container.innerHTML = toggleHtml + cards;
+}
+
+async function loadCalendarAccountSummary(dateStr) {
+    const container = document.getElementById('cal-acct-summary');
+    if (!container) return;
+
+    let params = [`date=${dateStr}`];
+    const brandName = document.getElementById('cal-brand-filter')?.value;
+    const subId = document.getElementById('cal-sub-filter')?.value;
+    const refVal = document.getElementById('cal-ref-filter')?.value?.trim();
+    if (brandName) {
+        const match = _calBrands.find(b => b.name === brandName);
+        if (match) params.push('brand_id=' + match.id);
+    }
+    if (subId) params.push('subreddit_id=' + subId);
+    if (refVal) params.push('ref=' + encodeURIComponent(refVal));
+
+    let data;
+    try {
+        data = await api('/api/calendar/account-summary?' + params.join('&'));
+    } catch(e) {
+        container.innerHTML = '<p class="text-sm text-red-400">Failed to load account summary</p>';
+        return;
+    }
+
+    if (!data.length) {
+        container.innerHTML = '<p class="text-sm text-gray-500">No account activity on this date</p>';
+        return;
+    }
+
+    // Sort by total descending
+    data.forEach(r => { r.total = (r.reg_assigned||0) + (r.reg_deployed||0) + (r.reg_paid||0) + (r.ls_assigned||0) + (r.ls_deployed||0) + (r.ls_paid||0) + (r.posts_deployed||0) + (r.posts_paid||0); });
+    data.sort((a, b) => b.total - a.total);
+
+    // Totals row
+    const tot = { reg_assigned: 0, reg_deployed: 0, reg_paid: 0, ls_assigned: 0, ls_deployed: 0, ls_paid: 0, posts_deployed: 0, posts_paid: 0, total: 0 };
+    data.forEach(r => { for (const k in tot) tot[k] += (r[k]||0); });
+
+    const rows = data.map(r => `<tr>
+        <td class="text-sm" style="color:#FFD700">u/${r.account_id}</td>
+        <td class="text-xs text-gray-400">${r.reference || '-'}</td>
+        <td class="text-sm text-center">${r.reg_assigned || '-'}</td>
+        <td class="text-sm text-center">${r.reg_deployed || '-'}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${r.reg_paid || '-'}</td>
+        <td class="text-sm text-center">${r.ls_assigned || '-'}</td>
+        <td class="text-sm text-center">${r.ls_deployed || '-'}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${r.ls_paid || '-'}</td>
+        <td class="text-sm text-center">${r.posts_deployed || '-'}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${r.posts_paid || '-'}</td>
+        <td class="text-sm text-center font-bold">${r.total}</td>
+    </tr>`).join('');
+
     container.innerHTML = `
-        <h3 class="text-lg font-bold mb-3">${dateLabel} <span class="text-sm font-normal text-gray-500">(${dayEvents.length} event${dayEvents.length > 1 ? 's' : ''})</span></h3>
-        ${cards}
-    `;
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead><tr>
+                    <th class="text-xs" style="color:#818384">Account</th>
+                    <th class="text-xs" style="color:#818384">Ref</th>
+                    <th class="text-xs text-center" style="color:#818384" colspan="3">REG Comments</th>
+                    <th class="text-xs text-center" style="color:#818384" colspan="3">LS Comments</th>
+                    <th class="text-xs text-center" style="color:#818384" colspan="2">Posts</th>
+                    <th class="text-xs text-center" style="color:#818384">Total</th>
+                </tr><tr>
+                    <th></th><th></th>
+                    <th class="text-xs text-center" style="color:#FFD635">Asgn</th>
+                    <th class="text-xs text-center" style="color:#46d160">Depl</th>
+                    <th class="text-xs text-center" style="color:#00A86B">Paid</th>
+                    <th class="text-xs text-center" style="color:#FFD635">Asgn</th>
+                    <th class="text-xs text-center" style="color:#46d160">Depl</th>
+                    <th class="text-xs text-center" style="color:#00A86B">Paid</th>
+                    <th class="text-xs text-center" style="color:#46d160">Depl</th>
+                    <th class="text-xs text-center" style="color:#00A86B">Paid</th>
+                    <th></th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+                <tfoot><tr style="border-top:1px solid #343536">
+                    <td class="text-sm font-bold">Total</td>
+                    <td></td>
+                    <td class="text-sm text-center font-bold">${tot.reg_assigned || '-'}</td>
+                    <td class="text-sm text-center font-bold">${tot.reg_deployed || '-'}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.reg_paid || '-'}</td>
+                    <td class="text-sm text-center font-bold">${tot.ls_assigned || '-'}</td>
+                    <td class="text-sm text-center font-bold">${tot.ls_deployed || '-'}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.ls_paid || '-'}</td>
+                    <td class="text-sm text-center font-bold">${tot.posts_deployed || '-'}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.posts_paid || '-'}</td>
+                    <td class="text-sm text-center font-bold">${tot.total}</td>
+                </tr></tfoot>
+            </table>
+        </div>`;
 }
 
 function copyCalendarMessage(eventId, eventType) {

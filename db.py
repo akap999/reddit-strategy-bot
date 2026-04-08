@@ -2774,36 +2774,65 @@ class Database:
 
     def get_calendar_events(self, date_from=None, date_to=None, brand_id=None,
                             subreddit_id=None, account_id=None, status=None,
-                            event_type=None):
+                            event_type=None, ref=None):
         """Get unified calendar events: published posts + assigned/deployed comments."""
         queries = []
         all_params = []
 
+        is_paid = status == 'paid'
+
         # --- Query 1: Published Posts ---
         has_posts = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_urls'").fetchone()
         if has_posts and (not event_type or event_type == 'post'):
-            q1 = """SELECT 'post' as event_type, p.id as event_id,
-                           pu.added_at as event_date,
-                           p.title as title, p.body as body,
-                           b.name as brand_name, b.id as brand_id,
-                           s.name as subreddit_name, s.id as subreddit_id,
-                           p.owner_account as account_id,
-                           'published' as status,
-                           pu.reddit_url as reddit_url,
-                           NULL as reddit_comment_url,
-                           0 as is_reply, 0 as mentions_brand,
-                           NULL as reply_to_url
-                    FROM posts p
-                    JOIN post_urls pu ON pu.post_id = p.id
-                    JOIN subreddits s ON p.subreddit_id = s.id
-                    LEFT JOIN brands b ON p.brand_id = b.id
-                    WHERE pu.added_at IS NOT NULL"""
+            if is_paid:
+                # For paid filter, show posts with paid_at set
+                q1 = """SELECT 'post' as event_type, p.id as event_id,
+                               COALESCE(p.paid_at, pu.added_at) as event_date,
+                               p.title as title, p.body as body,
+                               b.name as brand_name, b.id as brand_id,
+                               s.name as subreddit_name, s.id as subreddit_id,
+                               p.owner_account as account_id,
+                               'published' as status,
+                               pu.reddit_url as reddit_url,
+                               NULL as reddit_comment_url,
+                               0 as is_reply, 0 as mentions_brand,
+                               NULL as reply_to_url,
+                               p.paid_at as paid_at
+                        FROM posts p
+                        JOIN post_urls pu ON pu.post_id = p.id
+                        JOIN subreddits s ON p.subreddit_id = s.id
+                        LEFT JOIN brands b ON p.brand_id = b.id
+                        WHERE p.paid_at IS NOT NULL"""
+            else:
+                q1 = """SELECT 'post' as event_type, p.id as event_id,
+                               pu.added_at as event_date,
+                               p.title as title, p.body as body,
+                               b.name as brand_name, b.id as brand_id,
+                               s.name as subreddit_name, s.id as subreddit_id,
+                               p.owner_account as account_id,
+                               'published' as status,
+                               pu.reddit_url as reddit_url,
+                               NULL as reddit_comment_url,
+                               0 as is_reply, 0 as mentions_brand,
+                               NULL as reply_to_url,
+                               p.paid_at as paid_at
+                        FROM posts p
+                        JOIN post_urls pu ON pu.post_id = p.id
+                        JOIN subreddits s ON p.subreddit_id = s.id
+                        LEFT JOIN brands b ON p.brand_id = b.id
+                        WHERE pu.added_at IS NOT NULL"""
             p1 = []
             if date_from:
-                q1 += " AND pu.added_at >= ?"
+                if is_paid:
+                    q1 += " AND COALESCE(p.paid_at, pu.added_at) >= ?"
+                else:
+                    q1 += " AND pu.added_at >= ?"
                 p1.append(date_from)
             if date_to:
-                q1 += " AND pu.added_at <= ?"
+                if is_paid:
+                    q1 += " AND COALESCE(p.paid_at, pu.added_at) <= ?"
+                else:
+                    q1 += " AND pu.added_at <= ?"
                 p1.append(date_to + " 23:59:59")
             if brand_id:
                 q1 += " AND b.id = ?"
@@ -2814,8 +2843,11 @@ class Database:
             if account_id:
                 q1 += " AND p.owner_account = ?"
                 p1.append(account_id)
-            if status and status != 'published':
-                pass  # skip posts if filtering for non-published status
+            if ref:
+                q1 += " AND p.owner_account IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+                p1.append(ref)
+            if status and status not in ('published', 'paid'):
+                pass  # skip posts if filtering for non-published/non-paid status
             else:
                 queries.append(q1)
                 all_params.extend(p1)
@@ -2824,8 +2856,14 @@ class Database:
         has_comments = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'").fetchone()
         if has_comments and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'search_comment':
-                q2 = """SELECT 'comment' as event_type, c.id as event_id,
-                               COALESCE(c.deployed_at, c.created_at) as event_date,
+                if is_paid:
+                    date_expr = "COALESCE(c.paid_at, c.deployed_at, c.created_at)"
+                    where_clause = "WHERE c.paid_at IS NOT NULL"
+                else:
+                    date_expr = "COALESCE(c.deployed_at, c.created_at)"
+                    where_clause = "WHERE c.status IN ('assigned', 'informed', 'deployed')"
+                q2 = f"""SELECT 'comment' as event_type, c.id as event_id,
+                               {date_expr} as event_date,
                                p.title as title, c.body as body,
                                b.name as brand_name, b.id as brand_id,
                                s.name as subreddit_name, s.id as subreddit_id,
@@ -2834,19 +2872,20 @@ class Database:
                                pu.reddit_url as reddit_url,
                                c.reddit_comment_url as reddit_comment_url,
                                c.is_reply as is_reply, c.mentions_brand as mentions_brand,
-                               NULL as reply_to_url
+                               NULL as reply_to_url,
+                               c.paid_at as paid_at
                         FROM comments c
                         JOIN posts p ON c.post_id = p.id
                         JOIN subreddits s ON p.subreddit_id = s.id
                         LEFT JOIN brands b ON c.brand_id = b.id
                         LEFT JOIN post_urls pu ON pu.post_id = p.id
-                        WHERE c.status IN ('assigned', 'informed', 'deployed')"""
+                        {where_clause}"""
                 p2 = []
                 if date_from:
-                    q2 += " AND COALESCE(c.deployed_at, c.created_at) >= ?"
+                    q2 += f" AND {date_expr} >= ?"
                     p2.append(date_from)
                 if date_to:
-                    q2 += " AND COALESCE(c.deployed_at, c.created_at) <= ?"
+                    q2 += f" AND {date_expr} <= ?"
                     p2.append(date_to + " 23:59:59")
                 if brand_id:
                     q2 += " AND b.id = ?"
@@ -2857,19 +2896,27 @@ class Database:
                 if account_id:
                     q2 += " AND c.account_id = ?"
                     p2.append(account_id)
-                if status:
+                if ref:
+                    q2 += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+                    p2.append(ref)
+                if status and not is_paid:
                     q2 += " AND c.status = ?"
                     p2.append(status)
                 queries.append(q2)
                 all_params.extend(p2)
 
         # --- Query 3: Search Comments (assigned/deployed) ---
-        # Check if search_comments table exists
         has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
         if has_sc and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'comment':
-                q3 = """SELECT 'search_comment' as event_type, sc.id as event_id,
-                               COALESCE(sc.deployed_at, sc.created_at) as event_date,
+                if is_paid:
+                    date_expr3 = "COALESCE(sc.paid_at, sc.deployed_at, sc.created_at)"
+                    where_clause3 = "WHERE sc.paid_at IS NOT NULL"
+                else:
+                    date_expr3 = "COALESCE(sc.deployed_at, sc.created_at)"
+                    where_clause3 = "WHERE sc.status IN ('assigned', 'informed', 'deployed')"
+                q3 = f"""SELECT 'search_comment' as event_type, sc.id as event_id,
+                               {date_expr3} as event_date,
                                sp.title as title, sc.body as body,
                                b.name as brand_name, b.id as brand_id,
                                sp.subreddit as subreddit_name, NULL as subreddit_id,
@@ -2878,29 +2925,32 @@ class Database:
                                sp.reddit_url as reddit_url,
                                sc.reddit_comment_url as reddit_comment_url,
                                sc.is_reply as is_reply, sc.mentions_brand as mentions_brand,
-                               sc.reply_to_url as reply_to_url
+                               sc.reply_to_url as reply_to_url,
+                               sc.paid_at as paid_at
                         FROM search_comments sc
                         JOIN search_posts sp ON sc.search_post_id = sp.id
                         LEFT JOIN brands b ON sc.brand_id = b.id
-                        WHERE sc.status IN ('assigned', 'informed', 'deployed')"""
+                        {where_clause3}"""
                 p3 = []
                 if date_from:
-                    q3 += " AND COALESCE(sc.deployed_at, sc.created_at) >= ?"
+                    q3 += f" AND {date_expr3} >= ?"
                     p3.append(date_from)
                 if date_to:
-                    q3 += " AND COALESCE(sc.deployed_at, sc.created_at) <= ?"
+                    q3 += f" AND {date_expr3} <= ?"
                     p3.append(date_to + " 23:59:59")
                 if brand_id:
                     q3 += " AND b.id = ?"
                     p3.append(brand_id)
                 if subreddit_id:
-                    # search_posts store subreddit as text name — resolve via subquery
                     q3 += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"
                     p3.append(subreddit_id)
                 if account_id:
                     q3 += " AND sc.account_id = ?"
                     p3.append(account_id)
-                if status:
+                if ref:
+                    q3 += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+                    p3.append(ref)
+                if status and not is_paid:
                     q3 += " AND sc.status = ?"
                     p3.append(status)
                 queries.append(q3)
@@ -2912,6 +2962,125 @@ class Database:
         full_query = " UNION ALL ".join(queries) + " ORDER BY event_date DESC"
         rows = self.conn.execute(full_query, all_params).fetchall()
         return [dict(r) for r in rows]
+
+    def get_calendar_account_summary(self, date, brand_id=None, subreddit_id=None, ref=None):
+        """Get per-account counts of assigned/deployed/paid for a given date."""
+        results = {}
+
+        # --- Regular comments ---
+        q1 = """SELECT c.account_id,
+                       SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as reg_assigned,
+                       SUM(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 ELSE 0 END) as reg_deployed,
+                       SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as reg_paid
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                WHERE c.status IN ('assigned', 'informed', 'deployed')
+                  AND c.account_id IS NOT NULL
+                  AND DATE(COALESCE(c.deployed_at, c.created_at)) = ?"""
+        p1 = [date]
+        if brand_id:
+            q1 += " AND b.id = ?"
+            p1.append(brand_id)
+        if subreddit_id:
+            q1 += " AND p.subreddit_id = ?"
+            p1.append(subreddit_id)
+        if ref:
+            q1 += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+            p1.append(ref)
+        q1 += " GROUP BY c.account_id"
+        for row in self.conn.execute(q1, p1).fetchall():
+            r = dict(row)
+            acct = r['account_id']
+            if acct not in results:
+                results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                                 'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
+                                 'posts_deployed': 0, 'posts_paid': 0}
+            results[acct]['reg_assigned'] = r['reg_assigned']
+            results[acct]['reg_deployed'] = r['reg_deployed']
+            results[acct]['reg_paid'] = r['reg_paid']
+
+        # --- Search comments ---
+        has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
+        if has_sc:
+            q2 = """SELECT sc.account_id,
+                           SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as ls_assigned,
+                           SUM(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NULL THEN 1 ELSE 0 END) as ls_deployed,
+                           SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as ls_paid
+                    FROM search_comments sc
+                    JOIN search_posts sp ON sc.search_post_id = sp.id
+                    LEFT JOIN brands b ON sc.brand_id = b.id
+                    WHERE sc.status IN ('assigned', 'informed', 'deployed')
+                      AND sc.account_id IS NOT NULL
+                      AND DATE(COALESCE(sc.deployed_at, sc.created_at)) = ?"""
+            p2 = [date]
+            if brand_id:
+                q2 += " AND b.id = ?"
+                p2.append(brand_id)
+            if subreddit_id:
+                q2 += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"
+                p2.append(subreddit_id)
+            if ref:
+                q2 += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+                p2.append(ref)
+            q2 += " GROUP BY sc.account_id"
+            for row in self.conn.execute(q2, p2).fetchall():
+                r = dict(row)
+                acct = r['account_id']
+                if acct not in results:
+                    results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                                     'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
+                                     'posts_deployed': 0, 'posts_paid': 0}
+                results[acct]['ls_assigned'] = r['ls_assigned']
+                results[acct]['ls_deployed'] = r['ls_deployed']
+                results[acct]['ls_paid'] = r['ls_paid']
+
+        # --- Posts ---
+        has_pu = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_urls'").fetchone()
+        if has_pu:
+            q3 = """SELECT p.owner_account as account_id,
+                           COUNT(*) as posts_deployed,
+                           SUM(CASE WHEN p.paid_at IS NOT NULL THEN 1 ELSE 0 END) as posts_paid
+                    FROM posts p
+                    JOIN post_urls pu ON pu.post_id = p.id
+                    JOIN subreddits s ON p.subreddit_id = s.id
+                    LEFT JOIN brands b ON p.brand_id = b.id
+                    WHERE p.owner_account IS NOT NULL
+                      AND DATE(pu.added_at) = ?"""
+            p3 = [date]
+            if brand_id:
+                q3 += " AND b.id = ?"
+                p3.append(brand_id)
+            if subreddit_id:
+                q3 += " AND s.id = ?"
+                p3.append(subreddit_id)
+            if ref:
+                q3 += " AND p.owner_account IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
+                p3.append(ref)
+            q3 += " GROUP BY p.owner_account"
+            for row in self.conn.execute(q3, p3).fetchall():
+                r = dict(row)
+                acct = r['account_id']
+                if acct not in results:
+                    results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                                     'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
+                                     'posts_deployed': 0, 'posts_paid': 0}
+                results[acct]['posts_deployed'] = r['posts_deployed']
+                results[acct]['posts_paid'] = r['posts_paid']
+
+        # Add reference from accounts table
+        acct_names = list(results.keys())
+        if acct_names:
+            placeholders = ','.join('?' * len(acct_names))
+            refs = self.conn.execute(
+                f"SELECT username, reference FROM accounts WHERE username IN ({placeholders})",
+                acct_names
+            ).fetchall()
+            ref_map = {r['username']: r['reference'] for r in refs}
+            for acct in results.values():
+                acct['reference'] = ref_map.get(acct['account_id'], '')
+
+        return list(results.values())
 
     # --- Search Posts (Live Search) ---
 

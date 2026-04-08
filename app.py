@@ -1312,8 +1312,26 @@ def api_calendar_events():
             account_id=request.args.get("account_id") or None,
             status=request.args.get("status") or None,
             event_type=request.args.get("event_type") or None,
+            ref=request.args.get("ref") or None,
         )
         return jsonify(events)
+    finally:
+        db.close()
+
+@app.route("/api/calendar/account-summary")
+def api_calendar_account_summary():
+    """Get per-account counts for a given date."""
+    date = request.args.get("date")
+    if not date:
+        return jsonify([])
+    db = get_db()
+    try:
+        return jsonify(db.get_calendar_account_summary(
+            date=date,
+            brand_id=request.args.get("brand_id") or None,
+            subreddit_id=request.args.get("subreddit_id") or None,
+            ref=request.args.get("ref") or None,
+        ))
     finally:
         db.close()
 

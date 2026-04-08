@@ -2629,6 +2629,50 @@ class Database:
         )
         self.conn.commit()
 
+    def bulk_mark_paid(self, brand_id=None, subreddit_id=None, account_id=None, source=None, date=None):
+        """Mark all deployed comments matching filters as paid. Returns count of updated rows."""
+        total = 0
+
+        # Build WHERE for regular comments
+        if source != 'search_comment':
+            w1, p1 = ["status = 'deployed'"], []
+            if brand_id:
+                w1.append("brand_id = ?"); p1.append(brand_id)
+            if account_id:
+                w1.append("account_id = ?"); p1.append(account_id)
+            if subreddit_id:
+                w1.append("post_id IN (SELECT id FROM posts WHERE subreddit_id = ?)"); p1.append(subreddit_id)
+            if date:
+                w1.append("DATE(COALESCE(deployed_at, created_at)) = ?"); p1.append(date)
+            where1 = " AND ".join(w1)
+            cur = self.conn.execute(
+                f"UPDATE comments SET status = 'paid', paid_at = datetime('now') WHERE {where1}", p1
+            )
+            total += cur.rowcount
+
+        # Build WHERE for search comments
+        if source != 'comment':
+            w2, p2 = ["status = 'deployed'"], []
+            if brand_id:
+                w2.append("brand_id = ?"); p2.append(brand_id)
+            if account_id:
+                w2.append("account_id = ?"); p2.append(account_id)
+            if subreddit_id:
+                row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+                if row:
+                    w2.append("search_post_id IN (SELECT id FROM search_posts WHERE LOWER(subreddit) = LOWER(?))")
+                    p2.append(row["name"])
+            if date:
+                w2.append("DATE(COALESCE(deployed_at, created_at)) = ?"); p2.append(date)
+            where2 = " AND ".join(w2)
+            cur = self.conn.execute(
+                f"UPDATE search_comments SET status = 'paid', paid_at = datetime('now') WHERE {where2}", p2
+            )
+            total += cur.rowcount
+
+        self.conn.commit()
+        return total
+
     def get_due_payments(self):
         rows = self.conn.execute(
             """SELECT 'comment' as source, c.id, c.body, c.account_id, c.deployed_at,

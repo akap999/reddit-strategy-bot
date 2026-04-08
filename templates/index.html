@@ -4718,6 +4718,7 @@ async function renderAllComments(el) {
             <h2 class="text-2xl font-bold" style="color:#FF8b60">All Comments</h2>
             <div class="flex gap-2 items-center">
                 <span id="ac-count" class="text-sm" style="color:#818384"></span>
+                <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPaidAllComments()">Mark Paid All</button>
                 <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live (Search)</button>
             </div>
         </div>
@@ -4781,6 +4782,30 @@ async function renderAllComments(el) {
         <div id="ac-pagination" class="flex gap-2 mt-3 justify-center items-center"></div>
     `;
 
+    loadAllComments();
+}
+
+async function markPaidAllComments() {
+    const brandId = document.getElementById('ac-brand-filter')?.value || '';
+    const subId = document.getElementById('ac-sub-filter')?.value || '';
+    const accountId = document.getElementById('ac-account-filter')?.value || '';
+    const sourceFilter = document.getElementById('ac-source-filter')?.value || '';
+    const dateFilter = document.getElementById('ac-date-filter')?.value || '';
+
+    if (!confirm('Mark all deployed comments matching current filters as paid?')) return;
+
+    const body = {};
+    if (brandId) body.brand_id = parseInt(brandId);
+    if (subId) body.subreddit_id = parseInt(subId);
+    if (accountId) body.account_id = accountId;
+    if (sourceFilter) body.source = sourceFilter;
+    if (dateFilter) body.date = dateFilter;
+
+    const result = await api('/api/all-comments/mark-paid-all', {
+        method: 'POST',
+        body: body,
+    });
+    alert(`${result.updated} comment(s) marked as paid.`);
     loadAllComments();
 }
 

@@ -1141,6 +1141,23 @@ def api_global_all_comments():
         db.close()
 
 
+@app.route("/api/all-comments/mark-paid-all", methods=["POST"])
+def api_mark_paid_all_comments():
+    db = get_db()
+    try:
+        data = request.get_json() or {}
+        updated = db.bulk_mark_paid(
+            brand_id=data.get("brand_id"),
+            subreddit_id=data.get("subreddit_id"),
+            account_id=data.get("account_id"),
+            source=data.get("source"),
+            date=data.get("date"),
+        )
+        return jsonify({"updated": updated})
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
     import time as _time

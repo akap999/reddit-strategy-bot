@@ -167,6 +167,9 @@ def _normalize_reddit_comment_url(url):
     # If the path still starts with http, it's an unrecognized domain (e.g. redd.it)
     if path.startswith('http://') or path.startswith('https://'):
         return None
+    # Reject share URLs (/s/...) — they return HTML, not JSON
+    if path.startswith('/s/'):
+        return None
     # Ensure path starts with /
     if not path.startswith('/'):
         return None
@@ -1102,6 +1105,7 @@ def api_global_all_comments():
         subreddit_id = request.args.get("subreddit_id")
         account_id = request.args.get("account_id") or None
         sort_by = request.args.get("sort_by") or None
+        source = request.args.get("source") or None
         limit = int(request.args.get("limit", 200))
         offset = int(request.args.get("offset", 0))
         result = db.get_all_comments_global(
@@ -1110,6 +1114,7 @@ def api_global_all_comments():
             subreddit_id=int(subreddit_id) if subreddit_id else None,
             account_id=account_id,
             sort_by=sort_by,
+            source=source,
             limit=limit,
             offset=offset,
         )
@@ -1147,10 +1152,20 @@ def api_check_live(sid):
                         _time.sleep(10)
                         errors += 1
                         continue
+                    if resp.status_code == 403:
+                        print(f"[CHECK-LIVE] #{item['id']} got 403 Forbidden, waiting 5s", flush=True)
+                        _time.sleep(5)
+                        errors += 1
+                        continue
                     if resp.status_code == 404:
                         db.mark_comment_deleted(item["id"])
                         dead += 1
                     elif resp.status_code == 200:
+                        ct = resp.headers.get('Content-Type', '')
+                        if 'json' not in ct:
+                            print(f"[CHECK-LIVE] #{item['id']} got non-JSON response ({ct})", flush=True)
+                            errors += 1
+                            continue
                         data = resp.json()
                         found_deleted = False
                         if isinstance(data, list) and len(data) > 1:
@@ -1210,10 +1225,20 @@ def api_check_live_search_comments():
                         _time.sleep(10)
                         errors += 1
                         continue
+                    if resp.status_code == 403:
+                        print(f"[CHECK-LIVE-SEARCH] #{item['id']} got 403 Forbidden, waiting 5s", flush=True)
+                        _time.sleep(5)
+                        errors += 1
+                        continue
                     if resp.status_code == 404:
                         db.mark_search_comment_removed(item["id"])
                         dead += 1
                     elif resp.status_code == 200:
+                        ct = resp.headers.get('Content-Type', '')
+                        if 'json' not in ct:
+                            print(f"[CHECK-LIVE-SEARCH] #{item['id']} got non-JSON response ({ct})", flush=True)
+                            errors += 1
+                            continue
                         data = resp.json()
                         found_deleted = False
                         if isinstance(data, list) and len(data) > 1:

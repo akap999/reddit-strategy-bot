@@ -1350,13 +1350,18 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,
-                                account_id=None, sort_by=None, limit=200, offset=0):
+                                account_id=None, sort_by=None, source=None,
+                                limit=200, offset=0):
         """Get all comments (regular + search) globally with optional filters and pagination."""
         # Build WHERE clauses dynamically
         w1, w2 = ["c.status != 'deleted'"], ["sc.status != 'deleted'"]
         p1, p2 = [], []
 
-        if status:
+        if status == 'paid':
+            # Special: "paid" is not a status column value — filter by paid_at
+            w1.append("c.paid_at IS NOT NULL")
+            w2.append("sc.paid_at IS NOT NULL")
+        elif status:
             w1 = ["c.status = ?"]; p1.append(status)
             w2 = ["sc.status = ?"]; p2.append(status)
         if brand_id:
@@ -1367,7 +1372,6 @@ class Database:
             w2.append("sc.account_id = ?"); p2.append(account_id)
 
         # Subreddit filter: ID for regular, name for search
-        sub_name = None
         if subreddit_id:
             w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
             row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
@@ -1410,14 +1414,26 @@ class Database:
 
         if sort_by == 'deployed_at':
             order = "ORDER BY deployed_at DESC, id DESC"
+        elif sort_by == 'oldest':
+            order = "ORDER BY created_at ASC, id ASC"
         else:
             order = "ORDER BY created_at DESC, id DESC"
 
-        union = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
-        all_params = p1 + p2
+        # Source filter: only one table if specified
+        if source == 'comment':
+            inner = q1
+            all_params = p1
+        elif source == 'search_comment':
+            inner = q2
+            all_params = p2
+        else:
+            inner = f"{q1} UNION ALL {q2}"
+            all_params = p1 + p2
+
+        union = f"SELECT * FROM ({inner}) combined {order}"
 
         # Count
-        count_query = f"SELECT COUNT(*) as cnt FROM ({q1} UNION ALL {q2}) combined"
+        count_query = f"SELECT COUNT(*) as cnt FROM ({inner}) combined"
         total = self.conn.execute(count_query, all_params).fetchone()["cnt"]
 
         # Paginated results

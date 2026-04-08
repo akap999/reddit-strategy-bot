@@ -7900,24 +7900,29 @@ async function loadCalendarAccountSummary(dateStr) {
     }
 
     // Sort by total descending
-    data.forEach(r => { r.total = (r.reg_assigned||0) + (r.reg_deployed||0) + (r.reg_paid||0) + (r.ls_assigned||0) + (r.ls_deployed||0) + (r.ls_paid||0) + (r.posts_deployed||0) + (r.posts_paid||0); });
+    data.forEach(r => { r.total = (r.reg_brand_assigned||0) + (r.reg_nonbrand_assigned||0) + (r.reg_brand_deployed||0) + (r.reg_nonbrand_deployed||0) + (r.reg_brand_paid||0) + (r.reg_nonbrand_paid||0) + (r.ls_assigned||0) + (r.ls_deployed||0) + (r.ls_paid||0) + (r.posts_deployed||0) + (r.posts_paid||0); });
     data.sort((a, b) => b.total - a.total);
 
     // Totals row
-    const tot = { reg_assigned: 0, reg_deployed: 0, reg_paid: 0, ls_assigned: 0, ls_deployed: 0, ls_paid: 0, posts_deployed: 0, posts_paid: 0, total: 0 };
+    const tot = { reg_brand_assigned: 0, reg_nonbrand_assigned: 0, reg_brand_deployed: 0, reg_nonbrand_deployed: 0, reg_brand_paid: 0, reg_nonbrand_paid: 0, ls_assigned: 0, ls_deployed: 0, ls_paid: 0, posts_deployed: 0, posts_paid: 0, total: 0 };
     data.forEach(r => { for (const k in tot) tot[k] += (r[k]||0); });
+
+    const v = (n) => n ? n : '-';
 
     const rows = data.map(r => `<tr>
         <td class="text-sm" style="color:#FFD700">u/${r.account_id}</td>
         <td class="text-xs text-gray-400">${r.reference || '-'}</td>
-        <td class="text-sm text-center">${r.reg_assigned || '-'}</td>
-        <td class="text-sm text-center">${r.reg_deployed || '-'}</td>
-        <td class="text-sm text-center" style="color:#00A86B">${r.reg_paid || '-'}</td>
-        <td class="text-sm text-center">${r.ls_assigned || '-'}</td>
-        <td class="text-sm text-center">${r.ls_deployed || '-'}</td>
-        <td class="text-sm text-center" style="color:#00A86B">${r.ls_paid || '-'}</td>
-        <td class="text-sm text-center">${r.posts_deployed || '-'}</td>
-        <td class="text-sm text-center" style="color:#00A86B">${r.posts_paid || '-'}</td>
+        <td class="text-sm text-center">${v(r.reg_brand_assigned)}</td>
+        <td class="text-sm text-center">${v(r.reg_brand_deployed)}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${v(r.reg_brand_paid)}</td>
+        <td class="text-sm text-center">${v(r.reg_nonbrand_assigned)}</td>
+        <td class="text-sm text-center">${v(r.reg_nonbrand_deployed)}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${v(r.reg_nonbrand_paid)}</td>
+        <td class="text-sm text-center">${v(r.ls_assigned)}</td>
+        <td class="text-sm text-center">${v(r.ls_deployed)}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${v(r.ls_paid)}</td>
+        <td class="text-sm text-center">${v(r.posts_deployed)}</td>
+        <td class="text-sm text-center" style="color:#00A86B">${v(r.posts_paid)}</td>
         <td class="text-sm text-center font-bold">${r.total}</td>
     </tr>`).join('');
 
@@ -7925,36 +7930,41 @@ async function loadCalendarAccountSummary(dateStr) {
         <div class="overflow-x-auto">
             <table class="w-full text-left">
                 <thead><tr>
-                    <th class="text-xs" style="color:#818384">Account</th>
-                    <th class="text-xs" style="color:#818384">Ref</th>
-                    <th class="text-xs text-center" style="color:#818384" colspan="3">REG Comments</th>
-                    <th class="text-xs text-center" style="color:#818384" colspan="3">LS Comments</th>
-                    <th class="text-xs text-center" style="color:#818384" colspan="2">Posts</th>
-                    <th class="text-xs text-center" style="color:#818384">Total</th>
+                    <th class="text-xs" style="color:#818384" rowspan="2">Account</th>
+                    <th class="text-xs" style="color:#818384" rowspan="2">Ref</th>
+                    <th class="text-xs text-center" style="color:#FF4500;border-bottom:1px solid #343536" colspan="3">REG Brand</th>
+                    <th class="text-xs text-center" style="color:#818384;border-bottom:1px solid #343536" colspan="3">REG Non-Brand</th>
+                    <th class="text-xs text-center" style="color:#0079D3;border-bottom:1px solid #343536" colspan="3">LS Comments</th>
+                    <th class="text-xs text-center" style="color:#818384;border-bottom:1px solid #343536" colspan="2">Posts</th>
+                    <th class="text-xs text-center" style="color:#818384" rowspan="2">Total</th>
                 </tr><tr>
-                    <th></th><th></th>
                     <th class="text-xs text-center" style="color:#FFD635">Asgn</th>
                     <th class="text-xs text-center" style="color:#46d160">Depl</th>
                     <th class="text-xs text-center" style="color:#00A86B">Paid</th>
                     <th class="text-xs text-center" style="color:#FFD635">Asgn</th>
                     <th class="text-xs text-center" style="color:#46d160">Depl</th>
                     <th class="text-xs text-center" style="color:#00A86B">Paid</th>
+                    <th class="text-xs text-center" style="color:#FFD635">Asgn</th>
                     <th class="text-xs text-center" style="color:#46d160">Depl</th>
                     <th class="text-xs text-center" style="color:#00A86B">Paid</th>
-                    <th></th>
+                    <th class="text-xs text-center" style="color:#46d160">Depl</th>
+                    <th class="text-xs text-center" style="color:#00A86B">Paid</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
                 <tfoot><tr style="border-top:1px solid #343536">
                     <td class="text-sm font-bold">Total</td>
                     <td></td>
-                    <td class="text-sm text-center font-bold">${tot.reg_assigned || '-'}</td>
-                    <td class="text-sm text-center font-bold">${tot.reg_deployed || '-'}</td>
-                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.reg_paid || '-'}</td>
-                    <td class="text-sm text-center font-bold">${tot.ls_assigned || '-'}</td>
-                    <td class="text-sm text-center font-bold">${tot.ls_deployed || '-'}</td>
-                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.ls_paid || '-'}</td>
-                    <td class="text-sm text-center font-bold">${tot.posts_deployed || '-'}</td>
-                    <td class="text-sm text-center font-bold" style="color:#00A86B">${tot.posts_paid || '-'}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.reg_brand_assigned)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.reg_brand_deployed)}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${v(tot.reg_brand_paid)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.reg_nonbrand_assigned)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.reg_nonbrand_deployed)}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${v(tot.reg_nonbrand_paid)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.ls_assigned)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.ls_deployed)}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${v(tot.ls_paid)}</td>
+                    <td class="text-sm text-center font-bold">${v(tot.posts_deployed)}</td>
+                    <td class="text-sm text-center font-bold" style="color:#00A86B">${v(tot.posts_paid)}</td>
                     <td class="text-sm text-center font-bold">${tot.total}</td>
                 </tr></tfoot>
             </table>

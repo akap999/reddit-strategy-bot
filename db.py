@@ -2962,9 +2962,12 @@ class Database:
 
         # --- Regular comments ---
         q1 = """SELECT c.account_id,
-                       SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as reg_assigned,
-                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as reg_deployed,
-                       SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as reg_paid
+                       SUM(CASE WHEN c.status = 'assigned' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_assigned,
+                       SUM(CASE WHEN c.status = 'assigned' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_assigned,
+                       SUM(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_deployed,
+                       SUM(CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_deployed,
+                       SUM(CASE WHEN c.status = 'paid' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_paid,
+                       SUM(CASE WHEN c.status = 'paid' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_paid
                 FROM comments c
                 JOIN posts p ON c.post_id = p.id
                 LEFT JOIN brands b ON c.brand_id = b.id
@@ -2986,12 +2989,15 @@ class Database:
             r = dict(row)
             acct = r['account_id']
             if acct not in results:
-                results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                results[acct] = {'account_id': acct,
+                                 'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
+                                 'reg_brand_deployed': 0, 'reg_nonbrand_deployed': 0,
+                                 'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
                                  'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
                                  'posts_deployed': 0, 'posts_paid': 0}
-            results[acct]['reg_assigned'] = r['reg_assigned']
-            results[acct]['reg_deployed'] = r['reg_deployed']
-            results[acct]['reg_paid'] = r['reg_paid']
+            for k in ('reg_brand_assigned', 'reg_nonbrand_assigned', 'reg_brand_deployed',
+                       'reg_nonbrand_deployed', 'reg_brand_paid', 'reg_nonbrand_paid'):
+                results[acct][k] = r[k]
 
         # --- Search comments ---
         has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
@@ -3021,7 +3027,10 @@ class Database:
                 r = dict(row)
                 acct = r['account_id']
                 if acct not in results:
-                    results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                    results[acct] = {'account_id': acct,
+                                     'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
+                                     'reg_brand_deployed': 0, 'reg_nonbrand_deployed': 0,
+                                     'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
                                      'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
                                      'posts_deployed': 0, 'posts_paid': 0}
                 results[acct]['ls_assigned'] = r['ls_assigned']
@@ -3055,7 +3064,10 @@ class Database:
                 r = dict(row)
                 acct = r['account_id']
                 if acct not in results:
-                    results[acct] = {'account_id': acct, 'reg_assigned': 0, 'reg_deployed': 0, 'reg_paid': 0,
+                    results[acct] = {'account_id': acct,
+                                     'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
+                                     'reg_brand_deployed': 0, 'reg_nonbrand_deployed': 0,
+                                     'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
                                      'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
                                      'posts_deployed': 0, 'posts_paid': 0}
                 results[acct]['posts_deployed'] = r['posts_deployed']

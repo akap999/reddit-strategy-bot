@@ -25,6 +25,7 @@
         .badge-assigned { background: #3a2a00; color: #FFD635; }
         .badge-informed { background: #4a2a00; color: #FF8b60; }
         .badge-deployed { background: #1a3320; color: #46d160; }
+        .badge-paid { background: #004d33; color: #00A86B; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
         .badge-removed { background: #4a1a2a; color: #ff6b9b; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
@@ -1694,7 +1695,7 @@ function renderBrandCommentTable() {
     }
 
     const statusBadge = (s) => {
-        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', deleted: 'badge-deleted', removed: 'badge-removed', draft: 'badge-draft' };
+        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', paid: 'badge-paid', deleted: 'badge-deleted', removed: 'badge-removed', draft: 'badge-draft' };
         return `<span class="badge ${map[s] || 'badge-draft'}">${s}</span>`;
     };
 
@@ -2275,7 +2276,7 @@ async function informPost(pid) {
 async function markPostPaid(pid) {
     await api(`/api/posts/${pid}/mark-paid`, { method: 'POST', body: {} });
     toast('Post marked as paid', 'success');
-    _postsUpdateLocal(pid, { paid_at: new Date().toISOString() });
+    _postsUpdateLocal(pid, { status: 'published', paid_at: new Date().toISOString() });
 }
 
 async function undeployPost(pid) {
@@ -3257,7 +3258,8 @@ function renderCommentNodeFlat(c) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
 
     return `
         <div class="mb-2">
@@ -3271,8 +3273,7 @@ function renderCommentNodeFlat(c) {
                     ${c.is_reply && c.parent_comment_id ? `<span class="text-xs text-gray-500">→ #${c.parent_comment_id}</span>` : ''}
                     ${c.mentions_brand ? '<span class="badge badge-brand">brand</span>' : ''}
                     ${kwPills}
-                    <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
-                    ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
+                    <span class="badge badge-${c.status}">${c.status}</span>                    ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
                     ${_commentStatusDate(c)}
                     <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
                         <button class="btn btn-sm btn-secondary" onclick="generateReplyToComment(${c.id}, ${c.post_id})">Reply</button>
@@ -3301,7 +3302,8 @@ function renderCommentNode(c, depth) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -3318,8 +3320,7 @@ function renderCommentNode(c, depth) {
                     ${c.persona_id ? `<span class="badge badge-draft">${c.persona_id}</span>` : ''}
                     ${c.structure_id ? `<span class="badge badge-draft">${c.structure_id}</span>` : ''}
                     ${kwPills}
-                    <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}
-                    ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
+                    <span class="badge badge-${c.status}">${c.status}</span>                    ${c.account_id ? `<span class="text-xs font-medium text-yellow-400">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
                     <span class="text-xs text-gray-500">Day ${c.suggested_post_day}</span>
                     ${_commentStatusDate(c)}
                     ${c.validation_score ? `<span class="text-xs text-gray-500">Score: ${c.validation_score}</span>` : ''}
@@ -3779,7 +3780,7 @@ async function markCommentRemoved(cid) {
 async function markCommentPaid(cid) {
     await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
     toast('Marked as paid', 'success');
-    const patch = { paid_at: new Date().toISOString() };
+    const patch = { status: 'paid', paid_at: new Date().toISOString() };
     if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
     else loadCommentTree();
@@ -4201,7 +4202,8 @@ function renderManagedCommentsFromCache() {
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
                 else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
-                else if (c.status === 'deployed') actions = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'deployed') actions = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'paid') actions = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
 
                 return `<tr>
                     <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
@@ -4640,7 +4642,9 @@ function renderAllCommentCard(c) {
     } else if (c.status === 'informed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
     } else if (c.status === 'deployed') {
-        actionBtns = `${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button>` : ''}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
+    } else if (c.status === 'paid') {
+        actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     }
 
     const redditLink = c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-blue-400 hover:underline">view</a>` : '';
@@ -5957,7 +5961,7 @@ async function payItem(type, id) {
             await api(`/api/search/comments/${id}/mark-paid`, { method: 'POST' });
         }
         toast('Marked as paid', 'success');
-        _payItemsUpdateLocal(type, id, { paid_at: new Date().toISOString() });
+        _payItemsUpdateLocal(type, id, { status: 'paid', paid_at: new Date().toISOString() });
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
@@ -6955,7 +6959,11 @@ function lsFilterComments() {
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
-                                    ${!c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                                    <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                ` : ''}
+                                ${c.status === 'paid' ? `
+                                    <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                 ` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
@@ -6974,8 +6982,8 @@ async function lsMarkPaid(cid) {
     try {
         await api(`/api/search/comments/${cid}/mark-paid`, { method: 'POST' });
         toast('Marked as paid', 'success');
-        _lsUpdateCommentLocal(cid, { paid_at: new Date().toISOString() });
-        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { paid_at: new Date().toISOString() });
+        _lsUpdateCommentLocal(cid, { status: 'paid', paid_at: new Date().toISOString() });
+        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'paid', paid_at: new Date().toISOString() });
     } catch(e) { toast('Failed to mark paid', 'error'); }
 }
 
@@ -7534,8 +7542,8 @@ async function lsToggleAccountDetail(username) {
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
                         <td>${c.deployed_at ? new Date(c.deployed_at+'Z').toLocaleDateString() : '-'}</td>
                         <td>
-                            ${c.status === 'deployed' && !c.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
-                            ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>` : ''}
+                            ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
+                            ${c.status === 'deployed' || c.status === 'paid' ? `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>` : ''}
                             ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="lsUndeployComment(${c.id})">Undeploy</button>` : ''}
                             ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                         </td>

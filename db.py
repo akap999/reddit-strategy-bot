@@ -325,9 +325,9 @@ class Database:
         comment_counts = """
                        COUNT(DISTINCT CASE WHEN c.status != 'deleted' THEN c.id END) as total_comments,
                        COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
-                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed') AND c.mentions_brand = 1 THEN c.id END) as assigned_brand,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed','paid') AND c.mentions_brand = 1 THEN c.id END) as assigned_brand,
                        COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN c.id END) as deployed_brand,
-                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed') AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as assigned_non_brand,
+                       COUNT(DISTINCT CASE WHEN c.status IN ('assigned','informed','deployed','paid') AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as assigned_non_brand,
                        COUNT(DISTINCT CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN c.id END) as deployed_non_brand,"""
         if brand_id is not None:
             query = f"""SELECT p.*,{comment_counts}
@@ -661,8 +661,8 @@ class Database:
                 COUNT(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 0 THEN 1 END) as deployed_organic,
                 COUNT(CASE WHEN c.status IN ('assigned','informed') THEN 1 END) as assigned_comments,
                 COUNT(CASE WHEN c.status IN ('draft','complete') THEN 1 END) as pending_comments,
-                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NOT NULL THEN 1 END) as paid_comments,
-                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 END) as unpaid_comments
+                COUNT(CASE WHEN c.status = 'paid' THEN 1 END) as paid_comments,
+                COUNT(CASE WHEN c.status = 'deployed' THEN 1 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             {where_sql}
@@ -937,6 +937,11 @@ class Database:
         if "deployed_at" not in post_cols2:
             self.conn.execute("ALTER TABLE posts ADD COLUMN deployed_at TEXT")
             self.conn.commit()
+
+        # Migrate existing paid comments: set status='paid' where paid_at is set
+        self.conn.execute("UPDATE comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
+        self.conn.execute("UPDATE search_comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
+        self.conn.commit()
 
         # Subreddit scrutiny cache (comment removal rate + gate penalty)
         self.conn.execute("""
@@ -1357,11 +1362,7 @@ class Database:
         w1, w2 = ["c.status != 'deleted'"], ["sc.status != 'deleted'"]
         p1, p2 = [], []
 
-        if status == 'paid':
-            # Special: "paid" is not a status column value — filter by paid_at
-            w1.append("c.paid_at IS NOT NULL")
-            w2.append("sc.paid_at IS NOT NULL")
-        elif status:
+        if status:
             w1 = ["c.status = ?"]; p1.append(status)
             w2 = ["sc.status = ?"]; p2.append(status)
         if brand_id:
@@ -1974,7 +1975,7 @@ class Database:
                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
                       SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
-                      SUM(CASE WHEN c.status = 'deployed' AND c.deployed_at < datetime('now', '-4 days') AND c.paid_at IS NULL AND c.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment,
+                      SUM(CASE WHEN c.status = 'deployed' AND c.deployed_at < datetime('now', '-4 days') AND c.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment,
                       (SELECT COUNT(*) FROM subreddits WHERE owner_account = a.username) as owned_subreddits,
                       (SELECT COUNT(*) FROM posts WHERE owner_account = a.username) as owned_posts
                FROM accounts a
@@ -2185,14 +2186,14 @@ class Database:
                    SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
                    FROM comments c JOIN posts p ON c.post_id = p.id
                    WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
-                     AND c.status IN ('assigned','informed','deployed')
+                     AND c.status IN ('assigned','informed','deployed','paid')
                      AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
                    GROUP BY c.account_id, c.suggested_post_day
                    UNION ALL
                    SELECT sc.account_id, 0 as suggested_post_day, COUNT(*) as cnt
                    FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
                    WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
-                     AND sc.status IN ('assigned','informed','deployed')
+                     AND sc.status IN ('assigned','informed','deployed','paid')
                      AND (sc.deployed_at IS NULL OR sc.deployed_at > datetime('now', '-30 days'))
                    GROUP BY sc.account_id
                ) GROUP BY account_id, suggested_post_day""",
@@ -2293,11 +2294,11 @@ class Database:
             """SELECT account_id, COUNT(DISTINCT sub) as cnt FROM (
                    SELECT c.account_id, p.subreddit_id as sub FROM comments c
                    JOIN posts p ON c.post_id = p.id
-                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed')
+                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed','paid')
                    UNION ALL
                    SELECT sc.account_id, sp.subreddit as sub FROM search_comments sc
                    JOIN search_posts sp ON sc.search_post_id = sp.id
-                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed')
+                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed','paid')
                ) GROUP BY account_id"""
         ).fetchall()]
 
@@ -2349,14 +2350,14 @@ class Database:
                    FROM comments c JOIN posts p ON c.post_id = p.id
                    JOIN subreddits s ON p.subreddit_id = s.id
                    WHERE s.name IN ({placeholders}) AND c.account_id IS NOT NULL
-                     AND c.status IN ('assigned','informed','deployed')
+                     AND c.status IN ('assigned','informed','deployed','paid')
                      AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
                    GROUP BY c.account_id, c.suggested_post_day
                    UNION ALL
                    SELECT sc.account_id, 0 as suggested_post_day, COUNT(*) as cnt
                    FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
                    WHERE sp.subreddit IN ({placeholders}) AND sc.account_id IS NOT NULL
-                     AND sc.status IN ('assigned','informed','deployed')
+                     AND sc.status IN ('assigned','informed','deployed','paid')
                      AND (sc.deployed_at IS NULL OR sc.deployed_at > datetime('now', '-30 days'))
                    GROUP BY sc.account_id
                ) GROUP BY account_id, suggested_post_day""",
@@ -2434,11 +2435,11 @@ class Database:
             """SELECT account_id, COUNT(DISTINCT sub) as cnt FROM (
                    SELECT c.account_id, p.subreddit_id as sub FROM comments c
                    JOIN posts p ON c.post_id = p.id
-                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed')
+                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed','paid')
                    UNION ALL
                    SELECT sc.account_id, sp.subreddit as sub FROM search_comments sc
                    JOIN search_posts sp ON sc.search_post_id = sp.id
-                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed')
+                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed','paid')
                ) GROUP BY account_id"""
         ).fetchall()]
 
@@ -2517,7 +2518,7 @@ class Database:
                       SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN sc.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
                       SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
-                      SUM(CASE WHEN sc.status = 'deployed' AND sc.deployed_at < datetime('now', '-4 days') AND sc.paid_at IS NULL AND sc.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment
+                      SUM(CASE WHEN sc.status = 'deployed' AND sc.deployed_at < datetime('now', '-4 days') AND sc.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment
                FROM accounts a
                LEFT JOIN search_comments sc ON sc.account_id = a.username
                GROUP BY a.id
@@ -2544,7 +2545,7 @@ class Database:
 
     def mark_comment_paid(self, comment_id):
         self.conn.execute(
-            "UPDATE comments SET paid_at = datetime('now') WHERE id = ?",
+            "UPDATE comments SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
             (comment_id,)
         )
         self.conn.commit()
@@ -2558,7 +2559,7 @@ class Database:
 
     def mark_search_comment_paid(self, comment_id):
         self.conn.execute(
-            "UPDATE search_comments SET paid_at = datetime('now') WHERE id = ?",
+            "UPDATE search_comments SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
             (comment_id,)
         )
         self.conn.commit()
@@ -2619,8 +2620,8 @@ class Database:
 
         summary = dict(self.conn.execute(f"""
             SELECT
-                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NOT NULL THEN 1 END) as paid_comments,
-                COUNT(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 END) as unpaid_comments
+                COUNT(CASE WHEN c.status = 'paid' THEN 1 END) as paid_comments,
+                COUNT(CASE WHEN c.status = 'deployed' THEN 1 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             WHERE c.status = 'deployed' {sw}
@@ -2659,8 +2660,8 @@ class Database:
 
         sc_summary = dict(self.conn.execute(f"""
             SELECT
-                COUNT(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NOT NULL THEN 1 END) as paid_search_comments,
-                COUNT(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NULL THEN 1 END) as unpaid_search_comments
+                COUNT(CASE WHEN sc.status = 'paid' THEN 1 END) as paid_search_comments,
+                COUNT(CASE WHEN sc.status = 'deployed' THEN 1 END) as unpaid_search_comments
             FROM search_comments sc
             WHERE sc.status = 'deployed' {scw}
         """, sc_params).fetchone())
@@ -2856,12 +2857,8 @@ class Database:
         has_comments = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'").fetchone()
         if has_comments and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'search_comment':
-                if is_paid:
-                    date_expr = "COALESCE(c.paid_at, c.deployed_at, c.created_at)"
-                    where_clause = "WHERE c.paid_at IS NOT NULL"
-                else:
-                    date_expr = "COALESCE(c.deployed_at, c.created_at)"
-                    where_clause = "WHERE c.status IN ('assigned', 'informed', 'deployed')"
+                date_expr = "COALESCE(c.paid_at, c.deployed_at, c.created_at)" if is_paid else "COALESCE(c.deployed_at, c.created_at)"
+                where_clause = "WHERE c.status IN ('assigned', 'informed', 'deployed', 'paid')"
                 q2 = f"""SELECT 'comment' as event_type, c.id as event_id,
                                {date_expr} as event_date,
                                p.title as title, c.body as body,
@@ -2899,7 +2896,7 @@ class Database:
                 if ref:
                     q2 += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
                     p2.append(ref)
-                if status and not is_paid:
+                if status:
                     q2 += " AND c.status = ?"
                     p2.append(status)
                 queries.append(q2)
@@ -2909,12 +2906,8 @@ class Database:
         has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
         if has_sc and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'comment':
-                if is_paid:
-                    date_expr3 = "COALESCE(sc.paid_at, sc.deployed_at, sc.created_at)"
-                    where_clause3 = "WHERE sc.paid_at IS NOT NULL"
-                else:
-                    date_expr3 = "COALESCE(sc.deployed_at, sc.created_at)"
-                    where_clause3 = "WHERE sc.status IN ('assigned', 'informed', 'deployed')"
+                date_expr3 = "COALESCE(sc.paid_at, sc.deployed_at, sc.created_at)" if is_paid else "COALESCE(sc.deployed_at, sc.created_at)"
+                where_clause3 = "WHERE sc.status IN ('assigned', 'informed', 'deployed', 'paid')"
                 q3 = f"""SELECT 'search_comment' as event_type, sc.id as event_id,
                                {date_expr3} as event_date,
                                sp.title as title, sc.body as body,
@@ -2950,7 +2943,7 @@ class Database:
                 if ref:
                     q3 += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
                     p3.append(ref)
-                if status and not is_paid:
+                if status:
                     q3 += " AND sc.status = ?"
                     p3.append(status)
                 queries.append(q3)
@@ -2970,12 +2963,12 @@ class Database:
         # --- Regular comments ---
         q1 = """SELECT c.account_id,
                        SUM(CASE WHEN c.status = 'assigned' THEN 1 ELSE 0 END) as reg_assigned,
-                       SUM(CASE WHEN c.status = 'deployed' AND c.paid_at IS NULL THEN 1 ELSE 0 END) as reg_deployed,
-                       SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as reg_paid
+                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as reg_deployed,
+                       SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as reg_paid
                 FROM comments c
                 JOIN posts p ON c.post_id = p.id
                 LEFT JOIN brands b ON c.brand_id = b.id
-                WHERE c.status IN ('assigned', 'informed', 'deployed')
+                WHERE c.status IN ('assigned', 'informed', 'deployed', 'paid')
                   AND c.account_id IS NOT NULL
                   AND DATE(COALESCE(c.deployed_at, c.created_at)) = ?"""
         p1 = [date]
@@ -3005,12 +2998,12 @@ class Database:
         if has_sc:
             q2 = """SELECT sc.account_id,
                            SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as ls_assigned,
-                           SUM(CASE WHEN sc.status = 'deployed' AND sc.paid_at IS NULL THEN 1 ELSE 0 END) as ls_deployed,
-                           SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as ls_paid
+                           SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as ls_deployed,
+                           SUM(CASE WHEN sc.status = 'paid' THEN 1 ELSE 0 END) as ls_paid
                     FROM search_comments sc
                     JOIN search_posts sp ON sc.search_post_id = sp.id
                     LEFT JOIN brands b ON sc.brand_id = b.id
-                    WHERE sc.status IN ('assigned', 'informed', 'deployed')
+                    WHERE sc.status IN ('assigned', 'informed', 'deployed', 'paid')
                       AND sc.account_id IS NOT NULL
                       AND DATE(COALESCE(sc.deployed_at, sc.created_at)) = ?"""
             p2 = [date]

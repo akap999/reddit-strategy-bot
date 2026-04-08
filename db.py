@@ -2857,7 +2857,7 @@ class Database:
         has_comments = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'").fetchone()
         if has_comments and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'search_comment':
-                date_expr = "COALESCE(c.paid_at, c.deployed_at, c.created_at)" if is_paid else "COALESCE(c.deployed_at, c.created_at)"
+                date_expr = "CASE WHEN c.status = 'paid' THEN COALESCE(c.paid_at, c.deployed_at, c.created_at) ELSE COALESCE(c.deployed_at, c.created_at) END"
                 where_clause = "WHERE c.status IN ('assigned', 'informed', 'deployed', 'paid')"
                 q2 = f"""SELECT 'comment' as event_type, c.id as event_id,
                                {date_expr} as event_date,
@@ -2906,7 +2906,7 @@ class Database:
         has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
         if has_sc and (not event_type or event_type in ('comment', 'search_comment')):
             if not event_type or event_type != 'comment':
-                date_expr3 = "COALESCE(sc.paid_at, sc.deployed_at, sc.created_at)" if is_paid else "COALESCE(sc.deployed_at, sc.created_at)"
+                date_expr3 = "CASE WHEN sc.status = 'paid' THEN COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) ELSE COALESCE(sc.deployed_at, sc.created_at) END"
                 where_clause3 = "WHERE sc.status IN ('assigned', 'informed', 'deployed', 'paid')"
                 q3 = f"""SELECT 'search_comment' as event_type, sc.id as event_id,
                                {date_expr3} as event_date,
@@ -2970,7 +2970,7 @@ class Database:
                 LEFT JOIN brands b ON c.brand_id = b.id
                 WHERE c.status IN ('assigned', 'informed', 'deployed', 'paid')
                   AND c.account_id IS NOT NULL
-                  AND DATE(COALESCE(c.deployed_at, c.created_at)) = ?"""
+                  AND DATE(CASE WHEN c.status = 'paid' THEN COALESCE(c.paid_at, c.deployed_at, c.created_at) ELSE COALESCE(c.deployed_at, c.created_at) END) = ?"""
         p1 = [date]
         if brand_id:
             q1 += " AND b.id = ?"
@@ -3005,7 +3005,7 @@ class Database:
                     LEFT JOIN brands b ON sc.brand_id = b.id
                     WHERE sc.status IN ('assigned', 'informed', 'deployed', 'paid')
                       AND sc.account_id IS NOT NULL
-                      AND DATE(COALESCE(sc.deployed_at, sc.created_at)) = ?"""
+                      AND DATE(CASE WHEN sc.status = 'paid' THEN COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) ELSE COALESCE(sc.deployed_at, sc.created_at) END) = ?"""
             p2 = [date]
             if brand_id:
                 q2 += " AND b.id = ?"

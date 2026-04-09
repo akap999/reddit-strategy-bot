@@ -179,49 +179,34 @@ def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path, routing through Cloudflare proxy if configured.
     path should start with / e.g. /user/spez/about.json
     Retries on transient errors (403, 429, timeouts) with exponential backoff.
-    Falls back to direct Reddit request if proxy returns non-JSON (HTML).
     """
     import requests as _requests
     import time as _time
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    url = f"{base}{path}"
     ua = REDDIT_USER_AGENT
     headers = {"User-Agent": ua, "Accept": "application/json"}
-
-    def _try_fetch(base_url, label, retries):
-        url = f"{base_url}{path}"
-        last_err = None
-        for attempt in range(retries):
-            try:
-                if attempt > 0:
-                    wait = min(2 ** attempt * 2, 15)
-                    print(f"[REDDIT_GET] Retry {attempt}/{retries-1} in {wait}s ({label})", flush=True)
-                    _time.sleep(wait)
-                print(f"[REDDIT_GET] {url} ({label}, attempt={attempt+1})", flush=True)
-                resp = _requests.get(url, headers=headers, timeout=timeout)
-                if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < retries - 1:
-                    print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
-                    continue
-                return resp
-            except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
-                last_err = e
-                print(f"[REDDIT_GET] {type(e).__name__} ({label}, attempt {attempt+1}): {e}", flush=True)
-        return last_err  # return exception if all retries failed
-
-    # Try proxy first
-    if proxy:
-        result = _try_fetch(proxy.rstrip("/"), "proxy", max_retries)
-        if isinstance(result, Exception):
-            print(f"[REDDIT_GET] Proxy failed with exception, falling back to direct", flush=True)
-        elif result.status_code == 200 and result.text.lstrip()[:1] == "<":
-            print(f"[REDDIT_GET] Proxy returned HTML, falling back to direct", flush=True)
-        else:
-            return result
-
-    # Fall back to direct (or use it if no proxy)
-    result = _try_fetch("https://www.reddit.com", "direct", max_retries)
-    if isinstance(result, Exception):
-        raise result
-    return result
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                wait = min(2 ** attempt * 2, 15)
+                print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
+                _time.sleep(wait)
+            print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, attempt={attempt+1})", flush=True)
+            resp = _requests.get(url, headers=headers, timeout=timeout)
+            # Retry on transient errors
+            if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
+                print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
+                continue
+            return resp
+        except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
+            if attempt >= max_retries - 1:
+                raise
+    raise last_exc
 
 # ---------------------------------------------------------------------------
 # Background task system

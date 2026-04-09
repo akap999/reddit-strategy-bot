@@ -3377,18 +3377,24 @@ class Database:
             (comment_id,))
         self.conn.commit()
 
-    def archive_search_comment(self, comment_id):
-        """Archive a search comment (hide from active views)."""
+    def archive_search_post(self, post_id):
+        """Archive a search post and all its non-deployed/paid comments."""
         self.conn.execute(
-            "UPDATE search_comments SET status = 'archived' WHERE id = ? AND status IN ('draft','complete','assigned','informed')",
-            (comment_id,))
+            "UPDATE search_comments SET status = 'archived' WHERE search_post_id = ? AND status IN ('draft','complete','assigned','informed')",
+            (post_id,))
+        self.conn.execute(
+            "UPDATE search_posts SET status = 'archived' WHERE id = ?",
+            (post_id,))
         self.conn.commit()
 
-    def unarchive_search_comment(self, comment_id):
-        """Unarchive a search comment back to draft."""
+    def unarchive_search_post(self, post_id):
+        """Unarchive a search post and all its archived comments back to draft."""
         self.conn.execute(
-            "UPDATE search_comments SET status = 'draft', account_id = NULL WHERE id = ? AND status = 'archived'",
-            (comment_id,))
+            "UPDATE search_comments SET status = 'draft', account_id = NULL WHERE search_post_id = ? AND status = 'archived'",
+            (post_id,))
+        self.conn.execute(
+            "UPDATE search_posts SET status = 'saved' WHERE id = ? AND status = 'archived'",
+            (post_id,))
         self.conn.commit()
 
     def set_comment_live_check(self, comment_id):

@@ -4623,8 +4623,6 @@ function _acAction(source, cid, action) {
             undeploy: `lsUndeployComment(${cid})`,
             paid: `lsMarkPaid(${cid})`,
             removed: `lsMarkRemoved(${cid})`,
-            archive: `lsArchiveComment(${cid})`,
-            unarchive: `lsUnarchiveComment(${cid})`,
             copy: `lsCopyMessage(${cid})`,
             edit: `lsEditComment(${cid})`,
             delete: `lsDeleteComment(${cid})`,
@@ -4661,19 +4659,18 @@ function renderAllCommentCard(c) {
         : '<span class="badge" style="background:#343536;color:#818384;font-size:0.6rem">REG</span>';
 
     let actionBtns = '';
-    const archiveBtn = src === 'search_comment' ? `<button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="${_acAction(src, c.id, 'archive')}">Archive</button>` : '';
     if (c.status === 'draft' || c.status === 'complete') {
-        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button>${archiveBtn}`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button>`;
     } else if (c.status === 'assigned') {
-        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>${archiveBtn}`;
+        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
     } else if (c.status === 'informed') {
-        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>${archiveBtn}`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
     } else if (c.status === 'deployed') {
         actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
     } else if (c.status === 'paid') {
         actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'archived') {
-        actionBtns = `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="${_acAction(src, c.id, 'unarchive')}">Unarchive</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchivePost(${c.source === 'search_comment' ? c.p_id : 0})">Unarchive Post</button>`;
     }
 
     const redditLink = c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-blue-400 hover:underline">view</a>` : '';
@@ -7019,7 +7016,12 @@ function lsFilterComments() {
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
                     ${postStatus[pid] ? `<span class="badge badge-${postStatus[pid]} ml-2" title="Post aggregate status">${postStatus[pid]}</span>` : ''}
                 </div>
-                <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
+                <div class="flex gap-1 items-center">
+                    ${g.comments.some(c => c.status === 'archived')
+                        ? `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchivePost(${pid})">Unarchive</button>`
+                        : `<button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchivePost(${pid})">Archive</button>`}
+                    <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
+                </div>
             </div>
             <table>
                 <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
@@ -7034,19 +7036,17 @@ function lsFilterComments() {
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}<br>${_commentStatusDate(c)}</td>
                         <td>
                             <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
-                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>` : ''}
+                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>` : ''}
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
-                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>
                                 ` : ''}
                                 ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
-                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
@@ -7058,7 +7058,7 @@ function lsFilterComments() {
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                 ` : ''}
                                 ${c.status === 'archived' ? `
-                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchiveComment(${c.id})">Unarchive</button>
+                                    <span class="text-xs" style="color:#8888aa">Archived</span>
                                 ` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
@@ -7091,21 +7091,33 @@ async function lsMarkRemoved(cid) {
     } catch(e) { toast('Failed to mark removed', 'error'); }
 }
 
-async function lsArchiveComment(cid) {
+async function lsArchivePost(postId) {
+    const postComments = _lsComments.filter(c => c.search_post_id == postId && c.status !== 'deleted');
+    if (!confirm(`Archive this post and its ${postComments.length} comment(s)?`)) return;
     try {
-        await api(`/api/search/comments/${cid}/archive`, { method: 'POST' });
-        toast('Comment archived', 'success');
-        _lsUpdateCommentLocal(cid, { status: 'archived', account_id: null });
-        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'archived', account_id: null });
+        await api(`/api/search/posts/${postId}/archive`, { method: 'POST' });
+        toast('Post archived', 'success');
+        // Update all comments for this post locally
+        postComments.forEach(c => {
+            if (['draft','complete','assigned','informed'].includes(c.status)) {
+                _lsUpdateCommentLocal(c.id, { status: 'archived', account_id: null });
+                if (currentView === 'allcomments') _acUpdateLocal(c.id, 'search_comment', { status: 'archived', account_id: null });
+            }
+        });
+        renderLsTabContent();
     } catch(e) { toast('Failed to archive', 'error'); }
 }
 
-async function lsUnarchiveComment(cid) {
+async function lsUnarchivePost(postId) {
     try {
-        await api(`/api/search/comments/${cid}/unarchive`, { method: 'POST' });
-        toast('Comment unarchived', 'success');
-        _lsUpdateCommentLocal(cid, { status: 'draft', account_id: null });
-        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'draft', account_id: null });
+        await api(`/api/search/posts/${postId}/unarchive`, { method: 'POST' });
+        toast('Post unarchived', 'success');
+        const postComments = _lsComments.filter(c => c.search_post_id == postId && c.status === 'archived');
+        postComments.forEach(c => {
+            _lsUpdateCommentLocal(c.id, { status: 'draft', account_id: null });
+            if (currentView === 'allcomments') _acUpdateLocal(c.id, 'search_comment', { status: 'draft', account_id: null });
+        });
+        renderLsTabContent();
     } catch(e) { toast('Failed to unarchive', 'error'); }
 }
 

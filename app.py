@@ -1209,13 +1209,16 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 _mark_dead(item)
                 dead += 1
             elif resp.status_code == 200:
-                ct = resp.headers.get('Content-Type', '')
-                if 'json' not in ct:
-                    print(f"[{log_prefix}] #{item['id']} ({src}) got non-JSON ({ct}): {resp.text[:200]}", flush=True)
+                # Try to parse JSON regardless of Content-Type (proxies may alter headers)
+                try:
+                    data = resp.json()
+                except (ValueError, Exception) as json_err:
+                    ct = resp.headers.get('Content-Type', '')
+                    print(f"[{log_prefix}] #{item['id']} ({src}) JSON parse failed ({ct}): {resp.text[:300]}", flush=True)
                     errors += 1
                     error_details["non_json"] += 1
+                    _time.sleep(2)
                     continue
-                data = resp.json()
                 found_deleted = False
                 found_live = False
                 if isinstance(data, list) and len(data) > 1:

@@ -195,7 +195,7 @@ def _reddit_get(path, timeout=15, max_retries=3):
                 print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
                 _time.sleep(wait)
             print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, attempt={attempt+1})", flush=True)
-            resp = _requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
+            resp = _requests.get(url, headers={"User-Agent": ua, "Accept": "application/json"}, timeout=timeout)
             # Retry on transient errors
             if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
                 print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)

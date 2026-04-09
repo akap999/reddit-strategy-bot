@@ -1253,7 +1253,15 @@ class Database:
     def mark_comment_removed(self, comment_id):
         """Mark a deployed comment as removed/deleted on Reddit."""
         self.conn.execute(
-            "UPDATE comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            "UPDATE comments SET status = 'removed' WHERE id = ? AND status IN ('deployed', 'paid')",
+            (comment_id,)
+        )
+        self.conn.commit()
+
+    def unremove_comment(self, comment_id):
+        """Revert a removed comment back to deployed status."""
+        self.conn.execute(
+            "UPDATE comments SET status = 'deployed' WHERE id = ? AND status = 'removed'",
             (comment_id,)
         )
         self.conn.commit()
@@ -3422,7 +3430,14 @@ class Database:
     def mark_search_comment_removed(self, comment_id):
         """Mark a deployed search comment as removed/deleted on Reddit."""
         self.conn.execute(
-            "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status IN ('deployed', 'paid')",
+            (comment_id,))
+        self.conn.commit()
+
+    def unremove_search_comment(self, comment_id):
+        """Revert a removed search comment back to deployed status."""
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'deployed' WHERE id = ? AND status = 'removed'",
             (comment_id,))
         self.conn.commit()
 

@@ -3282,8 +3282,9 @@ function renderCommentNodeFlat(c) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
-    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
+    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
 
     return `
         <div class="mb-2">
@@ -3326,8 +3327,9 @@ function renderCommentNode(c, depth) {
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button>`;
     else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
-    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
-    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
+    else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
+    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -3801,6 +3803,57 @@ async function markCommentRemoved(cid) {
     _acUpdateLocal(cid, 'comment', { status: 'removed' });
 }
 
+async function unremoveComment(cid) {
+    await api(`/api/comments/${cid}/unremove`, { method: 'POST', body: {} });
+    toast('Comment restored to deployed', 'success');
+    if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, { status: 'deployed' });
+    else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, { status: 'deployed' });
+    else loadCommentTree();
+    _acUpdateLocal(cid, 'comment', { status: 'deployed' });
+}
+
+function editDeployedLinkModal(cid, source) {
+    let comment = null;
+    if (source === 'search_comment') {
+        comment = (_lsComments || []).find(c => c.id === cid) || (_acData || []).find(c => c.id === cid && c.source === 'search_comment');
+    } else {
+        comment = (_managedCommentsCache || []).find(c => c.id === cid)
+            || (_acData || []).find(c => c.id === cid && c.source === 'comment')
+            || (_commentsTreeData || []).find(c => c.id === cid);
+    }
+    const currentUrl = comment ? (comment.reddit_comment_url || '') : '';
+    showModal(`
+        <h3 class="text-lg font-bold mb-4">Edit Deployed Link</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Reddit Comment URL</label><input id="edit-deploy-url" value="${currentUrl}" placeholder="https://reddit.com/r/.../comments/.../..."></div>
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" onclick="submitEditDeployedLink(${cid}, '${source}')">Update Link</button>
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitEditDeployedLink(cid, source) {
+    const url = document.getElementById('edit-deploy-url').value.trim();
+    if (!url) { toast('URL required', 'error'); return; }
+    const endpoint = source === 'search_comment'
+        ? `/api/search/comments/${cid}/url`
+        : `/api/comments/${cid}/url`;
+    await api(endpoint, { method: 'PATCH', body: { reddit_comment_url: url } });
+    closeModal();
+    toast('Link updated', 'success');
+    const patch = { reddit_comment_url: url };
+    if (source === 'search_comment') {
+        _lsUpdateCommentLocal(cid, patch);
+        _acUpdateLocal(cid, 'search_comment', patch);
+    } else {
+        if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
+        else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
+        _acUpdateLocal(cid, 'comment', patch);
+    }
+}
+
 async function markCommentPaid(cid) {
     await api(`/api/comments/${cid}/mark-paid`, { method: 'POST', body: {} });
     toast('Marked as paid', 'success');
@@ -4226,8 +4279,9 @@ function renderManagedCommentsFromCache() {
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button>`;
                 else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
                 else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button>`;
-                else if (c.status === 'deployed') actions = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
-                else if (c.status === 'paid') actions = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+                else if (c.status === 'deployed') actions = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
+                else if (c.status === 'paid') actions = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
+                else if (c.status === 'removed') actions = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
 
                 return `<tr>
                     <td class="text-xs text-gray-400 max-w-[120px] truncate">${(c.post_title || '').substring(0, 40)}</td>
@@ -4623,6 +4677,8 @@ function _acAction(source, cid, action) {
             undeploy: `lsUndeployComment(${cid})`,
             paid: `lsMarkPaid(${cid})`,
             removed: `lsMarkRemoved(${cid})`,
+            unremove: `lsUnremoveComment(${cid})`,
+            edit_link: `editDeployedLinkModal(${cid}, 'search_comment')`,
             copy: `lsCopyMessage(${cid})`,
             edit: `lsEditComment(${cid})`,
             delete: `lsDeleteComment(${cid})`,
@@ -4639,6 +4695,8 @@ function _acAction(source, cid, action) {
             paid: `markCommentPaid(${cid})`,
             removed: `markCommentRemoved(${cid})`,
             copy: `copyCommentMessage(${cid})`,
+            unremove: `unremoveComment(${cid})`,
+            edit_link: `editDeployedLinkModal(${cid}, 'comment')`,
             edit: `editComment(${cid})`,
             delete: `markCommentDeleted(${cid})`,
         };
@@ -4666,9 +4724,11 @@ function renderAllCommentCard(c) {
     } else if (c.status === 'informed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
     } else if (c.status === 'deployed') {
-        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'paid') {
-        actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+    } else if (c.status === 'removed') {
+        actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="${_acAction(src, c.id, 'unremove')}">Unremove</button>`;
     } else if (c.status === 'archived') {
         actionBtns = `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchivePost(${c.source === 'search_comment' ? c.p_id : 0})">Unarchive Post</button>`;
     }
@@ -7063,10 +7123,15 @@ function lsFilterComments() {
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'paid' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
+                                ` : ''}
+                                ${c.status === 'removed' ? `
+                                    <button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="lsUnremoveComment(${c.id})">Unremove</button>
                                 ` : ''}
                                 ${c.status === 'archived' ? `
                                     <span class="text-xs" style="color:#8888aa">Archived</span>
@@ -7100,6 +7165,15 @@ async function lsMarkRemoved(cid) {
         _lsUpdateCommentLocal(cid, { status: 'removed' });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'removed' });
     } catch(e) { toast('Failed to mark removed', 'error'); }
+}
+
+async function lsUnremoveComment(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/unremove`, { method: 'POST' });
+        toast('Comment restored to deployed', 'success');
+        _lsUpdateCommentLocal(cid, { status: 'deployed' });
+        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'deployed' });
+    } catch(e) { toast('Failed to unremove', 'error'); }
 }
 
 async function lsArchivePost(postId) {
@@ -7691,6 +7765,8 @@ async function lsToggleAccountDetail(username) {
                             ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>` : ''}
                             ${c.status === 'deployed' || c.status === 'paid' ? `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>` : ''}
                             ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="lsUndeployComment(${c.id})">Undeploy</button>` : ''}
+                            ${c.status === 'deployed' || c.status === 'paid' ? `<button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>` : ''}
+                            ${c.status === 'removed' ? `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="lsUnremoveComment(${c.id})">Unremove</button>` : ''}
                             ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                         </td>
                     </tr>

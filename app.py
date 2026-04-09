@@ -1141,6 +1141,90 @@ def api_global_all_comments():
         db.close()
 
 
+@app.route("/api/all-comments/check-live", methods=["POST"])
+def api_check_live_all_comments():
+    """Check all deployed/paid comments (regular + search) against Reddit."""
+    import time as _time
+
+    def task():
+        db = Database(DB_PATH)
+        db.connect()
+        db.initialize()
+        try:
+            deployed = db.get_all_deployed_comment_urls()
+            checked = 0
+            live = 0
+            dead = 0
+            errors = 0
+            for item in deployed:
+                checked += 1
+                url = item["reddit_comment_url"]
+                source = item["source"]
+                path = _normalize_reddit_comment_url(url)
+                if not path:
+                    print(f"[CHECK-LIVE-ALL] Skipping #{item['id']} ({source}): unrecognizable URL {url}", flush=True)
+                    errors += 1
+                    continue
+                try:
+                    resp = _reddit_get(path)
+                    if resp.status_code == 429:
+                        print(f"[CHECK-LIVE-ALL] Rate limited, waiting 10s", flush=True)
+                        _time.sleep(10)
+                        errors += 1
+                        continue
+                    if resp.status_code == 403:
+                        print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got 403, waiting 5s", flush=True)
+                        _time.sleep(5)
+                        errors += 1
+                        continue
+                    if resp.status_code == 404:
+                        if source == 'comment':
+                            db.mark_comment_deleted(item["id"])
+                        else:
+                            db.mark_search_comment_removed(item["id"])
+                        dead += 1
+                    elif resp.status_code == 200:
+                        ct = resp.headers.get('Content-Type', '')
+                        if 'json' not in ct:
+                            print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got non-JSON ({ct})", flush=True)
+                            errors += 1
+                            continue
+                        data = resp.json()
+                        found_deleted = False
+                        if isinstance(data, list) and len(data) > 1:
+                            children = data[1].get("data", {}).get("children", [])
+                            for child in children:
+                                body = child.get("data", {}).get("body", "")
+                                if body in ("[deleted]", "[removed]"):
+                                    found_deleted = True
+                                    break
+                        if found_deleted:
+                            if source == 'comment':
+                                db.mark_comment_deleted(item["id"])
+                            else:
+                                db.mark_search_comment_removed(item["id"])
+                            dead += 1
+                        else:
+                            if source == 'comment':
+                                db.set_comment_live_check(item["id"])
+                            else:
+                                db.set_search_comment_live_check(item["id"])
+                            live += 1
+                    else:
+                        print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got HTTP {resp.status_code}", flush=True)
+                        errors += 1
+                except Exception as e:
+                    print(f"[CHECK-LIVE-ALL] Error checking #{item['id']} ({source}) ({url}): {e}", flush=True)
+                    errors += 1
+                _time.sleep(2)
+            return {"checked": checked, "live": live, "dead": dead, "errors": errors}
+        finally:
+            db.close()
+
+    tid = start_task("check-live-all", task)
+    return jsonify({"task_id": tid})
+
+
 @app.route("/api/all-comments/mark-paid-all", methods=["POST"])
 def api_mark_paid_all_comments():
     db = get_db()

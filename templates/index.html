@@ -4719,7 +4719,7 @@ async function renderAllComments(el) {
             <div class="flex gap-2 items-center">
                 <span id="ac-count" class="text-sm" style="color:#818384"></span>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPaidAllComments()">Mark Paid All</button>
-                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live (Search)</button>
+                <button class="btn btn-secondary btn-sm" onclick="checkLiveAllComments()">Check Live</button>
             </div>
         </div>
         <div class="flex gap-3 mb-4 items-center flex-wrap">
@@ -4783,6 +4783,13 @@ async function renderAllComments(el) {
     `;
 
     loadAllComments();
+}
+
+async function checkLiveAllComments() {
+    runTask('/api/all-comments/check-live', {}, (result) => {
+        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
+        loadAllComments();
+    }, 'Check Live (All)');
 }
 
 async function markPaidAllComments() {

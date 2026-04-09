@@ -1535,22 +1535,35 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_deployed_comment_urls(self, subreddit_id):
-        """Get all deployed comments with their Reddit URLs."""
+        """Get all deployed/paid comments with their Reddit URLs."""
         rows = self.conn.execute(
             """SELECT c.id, c.reddit_comment_url
                FROM comments c
                JOIN posts p ON c.post_id = p.id
-               WHERE p.subreddit_id = ? AND c.status = 'deployed' AND c.reddit_comment_url IS NOT NULL""",
+               WHERE p.subreddit_id = ? AND c.status IN ('deployed', 'paid') AND c.reddit_comment_url IS NOT NULL""",
             (subreddit_id,)
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_deployed_search_comment_urls(self):
-        """Get all deployed search comments with their Reddit URLs."""
+        """Get all deployed/paid search comments with their Reddit URLs."""
         rows = self.conn.execute(
             """SELECT sc.id, sc.reddit_comment_url
                FROM search_comments sc
-               WHERE sc.status = 'deployed' AND sc.reddit_comment_url IS NOT NULL"""
+               WHERE sc.status IN ('deployed', 'paid') AND sc.reddit_comment_url IS NOT NULL"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_deployed_comment_urls(self):
+        """Get all deployed/paid comment URLs across both tables for live checking."""
+        rows = self.conn.execute(
+            """SELECT c.id, c.reddit_comment_url, 'comment' as source
+               FROM comments c
+               WHERE c.status IN ('deployed', 'paid') AND c.reddit_comment_url IS NOT NULL
+               UNION ALL
+               SELECT sc.id, sc.reddit_comment_url, 'search_comment' as source
+               FROM search_comments sc
+               WHERE sc.status IN ('deployed', 'paid') AND sc.reddit_comment_url IS NOT NULL"""
         ).fetchall()
         return [dict(r) for r in rows]
 

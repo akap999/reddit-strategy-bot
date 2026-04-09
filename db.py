@@ -141,8 +141,8 @@ class Database:
         rows = self.conn.execute("""
             SELECT s.*,
                    COUNT(DISTINCT b.id) as brand_count,
-                   COUNT(DISTINCT CASE WHEN p.status = 'published' THEN p.id END) as post_count,
-                   COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count
+                   COUNT(DISTINCT CASE WHEN p.status IN ('published', 'paid') THEN p.id END) as post_count,
+                   COUNT(DISTINCT CASE WHEN c.status IN ('deployed', 'paid') THEN c.id END) as comment_count
             FROM subreddits s
             LEFT JOIN brands b ON b.subreddit_id = s.id
             LEFT JOIN posts p ON p.subreddit_id = s.id
@@ -452,7 +452,7 @@ class Database:
         """Revert a deployed (published) post back to complete status."""
         self.conn.execute(
             """UPDATE posts SET status = 'complete', deployed_at = NULL, paid_at = NULL
-               WHERE id = ? AND status = 'published'""",
+               WHERE id = ? AND status IN ('published', 'paid')""",
             (post_id,)
         )
         self.conn.commit()
@@ -663,7 +663,7 @@ class Database:
                 COUNT(*) as total_posts,
                 SUM(CASE WHEN is_filler = 1 THEN 1 ELSE 0 END) as filler_posts,
                 SUM(CASE WHEN is_filler = 0 THEN 1 ELSE 0 END) as brand_posts,
-                SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) as published_posts,
+                SUM(CASE WHEN status IN ('published', 'paid') THEN 1 ELSE 0 END) as published_posts,
                 SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) as draft_posts,
                 SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete_posts
             FROM posts WHERE subreddit_id = ?""",
@@ -742,7 +742,7 @@ class Database:
         post_row = dict(self.conn.execute(f"""
             SELECT
                 COUNT(*) as total_posts,
-                COUNT(CASE WHEN p.status = 'published' THEN 1 END) as published_posts,
+                COUNT(CASE WHEN p.status IN ('published', 'paid') THEN 1 END) as published_posts,
                 COUNT(DISTINCT p.subreddit_id) as subreddit_count
             FROM posts p
             {post_where_sql}
@@ -998,9 +998,10 @@ class Database:
             self.conn.execute("ALTER TABLE posts ADD COLUMN deployed_at TEXT")
             self.conn.commit()
 
-        # Migrate existing paid comments: set status='paid' where paid_at is set
+        # Migrate existing paid items: set status='paid' where paid_at is set
         self.conn.execute("UPDATE comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
         self.conn.execute("UPDATE search_comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
+        self.conn.execute("UPDATE posts SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
         self.conn.commit()
 
         # Subreddit scrutiny cache (comment removal rate + gate penalty)
@@ -1817,7 +1818,7 @@ class Database:
             LEFT JOIN post_urls pu ON pu.post_id = p.id
             LEFT JOIN post_brands pb ON pb.post_id = p.id
             WHERE (pb.brand_id IN ({placeholders}) OR p.brand_id IN ({placeholders}))
-              AND p.status = 'published'
+              AND p.status IN ('published', 'paid')
             ORDER BY s.name, p.suggested_post_day
         """, brand_ids + brand_ids).fetchall()]
 
@@ -2630,7 +2631,7 @@ class Database:
 
     def mark_post_paid(self, post_id):
         self.conn.execute(
-            "UPDATE posts SET paid_at = datetime('now') WHERE id = ?",
+            "UPDATE posts SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
             (post_id,)
         )
         self.conn.commit()
@@ -2762,10 +2763,10 @@ class Database:
 
         post_summary = dict(self.conn.execute(f"""
             SELECT
-                COUNT(CASE WHEN p.status = 'published' AND p.paid_at IS NOT NULL THEN 1 END) as paid_posts,
-                COUNT(CASE WHEN p.status = 'published' AND p.paid_at IS NULL THEN 1 END) as unpaid_posts
+                COUNT(CASE WHEN p.status = 'paid' THEN 1 END) as paid_posts,
+                COUNT(CASE WHEN p.status = 'published' THEN 1 END) as unpaid_posts
             FROM posts p
-            WHERE p.status = 'published' {pw_sql}
+            WHERE p.status IN ('published', 'paid') {pw_sql}
         """, pp).fetchone())
         summary.update(post_summary)
 
@@ -2811,7 +2812,7 @@ class Database:
         c_where_sql = " AND ".join(c_where)
 
         # Build WHERE for posts
-        p_where = ["p.status = 'published'"]
+        p_where = ["p.status IN ('published', 'paid')"]
         p_params = []
         if subreddit_id:
             p_where.append("p.subreddit_id = ?")
@@ -2915,7 +2916,7 @@ class Database:
                                b.name as brand_name, b.id as brand_id,
                                s.name as subreddit_name, s.id as subreddit_id,
                                p.owner_account as account_id,
-                               'published' as status,
+                               p.status as status,
                                pu.reddit_url as reddit_url,
                                NULL as reddit_comment_url,
                                0 as is_reply, 0 as mentions_brand,
@@ -2925,7 +2926,7 @@ class Database:
                         JOIN post_urls pu ON pu.post_id = p.id
                         JOIN subreddits s ON p.subreddit_id = s.id
                         LEFT JOIN brands b ON p.brand_id = b.id
-                        WHERE p.paid_at IS NOT NULL"""
+                        WHERE p.status = 'paid'"""
             else:
                 q1 = """SELECT 'post' as event_type, p.id as event_id,
                                pu.added_at as event_date,
@@ -2933,7 +2934,7 @@ class Database:
                                b.name as brand_name, b.id as brand_id,
                                s.name as subreddit_name, s.id as subreddit_id,
                                p.owner_account as account_id,
-                               'published' as status,
+                               p.status as status,
                                pu.reddit_url as reddit_url,
                                NULL as reddit_comment_url,
                                0 as is_reply, 0 as mentions_brand,
@@ -3163,14 +3164,15 @@ class Database:
         has_pu = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_urls'").fetchone()
         if has_pu:
             q3 = """SELECT p.owner_account as account_id,
-                           COUNT(*) as posts_deployed,
-                           SUM(CASE WHEN p.paid_at IS NOT NULL THEN 1 ELSE 0 END) as posts_paid
+                           SUM(CASE WHEN p.status = 'published' THEN 1 ELSE 0 END) as posts_deployed,
+                           SUM(CASE WHEN p.status = 'paid' THEN 1 ELSE 0 END) as posts_paid
                     FROM posts p
                     JOIN post_urls pu ON pu.post_id = p.id
                     JOIN subreddits s ON p.subreddit_id = s.id
                     LEFT JOIN brands b ON p.brand_id = b.id
                     WHERE p.owner_account IS NOT NULL
-                      AND DATE(pu.added_at) = ?"""
+                      AND p.status IN ('published', 'paid')
+                      AND DATE(CASE WHEN p.status = 'paid' THEN COALESCE(p.paid_at, pu.added_at) ELSE pu.added_at END) = ?"""
             p3 = [date]
             if brand_id:
                 q3 += " AND b.id = ?"

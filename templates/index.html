@@ -2294,7 +2294,7 @@ async function informPost(pid) {
 async function markPostPaid(pid) {
     await api(`/api/posts/${pid}/mark-paid`, { method: 'POST', body: {} });
     toast('Post marked as paid', 'success');
-    _postsUpdateLocal(pid, { status: 'published', paid_at: new Date().toISOString() });
+    _postsUpdateLocal(pid, { status: 'paid', paid_at: new Date().toISOString() });
 }
 
 async function undeployPost(pid) {

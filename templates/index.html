@@ -6876,7 +6876,7 @@ async function renderLsComments(c) {
                 <option value="">All Posts</option>
                 ${[...new Set(active.map(c=>JSON.stringify({id:c.search_post_id,title:c.post_title})))].map(s=>{const p=JSON.parse(s);return `<option value="${p.id}">${(p.title||'').substring(0,50)}</option>`;}).join('')}
             </select>
-            <select id="ls-cf-brand" onchange="lsFilterComments()" class="w-40">
+            <select id="ls-cf-brand" onchange="lsOnBrandFilterChange()" class="w-40">
                 <option value="">All Brands</option>
                 ${brands.map(b => `<option value="${b}">${b}</option>`).join('')}
             </select>
@@ -6914,12 +6914,17 @@ async function renderLsComments(c) {
 
 // --- Subreddit multi-select filter ---
 function lsAllSubsInComments() {
-    return [...new Set(_lsComments.filter(c => c.status !== 'deleted').map(c => c.post_subreddit).filter(Boolean))].sort();
+    const brandName = document.getElementById('ls-cf-brand')?.value;
+    let pool = _lsComments.filter(c => c.status !== 'deleted');
+    if (brandName) pool = pool.filter(c => c.brand_name === brandName);
+    return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
 }
 function lsBuildSubList() {
     const subs = lsAllSubsInComments();
     if (_lsSelectedSubs === null) _lsSelectedSubs = new Set(subs);
     else _lsSelectedSubs = new Set([...subs].filter(s => _lsSelectedSubs.has(s)));
+    // If brand filter narrowed subs and nothing is selected, select all visible
+    if (_lsSelectedSubs.size === 0 && subs.length > 0) _lsSelectedSubs = new Set(subs);
     const list = document.getElementById('ls-cf-sub-list');
     if (list) {
         list.innerHTML = subs.map(s => `
@@ -6930,6 +6935,11 @@ function lsBuildSubList() {
         `).join('') || '<span class="text-xs text-gray-500">No subreddits</span>';
     }
     lsUpdateSubCountBadge();
+}
+function lsOnBrandFilterChange() {
+    _lsSelectedSubs = null; // reset sub selection when brand changes
+    lsBuildSubList();
+    lsFilterComments();
 }
 function lsToggleSubFilter(ev) {
     if (ev) ev.stopPropagation();
@@ -7101,11 +7111,11 @@ async function lsArchivePost(postId) {
         // Update all comments for this post locally
         postComments.forEach(c => {
             if (['draft','complete','assigned','informed'].includes(c.status)) {
-                _lsUpdateCommentLocal(c.id, { status: 'archived', account_id: null });
+                Object.assign(c, { status: 'archived', account_id: null });
                 if (currentView === 'allcomments') _acUpdateLocal(c.id, 'search_comment', { status: 'archived', account_id: null });
             }
         });
-        renderLsTabContent();
+        lsFilterComments();
     } catch(e) { toast('Failed to archive', 'error'); }
 }
 
@@ -7115,10 +7125,10 @@ async function lsUnarchivePost(postId) {
         toast('Post unarchived', 'success');
         const postComments = _lsComments.filter(c => c.search_post_id == postId && c.status === 'archived');
         postComments.forEach(c => {
-            _lsUpdateCommentLocal(c.id, { status: 'draft', account_id: null });
+            Object.assign(c, { status: 'draft', account_id: null });
             if (currentView === 'allcomments') _acUpdateLocal(c.id, 'search_comment', { status: 'draft', account_id: null });
         });
-        renderLsTabContent();
+        lsFilterComments();
     } catch(e) { toast('Failed to unarchive', 'error'); }
 }
 
@@ -7129,7 +7139,7 @@ async function lsDeletePost(postId) {
         await api(`/api/search/posts/${postId}`, { method: 'DELETE' });
         toast('Post and comments deleted', 'success');
         _lsComments = _lsComments.filter(c => c.search_post_id != postId);
-        renderLsTabContent();
+        lsFilterComments();
     } catch(e) { toast('Failed to delete post', 'error'); }
 }
 

@@ -167,7 +167,22 @@ async function resolveRedditUrl(url) {
 // =========================================================================
 // Toast
 // =========================================================================
+const _toastRecent = new Map(); // key -> timestamp — dedup within short window
+let _toastLastError = 0; // timestamp of last error toast (any message)
 function toast(msg, type = 'info', duration = 3500) {
+    const now = Date.now();
+    // Suppress identical toasts within 2s
+    const key = type + ':' + msg;
+    const last = _toastRecent.get(key);
+    if (last && now - last < 2000) return;
+    // Suppress rapid-fire error toasts (different messages, same root cause) within 1s
+    if (type === 'error' && now - _toastLastError < 1000) return;
+    _toastRecent.set(key, now);
+    if (type === 'error') _toastLastError = now;
+    // Cleanup old entries periodically
+    if (_toastRecent.size > 50) {
+        for (const [k, t] of _toastRecent) { if (now - t > 5000) _toastRecent.delete(k); }
+    }
     const el = document.createElement('div');
     el.className = `toast toast-${type}`;
     el.style.whiteSpace = 'pre-line';
@@ -223,7 +238,7 @@ async function _killTask(taskId) {
 }
 
 function _syncTasksToStorage() {
-    const arr = [..._bgTasks.entries()].map(([id, t]) => ({ id, label: t.label }));
+    const arr = [..._bgTasks.entries()].map(([id, t]) => ({ id, label: t.label, ts: Date.now() }));
     localStorage.setItem('_bgTasks', JSON.stringify(arr));
 }
 
@@ -281,7 +296,15 @@ async function runTask(url, body, onComplete, label) {
 function _restoreBgTasks() {
     try {
         const saved = JSON.parse(localStorage.getItem('_bgTasks') || '[]');
-        for (const { id, label } of saved) {
+        if (!saved.length) return;
+        // Only restore tasks saved in the last 10 minutes — stale tasks are cleared
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        const valid = saved.filter(t => (t.ts || 0) > cutoff);
+        if (valid.length !== saved.length) {
+            localStorage.setItem('_bgTasks', JSON.stringify(valid));
+        }
+        for (const { id, label } of valid) {
+            if (_bgTasks.has(id)) continue; // skip already tracked
             _addBgTask(id, label);
             _pollTask(id, label, null);
         }

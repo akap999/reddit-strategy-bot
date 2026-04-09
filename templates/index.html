@@ -7020,6 +7020,7 @@ function lsFilterComments() {
                     ${g.comments.some(c => c.status === 'archived')
                         ? `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchivePost(${pid})">Unarchive</button>`
                         : `<button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchivePost(${pid})">Archive</button>`}
+                    <button class="btn btn-sm btn-danger" onclick="lsDeletePost(${pid})">Delete Post</button>
                     <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
                 </div>
             </div>
@@ -7119,6 +7120,17 @@ async function lsUnarchivePost(postId) {
         });
         renderLsTabContent();
     } catch(e) { toast('Failed to unarchive', 'error'); }
+}
+
+async function lsDeletePost(postId) {
+    const postComments = _lsComments.filter(c => c.search_post_id == postId && c.status !== 'deleted');
+    if (!confirm(`Delete this post and all ${postComments.length} comment(s)? This cannot be undone.`)) return;
+    try {
+        await api(`/api/search/posts/${postId}`, { method: 'DELETE' });
+        toast('Post and comments deleted', 'success');
+        _lsComments = _lsComments.filter(c => c.search_post_id != postId);
+        renderLsTabContent();
+    } catch(e) { toast('Failed to delete post', 'error'); }
 }
 
 async function lsUndeployComment(cid) {

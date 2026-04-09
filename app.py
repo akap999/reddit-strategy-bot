@@ -179,38 +179,91 @@ def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path, routing through Cloudflare proxy if configured.
     path should start with / e.g. /user/spez/about.json
     Retries on transient errors (403, 429, timeouts) with exponential backoff.
+    Falls back to direct Reddit request if proxy returns non-JSON (HTML).
     """
     import requests as _requests
     import time as _time
-    # Check both config and env directly (env var may be set after config import)
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    url = f"{base}{path}"
     ua = REDDIT_USER_AGENT
-    last_exc = None
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                wait = min(2 ** attempt * 2, 15)  # 4s, 8s, 15s
-                print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
-                _time.sleep(wait)
-            print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, attempt={attempt+1})", flush=True)
-            resp = _requests.get(url, headers={"User-Agent": ua, "Accept": "application/json"}, timeout=timeout)
-            # Retry on transient errors
-            if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
-                print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
-                continue
-            return resp
-        except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
-            last_exc = e
-            print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
-            if attempt >= max_retries - 1:
-                raise
-    raise last_exc
+    headers = {"User-Agent": ua, "Accept": "application/json"}
+
+    def _try_fetch(base_url, label, retries):
+        url = f"{base_url}{path}"
+        last_err = None
+        for attempt in range(retries):
+            try:
+                if attempt > 0:
+                    wait = min(2 ** attempt * 2, 15)
+                    print(f"[REDDIT_GET] Retry {attempt}/{retries-1} in {wait}s ({label})", flush=True)
+                    _time.sleep(wait)
+                print(f"[REDDIT_GET] {url} ({label}, attempt={attempt+1})", flush=True)
+                resp = _requests.get(url, headers=headers, timeout=timeout)
+                if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < retries - 1:
+                    print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
+                    continue
+                return resp
+            except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
+                last_err = e
+                print(f"[REDDIT_GET] {type(e).__name__} ({label}, attempt {attempt+1}): {e}", flush=True)
+        return last_err  # return exception if all retries failed
+
+    # Try proxy first
+    if proxy:
+        result = _try_fetch(proxy.rstrip("/"), "proxy", max_retries)
+        if isinstance(result, Exception):
+            print(f"[REDDIT_GET] Proxy failed with exception, falling back to direct", flush=True)
+        elif result.status_code == 200 and result.text.lstrip()[:1] == "<":
+            print(f"[REDDIT_GET] Proxy returned HTML, falling back to direct", flush=True)
+        else:
+            return result
+
+    # Fall back to direct (or use it if no proxy)
+    result = _try_fetch("https://www.reddit.com", "direct", max_retries)
+    if isinstance(result, Exception):
+        raise result
+    return result
 
 # ---------------------------------------------------------------------------
 # Background task system
 # ---------------------------------------------------------------------------
+
+@app.route("/api/debug/reddit-proxy")
+def api_debug_reddit_proxy():
+    """Test what the proxy returns for a Reddit .json URL — for debugging live checker."""
+    import requests as _requests
+    test_path = request.args.get("path") or "/r/test/comments/abc.json"
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    ua = REDDIT_USER_AGENT
+    results = {}
+    # Test proxy
+    if proxy:
+        try:
+            url = f"{proxy.rstrip('/')}{test_path}"
+            resp = _requests.get(url, headers={"User-Agent": ua, "Accept": "application/json"}, timeout=15)
+            results["proxy"] = {
+                "url": url, "status": resp.status_code,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "body_preview": resp.text[:500],
+                "is_json": not resp.text.lstrip().startswith("<"),
+            }
+        except Exception as e:
+            results["proxy"] = {"error": str(e)}
+    else:
+        results["proxy"] = {"error": "REDDIT_PROXY_URL not configured"}
+    # Test direct
+    try:
+        url = f"https://www.reddit.com{test_path}"
+        resp = _requests.get(url, headers={"User-Agent": ua, "Accept": "application/json"}, timeout=15)
+        results["direct"] = {
+            "url": url, "status": resp.status_code,
+            "content_type": resp.headers.get("Content-Type", ""),
+            "body_preview": resp.text[:500],
+            "is_json": not resp.text.lstrip().startswith("<"),
+        }
+    except Exception as e:
+        results["direct"] = {"error": str(e)}
+    return jsonify(results)
+
 
 def run_task(task_id, func, *args, **kwargs):
     """Run a function in background thread, storing result in DB."""

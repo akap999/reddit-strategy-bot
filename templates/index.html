@@ -4272,8 +4272,8 @@ async function markCommentDeletedMgmt(cid) {
 async function checkLiveComments() {
     const sid = document.getElementById('mgmt-sub-filter').value;
     runTask(`/api/subreddits/${sid}/check-live`, {}, (result) => {
-        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
-        loadManagedComments(); // refetch: bulk status changes from live check
+        toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
+        loadManagedComments();
     }, 'Check Live');
 }
 
@@ -4785,9 +4785,26 @@ async function renderAllComments(el) {
     loadAllComments();
 }
 
+function _liveCheckToast(result) {
+    let msg = `Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`;
+    if (result.errors > 0 && result.error_details) {
+        const d = result.error_details;
+        const parts = [];
+        if (d.forbidden) parts.push(`${d.forbidden} forbidden`);
+        if (d.rate_limited) parts.push(`${d.rate_limited} rate-limited`);
+        if (d.bad_url) parts.push(`${d.bad_url} bad URL`);
+        if (d.timeout) parts.push(`${d.timeout} timeout`);
+        if (d.non_json) parts.push(`${d.non_json} non-JSON`);
+        if (d.http_other) parts.push(`${d.http_other} HTTP error`);
+        if (d.exception) parts.push(`${d.exception} exception`);
+        if (parts.length) msg += ` (${parts.join(', ')})`;
+    }
+    return msg;
+}
+
 async function checkLiveAllComments() {
     runTask('/api/all-comments/check-live', {}, (result) => {
-        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
+        toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
         loadAllComments();
     }, 'Check Live (All)');
 }
@@ -7320,7 +7337,7 @@ async function lsDeleteSelectedPostComments() {
 
 async function checkLiveSearchComments() {
     runTask('/api/search/comments/check-live', {}, (result) => {
-        toast(`Checked ${result.checked}: ${result.live} live, ${result.dead} dead, ${result.errors} errors`, 'success');
+        toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
         renderLsTabContent();
     }, 'Check Live (Search)');
 }

@@ -175,24 +175,38 @@ def _normalize_reddit_comment_url(url):
         return None
     return path + ".json"
 
-def _reddit_get(path, timeout=15):
+def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path, routing through Cloudflare proxy if configured.
     path should start with / e.g. /user/spez/about.json
+    Retries on transient errors (403, 429, timeouts) with exponential backoff.
     """
     import requests as _requests
+    import time as _time
     # Check both config and env directly (env var may be set after config import)
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
     url = f"{base}{path}"
     ua = REDDIT_USER_AGENT
-    print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, ua={ua[:40]})", flush=True)
-    resp = _requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
-    # If we get 403, Reddit may be blocking the User-Agent — retry with bot-style UA
-    if resp.status_code == 403 and "Mozilla" in ua:
-        bot_ua = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
-        print(f"[REDDIT_GET] 403 with browser UA, retrying with bot UA", flush=True)
-        resp = _requests.get(url, headers={"User-Agent": bot_ua}, timeout=timeout)
-    return resp
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                wait = min(2 ** attempt * 2, 15)  # 4s, 8s, 15s
+                print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
+                _time.sleep(wait)
+            print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, attempt={attempt+1})", flush=True)
+            resp = _requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
+            # Retry on transient errors
+            if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
+                print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
+                continue
+            return resp
+        except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
+            if attempt >= max_retries - 1:
+                raise
+    raise last_exc
 
 # ---------------------------------------------------------------------------
 # Background task system
@@ -1141,83 +1155,125 @@ def api_global_all_comments():
         db.close()
 
 
+def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
+    """Shared live-check logic for a batch of comments.
+    Each item must have: id, reddit_comment_url, source ('comment' or 'search_comment').
+    Returns dict with checked/live/dead/errors counts and error_details breakdown.
+    """
+    import time as _time
+    checked = 0
+    live = 0
+    dead = 0
+    errors = 0
+    error_details = {"forbidden": 0, "rate_limited": 0, "bad_url": 0,
+                     "timeout": 0, "non_json": 0, "http_other": 0, "exception": 0}
+
+    def _mark_dead(item):
+        src = item.get("source", "comment")
+        if src == "comment":
+            db.mark_comment_deleted(item["id"])
+        else:
+            db.mark_search_comment_removed(item["id"])
+
+    def _mark_live(item):
+        src = item.get("source", "comment")
+        if src == "comment":
+            db.set_comment_live_check(item["id"])
+        else:
+            db.set_search_comment_live_check(item["id"])
+
+    for item in deployed:
+        checked += 1
+        url = item["reddit_comment_url"]
+        src = item.get("source", "comment")
+        path = _normalize_reddit_comment_url(url)
+        if not path:
+            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): unrecognizable URL {url}", flush=True)
+            errors += 1
+            error_details["bad_url"] += 1
+            continue
+        try:
+            resp = _reddit_get(path)
+            if resp.status_code == 429:
+                print(f"[{log_prefix}] #{item['id']} ({src}) rate limited after retries", flush=True)
+                errors += 1
+                error_details["rate_limited"] += 1
+                _time.sleep(5)
+                continue
+            if resp.status_code == 403:
+                print(f"[{log_prefix}] #{item['id']} ({src}) 403 Forbidden after retries", flush=True)
+                errors += 1
+                error_details["forbidden"] += 1
+                continue
+            if resp.status_code == 404:
+                _mark_dead(item)
+                dead += 1
+            elif resp.status_code == 200:
+                ct = resp.headers.get('Content-Type', '')
+                if 'json' not in ct:
+                    print(f"[{log_prefix}] #{item['id']} ({src}) got non-JSON ({ct}): {resp.text[:200]}", flush=True)
+                    errors += 1
+                    error_details["non_json"] += 1
+                    continue
+                data = resp.json()
+                found_deleted = False
+                found_live = False
+                if isinstance(data, list) and len(data) > 1:
+                    children = data[1].get("data", {}).get("children", [])
+                    if not children:
+                        # Reddit returns empty children when comment is removed/deleted
+                        print(f"[{log_prefix}] #{item['id']} ({src}) empty children — comment removed", flush=True)
+                        _mark_dead(item)
+                        dead += 1
+                        _time.sleep(2)
+                        continue
+                    for child in children:
+                        body = child.get("data", {}).get("body", "")
+                        if body in ("[deleted]", "[removed]"):
+                            found_deleted = True
+                            break
+                        if body:
+                            found_live = True
+                else:
+                    # Unexpected response structure — treat as error
+                    print(f"[{log_prefix}] #{item['id']} ({src}) unexpected JSON structure: {str(data)[:200]}", flush=True)
+                    errors += 1
+                    error_details["non_json"] += 1
+                    _time.sleep(2)
+                    continue
+                if found_deleted:
+                    _mark_dead(item)
+                    dead += 1
+                else:
+                    _mark_live(item)
+                    live += 1
+            else:
+                print(f"[{log_prefix}] #{item['id']} ({src}) got HTTP {resp.status_code}", flush=True)
+                errors += 1
+                error_details["http_other"] += 1
+        except Exception as e:
+            print(f"[{log_prefix}] Error checking #{item['id']} ({src}) ({url}): {e}", flush=True)
+            errors += 1
+            if "timeout" in str(e).lower() or "Timeout" in type(e).__name__:
+                error_details["timeout"] += 1
+            else:
+                error_details["exception"] += 1
+        _time.sleep(2)
+
+    return {"checked": checked, "live": live, "dead": dead, "errors": errors,
+            "error_details": error_details}
+
+
 @app.route("/api/all-comments/check-live", methods=["POST"])
 def api_check_live_all_comments():
     """Check all deployed/paid comments (regular + search) against Reddit."""
-    import time as _time
-
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
             deployed = db.get_all_deployed_comment_urls()
-            checked = 0
-            live = 0
-            dead = 0
-            errors = 0
-            for item in deployed:
-                checked += 1
-                url = item["reddit_comment_url"]
-                source = item["source"]
-                path = _normalize_reddit_comment_url(url)
-                if not path:
-                    print(f"[CHECK-LIVE-ALL] Skipping #{item['id']} ({source}): unrecognizable URL {url}", flush=True)
-                    errors += 1
-                    continue
-                try:
-                    resp = _reddit_get(path)
-                    if resp.status_code == 429:
-                        print(f"[CHECK-LIVE-ALL] Rate limited, waiting 10s", flush=True)
-                        _time.sleep(10)
-                        errors += 1
-                        continue
-                    if resp.status_code == 403:
-                        print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got 403, waiting 5s", flush=True)
-                        _time.sleep(5)
-                        errors += 1
-                        continue
-                    if resp.status_code == 404:
-                        if source == 'comment':
-                            db.mark_comment_deleted(item["id"])
-                        else:
-                            db.mark_search_comment_removed(item["id"])
-                        dead += 1
-                    elif resp.status_code == 200:
-                        ct = resp.headers.get('Content-Type', '')
-                        if 'json' not in ct:
-                            print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got non-JSON ({ct})", flush=True)
-                            errors += 1
-                            continue
-                        data = resp.json()
-                        found_deleted = False
-                        if isinstance(data, list) and len(data) > 1:
-                            children = data[1].get("data", {}).get("children", [])
-                            for child in children:
-                                body = child.get("data", {}).get("body", "")
-                                if body in ("[deleted]", "[removed]"):
-                                    found_deleted = True
-                                    break
-                        if found_deleted:
-                            if source == 'comment':
-                                db.mark_comment_deleted(item["id"])
-                            else:
-                                db.mark_search_comment_removed(item["id"])
-                            dead += 1
-                        else:
-                            if source == 'comment':
-                                db.set_comment_live_check(item["id"])
-                            else:
-                                db.set_search_comment_live_check(item["id"])
-                            live += 1
-                    else:
-                        print(f"[CHECK-LIVE-ALL] #{item['id']} ({source}) got HTTP {resp.status_code}", flush=True)
-                        errors += 1
-                except Exception as e:
-                    print(f"[CHECK-LIVE-ALL] Error checking #{item['id']} ({source}) ({url}): {e}", flush=True)
-                    errors += 1
-                _time.sleep(2)
-            return {"checked": checked, "live": live, "dead": dead, "errors": errors}
+            return _check_live_batch(deployed, db, "CHECK-LIVE-ALL")
         finally:
             db.close()
 
@@ -1244,70 +1300,16 @@ def api_mark_paid_all_comments():
 
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
-    import time as _time
-
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
             deployed = db.get_deployed_comment_urls(sid)
-            checked = 0
-            live = 0
-            dead = 0
-            errors = 0
+            # Add source field for shared helper
             for item in deployed:
-                checked += 1
-                url = item["reddit_comment_url"]
-                path = _normalize_reddit_comment_url(url)
-                if not path:
-                    print(f"[CHECK-LIVE] Skipping #{item['id']}: unrecognizable URL {url}", flush=True)
-                    errors += 1
-                    continue
-                try:
-                    resp = _reddit_get(path)
-                    if resp.status_code == 429:
-                        print(f"[CHECK-LIVE] Rate limited, waiting 10s", flush=True)
-                        _time.sleep(10)
-                        errors += 1
-                        continue
-                    if resp.status_code == 403:
-                        print(f"[CHECK-LIVE] #{item['id']} got 403 Forbidden, waiting 5s", flush=True)
-                        _time.sleep(5)
-                        errors += 1
-                        continue
-                    if resp.status_code == 404:
-                        db.mark_comment_deleted(item["id"])
-                        dead += 1
-                    elif resp.status_code == 200:
-                        ct = resp.headers.get('Content-Type', '')
-                        if 'json' not in ct:
-                            print(f"[CHECK-LIVE] #{item['id']} got non-JSON response ({ct})", flush=True)
-                            errors += 1
-                            continue
-                        data = resp.json()
-                        found_deleted = False
-                        if isinstance(data, list) and len(data) > 1:
-                            children = data[1].get("data", {}).get("children", [])
-                            for child in children:
-                                body = child.get("data", {}).get("body", "")
-                                if body in ("[deleted]", "[removed]"):
-                                    found_deleted = True
-                                    break
-                        if found_deleted:
-                            db.mark_comment_deleted(item["id"])
-                            dead += 1
-                        else:
-                            db.set_comment_live_check(item["id"])
-                            live += 1
-                    else:
-                        print(f"[CHECK-LIVE] #{item['id']} got HTTP {resp.status_code}", flush=True)
-                        errors += 1
-                except Exception as e:
-                    print(f"[CHECK-LIVE] Error checking #{item['id']} ({url}): {e}", flush=True)
-                    errors += 1
-                _time.sleep(2)
-            return {"checked": checked, "live": live, "dead": dead, "errors": errors}
+                item["source"] = "comment"
+            return _check_live_batch(deployed, db, "CHECK-LIVE")
         finally:
             db.close()
 
@@ -1317,70 +1319,15 @@ def api_check_live(sid):
 @app.route("/api/search/comments/check-live", methods=["POST"])
 def api_check_live_search_comments():
     """Check deployed search comments against Reddit to find removed/deleted ones."""
-    import time as _time
-
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
             deployed = db.get_deployed_search_comment_urls()
-            checked = 0
-            live = 0
-            dead = 0
-            errors = 0
             for item in deployed:
-                checked += 1
-                url = item["reddit_comment_url"]
-                path = _normalize_reddit_comment_url(url)
-                if not path:
-                    print(f"[CHECK-LIVE-SEARCH] Skipping #{item['id']}: unrecognizable URL {url}", flush=True)
-                    errors += 1
-                    continue
-                try:
-                    resp = _reddit_get(path)
-                    if resp.status_code == 429:
-                        print(f"[CHECK-LIVE-SEARCH] Rate limited, waiting 10s", flush=True)
-                        _time.sleep(10)
-                        errors += 1
-                        continue
-                    if resp.status_code == 403:
-                        print(f"[CHECK-LIVE-SEARCH] #{item['id']} got 403 Forbidden, waiting 5s", flush=True)
-                        _time.sleep(5)
-                        errors += 1
-                        continue
-                    if resp.status_code == 404:
-                        db.mark_search_comment_removed(item["id"])
-                        dead += 1
-                    elif resp.status_code == 200:
-                        ct = resp.headers.get('Content-Type', '')
-                        if 'json' not in ct:
-                            print(f"[CHECK-LIVE-SEARCH] #{item['id']} got non-JSON response ({ct})", flush=True)
-                            errors += 1
-                            continue
-                        data = resp.json()
-                        found_deleted = False
-                        if isinstance(data, list) and len(data) > 1:
-                            children = data[1].get("data", {}).get("children", [])
-                            for child in children:
-                                body = child.get("data", {}).get("body", "")
-                                if body in ("[deleted]", "[removed]"):
-                                    found_deleted = True
-                                    break
-                        if found_deleted:
-                            db.mark_search_comment_removed(item["id"])
-                            dead += 1
-                        else:
-                            db.set_search_comment_live_check(item["id"])
-                            live += 1
-                    else:
-                        print(f"[CHECK-LIVE-SEARCH] #{item['id']} got HTTP {resp.status_code}", flush=True)
-                        errors += 1
-                except Exception as e:
-                    print(f"[CHECK-LIVE-SEARCH] Error checking #{item['id']} ({url}): {e}", flush=True)
-                    errors += 1
-                _time.sleep(2)
-            return {"checked": checked, "live": live, "dead": dead, "errors": errors}
+                item["source"] = "search_comment"
+            return _check_live_batch(deployed, db, "CHECK-LIVE-SEARCH")
         finally:
             db.close()
 

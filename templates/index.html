@@ -28,6 +28,7 @@
         .badge-paid { background: #004d33; color: #00A86B; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
         .badge-removed { background: #4a1a2a; color: #ff6b9b; }
+        .badge-archived { background: #2a2a3a; color: #8888aa; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
         .brand-tab { color: #818384; border-bottom: 2px solid transparent; cursor: pointer; }
         .brand-tab:hover { color: #D7DADC; }
@@ -4622,6 +4623,8 @@ function _acAction(source, cid, action) {
             undeploy: `lsUndeployComment(${cid})`,
             paid: `lsMarkPaid(${cid})`,
             removed: `lsMarkRemoved(${cid})`,
+            archive: `lsArchiveComment(${cid})`,
+            unarchive: `lsUnarchiveComment(${cid})`,
             copy: `lsCopyMessage(${cid})`,
             edit: `lsEditComment(${cid})`,
             delete: `lsDeleteComment(${cid})`,
@@ -4658,16 +4661,19 @@ function renderAllCommentCard(c) {
         : '<span class="badge" style="background:#343536;color:#818384;font-size:0.6rem">REG</span>';
 
     let actionBtns = '';
+    const archiveBtn = src === 'search_comment' ? `<button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="${_acAction(src, c.id, 'archive')}">Archive</button>` : '';
     if (c.status === 'draft' || c.status === 'complete') {
-        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button>`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button>${archiveBtn}`;
     } else if (c.status === 'assigned') {
-        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>${archiveBtn}`;
     } else if (c.status === 'informed') {
-        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button>${archiveBtn}`;
     } else if (c.status === 'deployed') {
         actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button>`;
     } else if (c.status === 'paid') {
         actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
+    } else if (c.status === 'archived') {
+        actionBtns = `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="${_acAction(src, c.id, 'unarchive')}">Unarchive</button>`;
     }
 
     const redditLink = c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="text-xs text-blue-400 hover:underline">view</a>` : '';
@@ -4748,6 +4754,7 @@ async function renderAllComments(el) {
                     <option value="deployed">Deployed</option>
                     <option value="paid">Paid</option>
                     <option value="removed">Removed</option>
+                    <option value="archived">Archived</option>
                 </select>
             </div>
             <div>
@@ -6893,6 +6900,7 @@ async function renderLsComments(c) {
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
                 <option value="removed">Removed</option>
+                <option value="archived">Archived</option>
             </select>
             <span style="margin-left:auto" class="flex gap-2">
                 <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live</button>
@@ -6964,15 +6972,18 @@ function lsFilterComments() {
     const status = document.getElementById('ls-cf-status')?.value;
 
     // Post-level aggregate status (highest-ranked status among a post's comments)
-    const STATUS_RANK = { draft:0, assigned:1, informed:2, deployed:3, removed:4 };
+    const STATUS_RANK = { draft:0, assigned:1, informed:2, deployed:3, removed:4, archived:-1 };
     const postStatus = {};
-    _lsComments.filter(c => c.status !== 'deleted').forEach(c => {
+    _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived').forEach(c => {
         const cur = postStatus[c.search_post_id];
         const r = STATUS_RANK[c.status] ?? -1;
         if (cur == null || r > (STATUS_RANK[cur] ?? -1)) postStatus[c.search_post_id] = c.status;
     });
 
-    let filtered = _lsComments.filter(c => c.status !== 'deleted');
+    // When "archived" filter selected, show archived; otherwise exclude them
+    let filtered = status === 'archived'
+        ? _lsComments.filter(c => c.status === 'archived')
+        : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
     // Status filter applies at the POST level — keep all comments of posts whose aggregate status matches
@@ -7023,17 +7034,19 @@ function lsFilterComments() {
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}<br>${_commentStatusDate(c)}</td>
                         <td>
                             <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
-                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>` : ''}
+                                ${c.status === 'draft' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>` : ''}
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
+                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>
                                 ` : ''}
                                 ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
+                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#8888aa" onclick="lsArchiveComment(${c.id})">Archive</button>
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
@@ -7043,6 +7056,9 @@ function lsFilterComments() {
                                 ${c.status === 'paid' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                ` : ''}
+                                ${c.status === 'archived' ? `
+                                    <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchiveComment(${c.id})">Unarchive</button>
                                 ` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
@@ -7073,6 +7089,24 @@ async function lsMarkRemoved(cid) {
         _lsUpdateCommentLocal(cid, { status: 'removed' });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'removed' });
     } catch(e) { toast('Failed to mark removed', 'error'); }
+}
+
+async function lsArchiveComment(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/archive`, { method: 'POST' });
+        toast('Comment archived', 'success');
+        _lsUpdateCommentLocal(cid, { status: 'archived', account_id: null });
+        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'archived', account_id: null });
+    } catch(e) { toast('Failed to archive', 'error'); }
+}
+
+async function lsUnarchiveComment(cid) {
+    try {
+        await api(`/api/search/comments/${cid}/unarchive`, { method: 'POST' });
+        toast('Comment unarchived', 'success');
+        _lsUpdateCommentLocal(cid, { status: 'draft', account_id: null });
+        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'draft', account_id: null });
+    } catch(e) { toast('Failed to unarchive', 'error'); }
 }
 
 async function lsUndeployComment(cid) {

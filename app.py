@@ -3131,6 +3131,24 @@ def api_mark_search_comment_removed(cid):
         db.close()
 
 
+@app.route("/api/search/comments/<int:cid>/archive", methods=["POST"])
+def api_archive_search_comment(cid):
+    db = get_db()
+    try:
+        db.archive_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/search/comments/<int:cid>/unarchive", methods=["POST"])
+def api_unarchive_search_comment(cid):
+    db = get_db()
+    try:
+        db.unarchive_search_comment(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/accounts/search-assignment-status")
 def api_accounts_search_assignment_status():
     db = get_db()

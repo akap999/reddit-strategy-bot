@@ -1419,7 +1419,7 @@ class Database:
                                 date=None, limit=200, offset=0):
         """Get all comments (regular + search) globally with optional filters and pagination."""
         # Build WHERE clauses dynamically
-        w1, w2 = ["c.status != 'deleted'"], ["sc.status != 'deleted'"]
+        w1, w2 = ["c.status NOT IN ('deleted','archived')"], ["sc.status NOT IN ('deleted','archived')"]
         p1, p2 = [], []
 
         if status:
@@ -3374,6 +3374,20 @@ class Database:
         """Mark a deployed search comment as removed/deleted on Reddit."""
         self.conn.execute(
             "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status = 'deployed'",
+            (comment_id,))
+        self.conn.commit()
+
+    def archive_search_comment(self, comment_id):
+        """Archive a search comment (hide from active views)."""
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'archived' WHERE id = ? AND status IN ('draft','complete','assigned','informed')",
+            (comment_id,))
+        self.conn.commit()
+
+    def unarchive_search_comment(self, comment_id):
+        """Unarchive a search comment back to draft."""
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'draft', account_id = NULL WHERE id = ? AND status = 'archived'",
             (comment_id,))
         self.conn.commit()
 

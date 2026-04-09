@@ -179,6 +179,7 @@ def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path, routing through Cloudflare proxy if configured.
     path should start with / e.g. /user/spez/about.json
     Retries on transient errors (403, 429, timeouts) with exponential backoff.
+    Also retries when proxy returns HTML instead of JSON.
     """
     import requests as _requests
     import time as _time
@@ -188,6 +189,7 @@ def _reddit_get(path, timeout=15, max_retries=3):
     ua = REDDIT_USER_AGENT
     headers = {"User-Agent": ua, "Accept": "application/json"}
     last_exc = None
+    last_resp = None
     for attempt in range(max_retries):
         try:
             if attempt > 0:
@@ -200,12 +202,19 @@ def _reddit_get(path, timeout=15, max_retries=3):
             if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
                 print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
                 continue
+            # Retry if we got HTML instead of JSON (proxy not updated yet)
+            if resp.status_code == 200 and resp.text.lstrip()[:1] == "<" and attempt < max_retries - 1:
+                print(f"[REDDIT_GET] Got HTML instead of JSON (Content-Type: {resp.headers.get('Content-Type','')}), will retry", flush=True)
+                continue
+            last_resp = resp
             return resp
         except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
             last_exc = e
             print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
             if attempt >= max_retries - 1:
                 raise
+    if last_resp:
+        return last_resp
     raise last_exc
 
 # ---------------------------------------------------------------------------

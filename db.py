@@ -1117,9 +1117,20 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_comments_brand ON comments(brand_id)",
             "CREATE INDEX IF NOT EXISTS idx_comments_mentions ON comments(mentions_brand)",
             "CREATE INDEX IF NOT EXISTS idx_comments_type ON comments(comment_type)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_paid_at ON comments(paid_at)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_status_deployed ON comments(status, deployed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_status_paid ON comments(status, paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_account ON search_comments(account_id)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_status ON search_comments(status)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_deployed_at ON search_comments(deployed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_paid_at ON search_comments(paid_at)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_status_deployed ON search_comments(status, deployed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_status_paid ON search_comments(status, paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_post_urls_post ON post_urls(post_id)",
+            "CREATE INDEX IF NOT EXISTS idx_post_urls_added_at ON post_urls(added_at)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_paid_at ON posts(paid_at)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_owner_status ON posts(owner_account, status)",
         ]
         for idx_sql in perf_indexes:
             self.conn.execute(idx_sql)
@@ -3082,35 +3093,10 @@ class Database:
     def get_calendar_account_summary(self, date, brand_id=None, subreddit_id=None, ref=None):
         """Get per-account counts of assigned/deployed/paid for a given date."""
         results = {}
+        day_start = date
+        day_end = date + " 23:59:59"
 
-        # --- Regular comments ---
-        q1 = """SELECT c.account_id,
-                       SUM(CASE WHEN c.status = 'assigned' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_assigned,
-                       SUM(CASE WHEN c.status = 'assigned' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_assigned,
-                       SUM(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_deployed,
-                       SUM(CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_deployed,
-                       SUM(CASE WHEN c.status = 'paid' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_paid,
-                       SUM(CASE WHEN c.status = 'paid' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_paid
-                FROM comments c
-                JOIN posts p ON c.post_id = p.id
-                LEFT JOIN brands b ON c.brand_id = b.id
-                WHERE c.status IN ('assigned', 'informed', 'deployed', 'paid')
-                  AND c.account_id IS NOT NULL
-                  AND DATE(CASE WHEN c.status = 'paid' THEN COALESCE(c.paid_at, c.deployed_at, c.created_at) ELSE COALESCE(c.deployed_at, c.created_at) END) = ?"""
-        p1 = [date]
-        if brand_id:
-            q1 += " AND b.id = ?"
-            p1.append(brand_id)
-        if subreddit_id:
-            q1 += " AND p.subreddit_id = ?"
-            p1.append(subreddit_id)
-        if ref:
-            q1 += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
-            p1.append(ref)
-        q1 += " GROUP BY c.account_id"
-        for row in self.conn.execute(q1, p1).fetchall():
-            r = dict(row)
-            acct = r['account_id']
+        def _ensure(acct):
             if acct not in results:
                 results[acct] = {'account_id': acct,
                                  'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
@@ -3118,84 +3104,145 @@ class Database:
                                  'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
                                  'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
                                  'posts_deployed': 0, 'posts_paid': 0}
-            for k in ('reg_brand_assigned', 'reg_nonbrand_assigned', 'reg_brand_deployed',
-                       'reg_nonbrand_deployed', 'reg_brand_paid', 'reg_nonbrand_paid'):
+
+        # --- Regular comments (non-paid): use deployed_at/created_at range ---
+        q1a = """SELECT c.account_id,
+                       SUM(CASE WHEN c.status = 'assigned' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_assigned,
+                       SUM(CASE WHEN c.status = 'assigned' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_assigned,
+                       SUM(CASE WHEN c.status = 'deployed' AND c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_deployed,
+                       SUM(CASE WHEN c.status = 'deployed' AND (c.mentions_brand = 0 OR c.mentions_brand IS NULL) THEN 1 ELSE 0 END) as reg_nonbrand_deployed
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                WHERE c.status IN ('assigned', 'informed', 'deployed')
+                  AND c.account_id IS NOT NULL
+                  AND COALESCE(c.deployed_at, c.created_at) >= ? AND COALESCE(c.deployed_at, c.created_at) <= ?"""
+        p1a = [day_start, day_end]
+        if brand_id:
+            q1a += " AND b.id = ?"; p1a.append(brand_id)
+        if subreddit_id:
+            q1a += " AND p.subreddit_id = ?"; p1a.append(subreddit_id)
+        if ref:
+            q1a += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p1a.append(ref)
+        q1a += " GROUP BY c.account_id"
+        for row in self.conn.execute(q1a, p1a).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            for k in ('reg_brand_assigned', 'reg_nonbrand_assigned', 'reg_brand_deployed', 'reg_nonbrand_deployed'):
                 results[acct][k] = r[k]
 
-        # --- Search comments ---
-        has_sc = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='search_comments'").fetchone()
-        if has_sc:
-            q2 = """SELECT sc.account_id,
-                           SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as ls_assigned,
-                           SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as ls_deployed,
-                           SUM(CASE WHEN sc.status = 'paid' THEN 1 ELSE 0 END) as ls_paid
-                    FROM search_comments sc
-                    JOIN search_posts sp ON sc.search_post_id = sp.id
-                    LEFT JOIN brands b ON sc.brand_id = b.id
-                    WHERE sc.status IN ('assigned', 'informed', 'deployed', 'paid')
-                      AND sc.account_id IS NOT NULL
-                      AND DATE(CASE WHEN sc.status = 'paid' THEN COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) ELSE COALESCE(sc.deployed_at, sc.created_at) END) = ?"""
-            p2 = [date]
-            if brand_id:
-                q2 += " AND b.id = ?"
-                p2.append(brand_id)
-            if subreddit_id:
-                q2 += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"
-                p2.append(subreddit_id)
-            if ref:
-                q2 += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
-                p2.append(ref)
-            q2 += " GROUP BY sc.account_id"
-            for row in self.conn.execute(q2, p2).fetchall():
-                r = dict(row)
-                acct = r['account_id']
-                if acct not in results:
-                    results[acct] = {'account_id': acct,
-                                     'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
-                                     'reg_brand_deployed': 0, 'reg_nonbrand_deployed': 0,
-                                     'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
-                                     'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
-                                     'posts_deployed': 0, 'posts_paid': 0}
-                results[acct]['ls_assigned'] = r['ls_assigned']
-                results[acct]['ls_deployed'] = r['ls_deployed']
-                results[acct]['ls_paid'] = r['ls_paid']
+        # --- Regular comments (paid): use paid_at range ---
+        q1b = """SELECT c.account_id,
+                       SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as reg_brand_paid,
+                       SUM(CASE WHEN c.mentions_brand = 0 OR c.mentions_brand IS NULL THEN 1 ELSE 0 END) as reg_nonbrand_paid
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                WHERE c.status = 'paid'
+                  AND c.account_id IS NOT NULL
+                  AND COALESCE(c.paid_at, c.deployed_at, c.created_at) >= ? AND COALESCE(c.paid_at, c.deployed_at, c.created_at) <= ?"""
+        p1b = [day_start, day_end]
+        if brand_id:
+            q1b += " AND b.id = ?"; p1b.append(brand_id)
+        if subreddit_id:
+            q1b += " AND p.subreddit_id = ?"; p1b.append(subreddit_id)
+        if ref:
+            q1b += " AND c.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p1b.append(ref)
+        q1b += " GROUP BY c.account_id"
+        for row in self.conn.execute(q1b, p1b).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            results[acct]['reg_brand_paid'] = r['reg_brand_paid']
+            results[acct]['reg_nonbrand_paid'] = r['reg_nonbrand_paid']
 
-        # --- Posts ---
-        has_pu = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_urls'").fetchone()
-        if has_pu:
-            q3 = """SELECT p.owner_account as account_id,
-                           SUM(CASE WHEN p.status = 'published' THEN 1 ELSE 0 END) as posts_deployed,
-                           SUM(CASE WHEN p.status = 'paid' THEN 1 ELSE 0 END) as posts_paid
-                    FROM posts p
-                    JOIN post_urls pu ON pu.post_id = p.id
-                    JOIN subreddits s ON p.subreddit_id = s.id
-                    LEFT JOIN brands b ON p.brand_id = b.id
-                    WHERE p.owner_account IS NOT NULL
-                      AND p.status IN ('published', 'paid')
-                      AND DATE(CASE WHEN p.status = 'paid' THEN COALESCE(p.paid_at, pu.added_at) ELSE pu.added_at END) = ?"""
-            p3 = [date]
-            if brand_id:
-                q3 += " AND b.id = ?"
-                p3.append(brand_id)
-            if subreddit_id:
-                q3 += " AND s.id = ?"
-                p3.append(subreddit_id)
-            if ref:
-                q3 += " AND p.owner_account IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"
-                p3.append(ref)
-            q3 += " GROUP BY p.owner_account"
-            for row in self.conn.execute(q3, p3).fetchall():
-                r = dict(row)
-                acct = r['account_id']
-                if acct not in results:
-                    results[acct] = {'account_id': acct,
-                                     'reg_brand_assigned': 0, 'reg_nonbrand_assigned': 0,
-                                     'reg_brand_deployed': 0, 'reg_nonbrand_deployed': 0,
-                                     'reg_brand_paid': 0, 'reg_nonbrand_paid': 0,
-                                     'ls_assigned': 0, 'ls_deployed': 0, 'ls_paid': 0,
-                                     'posts_deployed': 0, 'posts_paid': 0}
-                results[acct]['posts_deployed'] = r['posts_deployed']
-                results[acct]['posts_paid'] = r['posts_paid']
+        # --- Search comments (non-paid) ---
+        q2a = """SELECT sc.account_id,
+                       SUM(CASE WHEN sc.status = 'assigned' THEN 1 ELSE 0 END) as ls_assigned,
+                       SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as ls_deployed
+                FROM search_comments sc
+                JOIN search_posts sp ON sc.search_post_id = sp.id
+                LEFT JOIN brands b ON sc.brand_id = b.id
+                WHERE sc.status IN ('assigned', 'informed', 'deployed')
+                  AND sc.account_id IS NOT NULL
+                  AND COALESCE(sc.deployed_at, sc.created_at) >= ? AND COALESCE(sc.deployed_at, sc.created_at) <= ?"""
+        p2a = [day_start, day_end]
+        if brand_id:
+            q2a += " AND b.id = ?"; p2a.append(brand_id)
+        if subreddit_id:
+            q2a += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"; p2a.append(subreddit_id)
+        if ref:
+            q2a += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p2a.append(ref)
+        q2a += " GROUP BY sc.account_id"
+        for row in self.conn.execute(q2a, p2a).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            results[acct]['ls_assigned'] = r['ls_assigned']
+            results[acct]['ls_deployed'] = r['ls_deployed']
+
+        # --- Search comments (paid) ---
+        q2b = """SELECT sc.account_id, COUNT(*) as ls_paid
+                FROM search_comments sc
+                JOIN search_posts sp ON sc.search_post_id = sp.id
+                LEFT JOIN brands b ON sc.brand_id = b.id
+                WHERE sc.status = 'paid'
+                  AND sc.account_id IS NOT NULL
+                  AND COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) >= ? AND COALESCE(sc.paid_at, sc.deployed_at, sc.created_at) <= ?"""
+        p2b = [day_start, day_end]
+        if brand_id:
+            q2b += " AND b.id = ?"; p2b.append(brand_id)
+        if subreddit_id:
+            q2b += " AND sp.subreddit = (SELECT name FROM subreddits WHERE id = ?)"; p2b.append(subreddit_id)
+        if ref:
+            q2b += " AND sc.account_id IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p2b.append(ref)
+        q2b += " GROUP BY sc.account_id"
+        for row in self.conn.execute(q2b, p2b).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            results[acct]['ls_paid'] = r['ls_paid']
+
+        # --- Posts (deployed): by post_urls.added_at ---
+        q3a = """SELECT p.owner_account as account_id, COUNT(*) as posts_deployed
+                FROM posts p
+                JOIN post_urls pu ON pu.post_id = p.id
+                JOIN subreddits s ON p.subreddit_id = s.id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                WHERE p.owner_account IS NOT NULL AND p.owner_account != ''
+                  AND p.status = 'published'
+                  AND pu.added_at >= ? AND pu.added_at <= ?"""
+        p3a = [day_start, day_end]
+        if brand_id:
+            q3a += " AND b.id = ?"; p3a.append(brand_id)
+        if subreddit_id:
+            q3a += " AND s.id = ?"; p3a.append(subreddit_id)
+        if ref:
+            q3a += " AND p.owner_account IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p3a.append(ref)
+        q3a += " GROUP BY p.owner_account"
+        for row in self.conn.execute(q3a, p3a).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            results[acct]['posts_deployed'] = r['posts_deployed']
+
+        # --- Posts (paid): by paid_at ---
+        q3b = """SELECT p.owner_account as account_id, COUNT(*) as posts_paid
+                FROM posts p
+                JOIN post_urls pu ON pu.post_id = p.id
+                JOIN subreddits s ON p.subreddit_id = s.id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                WHERE p.owner_account IS NOT NULL AND p.owner_account != ''
+                  AND p.status = 'paid'
+                  AND COALESCE(p.paid_at, pu.added_at) >= ? AND COALESCE(p.paid_at, pu.added_at) <= ?"""
+        p3b = [day_start, day_end]
+        if brand_id:
+            q3b += " AND b.id = ?"; p3b.append(brand_id)
+        if subreddit_id:
+            q3b += " AND s.id = ?"; p3b.append(subreddit_id)
+        if ref:
+            q3b += " AND p.owner_account IN (SELECT username FROM accounts WHERE reference LIKE '%' || ? || '%')"; p3b.append(ref)
+        q3b += " GROUP BY p.owner_account"
+        for row in self.conn.execute(q3b, p3b).fetchall():
+            r = dict(row)
+            acct = r['account_id']; _ensure(acct)
+            results[acct]['posts_paid'] = r['posts_paid']
 
         # Add reference from accounts table
         acct_names = list(results.keys())

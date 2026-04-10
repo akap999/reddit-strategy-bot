@@ -862,18 +862,15 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
       - Non-reply: unique account per search post (no account already used on that post)
       - Reply: normal scoring, any account eligible
     """
-    comment = dict(db.conn.execute(
-        """SELECT sc.*, sp.subreddit, sp.title as post_title
-           FROM search_comments sc
-           JOIN search_posts sp ON sc.search_post_id = sp.id
-           WHERE sc.id = ?""", (comment_id,)
-    ).fetchone() or {})
-    if not comment.get("id"):
+    # Use the lightweight single-comment context path: avoids full-batch scans
+    # and scopes subreddit/brand lookups to only the target comment's values.
+    context = db.get_single_search_comment_context(comment_id)
+    if context is None:
         return {"error": "Comment not found"}
+    comment = context["target_comment"]
     if comment.get("account_id") and comment["status"] not in ("draft",):
         return {"error": "Comment already assigned"}
 
-    context = db.get_search_auto_assign_context()
     accounts = context["all_accounts"]
     if exclude_accounts:
         accounts = [a for a in accounts if a["username"] not in set(exclude_accounts)]

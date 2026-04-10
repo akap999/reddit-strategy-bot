@@ -1131,6 +1131,15 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_post_urls_added_at ON post_urls(added_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_paid_at ON posts(paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_owner_status ON posts(owner_account, status)",
+            # Auto-assign context: composite indexes to avoid full-table scans
+            "CREATE INDEX IF NOT EXISTS idx_comments_status_account ON comments(status, account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_status_account ON search_comments(status, account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_mentions_account_brand ON comments(mentions_brand, account_id, brand_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_mentions_account_brand ON search_comments(mentions_brand, account_id, brand_id)",
+            "CREATE INDEX IF NOT EXISTS idx_comments_post_status ON comments(post_id, status, account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_post_status ON search_comments(search_post_id, status, account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_posts_subreddit ON posts(subreddit_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_posts_subreddit ON search_posts(subreddit)",
         ]
         for idx_sql in perf_indexes:
             self.conn.execute(idx_sql)
@@ -2337,17 +2346,9 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
-        # Cross-table: veterans from BOTH comments and search_comments in this subreddit
-        subreddit_veterans = [r[0] for r in self.conn.execute(
-            """SELECT DISTINCT account_id FROM (
-                   SELECT c.account_id FROM comments c JOIN posts p ON c.post_id = p.id
-                   WHERE p.subreddit_id = ? AND c.account_id IS NOT NULL
-                   UNION
-                   SELECT sc.account_id FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
-                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
-               )""",
-            (sub_id, sub_name_val)
-        ).fetchall()]
+        # subreddit_veterans: removed (unused by score_account). Kept as empty
+        # set for backward compat with _build_lookups.
+        subreddit_veterans = []
 
         # Global deployed footprint: total deployed comments + search_comments per account
         account_deployed_counts = [dict(r) for r in self.conn.execute(
@@ -2499,17 +2500,9 @@ class Database:
                ) GROUP BY account_id"""
         ).fetchall()]
 
-        subreddit_veterans = [r[0] for r in self.conn.execute(
-            f"""SELECT DISTINCT account_id FROM (
-                   SELECT c.account_id FROM comments c JOIN posts p ON c.post_id = p.id
-                   JOIN subreddits s ON p.subreddit_id = s.id
-                   WHERE s.name IN ({placeholders}) AND c.account_id IS NOT NULL
-                   UNION
-                   SELECT sc.account_id FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
-                   WHERE sp.subreddit IN ({placeholders}) AND sc.account_id IS NOT NULL
-               )""",
-            sub_names + sub_names
-        ).fetchall()]
+        # subreddit_veterans: removed (unused by score_account, was an expensive
+        # full-table scan). Kept as empty set for backward compat with _build_lookups.
+        subreddit_veterans = []
 
         account_deployed_counts = [dict(r) for r in self.conn.execute(
             """SELECT account_id, SUM(cnt) as cnt FROM (
@@ -2569,6 +2562,159 @@ class Database:
             "account_brand_mentions": account_brand_mentions,
             "account_total_mentions": account_total_mentions,
             "subreddit_veterans": set(subreddit_veterans),
+            "account_deployed_counts": account_deployed_counts,
+            "subreddit_deployed_counts": subreddit_deployed_counts,
+            "account_post_ownership": account_post_ownership,
+            "account_sub_spread": account_sub_spread,
+        }
+
+    def get_single_search_comment_context(self, comment_id):
+        """Lightweight context fetch for auto-assigning ONE search comment.
+
+        Avoids the whole-batch scans in get_search_auto_assign_context():
+          - Skips draft_comments query (we only need one target)
+          - Scopes subreddit-specific lookups to the single target subreddit
+          - Scopes brand_mentions to the single target brand_id only
+        Much faster than the full context function.
+        """
+        target = self.conn.execute(
+            """SELECT sc.*, sp.subreddit, sp.title as post_title, sp.reddit_url
+               FROM search_comments sc
+               JOIN search_posts sp ON sc.search_post_id = sp.id
+               WHERE sc.id = ?""", (comment_id,)
+        ).fetchone()
+        if not target:
+            return None
+        target = dict(target)
+        sub_name = target.get("subreddit") or ""
+        target_brand_id = target.get("brand_id")
+
+        all_accounts = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM accounts WHERE excluded = 0 ORDER BY username"
+        ).fetchall()]
+
+        # Subreddit day assignments — scoped to the single target subreddit
+        subreddit_day_assignments = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, suggested_post_day, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, c.suggested_post_day, COUNT(*) as cnt
+                   FROM comments c JOIN posts p ON c.post_id = p.id
+                   JOIN subreddits s ON p.subreddit_id = s.id
+                   WHERE s.name = ? AND c.account_id IS NOT NULL
+                     AND c.status IN ('assigned','informed','deployed','paid')
+                     AND (c.deployed_at IS NULL OR c.deployed_at > datetime('now', '-30 days'))
+                   GROUP BY c.account_id, c.suggested_post_day
+                   UNION ALL
+                   SELECT sc.account_id, 0 as suggested_post_day, COUNT(*) as cnt
+                   FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+                     AND sc.status IN ('assigned','informed','deployed','paid')
+                     AND (sc.deployed_at IS NULL OR sc.deployed_at > datetime('now', '-30 days'))
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id, suggested_post_day""",
+            (sub_name, sub_name)
+        ).fetchall()]
+
+        # Global pending counts
+        account_pending_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE status IN ('assigned','informed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
+        # Brand mentions — scoped to the target brand only (score_account only
+        # looks up lookups["brand_mentions"][user][target_brand_id]).
+        if target_brand_id is not None:
+            account_brand_mentions = [dict(r) for r in self.conn.execute(
+                """SELECT account_id, brand_id, SUM(cnt) as cnt FROM (
+                       SELECT account_id, brand_id, COUNT(*) as cnt FROM comments
+                       WHERE mentions_brand = 1 AND brand_id = ? AND account_id IS NOT NULL
+                       GROUP BY account_id, brand_id
+                       UNION ALL
+                       SELECT account_id, brand_id, COUNT(*) as cnt FROM search_comments
+                       WHERE mentions_brand = 1 AND brand_id = ? AND account_id IS NOT NULL
+                       GROUP BY account_id, brand_id
+                   ) GROUP BY account_id, brand_id""",
+                (target_brand_id, target_brand_id)
+            ).fetchall()]
+        else:
+            account_brand_mentions = []
+
+        account_total_mentions = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE mentions_brand = 1 AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
+        account_deployed_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT account_id, COUNT(*) as cnt FROM comments
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+                   UNION ALL
+                   SELECT account_id, COUNT(*) as cnt FROM search_comments
+                   WHERE status IN ('deployed', 'removed') AND account_id IS NOT NULL
+                   GROUP BY account_id
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
+        account_post_ownership = [dict(r) for r in self.conn.execute(
+            """SELECT owner_account as account_id, COUNT(*) as cnt FROM posts
+               WHERE owner_account IS NOT NULL AND owner_account != ''
+               GROUP BY owner_account"""
+        ).fetchall()]
+
+        account_sub_spread = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, COUNT(DISTINCT sub) as cnt FROM (
+                   SELECT c.account_id, p.subreddit_id as sub FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   WHERE c.account_id IS NOT NULL AND c.status IN ('assigned','informed','deployed','paid')
+                   UNION ALL
+                   SELECT sc.account_id, sp.subreddit as sub FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sc.account_id IS NOT NULL AND sc.status IN ('assigned','informed','deployed','paid')
+               ) GROUP BY account_id"""
+        ).fetchall()]
+
+        # Subreddit deployed counts — scoped to single target subreddit
+        subreddit_deployed_counts = [dict(r) for r in self.conn.execute(
+            """SELECT account_id, SUM(cnt) as cnt FROM (
+                   SELECT c.account_id, COUNT(*) as cnt FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   JOIN subreddits s ON p.subreddit_id = s.id
+                   WHERE s.name = ? AND c.account_id IS NOT NULL
+                     AND c.status = 'deployed'
+                   GROUP BY c.account_id
+                   UNION ALL
+                   SELECT sc.account_id, COUNT(*) as cnt FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   WHERE sp.subreddit = ? AND sc.account_id IS NOT NULL
+                     AND sc.status = 'deployed'
+                   GROUP BY sc.account_id
+               ) GROUP BY account_id""",
+            (sub_name, sub_name)
+        ).fetchall()]
+
+        return {
+            "target_comment": target,
+            "draft_comments": [target],
+            "all_accounts": all_accounts,
+            "subreddit_day_assignments": subreddit_day_assignments,
+            "account_pending_counts": account_pending_counts,
+            "account_brand_mentions": account_brand_mentions,
+            "account_total_mentions": account_total_mentions,
+            "subreddit_veterans": set(),
             "account_deployed_counts": account_deployed_counts,
             "subreddit_deployed_counts": subreddit_deployed_counts,
             "account_post_ownership": account_post_ownership,

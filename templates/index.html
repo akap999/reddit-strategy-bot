@@ -6716,19 +6716,37 @@ async function lsSaveAndGenerateAll() {
         post_date: r.date, body_preview: r.text || '',
         brand_id: parseInt(brandId),
     }));
+
+    let res;
     try {
-        const res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
-        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
+        res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
+        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed, skipped)` : ''}`, 'success');
     } catch(e) { toast('Failed to save posts', 'error'); return; }
 
-    // Step 2: Generate comments ONLY for the newly saved posts (not old pending ones)
+    // Step 2: Generate comments ONLY for posts that were newly inserted by
+    // this call. res.saved_ids contains exactly the rows the DB created —
+    // pre-existing duplicates are excluded by construction.
+    const newIds = new Set(res.saved_ids || []);
+    if (!newIds.size) {
+        toast('All posts already existed — nothing new to generate', 'info');
+        _lsTab = 'saved'; renderLsTabContent();
+        return;
+    }
+
     try {
         const saved = await api('/api/search/posts');
         const excludeSubs = lsGetExcludedSubs();
-        // Build set of URLs we just saved to only generate for those
-        const savedUrls = new Set(posts.map(p => p.reddit_url));
-        const eligible = saved.filter(p => savedUrls.has(p.reddit_url) && p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
-        if (!eligible.length) { toast('No new posts to generate for (may already be complete or excluded)', 'info'); _lsTab = 'saved'; renderLsTabContent(); return; }
+        const eligible = saved.filter(p =>
+            newIds.has(p.id) &&
+            p.brand_id &&
+            p.status !== 'generating' &&
+            p.status !== 'complete' &&
+            !excludeSubs.has((p.subreddit || '').toLowerCase())
+        );
+        if (!eligible.length) {
+            toast('New posts saved but none eligible for generation (check excluded subs)', 'info');
+            _lsTab = 'saved'; renderLsTabContent(); return;
+        }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
         runTask('/api/search/posts/generate-batch',
             { post_ids: eligible.map(p => p.id), num_comments: numComments },

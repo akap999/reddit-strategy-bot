@@ -2732,17 +2732,17 @@ def api_save_search_posts_bulk():
     db = get_db()
     try:
         items = request.json.get("posts", [])
-        saved = 0
+        saved_ids = []
         dupes = 0
         for item in items:
             if not item.get("reddit_url"):
                 continue
             pid = db.save_search_post(item)
             if pid:
-                saved += 1
+                saved_ids.append(pid)
             else:
                 dupes += 1
-        return jsonify({"saved": saved, "duplicates": dupes})
+        return jsonify({"saved": len(saved_ids), "duplicates": dupes, "saved_ids": saved_ids})
     finally:
         db.close()
 

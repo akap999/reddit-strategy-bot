@@ -4906,6 +4906,7 @@ function showLiveCheckChanges() {
     if (existing) existing.remove();
     const restored = changes.filter(c => c.action === 'restored');
     const dead = changes.filter(c => c.action === 'marked_dead');
+    const skipped = changes.filter(c => c.action === 'skipped');
     const renderRows = (list) => list.map(c =>
         `<tr>
             <td style="padding:4px 8px">#${c.id}</td>
@@ -4945,6 +4946,24 @@ function showLiveCheckChanges() {
                         <th style="padding:4px 8px;text-align:left">URL</th>
                     </tr></thead>
                     <tbody style="color:#d7dadc">${renderRows(dead)}</tbody>
+                </table>` : ''}
+            ${skipped.length ? `
+                <h4 style="color:#ffa500;margin-bottom:8px">Skipped / Unresolved (${skipped.length})</h4>
+                <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+                    <thead><tr style="color:#818384;border-bottom:1px solid #343536">
+                        <th style="padding:4px 8px;text-align:left">ID</th>
+                        <th style="padding:4px 8px;text-align:left">Source</th>
+                        <th style="padding:4px 8px;text-align:left">Status</th>
+                        <th style="padding:4px 8px;text-align:left">URL</th>
+                    </tr></thead>
+                    <tbody style="color:#d7dadc">${skipped.map(c =>
+                        `<tr>
+                            <td style="padding:4px 8px">#${c.id}</td>
+                            <td style="padding:4px 8px">${c.source}</td>
+                            <td style="padding:4px 8px">${c.prev_status}</td>
+                            <td style="padding:4px 8px"><a href="${c.url}" target="_blank" style="color:#ffa500;word-break:break-all">${c.url ? c.url.slice(0, 60) + '...' : 'N/A'}</a></td>
+                        </tr>`
+                    ).join('')}</tbody>
                 </table>` : ''}
         </div>`;
     document.body.appendChild(modal);

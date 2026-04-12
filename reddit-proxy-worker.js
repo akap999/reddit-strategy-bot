@@ -7,6 +7,36 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname + url.search;
 
+    // Resolve mode: follow redirects on www.reddit.com and return final URL
+    // Used for /s/ short share links that need redirect resolution
+    if (url.pathname.startsWith("/resolve/")) {
+      const targetPath = url.pathname.slice("/resolve".length);
+      const redditUrl = "https://www.reddit.com" + targetPath;
+      try {
+        const resp = await fetch(redditUrl, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          },
+          redirect: "follow",
+        });
+        return new Response(JSON.stringify({ url: resp.url }), {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ url: "", error: e.message }), {
+          status: 502,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
+    }
+
     // Use old.reddit.com — much less aggressive bot blocking than www.reddit.com
     // Ensure path ends with .json for Reddit API
     let apiPath = path;

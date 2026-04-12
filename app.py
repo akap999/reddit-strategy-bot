@@ -1292,47 +1292,41 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         # Clean URL: strip query params, trailing slash
         clean_url = raw_url.strip().split("?")[0].rstrip("/")
 
-        # Resolve Reddit share/short URLs (/s/ links) to full comment URLs
+        # Resolve Reddit share/short URLs (/s/ links) via Cloudflare proxy
         if "/s/" in clean_url:
             import re as _re2
-            resolved_url = None
             try:
-                print(f"[{log_prefix}] #{item['id']} ({src}) resolving short URL...", flush=True)
-                _browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                # Try HEAD redirect first
-                head_resp = _requests.head(clean_url, headers={"User-Agent": _browser_ua},
-                                           allow_redirects=True, timeout=15)
-                if "/comments/" in head_resp.url:
-                    resolved_url = head_resp.url.split("?")[0].rstrip("/")
+                # Extract path from URL, route through proxy's /resolve/ endpoint
+                s_path = _re2.sub(r'^https?://[^/]+', '', clean_url)  # e.g. /r/sub/s/xxxx
+                proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+                if proxy:
+                    resolve_url = f"{proxy.rstrip('/')}/resolve{s_path}"
+                    print(f"[{log_prefix}] #{item['id']} ({src}) resolving short URL via proxy...", flush=True)
+                    r = _requests.get(resolve_url, timeout=15)
+                    resolved = r.json().get("url", "").split("?")[0].rstrip("/")
                 else:
-                    # GET and check redirect URL + parse body for canonical/og:url
-                    get_resp = _requests.get(clean_url, headers={"User-Agent": _browser_ua},
-                                             allow_redirects=True, timeout=15)
-                    if "/comments/" in get_resp.url:
-                        resolved_url = get_resp.url.split("?")[0].rstrip("/")
-                    else:
-                        # Search response body for canonical URL or og:url
-                        body_text = get_resp.text[:10000]
-                        canon = _re2.search(r'<link[^>]+rel="canonical"[^>]+href="([^"]+)"', body_text)
-                        if canon and "/comments/" in canon.group(1):
-                            resolved_url = canon.group(1).split("?")[0].rstrip("/")
-                        else:
-                            og = _re2.search(r'<meta[^>]+property="og:url"[^>]+content="([^"]+)"', body_text)
-                            if og and "/comments/" in og.group(1):
-                                resolved_url = og.group(1).split("?")[0].rstrip("/")
-                            else:
-                                # Try finding any reddit comment URL in the page
-                                any_url = _re2.search(r'https?://(?:www\.)?reddit\.com/r/\w+/comments/\w+/[^/]+/\w+', body_text)
-                                if any_url:
-                                    resolved_url = any_url.group(0).split("?")[0].rstrip("/")
+                    # No proxy — try direct (works from residential IPs)
+                    print(f"[{log_prefix}] #{item['id']} ({src}) resolving short URL direct...", flush=True)
+                    r = _requests.head(clean_url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }, allow_redirects=True, timeout=15)
+                    resolved = r.url.split("?")[0].rstrip("/")
+
+                if "/comments/" in resolved:
+                    clean_url = resolved
+                    print(f"[{log_prefix}] #{item['id']} ({src}) resolved to {clean_url}", flush=True)
+                else:
+                    print(f"[{log_prefix}] #{item['id']} ({src}) short URL resolved to non-comment: {resolved}", flush=True)
+                    changes.append({"id": item["id"], "source": src, "url": raw_url,
+                                    "action": "skipped", "prev_status": item.get("status", ""), "new_status": ""})
+                    errors += 1
+                    error_details["bad_url"] += 1
+                    _time.sleep(3)
+                    continue
             except Exception as e:
                 print(f"[{log_prefix}] #{item['id']} ({src}) failed to resolve short URL: {e}", flush=True)
-
-            if resolved_url:
-                clean_url = resolved_url
-                print(f"[{log_prefix}] #{item['id']} ({src}) resolved to {clean_url}", flush=True)
-            else:
-                print(f"[{log_prefix}] #{item['id']} ({src}) could not resolve short URL, skipping", flush=True)
+                changes.append({"id": item["id"], "source": src, "url": raw_url,
+                                "action": "skipped", "prev_status": item.get("status", ""), "new_status": ""})
                 errors += 1
                 error_details["bad_url"] += 1
                 _time.sleep(3)

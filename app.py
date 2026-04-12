@@ -1461,6 +1461,7 @@ def api_check_live_all_comments():
     f_account_id = data.get("account_id") or None
     f_source = data.get("source") or None
     f_date = data.get("date") or None
+    f_fresh = data.get("fresh", False)
 
     def task():
         db = Database(DB_PATH)
@@ -1471,8 +1472,9 @@ def api_check_live_all_comments():
                 status=f_status, brand_id=f_brand_id,
                 subreddit_id=f_subreddit_id, account_id=f_account_id,
                 source_filter=f_source, date=f_date,
+                fresh_only=f_fresh,
             )
-            label = f_status or "all"
+            label = "fresh" if f_fresh else (f_status or "all")
             return _check_live_batch(comments, db, f"CHECK-LIVE-ALL({label})")
         finally:
             db.close()

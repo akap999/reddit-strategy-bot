@@ -1630,7 +1630,8 @@ class Database:
         return self.get_filtered_comment_urls(status='deployed')
 
     def get_filtered_comment_urls(self, status=None, brand_id=None, subreddit_id=None,
-                                   account_id=None, source_filter=None, date=None):
+                                   account_id=None, source_filter=None, date=None,
+                                   fresh_only=False):
         """Get comment URLs matching filters for live checking.
         Returns list of dicts with id, reddit_comment_url, source, status."""
         w1, w2 = ["c.reddit_comment_url IS NOT NULL"], ["sc.reddit_comment_url IS NOT NULL"]
@@ -1639,6 +1640,13 @@ class Database:
         if status:
             w1.append("c.status = ?"); p1.append(status)
             w2.append("sc.status = ?"); p2.append(status)
+        if fresh_only:
+            w1.append("c.last_live_check IS NULL")
+            w2.append("sc.last_live_check IS NULL")
+            # Fresh only makes sense for deployed/paid — skip drafts etc.
+            if not status:
+                w1.append("c.status IN ('deployed','paid')")
+                w2.append("sc.status IN ('deployed','paid')")
         if brand_id:
             w1.append("c.brand_id = ?"); p1.append(brand_id)
             w2.append("sc.brand_id = ?"); p2.append(brand_id)

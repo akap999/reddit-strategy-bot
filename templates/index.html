@@ -4805,7 +4805,17 @@ async function renderAllComments(el) {
             <div class="flex gap-2 items-center">
                 <span id="ac-count" class="text-sm" style="color:#818384"></span>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPaidAllComments()">Mark Paid All</button>
-                <button class="btn btn-secondary btn-sm" onclick="checkLiveAllComments()">Check Live</button>
+                <div style="position:relative;display:inline-block">
+                    <button class="btn btn-secondary btn-sm" onclick="this.nextElementSibling.classList.toggle('hidden')">Check Live ▾</button>
+                    <div class="hidden" style="position:absolute;right:0;top:100%;z-index:50;background:#1a1a1b;border:1px solid #343536;border-radius:6px;min-width:200px;padding:4px 0;margin-top:2px">
+                        <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#46d160" onclick="checkLiveAc('deployed');this.closest('div').classList.add('hidden')">Deployed</a>
+                        <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#ff6b6b" onclick="checkLiveAc('removed');this.closest('div').classList.add('hidden')">Removed</a>
+                        <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#00A86B" onclick="checkLiveAc('paid');this.closest('div').classList.add('hidden')">Paid</a>
+                        <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#4fc3f7" onclick="checkLiveAc('fresh');this.closest('div').classList.add('hidden')">Fresh (never checked)</a>
+                        <div style="border-top:1px solid #343536;margin:4px 0"></div>
+                        <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#d7dadc" onclick="checkLiveAc('');this.closest('div').classList.add('hidden')">All (use filters)</a>
+                    </div>
+                </div>
             </div>
         </div>
         <div id="ac-counts" class="flex gap-1 flex-wrap mb-3"></div>
@@ -4981,27 +4991,35 @@ function _getAcFilters() {
     };
 }
 
-async function checkLiveAllComments() {
+async function checkLiveAc(mode) {
     const filters = _getAcFilters();
-    // Build body with only non-empty filters
     const body = {};
     if (filters.brand_id) body.brand_id = parseInt(filters.brand_id);
     if (filters.subreddit_id) body.subreddit_id = parseInt(filters.subreddit_id);
-    if (filters.status) body.status = filters.status;
     if (filters.account_id) body.account_id = filters.account_id;
     if (filters.source) body.source = filters.source;
     if (filters.date) body.date = filters.date;
 
-    const filterDesc = Object.values(body).length
-        ? ` (${Object.entries(body).map(([k,v]) => `${k}=${v}`).join(', ')})`
-        : ' (all deployed)';
+    // Mode overrides status filter
+    if (mode === 'fresh') {
+        body.fresh = true; // server will filter for last_live_check IS NULL
+    } else if (mode) {
+        body.status = mode; // deployed, removed, paid
+    } else if (filters.status) {
+        body.status = filters.status; // "All" mode uses UI filter
+    }
+    // If no mode and no filter status → check all with URLs (no status restriction)
 
-    // Default to deployed if no status filter set
-    if (!body.status) body.status = 'deployed';
+    const parts = [];
+    if (mode === 'fresh') parts.push('fresh');
+    else if (mode) parts.push(mode);
+    if (filters.brand_id) parts.push('brand');
+    if (filters.account_id) parts.push('account');
+    const label = parts.length ? parts.join('+') : 'all';
 
     runTask('/api/all-comments/check-live', body, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
-    }, `Check Live${filterDesc}`);
+    }, `Check Live (${label})`);
 }
 
 async function markPaidAllComments() {

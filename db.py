@@ -1527,14 +1527,56 @@ class Database:
 
         union = f"SELECT * FROM ({inner}) combined {order}"
 
-        # Count
+        # Count + status breakdown (across ALL matching rows, not just current page)
         count_query = f"SELECT COUNT(*) as cnt FROM ({inner}) combined"
         total = self.conn.execute(count_query, all_params).fetchone()["cnt"]
+
+        counts_q = f"SELECT status, COUNT(*) as cnt FROM ({inner}) combined GROUP BY status"
+        status_counts = {r["status"]: r["cnt"] for r in self.conn.execute(counts_q, all_params).fetchall()}
+
+        paid_cnt = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM ({inner}) combined WHERE paid_at IS NOT NULL", all_params
+        ).fetchone()["cnt"]
+        live_cnt = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM ({inner}) combined WHERE status='deployed' AND last_live_check IS NOT NULL", all_params
+        ).fetchone()["cnt"]
 
         # Paginated results
         paginated = f"{union} LIMIT ? OFFSET ?"
         rows = self.conn.execute(paginated, all_params + [limit, offset]).fetchall()
-        return {"items": [dict(r) for r in rows], "total": total}
+        return {"items": [dict(r) for r in rows], "total": total,
+                "status_counts": status_counts, "paid_count": paid_cnt, "live_count": live_cnt}
+
+    def get_live_status_analytics(self):
+        """Get brand-wise monthly breakdown of comment statuses (live/removed/deployed/total)."""
+        q = """
+            SELECT brand_name, month,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN status = 'deployed' THEN 1 ELSE 0 END) as deployed,
+                   SUM(CASE WHEN status = 'deployed' AND last_live_check IS NOT NULL THEN 1 ELSE 0 END) as live,
+                   SUM(CASE WHEN status IN ('removed','deleted') THEN 1 ELSE 0 END) as removed,
+                   SUM(CASE WHEN paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid
+            FROM (
+                SELECT b.name as brand_name,
+                       COALESCE(strftime('%%Y-%%m', c.deployed_at), strftime('%%Y-%%m', c.created_at)) as month,
+                       c.status, c.last_live_check, c.paid_at
+                FROM comments c
+                LEFT JOIN brands b ON c.brand_id = b.id
+                WHERE c.reddit_comment_url IS NOT NULL
+                UNION ALL
+                SELECT b.name as brand_name,
+                       COALESCE(strftime('%%Y-%%m', sc.deployed_at), strftime('%%Y-%%m', sc.created_at)) as month,
+                       sc.status, sc.last_live_check, sc.paid_at
+                FROM search_comments sc
+                LEFT JOIN brands b ON sc.brand_id = b.id
+                WHERE sc.reddit_comment_url IS NOT NULL
+            ) combined
+            WHERE month IS NOT NULL
+            GROUP BY brand_name, month
+            ORDER BY month DESC, brand_name
+        """
+        rows = self.conn.execute(q).fetchall()
+        return [dict(r) for r in rows]
 
     def get_deployed_comments_by_brand(self, brand_id=None, brand_name=None):
         """Get all deployed comments for a brand, with post info."""

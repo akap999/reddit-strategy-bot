@@ -394,6 +394,15 @@ def api_dashboard():
     finally:
         db.close()
 
+@app.route("/api/analytics/live-status")
+def api_live_status_analytics():
+    db = get_db()
+    try:
+        return jsonify(db.get_live_status_analytics())
+    finally:
+        db.close()
+
+
 @app.route("/api/analytics/deployments")
 def api_deployment_analytics():
     db = get_db()

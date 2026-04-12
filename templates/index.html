@@ -4674,6 +4674,7 @@ function filterAccountComments(username) {
 // =========================================================================
 
 let _acData = [], _acTotal = 0, _acPage = 0;
+let _acStatusCounts = {}, _acPaidCount = 0, _acLiveCount = 0;
 const _acPageSize = 200;
 let _acLastFilterKey = '';
 
@@ -5062,6 +5063,9 @@ async function loadAllComments(keepPage) {
     const result = await api(url);
     _acData = result.items;
     _acTotal = result.total;
+    _acStatusCounts = result.status_counts || {};
+    _acPaidCount = result.paid_count || 0;
+    _acLiveCount = result.live_count || 0;
 
     const countEl = document.getElementById('ac-count');
     if (countEl) countEl.textContent = `${_acTotal} comment${_acTotal !== 1 ? 's' : ''}`;
@@ -5098,28 +5102,21 @@ function renderAcPagination() {
 function renderAcCounts() {
     const el = document.getElementById('ac-counts');
     if (!el) return;
-    const counts = { draft:0, complete:0, assigned:0, informed:0, deployed:0, removed:0, archived:0 };
-    let paid = 0, live = 0;
-    _acData.forEach(c => {
-        if (counts[c.status] !== undefined) counts[c.status]++;
-        if (c.paid_at) paid++;
-        if (c.status === 'deployed' && c.last_live_check) live++;
-    });
+    // Use server-side counts (across ALL matching rows, not just current page)
+    const sc = _acStatusCounts;
     const total = _acTotal;
-    const shown = _acData.length;
     const pill = (label, n, bg, fg) =>
         `<span class="badge" style="background:${bg};color:${fg}">${label}: ${n}</span>`;
     const parts = [pill('Total', total, '#343536', '#d7dadc')];
-    if (shown !== total) parts.push(pill('Shown', shown, '#2d2d2e', '#d7dadc'));
-    if (counts.draft)    parts.push(pill('Draft',    counts.draft,    '#343536', '#818384'));
-    if (counts.complete) parts.push(pill('Complete', counts.complete, '#2a2a3a', '#8888aa'));
-    if (counts.assigned) parts.push(pill('Assigned', counts.assigned, '#0b3a5a', '#4fc3f7'));
-    if (counts.informed) parts.push(pill('Informed', counts.informed, '#4a2a00', '#FF8b60'));
-    if (counts.deployed) parts.push(pill('Deployed', counts.deployed, '#1a3320', '#46d160'));
-    if (counts.removed)  parts.push(pill('Removed',  counts.removed,  '#3a1a1a', '#ff6b6b'));
-    if (counts.archived) parts.push(pill('Archived', counts.archived, '#2a2a3a', '#8888aa'));
-    if (live)            parts.push(pill('Live',     live,            '#1a3320', '#46d160'));
-    if (paid)            parts.push(pill('Paid',     paid,            '#00A86B', '#ffffff'));
+    if (sc.draft)    parts.push(pill('Draft',    sc.draft,    '#343536', '#818384'));
+    if (sc.complete) parts.push(pill('Complete', sc.complete, '#2a2a3a', '#8888aa'));
+    if (sc.assigned) parts.push(pill('Assigned', sc.assigned, '#0b3a5a', '#4fc3f7'));
+    if (sc.informed) parts.push(pill('Informed', sc.informed, '#4a2a00', '#FF8b60'));
+    if (sc.deployed) parts.push(pill('Deployed', sc.deployed, '#1a3320', '#46d160'));
+    if (sc.removed)  parts.push(pill('Removed',  sc.removed,  '#3a1a1a', '#ff6b6b'));
+    if (sc.archived) parts.push(pill('Archived', sc.archived, '#2a2a3a', '#8888aa'));
+    if (_acLiveCount)  parts.push(pill('Live',   _acLiveCount, '#1a3320', '#46d160'));
+    if (_acPaidCount)  parts.push(pill('Paid',   _acPaidCount, '#00A86B', '#ffffff'));
     el.innerHTML = parts.join('');
 }
 
@@ -5736,6 +5733,7 @@ async function renderAnalytics(el) {
             <div class="tab ${analyticsTab==='health'?'active':''}" onclick="analyticsTab='health';renderAnalyticsTab()">Content Health</div>
             <div class="tab ${analyticsTab==='schedule'?'active':''}" onclick="analyticsTab='schedule';renderAnalyticsTab()">Schedule</div>
             <div class="tab ${analyticsTab==='pay'?'active':''}" onclick="analyticsTab='pay';renderAnalyticsTab()">Pay</div>
+            <div class="tab ${analyticsTab==='livestatus'?'active':''}" onclick="analyticsTab='livestatus';renderAnalyticsTab()">Live Status</div>
         </div>
         <div class="flex gap-3 mb-3 items-center flex-wrap">
             <select id="analytics-sub" onchange="renderAnalyticsTab()">
@@ -5761,7 +5759,7 @@ async function renderAnalyticsTab() {
     if (!container) return;
 
     // Update tab active states
-    const tabMap = { overview: 'overview', brand: 'brand', health: 'health', schedule: 'schedule', pay: 'pay' };
+    const tabMap = { overview: 'overview', brand: 'brand', health: 'health', schedule: 'schedule', pay: 'pay', livestatus: 'live status' };
     document.querySelectorAll('.tab').forEach(t => {
         t.classList.toggle('active', t.textContent.toLowerCase().includes(tabMap[analyticsTab] || ''));
     });
@@ -5777,6 +5775,7 @@ async function renderAnalyticsTab() {
     else if (analyticsTab === 'health') await renderHealthTab(container, sid);
     else if (analyticsTab === 'schedule') await renderScheduleTab(container, sid);
     else if (analyticsTab === 'pay') await renderPayTab(container, sid, bid);
+    else if (analyticsTab === 'livestatus') await renderLiveStatusTab(container);
 }
 
 async function renderOverviewTab(container, sid, bid, dateFrom, dateTo) {
@@ -6380,6 +6379,94 @@ function downloadExport(type) {
     const sid = document.getElementById('export-sub').value;
     window.location.href = `/api/export/${type}/${sid}`;
     toast('Download started', 'info');
+}
+
+// --- Live Status Analytics Tab ---
+async function renderLiveStatusTab(container) {
+    try {
+        const data = await api('/api/analytics/live-status');
+        if (!data.length) {
+            container.innerHTML = '<p class="text-gray-500 py-8">No deployed comments with URLs found.</p>';
+            return;
+        }
+        // Group by brand, then by month
+        const brands = {};
+        const allMonths = new Set();
+        data.forEach(r => {
+            const brand = r.brand_name || 'No Brand';
+            if (!brands[brand]) brands[brand] = { total: 0, deployed: 0, live: 0, removed: 0, paid: 0, months: {} };
+            brands[brand].months[r.month] = r;
+            brands[brand].total += r.total;
+            brands[brand].deployed += r.deployed;
+            brands[brand].live += r.live;
+            brands[brand].removed += r.removed;
+            brands[brand].paid += r.paid;
+            allMonths.add(r.month);
+        });
+        const months = [...allMonths].sort().reverse();
+        const brandNames = Object.keys(brands).sort();
+
+        // Summary cards
+        const grandTotal = brandNames.reduce((s, b) => s + brands[b].total, 0);
+        const grandDeployed = brandNames.reduce((s, b) => s + brands[b].deployed, 0);
+        const grandLive = brandNames.reduce((s, b) => s + brands[b].live, 0);
+        const grandRemoved = brandNames.reduce((s, b) => s + brands[b].removed, 0);
+        const grandPaid = brandNames.reduce((s, b) => s + brands[b].paid, 0);
+
+        let html = `
+            <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+                <div class="card text-center"><div class="text-2xl font-bold" style="color:#d7dadc">${grandTotal}</div><div class="text-xs" style="color:#818384">Total</div></div>
+                <div class="card text-center"><div class="text-2xl font-bold" style="color:#46d160">${grandDeployed}</div><div class="text-xs" style="color:#818384">Deployed</div></div>
+                <div class="card text-center"><div class="text-2xl font-bold" style="color:#4fc3f7">${grandLive}</div><div class="text-xs" style="color:#818384">Verified Live</div></div>
+                <div class="card text-center"><div class="text-2xl font-bold" style="color:#ff6b6b">${grandRemoved}</div><div class="text-xs" style="color:#818384">Removed</div></div>
+                <div class="card text-center"><div class="text-2xl font-bold" style="color:#00A86B">${grandPaid}</div><div class="text-xs" style="color:#818384">Paid</div></div>
+            </div>`;
+
+        // Brand summary table
+        html += `<h3 class="text-lg font-bold mb-2" style="color:#d7dadc">Brand Summary</h3>
+            <table class="mb-6"><thead><tr>
+                <th>Brand</th><th>Total</th><th>Deployed</th><th>Live</th><th>Removed</th><th>Paid</th><th>Live %</th>
+            </tr></thead><tbody>
+            ${brandNames.map(b => {
+                const br = brands[b];
+                const livePct = br.deployed > 0 ? ((br.live / br.deployed) * 100).toFixed(1) : '0.0';
+                return `<tr>
+                    <td><strong>${b}</strong></td>
+                    <td>${br.total}</td>
+                    <td style="color:#46d160">${br.deployed}</td>
+                    <td style="color:#4fc3f7">${br.live}</td>
+                    <td style="color:#ff6b6b">${br.removed}</td>
+                    <td style="color:#00A86B">${br.paid}</td>
+                    <td>${livePct}%</td>
+                </tr>`;
+            }).join('')}
+            </tbody></table>`;
+
+        // Monthly breakdown per brand
+        html += `<h3 class="text-lg font-bold mb-2" style="color:#d7dadc">Monthly Breakdown</h3>
+            <table><thead><tr>
+                <th>Month</th><th>Brand</th><th>Total</th><th>Deployed</th><th>Live</th><th>Removed</th><th>Paid</th>
+            </tr></thead><tbody>`;
+        months.forEach(m => {
+            brandNames.forEach(b => {
+                const r = brands[b].months[m];
+                if (!r) return;
+                html += `<tr>
+                    <td>${m}</td>
+                    <td>${b}</td>
+                    <td>${r.total}</td>
+                    <td style="color:#46d160">${r.deployed}</td>
+                    <td style="color:#4fc3f7">${r.live}</td>
+                    <td style="color:#ff6b6b">${r.removed}</td>
+                    <td style="color:#00A86B">${r.paid}</td>
+                </tr>`;
+            });
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch(e) {
+        container.innerHTML = `<p class="text-red-400">Error loading live status: ${e.message}</p>`;
+    }
 }
 
 // =========================================================================

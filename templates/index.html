@@ -7685,9 +7685,9 @@ async function checkLiveSearchComments() {
 }
 
 async function checkLiveSearchFiltered() {
-    const deployed = (_lsFilteredComments || []).filter(c => c.status === 'deployed');
-    if (!deployed.length) { toast('No deployed comments in current filter to check', 'info'); return; }
-    const ids = deployed.map(c => c.id);
+    const withUrl = (_lsFilteredComments || []).filter(c => c.reddit_comment_url);
+    if (!withUrl.length) { toast('No comments with URLs in current filter to check', 'info'); return; }
+    const ids = withUrl.map(c => c.id);
     runTask('/api/search/comments/check-live', { comment_ids: ids }, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
         renderLsTabContent();

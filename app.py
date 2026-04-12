@@ -1479,6 +1479,7 @@ def api_check_live_search_comments():
                 deployed = [d for d in deployed if d["id"] in id_set]
             for item in deployed:
                 item["source"] = "search_comment"
+                item.setdefault("status", "deployed")
             return _check_live_batch(deployed, db, "CHECK-LIVE-SEARCH")
         finally:
             db.close()

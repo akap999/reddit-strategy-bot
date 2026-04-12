@@ -1575,11 +1575,11 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_deployed_search_comment_urls(self):
-        """Get deployed search comments with their Reddit URLs for live checking."""
+        """Get search comments with Reddit URLs for live checking (any status with a URL)."""
         rows = self.conn.execute(
-            """SELECT sc.id, sc.reddit_comment_url
+            """SELECT sc.id, sc.reddit_comment_url, sc.status
                FROM search_comments sc
-               WHERE sc.status = 'deployed' AND sc.reddit_comment_url IS NOT NULL"""
+               WHERE sc.reddit_comment_url IS NOT NULL"""
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -3624,9 +3624,9 @@ class Database:
         self.conn.commit()
 
     def mark_search_comment_removed(self, comment_id):
-        """Mark a deployed search comment as removed/deleted on Reddit."""
+        """Mark a search comment as removed/deleted on Reddit."""
         self.conn.execute(
-            "UPDATE search_comments SET status = 'removed' WHERE id = ? AND status IN ('deployed', 'paid')",
+            "UPDATE search_comments SET status = 'removed', deleted_at = datetime('now') WHERE id = ?",
             (comment_id,))
         self.conn.commit()
 

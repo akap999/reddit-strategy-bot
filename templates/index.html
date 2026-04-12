@@ -312,7 +312,7 @@ function _restoreBgTasks() {
 }
 
 function _batchGenComplete(result) {
-    if (!result || !result.results) { renderLsTabContent(); return; }
+    if (!result || !result.results) return;
     const generated = result.results.filter(r => r.generated);
     const skipped = result.results.filter(r => r.skipped);
     const errored = result.results.filter(r => r.error);
@@ -320,7 +320,8 @@ function _batchGenComplete(result) {
     if (skipped.length) msg += `, ${skipped.length} skipped (low relevancy)`;
     if (errored.length) msg += `, ${errored.length} failed`;
     toast(msg, generated.length ? 'success' : 'info', 8000);
-    renderLsTabContent();
+    // Refresh saved tab content only if currently viewing it
+    if (_lsTab === 'saved') renderLsTabContent();
 }
 
 // =========================================================================
@@ -4912,12 +4913,16 @@ async function markPaidAllComments() {
     if (sourceFilter) body.source = sourceFilter;
     if (dateFilter) body.date = dateFilter;
 
-    const result = await api('/api/all-comments/mark-paid-all', {
-        method: 'POST',
-        body: body,
-    });
-    alert(`${result.updated} comment(s) marked as paid.`);
-    loadAllComments();
+    try {
+        const result = await api('/api/all-comments/mark-paid-all', {
+            method: 'POST',
+            body: body,
+        });
+        toast(`${result.updated} comment(s) marked as paid.`, 'success');
+        loadAllComments();
+    } catch(e) {
+        toast('Failed to mark comments as paid: ' + (e.message || e), 'error');
+    }
 }
 
 async function loadAllComments(keepPage) {
@@ -6402,9 +6407,9 @@ function renderLsSearch(c) {
                 </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
-                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="5"></div>
-                <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="3"></div>
-                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="30"></div>
+                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="3"></div>
+                <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="0"></div>
+                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="360"></div>
                 <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
                 <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50"></div>
             </div>
@@ -6730,7 +6735,6 @@ async function lsSaveAndGenerateAll() {
     const newIds = new Set(res.saved_ids || []);
     if (!newIds.size) {
         toast('All posts already existed — nothing new to generate', 'info');
-        _lsTab = 'saved'; renderLsTabContent();
         return;
     }
 
@@ -6746,15 +6750,13 @@ async function lsSaveAndGenerateAll() {
         );
         if (!eligible.length) {
             toast('New posts saved but none eligible for generation (check excluded subs)', 'info');
-            _lsTab = 'saved'; renderLsTabContent(); return;
+            return;
         }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
         runTask('/api/search/posts/generate-batch',
             { post_ids: eligible.map(p => p.id), num_comments: numComments },
             _batchGenComplete, `Gen: ${eligible.length} posts`);
     } catch(e) { toast('Generation failed to start', 'error'); }
-    _lsTab = 'saved';
-    renderLsTabContent();
 }
 
 // --- Saved Posts Tab ---

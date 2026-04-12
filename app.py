@@ -1238,6 +1238,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
     Returns dict with checked/live/dead/errors counts and error_details breakdown.
     """
     import time as _time
+    import requests as _requests
     checked = 0
     live = 0
     dead = 0
@@ -1259,118 +1260,111 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         else:
             db.set_search_comment_live_check(item["id"])
 
+    # Browser UA — same as local comment_checker.py that works reliably
+    _browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
     for item in deployed:
         checked += 1
-        url = item["reddit_comment_url"]
+        raw_url = item["reddit_comment_url"]
         src = item.get("source", "comment")
-        path = _normalize_reddit_comment_url(url)
-        if not path:
-            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): unrecognizable URL {url}", flush=True)
+        if not raw_url:
+            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): no URL", flush=True)
             errors += 1
             error_details["bad_url"] += 1
             continue
+
+        # Clean URL: strip query params, trailing slash
+        clean_url = raw_url.strip().split("?")[0].rstrip("/")
+
+        # Must be a comment URL
+        if "/comment/" not in clean_url and "/comments/" not in clean_url:
+            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): not a comment URL: {clean_url}", flush=True)
+            errors += 1
+            error_details["bad_url"] += 1
+            continue
+
+        # Fetch URL + .json directly — same approach as local comment_checker.py
+        json_url = clean_url + ".json"
         try:
-            resp = _reddit_get(path)
+            resp = _requests.get(json_url, headers={"User-Agent": _browser_ua}, timeout=15)
+
+            if resp.status_code == 404:
+                print(f"[{log_prefix}] #{item['id']} ({src}) 404 — removed", flush=True)
+                _mark_dead(item)
+                dead += 1
+                _time.sleep(3)
+                continue
+            if resp.status_code == 403:
+                print(f"[{log_prefix}] #{item['id']} ({src}) 403 Forbidden", flush=True)
+                errors += 1
+                error_details["forbidden"] += 1
+                _time.sleep(3)
+                continue
             if resp.status_code == 429:
-                print(f"[{log_prefix}] #{item['id']} ({src}) rate limited after retries", flush=True)
+                print(f"[{log_prefix}] #{item['id']} ({src}) rate limited", flush=True)
                 errors += 1
                 error_details["rate_limited"] += 1
                 _time.sleep(5)
                 continue
-            if resp.status_code == 403:
-                print(f"[{log_prefix}] #{item['id']} ({src}) 403 Forbidden after retries", flush=True)
-                errors += 1
-                error_details["forbidden"] += 1
-                continue
-            if resp.status_code == 404:
-                _mark_dead(item)
-                dead += 1
-            elif resp.status_code == 200:
-                # Try JSON first; fall back to HTML text search if not parseable
-                found_deleted = False
-                found_live = False
-                try:
-                    data = resp.json()
-                    if isinstance(data, list) and len(data) > 1:
-                        children = data[1].get("data", {}).get("children", [])
-                        if not children:
-                            print(f"[{log_prefix}] #{item['id']} ({src}) empty children — comment removed", flush=True)
-                            _mark_dead(item)
-                            dead += 1
-                            _time.sleep(3)
-                            continue
-                        for child in children:
-                            body = child.get("data", {}).get("body", "")
-                            if body in ("[deleted]", "[removed]"):
-                                found_deleted = True
-                                break
-                            if body:
-                                found_live = True
-                    else:
-                        # Unexpected JSON structure — fall through to HTML check
-                        found_live = False
-                except (ValueError, Exception):
-                    pass  # JSON failed — use HTML text search below
-
-                # If JSON didn't resolve it, search the raw response text (HTML fallback).
-                # Extract comment ID from URL, find it in HTML, check nearby text.
-                if not found_deleted and not found_live:
-                    import re as _re
-                    body_text = resp.text
-                    # Extract comment ID from path (last segment before .json)
-                    cid_match = _re.search(r'/(\w+)\.json$', path)
-                    cid = cid_match.group(1) if cid_match else None
-                    if cid:
-                        # Find the comment's element: id="thing_t1_{cid}"
-                        marker = f"thing_t1_{cid}"
-                        pos = body_text.find(marker)
-                        if pos >= 0:
-                            # Check ~2000 chars after the comment element for deleted/removed
-                            snippet = body_text[pos:pos+2000]
-                            if "[deleted]" in snippet or "[removed]" in snippet:
-                                found_deleted = True
-                                print(f"[{log_prefix}] #{item['id']} ({src}) [deleted]/[removed] near comment element (HTML)", flush=True)
-                            else:
-                                found_live = True
-                                print(f"[{log_prefix}] #{item['id']} ({src}) live (comment element present in HTML)", flush=True)
-                        elif len(body_text) > 500:
-                            # Page loaded but comment element not found → comment was nuked
-                            found_deleted = True
-                            print(f"[{log_prefix}] #{item['id']} ({src}) comment element not found in HTML — removed", flush=True)
-                        else:
-                            print(f"[{log_prefix}] #{item['id']} ({src}) ambiguous response ({len(body_text)} bytes), skipping", flush=True)
-                            errors += 1
-                            error_details["non_json"] += 1
-                            _time.sleep(3)
-                            continue
-                    elif len(body_text) > 500:
-                        # Can't extract comment ID but got a substantial page → assume live
-                        found_live = True
-                        print(f"[{log_prefix}] #{item['id']} ({src}) live (substantial response, no cid extract)", flush=True)
-                    else:
-                        print(f"[{log_prefix}] #{item['id']} ({src}) ambiguous response, skipping", flush=True)
-                        errors += 1
-                        error_details["non_json"] += 1
-                        _time.sleep(3)
-                        continue
-
-                if found_deleted:
-                    _mark_dead(item)
-                    dead += 1
-                else:
-                    _mark_live(item)
-                    live += 1
-            else:
-                print(f"[{log_prefix}] #{item['id']} ({src}) got HTTP {resp.status_code}", flush=True)
+            if resp.status_code != 200:
+                print(f"[{log_prefix}] #{item['id']} ({src}) HTTP {resp.status_code}", flush=True)
                 errors += 1
                 error_details["http_other"] += 1
-        except Exception as e:
-            print(f"[{log_prefix}] Error checking #{item['id']} ({src}) ({url}): {e}", flush=True)
-            errors += 1
-            if "timeout" in str(e).lower() or "Timeout" in type(e).__name__:
-                error_details["timeout"] += 1
+                _time.sleep(3)
+                continue
+
+            # Parse JSON — if it fails (HTML returned), skip as error
+            try:
+                data = resp.json()
+            except (ValueError, Exception):
+                ct = resp.headers.get("Content-Type", "")
+                print(f"[{log_prefix}] #{item['id']} ({src}) JSON parse failed ({ct}), skipping", flush=True)
+                errors += 1
+                error_details["non_json"] += 1
+                _time.sleep(3)
+                continue
+
+            # Reddit returns [post_data, comment_data]
+            if not isinstance(data, list) or len(data) < 2:
+                print(f"[{log_prefix}] #{item['id']} ({src}) unexpected JSON structure, skipping", flush=True)
+                errors += 1
+                error_details["non_json"] += 1
+                _time.sleep(3)
+                continue
+
+            children = data[1].get("data", {}).get("children", [])
+            if not children:
+                print(f"[{log_prefix}] #{item['id']} ({src}) empty children — removed", flush=True)
+                _mark_dead(item)
+                dead += 1
+                _time.sleep(3)
+                continue
+
+            comment = children[0].get("data", {})
+            body = comment.get("body", "")
+            author = comment.get("author", "")
+
+            if body in ("[deleted]", "[removed]"):
+                print(f"[{log_prefix}] #{item['id']} ({src}) {body}", flush=True)
+                _mark_dead(item)
+                dead += 1
+            elif not body and author == "[deleted]":
+                print(f"[{log_prefix}] #{item['id']} ({src}) user deleted", flush=True)
+                _mark_dead(item)
+                dead += 1
             else:
-                error_details["exception"] += 1
+                print(f"[{log_prefix}] #{item['id']} ({src}) live (author={author})", flush=True)
+                _mark_live(item)
+                live += 1
+
+        except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
+            print(f"[{log_prefix}] #{item['id']} ({src}) {type(e).__name__}: {e}", flush=True)
+            errors += 1
+            error_details["timeout"] += 1
+        except Exception as e:
+            print(f"[{log_prefix}] #{item['id']} ({src}) error: {e}", flush=True)
+            errors += 1
+            error_details["exception"] += 1
         _time.sleep(3)
 
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,

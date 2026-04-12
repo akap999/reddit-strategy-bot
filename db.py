@@ -756,17 +756,17 @@ class Database:
                 COUNT(*) as total,
                 SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded,
                 SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as organic,
-                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
-                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid
+                SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as paid,
+                SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as unpaid
             FROM comments c
             JOIN posts p ON c.post_id = p.id
-            {where_sql} {"AND" if where_sql else "WHERE"} c.status = 'deployed' AND c.account_id IS NOT NULL
+            {where_sql} {"AND" if where_sql else "WHERE"} c.status IN ('deployed', 'paid') AND c.account_id IS NOT NULL
             GROUP BY c.account_id
             ORDER BY total DESC
         """, params).fetchall()]
 
         # Per-brand breakdown: subreddits, posts, comments (branded/general) deployed
-        bq_parts = ["c.status = 'deployed'"]
+        bq_parts = ["c.status IN ('deployed', 'paid')"]
         bq_params = []
         if date_from:
             bq_parts.append("c.deployed_at >= ?")
@@ -788,8 +788,8 @@ class Database:
                 COUNT(c.id) as deployed_comments,
                 SUM(CASE WHEN c.mentions_brand = 1 THEN 1 ELSE 0 END) as branded_comments,
                 SUM(CASE WHEN c.mentions_brand = 0 THEN 1 ELSE 0 END) as general_comments,
-                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid_comments,
-                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid_comments
+                SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as paid_comments,
+                SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             JOIN subreddits s ON p.subreddit_id = s.id
@@ -805,8 +805,8 @@ class Database:
                 s.id as subreddit_id,
                 s.name as subreddit_name,
                 COUNT(c.id) as deployed_comments,
-                SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid_comments,
-                SUM(CASE WHEN c.paid_at IS NULL THEN 1 ELSE 0 END) as unpaid_comments
+                SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as paid_comments,
+                SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as unpaid_comments
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             JOIN subreddits s ON p.subreddit_id = s.id
@@ -1535,7 +1535,7 @@ class Database:
         status_counts = {r["status"]: r["cnt"] for r in self.conn.execute(counts_q, all_params).fetchall()}
 
         paid_cnt = self.conn.execute(
-            f"SELECT COUNT(*) as cnt FROM ({inner}) combined WHERE paid_at IS NOT NULL", all_params
+            f"SELECT COUNT(*) as cnt FROM ({inner}) combined WHERE status = 'paid'", all_params
         ).fetchone()["cnt"]
         live_cnt = self.conn.execute(
             f"SELECT COUNT(*) as cnt FROM ({inner}) combined WHERE status='deployed' AND last_live_check IS NOT NULL", all_params
@@ -1555,7 +1555,7 @@ class Database:
                    SUM(CASE WHEN status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                    SUM(CASE WHEN status = 'deployed' AND last_live_check IS NOT NULL THEN 1 ELSE 0 END) as live,
                    SUM(CASE WHEN status IN ('removed','deleted') THEN 1 ELSE 0 END) as removed,
-                   SUM(CASE WHEN paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid
+                   SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid
             FROM (
                 SELECT b.name as brand_name,
                        COALESCE(strftime('%%Y-%%m', c.deployed_at), strftime('%%Y-%%m', c.created_at)) as month,
@@ -2181,7 +2181,7 @@ class Database:
                       SUM(CASE WHEN c.status IN ('assigned','informed') THEN 1 ELSE 0 END) as pending,
                       SUM(CASE WHEN c.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN c.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                      SUM(CASE WHEN c.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
+                      SUM(CASE WHEN c.status = 'paid' THEN 1 ELSE 0 END) as paid,
                       SUM(CASE WHEN c.status = 'deployed' AND c.deployed_at < datetime('now', '-4 days') AND c.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment,
                       (SELECT COUNT(*) FROM subreddits WHERE owner_account = a.username) as owned_subreddits,
                       (SELECT COUNT(*) FROM posts WHERE owner_account = a.username) as owned_posts
@@ -2861,7 +2861,7 @@ class Database:
                       SUM(CASE WHEN sc.status IN ('assigned','informed') THEN 1 ELSE 0 END) as pending,
                       SUM(CASE WHEN sc.status = 'deployed' THEN 1 ELSE 0 END) as deployed,
                       SUM(CASE WHEN sc.status = 'deleted' THEN 1 ELSE 0 END) as deleted,
-                      SUM(CASE WHEN sc.paid_at IS NOT NULL THEN 1 ELSE 0 END) as paid,
+                      SUM(CASE WHEN sc.status = 'paid' THEN 1 ELSE 0 END) as paid,
                       SUM(CASE WHEN sc.status = 'deployed' AND sc.deployed_at < datetime('now', '-4 days') AND sc.deleted_at IS NULL THEN 1 ELSE 0 END) as due_payment
                FROM accounts a
                LEFT JOIN search_comments sc ON sc.account_id = a.username
@@ -3056,14 +3056,12 @@ class Database:
         summary.update(sc_summary)
 
         # --- Items list (comments + posts + search_comments) with UNION ---
-        paid_clause = ""
-        if paid_filter == 'paid':
-            paid_clause = "AND paid_at IS NOT NULL"
-        elif paid_filter == 'unpaid':
-            paid_clause = "AND paid_at IS NULL"
-
         # Build WHERE for comments
-        c_where = ["c.status = 'deployed'"]
+        c_where = ["c.status IN ('deployed', 'paid')"]
+        if paid_filter == 'paid':
+            c_where.append("c.status = 'paid'")
+        elif paid_filter == 'unpaid':
+            c_where.append("c.status = 'deployed'")
         c_params = []
         if subreddit_id:
             c_where.append("p.subreddit_id = ?")
@@ -3078,6 +3076,10 @@ class Database:
 
         # Build WHERE for posts
         p_where = ["p.status IN ('published', 'paid')"]
+        if paid_filter == 'paid':
+            p_where.append("p.status = 'paid'")
+        elif paid_filter == 'unpaid':
+            p_where.append("p.status = 'published'")
         p_params = []
         if subreddit_id:
             p_where.append("p.subreddit_id = ?")
@@ -3091,7 +3093,11 @@ class Database:
         p_where_sql = " AND ".join(p_where)
 
         # Build WHERE for search comments
-        sc_where2 = ["sc.status = 'deployed'"]
+        sc_where2 = ["sc.status IN ('deployed', 'paid')"]
+        if paid_filter == 'paid':
+            sc_where2.append("sc.status = 'paid'")
+        elif paid_filter == 'unpaid':
+            sc_where2.append("sc.status = 'deployed'")
         sc_params2 = []
         if brand_id:
             sc_where2.append("sc.brand_id = ?")
@@ -3110,7 +3116,7 @@ class Database:
                 JOIN posts p ON c.post_id = p.id
                 LEFT JOIN brands b ON c.brand_id = b.id
                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
-                WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
+                WHERE {c_where_sql}
 
                 UNION ALL
 
@@ -3121,7 +3127,7 @@ class Database:
                 LEFT JOIN post_brands pb ON pb.post_id = p.id
                 LEFT JOIN brands b2 ON b2.id = pb.brand_id
                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
-                WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
+                WHERE {p_where_sql}
                 GROUP BY p.id
 
                 UNION ALL
@@ -3132,7 +3138,7 @@ class Database:
                 FROM search_comments sc
                 LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
                 LEFT JOIN brands b ON sc.brand_id = b.id
-                WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
+                WHERE {sc_where_sql}
             ) combined
             ORDER BY paid_at IS NULL DESC, deployed_at DESC
             LIMIT ? OFFSET ?
@@ -3145,13 +3151,13 @@ class Database:
         count_query = f"""
             SELECT (
                 SELECT COUNT(*) FROM comments c JOIN posts p ON c.post_id = p.id
-                WHERE {c_where_sql} {paid_clause.replace('paid_at', 'c.paid_at')}
+                WHERE {c_where_sql}
             ) + (
                 SELECT COUNT(*) FROM posts p
-                WHERE {p_where_sql} {paid_clause.replace('paid_at', 'p.paid_at')}
+                WHERE {p_where_sql}
             ) + (
                 SELECT COUNT(*) FROM search_comments sc
-                WHERE {sc_where_sql} {paid_clause.replace('paid_at', 'sc.paid_at')}
+                WHERE {sc_where_sql}
             ) as total
         """
         count_params = c_params + p_params + sc_params2
@@ -3665,7 +3671,7 @@ class Database:
         prior = row["account_id"] if row else None
         prior_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
+            "UPDATE search_comments SET status = 'deleted', deleted_at = ?, paid_at = NULL WHERE id = ?",
             (deleted_at, comment_id))
         # Only decrement if this row was counted toward lifetime (i.e. had an
         # account attached and wasn't already deleted).

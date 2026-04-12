@@ -1260,9 +1260,6 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         else:
             db.set_search_comment_live_check(item["id"])
 
-    # Browser UA — same as local comment_checker.py that works reliably
-    _browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
     for item in deployed:
         checked += 1
         raw_url = item["reddit_comment_url"]
@@ -1273,20 +1270,28 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             error_details["bad_url"] += 1
             continue
 
-        # Clean URL: strip query params, trailing slash
+        # Clean URL → extract path → append .json → route through proxy
         clean_url = raw_url.strip().split("?")[0].rstrip("/")
-
-        # Must be a comment URL
         if "/comment/" not in clean_url and "/comments/" not in clean_url:
             print(f"[{log_prefix}] Skipping #{item['id']} ({src}): not a comment URL: {clean_url}", flush=True)
             errors += 1
             error_details["bad_url"] += 1
             continue
 
-        # Fetch URL + .json directly — same approach as local comment_checker.py
-        json_url = clean_url + ".json"
+        # Extract path from URL (strip domain) and append .json
+        import re as _re
+        path = _re.sub(r'^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com', '', clean_url)
+        if not path.startswith('/'):
+            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): bad path: {clean_url}", flush=True)
+            errors += 1
+            error_details["bad_url"] += 1
+            continue
+        json_path = path + ".json"
+
         try:
-            resp = _requests.get(json_url, headers={"User-Agent": _browser_ua}, timeout=15)
+            # Use _reddit_get which routes through Cloudflare proxy (avoids
+            # Railway cloud IP being 403'd by Reddit directly)
+            resp = _reddit_get(json_path, timeout=15)
 
             if resp.status_code == 404:
                 print(f"[{log_prefix}] #{item['id']} ({src}) 404 — removed", flush=True)

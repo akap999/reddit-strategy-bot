@@ -1247,13 +1247,17 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                      "timeout": 0, "non_json": 0, "http_other": 0, "exception": 0}
 
     restored = 0
+    changes = []
 
     def _mark_dead(item):
         src = item.get("source", "comment")
+        prev = item.get("status", "")
         if src == "comment":
             db.mark_comment_deleted(item["id"])
         else:
             db.mark_search_comment_removed(item["id"])
+        changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
+                        "action": "marked_dead", "prev_status": prev, "new_status": "removed"})
 
     def _mark_live(item):
         nonlocal restored
@@ -1266,6 +1270,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             else:
                 db.restore_search_comment_to_deployed(item["id"])
             restored += 1
+            changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
+                            "action": "restored", "prev_status": cur_status, "new_status": "deployed"})
             print(f"[{log_prefix}] #{item['id']} ({src}) RESTORED to deployed (was {cur_status})", flush=True)
         else:
             if src == "comment":
@@ -1386,7 +1392,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         _time.sleep(3)
 
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
-            "restored": restored, "error_details": error_details}
+            "restored": restored, "changes": changes, "error_details": error_details}
 
 
 @app.route("/api/all-comments/check-live", methods=["POST"])

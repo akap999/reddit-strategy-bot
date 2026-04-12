@@ -4874,6 +4874,8 @@ async function renderAllComments(el) {
     loadAllComments();
 }
 
+let _lastLiveCheckChanges = [];
+
 function _liveCheckToast(result) {
     let msg = `Checked ${result.checked}: ${result.live} live, ${result.dead} dead`;
     if (result.restored) msg += `, ${result.restored} restored`;
@@ -4890,7 +4892,64 @@ function _liveCheckToast(result) {
         if (d.exception) parts.push(`${d.exception} exception`);
         if (parts.length) msg += ` (${parts.join(', ')})`;
     }
+    _lastLiveCheckChanges = result.changes || [];
+    if (_lastLiveCheckChanges.length) {
+        msg += ` — <a href="#" onclick="showLiveCheckChanges();return false" style="color:#4fc3f7;text-decoration:underline">View ${_lastLiveCheckChanges.length} change(s)</a>`;
+    }
+    console.log('[CHECK-LIVE] Changes:', _lastLiveCheckChanges);
     return msg;
+}
+
+function showLiveCheckChanges() {
+    const changes = _lastLiveCheckChanges;
+    if (!changes.length) { toast('No status changes recorded', 'info'); return; }
+    // Build modal
+    let existing = document.getElementById('live-check-modal');
+    if (existing) existing.remove();
+    const restored = changes.filter(c => c.action === 'restored');
+    const dead = changes.filter(c => c.action === 'marked_dead');
+    const renderRows = (list) => list.map(c =>
+        `<tr>
+            <td style="padding:4px 8px">#${c.id}</td>
+            <td style="padding:4px 8px">${c.source}</td>
+            <td style="padding:4px 8px">${c.prev_status} → ${c.new_status}</td>
+            <td style="padding:4px 8px"><a href="${c.url}" target="_blank" style="color:#4fc3f7;word-break:break-all">${c.url ? c.url.slice(0, 60) + '...' : 'N/A'}</a></td>
+        </tr>`
+    ).join('');
+    const modal = document.createElement('div');
+    modal.id = 'live-check-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7)';
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+    modal.innerHTML = `
+        <div style="background:#1a1a1b;border:1px solid #343536;border-radius:8px;max-width:800px;width:95%;max-height:80vh;overflow-y:auto;padding:20px">
+            <div class="flex justify-between items-center mb-4">
+                <h3 style="color:#d7dadc;font-size:1.1rem;font-weight:bold">Check-Live Status Changes (${changes.length})</h3>
+                <button onclick="this.closest('#live-check-modal').remove()" style="color:#818384;font-size:1.3rem;background:none;border:none;cursor:pointer">&times;</button>
+            </div>
+            ${restored.length ? `
+                <h4 style="color:#46d160;margin-bottom:8px">Restored to Deployed (${restored.length})</h4>
+                <table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:0.85rem">
+                    <thead><tr style="color:#818384;border-bottom:1px solid #343536">
+                        <th style="padding:4px 8px;text-align:left">ID</th>
+                        <th style="padding:4px 8px;text-align:left">Source</th>
+                        <th style="padding:4px 8px;text-align:left">Change</th>
+                        <th style="padding:4px 8px;text-align:left">URL</th>
+                    </tr></thead>
+                    <tbody style="color:#d7dadc">${renderRows(restored)}</tbody>
+                </table>` : ''}
+            ${dead.length ? `
+                <h4 style="color:#ff6b6b;margin-bottom:8px">Marked Dead (${dead.length})</h4>
+                <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+                    <thead><tr style="color:#818384;border-bottom:1px solid #343536">
+                        <th style="padding:4px 8px;text-align:left">ID</th>
+                        <th style="padding:4px 8px;text-align:left">Source</th>
+                        <th style="padding:4px 8px;text-align:left">Change</th>
+                        <th style="padding:4px 8px;text-align:left">URL</th>
+                    </tr></thead>
+                    <tbody style="color:#d7dadc">${renderRows(dead)}</tbody>
+                </table>` : ''}
+        </div>`;
+    document.body.appendChild(modal);
 }
 
 function _getAcFilters() {

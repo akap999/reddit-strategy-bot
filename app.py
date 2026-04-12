@@ -1289,8 +1289,42 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             error_details["bad_url"] += 1
             continue
 
-        # Clean URL → extract path → append .json → route through proxy
+        # Clean URL: strip query params, trailing slash
         clean_url = raw_url.strip().split("?")[0].rstrip("/")
+
+        # Resolve Reddit share/short URLs (/s/ links) to full comment URLs
+        if "/s/" in clean_url:
+            try:
+                print(f"[{log_prefix}] #{item['id']} ({src}) resolving short URL...", flush=True)
+                head_resp = _requests.head(clean_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }, allow_redirects=True, timeout=15)
+                resolved = head_resp.url.split("?")[0].rstrip("/")
+                if "/comments/" in resolved:
+                    clean_url = resolved
+                    print(f"[{log_prefix}] #{item['id']} ({src}) resolved to {clean_url}", flush=True)
+                else:
+                    # HEAD didn't resolve, try GET
+                    get_resp = _requests.get(clean_url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }, allow_redirects=True, timeout=15)
+                    resolved = get_resp.url.split("?")[0].rstrip("/")
+                    if "/comments/" in resolved:
+                        clean_url = resolved
+                        print(f"[{log_prefix}] #{item['id']} ({src}) resolved (GET) to {clean_url}", flush=True)
+                    else:
+                        print(f"[{log_prefix}] #{item['id']} ({src}) short URL didn't resolve to comment: {resolved}", flush=True)
+                        errors += 1
+                        error_details["bad_url"] += 1
+                        _time.sleep(3)
+                        continue
+            except Exception as e:
+                print(f"[{log_prefix}] #{item['id']} ({src}) failed to resolve short URL: {e}", flush=True)
+                errors += 1
+                error_details["bad_url"] += 1
+                _time.sleep(3)
+                continue
+
         if "/comment/" not in clean_url and "/comments/" not in clean_url:
             print(f"[{log_prefix}] Skipping #{item['id']} ({src}): not a comment URL: {clean_url}", flush=True)
             errors += 1

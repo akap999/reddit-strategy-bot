@@ -1294,32 +1294,45 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
 
         # Resolve Reddit share/short URLs (/s/ links) to full comment URLs
         if "/s/" in clean_url:
+            import re as _re2
+            resolved_url = None
             try:
                 print(f"[{log_prefix}] #{item['id']} ({src}) resolving short URL...", flush=True)
-                head_resp = _requests.head(clean_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                }, allow_redirects=True, timeout=15)
-                resolved = head_resp.url.split("?")[0].rstrip("/")
-                if "/comments/" in resolved:
-                    clean_url = resolved
-                    print(f"[{log_prefix}] #{item['id']} ({src}) resolved to {clean_url}", flush=True)
+                _browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                # Try HEAD redirect first
+                head_resp = _requests.head(clean_url, headers={"User-Agent": _browser_ua},
+                                           allow_redirects=True, timeout=15)
+                if "/comments/" in head_resp.url:
+                    resolved_url = head_resp.url.split("?")[0].rstrip("/")
                 else:
-                    # HEAD didn't resolve, try GET
-                    get_resp = _requests.get(clean_url, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    }, allow_redirects=True, timeout=15)
-                    resolved = get_resp.url.split("?")[0].rstrip("/")
-                    if "/comments/" in resolved:
-                        clean_url = resolved
-                        print(f"[{log_prefix}] #{item['id']} ({src}) resolved (GET) to {clean_url}", flush=True)
+                    # GET and check redirect URL + parse body for canonical/og:url
+                    get_resp = _requests.get(clean_url, headers={"User-Agent": _browser_ua},
+                                             allow_redirects=True, timeout=15)
+                    if "/comments/" in get_resp.url:
+                        resolved_url = get_resp.url.split("?")[0].rstrip("/")
                     else:
-                        print(f"[{log_prefix}] #{item['id']} ({src}) short URL didn't resolve to comment: {resolved}", flush=True)
-                        errors += 1
-                        error_details["bad_url"] += 1
-                        _time.sleep(3)
-                        continue
+                        # Search response body for canonical URL or og:url
+                        body_text = get_resp.text[:10000]
+                        canon = _re2.search(r'<link[^>]+rel="canonical"[^>]+href="([^"]+)"', body_text)
+                        if canon and "/comments/" in canon.group(1):
+                            resolved_url = canon.group(1).split("?")[0].rstrip("/")
+                        else:
+                            og = _re2.search(r'<meta[^>]+property="og:url"[^>]+content="([^"]+)"', body_text)
+                            if og and "/comments/" in og.group(1):
+                                resolved_url = og.group(1).split("?")[0].rstrip("/")
+                            else:
+                                # Try finding any reddit comment URL in the page
+                                any_url = _re2.search(r'https?://(?:www\.)?reddit\.com/r/\w+/comments/\w+/[^/]+/\w+', body_text)
+                                if any_url:
+                                    resolved_url = any_url.group(0).split("?")[0].rstrip("/")
             except Exception as e:
                 print(f"[{log_prefix}] #{item['id']} ({src}) failed to resolve short URL: {e}", flush=True)
+
+            if resolved_url:
+                clean_url = resolved_url
+                print(f"[{log_prefix}] #{item['id']} ({src}) resolved to {clean_url}", flush=True)
+            else:
+                print(f"[{log_prefix}] #{item['id']} ({src}) could not resolve short URL, skipping", flush=True)
                 errors += 1
                 error_details["bad_url"] += 1
                 _time.sleep(3)

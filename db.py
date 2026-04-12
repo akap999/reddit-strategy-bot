@@ -1254,7 +1254,7 @@ class Database:
     def mark_comment_deleted(self, comment_id):
         deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute(
-            "UPDATE comments SET status = 'deleted', deleted_at = ? WHERE id = ?",
+            "UPDATE comments SET status = 'deleted', deleted_at = ?, paid_at = NULL WHERE id = ?",
             (deleted_at, comment_id)
         )
         self.conn.commit()
@@ -1262,7 +1262,7 @@ class Database:
     def mark_comment_removed(self, comment_id):
         """Mark a deployed comment as removed/deleted on Reddit."""
         self.conn.execute(
-            "UPDATE comments SET status = 'removed' WHERE id = ? AND status IN ('deployed', 'paid')",
+            "UPDATE comments SET status = 'removed', paid_at = NULL WHERE id = ? AND status IN ('deployed', 'paid')",
             (comment_id,)
         )
         self.conn.commit()
@@ -3676,7 +3676,7 @@ class Database:
     def mark_search_comment_removed(self, comment_id):
         """Mark a search comment as removed/deleted on Reddit."""
         self.conn.execute(
-            "UPDATE search_comments SET status = 'removed', deleted_at = datetime('now') WHERE id = ?",
+            "UPDATE search_comments SET status = 'removed', deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
             (comment_id,))
         self.conn.commit()
 

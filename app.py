@@ -1261,6 +1261,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
     def _mark_dead(item):
         src = item.get("source", "comment")
         prev = item.get("status", "")
+        print(f"[{log_prefix}] _mark_dead #{item['id']} ({src}) prev_status={prev}", flush=True)
         if src == "comment":
             db.mark_comment_deleted(item["id"])
         else:
@@ -1417,23 +1418,27 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             comment = children[0].get("data", {})
             body = comment.get("body", "")
             author = comment.get("author", "")
+            removed_flag = comment.get("removed", False)
+            collapsed_reason = comment.get("collapsed_reason_code", "")
 
-            body_lower = body.strip().lower()
+            body_stripped = body.strip().lower()
             is_removed = (
-                body in ("[deleted]", "[removed]") or
-                "removed by reddit" in body_lower or
-                "removed by moderator" in body_lower
+                body_stripped in ("[deleted]", "[removed]") or
+                "removed by reddit" in body_stripped or
+                "removed by moderator" in body_stripped or
+                removed_flag is True or
+                author in ("[deleted]", "[removed]")
             )
             if is_removed:
-                print(f"[{log_prefix}] #{item['id']} ({src}) {body[:50]}", flush=True)
+                print(f"[{log_prefix}] #{item['id']} ({src}) DEAD body={body[:60]!r} author={author} removed={removed_flag}", flush=True)
                 _mark_dead(item)
                 dead += 1
-            elif not body and author == "[deleted]":
-                print(f"[{log_prefix}] #{item['id']} ({src}) user deleted", flush=True)
+            elif not body.strip() and not author:
+                print(f"[{log_prefix}] #{item['id']} ({src}) DEAD empty body+author", flush=True)
                 _mark_dead(item)
                 dead += 1
             else:
-                print(f"[{log_prefix}] #{item['id']} ({src}) live (author={author})", flush=True)
+                print(f"[{log_prefix}] #{item['id']} ({src}) LIVE author={author} body={body[:40]!r}", flush=True)
                 _mark_live(item)
                 live += 1
 

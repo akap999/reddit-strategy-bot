@@ -1418,8 +1418,14 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             body = comment.get("body", "")
             author = comment.get("author", "")
 
-            if body in ("[deleted]", "[removed]"):
-                print(f"[{log_prefix}] #{item['id']} ({src}) {body}", flush=True)
+            body_lower = body.strip().lower()
+            is_removed = (
+                body in ("[deleted]", "[removed]") or
+                "removed by reddit" in body_lower or
+                "removed by moderator" in body_lower
+            )
+            if is_removed:
+                print(f"[{log_prefix}] #{item['id']} ({src}) {body[:50]}", flush=True)
                 _mark_dead(item)
                 dead += 1
             elif not body and author == "[deleted]":

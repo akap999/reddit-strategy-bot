@@ -180,11 +180,12 @@ def _reddit_get(path, timeout=15, max_retries=3):
     path should start with / e.g. /user/spez/about.json
     Retries on transient errors (403, 429, timeouts) with exponential backoff.
     Also retries when proxy returns HTML instead of JSON.
+    Falls back to old.reddit.com directly when proxy consistently returns HTML.
     """
     import requests as _requests
     import time as _time
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
     url = f"{base}{path}"
     ua = REDDIT_USER_AGENT
     headers = {"User-Agent": ua, "Accept": "application/json"}
@@ -207,15 +208,35 @@ def _reddit_get(path, timeout=15, max_retries=3):
                 print(f"[REDDIT_GET] Got HTML instead of JSON (Content-Type: {resp.headers.get('Content-Type','')}), will retry", flush=True)
                 continue
             last_resp = resp
-            return resp
+            break
         except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
             last_exc = e
             print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
             if attempt >= max_retries - 1:
-                raise
+                last_resp = None
+                break
+
+    # If proxy returned HTML after all retries, try old.reddit.com directly as fallback.
+    # old.reddit.com has much less aggressive bot-blocking than www.reddit.com and often
+    # returns JSON even from cloud IPs where www.reddit.com would return HTML/403.
+    if proxy and last_resp and last_resp.status_code == 200 and last_resp.text.lstrip()[:1] == "<":
+        fallback_url = f"https://old.reddit.com{path}"
+        print(f"[REDDIT_GET] Proxy returned HTML after retries, trying old.reddit.com fallback: {fallback_url}", flush=True)
+        try:
+            fb_resp = _requests.get(fallback_url, headers=headers, timeout=timeout)
+            if fb_resp.status_code == 200 and fb_resp.text.lstrip()[:1] != "<":
+                print(f"[REDDIT_GET] old.reddit.com fallback succeeded (JSON)", flush=True)
+                return fb_resp
+            else:
+                print(f"[REDDIT_GET] old.reddit.com fallback failed (status={fb_resp.status_code}, html={fb_resp.text.lstrip()[:1] == '<'})", flush=True)
+        except Exception as fb_err:
+            print(f"[REDDIT_GET] old.reddit.com fallback error: {fb_err}", flush=True)
+
     if last_resp:
         return last_resp
-    raise last_exc
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"_reddit_get: no response for {path}")
 
 # ---------------------------------------------------------------------------
 # Background task system
@@ -1317,7 +1338,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 error_details["timeout"] += 1
             else:
                 error_details["exception"] += 1
-        _time.sleep(2)
+        _time.sleep(3)
 
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
             "error_details": error_details}
@@ -1377,13 +1398,21 @@ def api_check_live(sid):
 
 @app.route("/api/search/comments/check-live", methods=["POST"])
 def api_check_live_search_comments():
-    """Check deployed search comments against Reddit to find removed/deleted ones."""
+    """Check deployed search comments against Reddit to find removed/deleted ones.
+    Optional body: { comment_ids: [1,2,3] } to check only specific comments.
+    """
+    data = request.json or {}
+    filter_ids = data.get("comment_ids")
+
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
             deployed = db.get_deployed_search_comment_urls()
+            if filter_ids:
+                id_set = set(filter_ids)
+                deployed = [d for d in deployed if d["id"] in id_set]
             for item in deployed:
                 item["source"] = "search_comment"
             return _check_live_batch(deployed, db, "CHECK-LIVE-SEARCH")

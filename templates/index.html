@@ -6251,6 +6251,7 @@ let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
 let _lsSavedPosts = [];
 let _lsComments = [];
+let _lsFilteredComments = [];
 let _lsSelectedSubs = null; // null = all selected (default)
 
 function _lsUpdateCommentLocal(cid, patch) {
@@ -7001,7 +7002,8 @@ async function renderLsComments(c) {
                 <option value="archived">Archived</option>
             </select>
             <span style="margin-left:auto" class="flex gap-2">
-                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live</button>
+                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchComments()">Check Live All</button>
+                <button class="btn btn-secondary btn-sm" onclick="checkLiveSearchFiltered()">Check Live Filtered</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
@@ -7134,7 +7136,8 @@ function lsFilterComments() {
         filtered = filtered.filter(c => _lsSelectedSubs.has(c.post_subreddit));
     }
 
-    // Counts summary — reflects the currently filtered set
+    // Stash for check-live-filtered and counts
+    _lsFilteredComments = filtered;
     lsRenderCommentCounts(filtered);
 
     const el = document.getElementById('ls-comments-list');
@@ -7558,6 +7561,16 @@ async function checkLiveSearchComments() {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
         renderLsTabContent();
     }, 'Check Live (Search)');
+}
+
+async function checkLiveSearchFiltered() {
+    const deployed = (_lsFilteredComments || []).filter(c => c.status === 'deployed' || c.status === 'paid');
+    if (!deployed.length) { toast('No deployed comments in current filter to check', 'info'); return; }
+    const ids = deployed.map(c => c.id);
+    runTask('/api/search/comments/check-live', { comment_ids: ids }, (result) => {
+        toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
+        renderLsTabContent();
+    }, `Check Live (${ids.length} filtered)`);
 }
 
 async function lsDeleteAllComments() {

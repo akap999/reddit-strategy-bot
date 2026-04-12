@@ -1286,41 +1286,74 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 _mark_dead(item)
                 dead += 1
             elif resp.status_code == 200:
-                # Try to parse JSON regardless of Content-Type (proxies may alter headers)
-                try:
-                    data = resp.json()
-                except (ValueError, Exception) as json_err:
-                    ct = resp.headers.get('Content-Type', '')
-                    print(f"[{log_prefix}] #{item['id']} ({src}) JSON parse failed ({ct}): {resp.text[:300]}", flush=True)
-                    errors += 1
-                    error_details["non_json"] += 1
-                    _time.sleep(2)
-                    continue
+                # Try JSON first; fall back to HTML text search if not parseable
                 found_deleted = False
                 found_live = False
-                if isinstance(data, list) and len(data) > 1:
-                    children = data[1].get("data", {}).get("children", [])
-                    if not children:
-                        # Reddit returns empty children when comment is removed/deleted
-                        print(f"[{log_prefix}] #{item['id']} ({src}) empty children — comment removed", flush=True)
-                        _mark_dead(item)
-                        dead += 1
-                        _time.sleep(2)
-                        continue
-                    for child in children:
-                        body = child.get("data", {}).get("body", "")
-                        if body in ("[deleted]", "[removed]"):
+                try:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 1:
+                        children = data[1].get("data", {}).get("children", [])
+                        if not children:
+                            print(f"[{log_prefix}] #{item['id']} ({src}) empty children — comment removed", flush=True)
+                            _mark_dead(item)
+                            dead += 1
+                            _time.sleep(3)
+                            continue
+                        for child in children:
+                            body = child.get("data", {}).get("body", "")
+                            if body in ("[deleted]", "[removed]"):
+                                found_deleted = True
+                                break
+                            if body:
+                                found_live = True
+                    else:
+                        # Unexpected JSON structure — fall through to HTML check
+                        found_live = False
+                except (ValueError, Exception):
+                    pass  # JSON failed — use HTML text search below
+
+                # If JSON didn't resolve it, search the raw response text (HTML fallback).
+                # Extract comment ID from URL, find it in HTML, check nearby text.
+                if not found_deleted and not found_live:
+                    import re as _re
+                    body_text = resp.text
+                    # Extract comment ID from path (last segment before .json)
+                    cid_match = _re.search(r'/(\w+)\.json$', path)
+                    cid = cid_match.group(1) if cid_match else None
+                    if cid:
+                        # Find the comment's element: id="thing_t1_{cid}"
+                        marker = f"thing_t1_{cid}"
+                        pos = body_text.find(marker)
+                        if pos >= 0:
+                            # Check ~2000 chars after the comment element for deleted/removed
+                            snippet = body_text[pos:pos+2000]
+                            if "[deleted]" in snippet or "[removed]" in snippet:
+                                found_deleted = True
+                                print(f"[{log_prefix}] #{item['id']} ({src}) [deleted]/[removed] near comment element (HTML)", flush=True)
+                            else:
+                                found_live = True
+                                print(f"[{log_prefix}] #{item['id']} ({src}) live (comment element present in HTML)", flush=True)
+                        elif len(body_text) > 500:
+                            # Page loaded but comment element not found → comment was nuked
                             found_deleted = True
-                            break
-                        if body:
-                            found_live = True
-                else:
-                    # Unexpected response structure — treat as error
-                    print(f"[{log_prefix}] #{item['id']} ({src}) unexpected JSON structure: {str(data)[:200]}", flush=True)
-                    errors += 1
-                    error_details["non_json"] += 1
-                    _time.sleep(2)
-                    continue
+                            print(f"[{log_prefix}] #{item['id']} ({src}) comment element not found in HTML — removed", flush=True)
+                        else:
+                            print(f"[{log_prefix}] #{item['id']} ({src}) ambiguous response ({len(body_text)} bytes), skipping", flush=True)
+                            errors += 1
+                            error_details["non_json"] += 1
+                            _time.sleep(3)
+                            continue
+                    elif len(body_text) > 500:
+                        # Can't extract comment ID but got a substantial page → assume live
+                        found_live = True
+                        print(f"[{log_prefix}] #{item['id']} ({src}) live (substantial response, no cid extract)", flush=True)
+                    else:
+                        print(f"[{log_prefix}] #{item['id']} ({src}) ambiguous response, skipping", flush=True)
+                        errors += 1
+                        error_details["non_json"] += 1
+                        _time.sleep(3)
+                        continue
+
                 if found_deleted:
                     _mark_dead(item)
                     dead += 1

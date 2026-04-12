@@ -1585,16 +1585,66 @@ class Database:
 
     def get_all_deployed_comment_urls(self):
         """Get all deployed comment URLs across both tables for live checking."""
-        rows = self.conn.execute(
-            """SELECT c.id, c.reddit_comment_url, 'comment' as source
-               FROM comments c
-               WHERE c.status = 'deployed' AND c.reddit_comment_url IS NOT NULL
-               UNION ALL
-               SELECT sc.id, sc.reddit_comment_url, 'search_comment' as source
-               FROM search_comments sc
-               WHERE sc.status = 'deployed' AND sc.reddit_comment_url IS NOT NULL"""
-        ).fetchall()
+        return self.get_filtered_comment_urls(status='deployed')
+
+    def get_filtered_comment_urls(self, status=None, brand_id=None, subreddit_id=None,
+                                   account_id=None, source_filter=None, date=None):
+        """Get comment URLs matching filters for live checking.
+        Returns list of dicts with id, reddit_comment_url, source, status."""
+        w1, w2 = ["c.reddit_comment_url IS NOT NULL"], ["sc.reddit_comment_url IS NOT NULL"]
+        p1, p2 = [], []
+
+        if status:
+            w1.append("c.status = ?"); p1.append(status)
+            w2.append("sc.status = ?"); p2.append(status)
+        if brand_id:
+            w1.append("c.brand_id = ?"); p1.append(brand_id)
+            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+        if account_id:
+            w1.append("c.account_id = ?"); p1.append(account_id)
+            w2.append("sc.account_id = ?"); p2.append(account_id)
+        if subreddit_id:
+            w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
+            row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+            sub_name = row["name"] if row else ""
+            w2.append("LOWER(sp.subreddit) = LOWER(?)"); p2.append(sub_name)
+        if date:
+            w1.append("DATE(COALESCE(c.deployed_at, c.created_at)) = ?"); p1.append(date)
+            w2.append("DATE(COALESCE(sc.deployed_at, sc.created_at)) = ?"); p2.append(date)
+
+        where1 = " AND ".join(w1)
+        where2 = " AND ".join(w2)
+
+        q1 = f"""SELECT c.id, c.reddit_comment_url, 'comment' as source, c.status
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 WHERE {where1}"""
+        q2 = f"""SELECT sc.id, sc.reddit_comment_url, 'search_comment' as source, sc.status
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 WHERE {where2}"""
+
+        if source_filter == 'comment':
+            rows = self.conn.execute(q1, p1).fetchall()
+        elif source_filter == 'search_comment':
+            rows = self.conn.execute(q2, p2).fetchall()
+        else:
+            rows = self.conn.execute(f"{q1} UNION ALL {q2}", p1 + p2).fetchall()
         return [dict(r) for r in rows]
+
+    def restore_comment_to_deployed(self, comment_id):
+        """Restore a removed/deleted regular comment back to deployed."""
+        self.conn.execute(
+            "UPDATE comments SET status = 'deployed', last_live_check = datetime('now') WHERE id = ?",
+            (comment_id,))
+        self.conn.commit()
+
+    def restore_search_comment_to_deployed(self, comment_id):
+        """Restore a removed search comment back to deployed."""
+        self.conn.execute(
+            "UPDATE search_comments SET status = 'deployed', last_live_check = datetime('now') WHERE id = ?",
+            (comment_id,))
+        self.conn.commit()
 
     def get_published_posts_with_urls(self, subreddit_id):
         """Get posts that have Reddit URLs linked (published posts)."""

@@ -1246,6 +1246,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
     error_details = {"forbidden": 0, "rate_limited": 0, "bad_url": 0,
                      "timeout": 0, "non_json": 0, "http_other": 0, "exception": 0}
 
+    restored = 0
+
     def _mark_dead(item):
         src = item.get("source", "comment")
         if src == "comment":
@@ -1254,11 +1256,22 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             db.mark_search_comment_removed(item["id"])
 
     def _mark_live(item):
+        nonlocal restored
         src = item.get("source", "comment")
-        if src == "comment":
-            db.set_comment_live_check(item["id"])
+        cur_status = item.get("status", "")
+        # If comment was removed/deleted but is actually live → restore to deployed
+        if cur_status in ("removed", "deleted"):
+            if src == "comment":
+                db.restore_comment_to_deployed(item["id"])
+            else:
+                db.restore_search_comment_to_deployed(item["id"])
+            restored += 1
+            print(f"[{log_prefix}] #{item['id']} ({src}) RESTORED to deployed (was {cur_status})", flush=True)
         else:
-            db.set_search_comment_live_check(item["id"])
+            if src == "comment":
+                db.set_comment_live_check(item["id"])
+            else:
+                db.set_search_comment_live_check(item["id"])
 
     for item in deployed:
         checked += 1
@@ -1373,19 +1386,32 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         _time.sleep(3)
 
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
-            "error_details": error_details}
+            "restored": restored, "error_details": error_details}
 
 
 @app.route("/api/all-comments/check-live", methods=["POST"])
 def api_check_live_all_comments():
-    """Check all deployed/paid comments (regular + search) against Reddit."""
+    """Check comments against Reddit with optional filters."""
+    data = request.get_json() or {}
+    f_status = data.get("status") or None
+    f_brand_id = int(data["brand_id"]) if data.get("brand_id") else None
+    f_subreddit_id = int(data["subreddit_id"]) if data.get("subreddit_id") else None
+    f_account_id = data.get("account_id") or None
+    f_source = data.get("source") or None
+    f_date = data.get("date") or None
+
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
-            deployed = db.get_all_deployed_comment_urls()
-            return _check_live_batch(deployed, db, "CHECK-LIVE-ALL")
+            comments = db.get_filtered_comment_urls(
+                status=f_status, brand_id=f_brand_id,
+                subreddit_id=f_subreddit_id, account_id=f_account_id,
+                source_filter=f_source, date=f_date,
+            )
+            label = f_status or "all"
+            return _check_live_batch(comments, db, f"CHECK-LIVE-ALL({label})")
         finally:
             db.close()
 

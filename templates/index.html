@@ -320,8 +320,6 @@ function _batchGenComplete(result) {
     if (skipped.length) msg += `, ${skipped.length} skipped (low relevancy)`;
     if (errored.length) msg += `, ${errored.length} failed`;
     toast(msg, generated.length ? 'success' : 'info', 8000);
-    // Refresh saved tab content only if currently viewing it
-    if (_lsTab === 'saved') renderLsTabContent();
 }
 
 // =========================================================================
@@ -4983,7 +4981,6 @@ async function checkLiveAllComments() {
 
     runTask('/api/all-comments/check-live', body, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
-        loadAllComments();
     }, `Check Live${filterDesc}`);
 }
 
@@ -7680,7 +7677,6 @@ async function lsDeleteSelectedPostComments() {
 async function checkLiveSearchComments() {
     runTask('/api/search/comments/check-live', {}, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
-        renderLsTabContent();
     }, 'Check Live (Search)');
 }
 
@@ -7690,7 +7686,6 @@ async function checkLiveSearchFiltered() {
     const ids = withUrl.map(c => c.id);
     runTask('/api/search/comments/check-live', { comment_ids: ids }, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
-        renderLsTabContent();
     }, `Check Live (${ids.length} filtered)`);
 }
 

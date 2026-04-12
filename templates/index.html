@@ -7564,7 +7564,7 @@ async function checkLiveSearchComments() {
 }
 
 async function checkLiveSearchFiltered() {
-    const deployed = (_lsFilteredComments || []).filter(c => c.status === 'deployed' || c.status === 'paid');
+    const deployed = (_lsFilteredComments || []).filter(c => c.status === 'deployed');
     if (!deployed.length) { toast('No deployed comments in current filter to check', 'info'); return; }
     const ids = deployed.map(c => c.id);
     runTask('/api/search/comments/check-live', { comment_ids: ids }, (result) => {

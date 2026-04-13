@@ -562,6 +562,23 @@ class RedditSearchBot:
             key = sort_key_map[sort_by]
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
+        # Equal distribution across subreddits when multiple are searched
+        if subreddits and len(subreddits) > 1 and len(filtered) > limit:
+            per_sub = limit // len(subreddits)
+            by_sub = {}
+            for p in filtered:
+                sub = p.get("subreddit", "").lower()
+                by_sub.setdefault(sub, []).append(p)
+            result = []
+            leftover = []
+            for sub in by_sub:
+                result.extend(by_sub[sub][:per_sub])
+                leftover.extend(by_sub[sub][per_sub:])
+            remaining = limit - len(result)
+            if remaining > 0:
+                leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
+                result.extend(leftover[:remaining])
+            return result
         return filtered[:limit]
 
     # Class-level subscriber cache (persists across searches within same process)

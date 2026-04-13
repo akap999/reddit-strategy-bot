@@ -1059,6 +1059,10 @@ class Database:
         if "excluded" not in acct_cols:
             self.conn.execute("ALTER TABLE accounts ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
             self.conn.commit()
+        if "assign_seq" not in acct_cols:
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN assign_seq INTEGER NOT NULL DEFAULT 0")
+            self.conn.commit()
+
         # Re-sync lifetime_assignments from actual DB state (fixes drift caused
         # by delete_subreddit/delete_account paths that previously skipped
         # _decrement_lifetime calls).
@@ -2078,6 +2082,15 @@ class Database:
             "UPDATE accounts SET lifetime_assignments = lifetime_assignments + 1 WHERE username = ?",
             (username,)
         )
+
+    def bump_assign_seq(self, username):
+        """Set assign_seq to current max + 1 (global monotonic).
+        Ensures this account is last in round-robin order."""
+        if not username:
+            return
+        max_seq = self.conn.execute("SELECT COALESCE(MAX(assign_seq), 0) FROM accounts").fetchone()[0]
+        self.conn.execute("UPDATE accounts SET assign_seq = ? WHERE username = ?", (max_seq + 1, username))
+        self.conn.commit()
 
     def _decrement_lifetime(self, username, n=1):
         """Roll the global rotation counter back when an account is unassigned or

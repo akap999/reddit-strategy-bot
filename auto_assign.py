@@ -72,6 +72,10 @@ def _build_lookups(context):
     for r in context.get("subreddit_deployed_counts", []):
         sub_deployed[r["account_id"]] = r["cnt"]
 
+    # Round-robin sequence: lower = used least recently = should be picked first
+    assign_seq = {a["username"]: (a.get("assign_seq") or 0)
+                  for a in context.get("all_accounts", [])}
+
     return {
         "sub_day": sub_day,
         "pending": pending,
@@ -83,6 +87,7 @@ def _build_lookups(context):
         "sub_spread": sub_spread,
         "lifetime": lifetime,
         "sub_deployed": sub_deployed,
+        "assign_seq": assign_seq,
     }
 
 
@@ -210,10 +215,14 @@ def score_account(account, comment, lookups, batch_picks):
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
 
-    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
-    # One canonical counter sourced from accounts.lifetime_assignments. Grows on
-    # every assign, shrinks on every unassign/delete. Applies identically in
-    # both High and Low pools and to post scoring — the long-term fairness floor.
+    # --- Round-robin enforcement via assign_seq ---
+    # assign_seq is a persistent monotonic counter bumped on every assignment.
+    # Lower seq = used least recently = should be picked first.
+    # Multiply by 10000 so it dominates all other scoring — effectively strict
+    # round-robin, with other factors as tiebreakers within the same seq.
+    score -= 10000 * lookups.get("assign_seq", {}).get(username, 0)
+
+    # --- Legacy lifetime rotation (minor tiebreaker) ---
     score -= 8 * lookups.get("lifetime", {}).get(username, 0)
 
     # =====================================================================
@@ -301,6 +310,10 @@ def _build_post_lookups(context):
     lifetime = {a["username"]: (a.get("lifetime_assignments") or 0)
                 for a in context.get("all_accounts", [])}
 
+    # Round-robin sequence
+    assign_seq = {a["username"]: (a.get("assign_seq") or 0)
+                  for a in context.get("all_accounts", [])}
+
     return {
         "global_posts": global_posts,
         "sub_posts": sub_posts,
@@ -308,6 +321,7 @@ def _build_post_lookups(context):
         "pending": pending,
         "deployed": deployed,
         "lifetime": lifetime,
+        "assign_seq": assign_seq,
     }
 
 
@@ -341,9 +355,10 @@ def score_account_for_post(account, lookups, batch_picks, sub_owner):
     picks = batch_picks.get(username, 0)
     score -= 55 * picks
 
-    # --- Global lifetime rotation: -8 per lifetime assignment, platform-wide ---
-    # Same weight & source as score_account — one counter, one penalty,
-    # identical behavior across comment and post assignment.
+    # --- Round-robin enforcement via assign_seq ---
+    score -= 10000 * lookups.get("assign_seq", {}).get(username, 0)
+
+    # --- Legacy lifetime rotation (minor tiebreaker) ---
     score -= 8 * lookups.get("lifetime", {}).get(username, 0)
 
     # =====================================================================
@@ -444,8 +459,10 @@ def auto_assign_posts(db, subreddit_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.set_post_owner(post["id"], username)
+        db.bump_assign_seq(username)
         _increment_pool_slot_comments(db)
         batch_picks[username] += 1
+        lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
         lookups["sub_posts"][username] = lookups["sub_posts"].get(username, 0) + 1
         lookups["global_posts"][username] = lookups["global_posts"].get(username, 0) + 1
 
@@ -545,7 +562,9 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         for c in op_comments:
             db.assign_comment(c["id"], op_account)
+            db.bump_assign_seq(op_account)
             batch_picks[op_account] += 1
+            lookups["assign_seq"][op_account] = max(lookups["assign_seq"].values() or [0]) + 1
             lookups["pending"][op_account] = lookups["pending"].get(op_account, 0) + 1
             assignments.append({
                 "comment_id": c["id"],
@@ -600,8 +619,10 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
+        db.bump_assign_seq(username)
         _increment_pool_slot_comments(db)
         batch_picks[username] += 1
+        lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
         comment_day = comment.get("suggested_post_day", 0) or 0
@@ -644,8 +665,10 @@ def auto_assign_post(db, post_id, exclude_accounts=None):
 
         username = best_account["username"]
         db.assign_comment(comment["id"], username)
+        db.bump_assign_seq(username)
         _increment_pool_slot_comments(db)
         batch_picks[username] += 1
+        lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
         lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
 
         comment_day = comment.get("suggested_post_day", 0) or 0
@@ -721,6 +744,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
 
         if op_acct and any(a["username"] == op_acct for a in accounts):
             db.assign_comment(comment_id, op_acct)
+            db.bump_assign_seq(op_acct)
             if not post.get("owner_account"):
                 db.set_post_owner(post_id, op_acct)
             return {"ok": True, "account": op_acct, "score": None, "type": "op_reply"}
@@ -742,6 +766,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
         best_score, best_account = scores[0]
         username = best_account["username"]
         db.assign_comment(comment_id, username)
+        db.bump_assign_seq(username)
         _increment_pool_slot_comments(db)
         return {
             "ok": True, "account": username, "score": best_score, "type": "reply",
@@ -774,6 +799,7 @@ def auto_assign_single_comment(db, comment_id, exclude_accounts=None):
     best_score, best_account = scores[0]
     username = best_account["username"]
     db.assign_comment(comment_id, username)
+    db.bump_assign_seq(username)
     _increment_pool_slot_comments(db)
     return {
         "ok": True, "account": username, "score": best_score,
@@ -826,6 +852,7 @@ def auto_assign_single_post(db, post_id, exclude_accounts=None):
     (best_score, best_account), all_scores = result
     username = best_account["username"]
     db.set_post_owner(post_id, username)
+    db.bump_assign_seq(username)
     _increment_pool_slot_comments(db)
     return {
         "ok": True,
@@ -911,6 +938,7 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     username = best_account["username"]
 
     db.assign_search_comment(comment_id, username)
+    db.bump_assign_seq(username)
     _increment_pool_slot(db)
     return {
         "ok": True, "account": username, "score": best_score,
@@ -992,6 +1020,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
 
             # Assign
             db.assign_search_comment(comment["id"], username)
+            db.bump_assign_seq(username)
             _increment_pool_slot(db)
             assignments.append({
                 "comment_id": comment["id"],
@@ -1003,6 +1032,7 @@ def auto_assign_search_comments(db, exclude_accounts=None):
 
             # Update tracking
             batch_picks[username] += 1
+            lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
             lookups["pending"][username] = lookups["pending"].get(username, 0) + 1
             comment_day = comment.get("suggested_post_day", 0) or 0
             lookups["sub_day"][username][comment_day] += 1

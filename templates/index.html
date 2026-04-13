@@ -7378,14 +7378,9 @@ function lsFilterComments() {
         : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
-    // Status filter: only show posts where ALL comments match the selected status
+    // Status filter: show only comments matching the selected status
     if (status && status !== 'archived') {
-        // Find posts that have ANY comment NOT matching the status
-        const postHasNonMatch = {};
-        filtered.forEach(c => {
-            if (c.status !== status) postHasNonMatch[c.search_post_id] = true;
-        });
-        filtered = filtered.filter(c => !postHasNonMatch[c.search_post_id]);
+        filtered = filtered.filter(c => c.status === status);
     }
     // Subreddit multi-select filter
     const allSubsCount = lsAllSubsInComments().length;

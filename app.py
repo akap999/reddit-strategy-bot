@@ -2817,11 +2817,10 @@ def api_search_reddit():
     import math
     data = request.json or {}
     keyword = (data.get("keyword") or "").strip()
+    keywords_list = data.get("keywords") or []  # comma-separated multi-keyword support
     auto_brand = data.get("auto_brand")
-    if not keyword and not auto_brand:
-        return jsonify({"error": "keyword or auto_brand is required"}), 400
-    if keyword and auto_brand:
-        return jsonify({"error": "provide either keyword or auto_brand, not both"}), 400
+    if not keyword and not keywords_list and not auto_brand:
+        return jsonify({"error": "keyword, keywords, or auto_brand is required"}), 400
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -2852,6 +2851,18 @@ def api_search_reddit():
             if keyword:
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)
                 return {"results": results, "generated_keywords": None}
+
+            # Manual multi-keyword path
+            if keywords_list:
+                n = max(len(keywords_list), 1)
+                per_kw_limit = max(10, math.ceil(requested_limit / n * 1.5))
+                print(f"    Multi-keyword search: {n} keywords, per_kw_limit={per_kw_limit}")
+                print(f"    Keywords: {keywords_list}")
+                merged = bot.search_multiple_keywords(
+                    keywords_list, concurrent=True, limit=per_kw_limit, **common_filters
+                )
+                trimmed = merged[:requested_limit]
+                return {"results": trimmed, "generated_keywords": keywords_list}
 
             # Auto-brand path
             keywords, source = _resolve_brand_keywords(auto_brand, db=task_db)

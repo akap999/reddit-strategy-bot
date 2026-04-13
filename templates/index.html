@@ -6709,7 +6709,7 @@ function renderLsSearch(c) {
                             <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
                         </label>
                     </label>
-                    <input id="ls-keyword" placeholder="e.g. best testosterone clinic">
+                    <input id="ls-keyword" placeholder="e.g. hr software, hris, human resources">
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Subreddits (optional, comma-separated)</label>
@@ -6913,8 +6913,11 @@ async function lsRunSearch() {
     const maxSubsVal = parseInt(document.getElementById('ls-maxsubs').value);
     const minSubsVal = parseInt(document.getElementById('ls-minsubs').value);
     const scrutinyVal = parseInt(document.getElementById('ls-scrutiny').value);
+    // Support comma-separated keywords
+    const kwList = keyword ? keyword.split(',').map(s => s.trim()).filter(Boolean) : [];
     const body = {
-        keyword: autoOn ? undefined : keyword,
+        keyword: autoOn ? undefined : (kwList.length <= 1 ? keyword : undefined),
+        keywords: autoOn ? undefined : (kwList.length > 1 ? kwList : undefined),
         auto_brand: autoBrand,
         subreddits: (() => { const r = document.getElementById('ls-subreddit').value.trim(); if (!r) return undefined; const l = r.split(',').map(s => s.trim()).filter(Boolean); return l.length ? l : undefined; })(),
         excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,

@@ -300,11 +300,13 @@ def run_task(task_id, func, *args, **kwargs):
 
 _task_threads = {}  # task_id -> threading.Thread
 
-def start_task(task_type, func, *args, **kwargs):
+def start_task(task_type, func, *args, pass_task_id=False, **kwargs):
     task_id = str(uuid.uuid4())
     db = get_db()
     db.create_task(task_id, task_type)
     db.close()
+    if pass_task_id:
+        kwargs["_task_id"] = task_id
     t = threading.Thread(target=run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
     _task_threads[task_id] = t
     t.start()
@@ -3125,7 +3127,7 @@ def api_generate_search_comments_batch():
     if not valid_posts:
         return jsonify({"error": "No eligible posts to generate for"}), 400
 
-    def task():
+    def task(_task_id=None):
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
         api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
         bot = CommentGeneratorBot(api_key, reddit_base=proxy.rstrip("/") if proxy else None)
@@ -3143,10 +3145,20 @@ def api_generate_search_comments_batch():
                 brand_keywords = vp["brand_keywords"]
 
                 # Update progress
-                progress_db = Database(DB_PATH)
-                progress_db.connect()
-                # We don't have a progress field, so store partial result
-                progress_db.close()
+                if _task_id:
+                    try:
+                        progress_db = Database(DB_PATH)
+                        progress_db.connect()
+                        progress_db.update_task_progress(_task_id, {
+                            "current": i + 1,
+                            "total": len(valid_posts),
+                            "generated": len([r for r in results if r.get("generated")]),
+                            "skipped": len([r for r in results if r.get("skipped")]),
+                            "errors": len([r for r in results if r.get("error")]),
+                        })
+                        progress_db.close()
+                    except Exception:
+                        pass
 
                 try:
                     db2.update_search_post_status(pid, "generating")
@@ -3251,7 +3263,7 @@ def api_generate_search_comments_batch():
         finally:
             db2.close()
 
-    tid = start_task("generate-search-comments-batch", task)
+    tid = start_task("generate-search-comments-batch", task, pass_task_id=True)
     return jsonify({"task_id": tid, "post_count": len(valid_posts)})
 
 

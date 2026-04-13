@@ -1128,6 +1128,12 @@ class Database:
         """)
         self.conn.commit()
 
+        # ----- tasks: progress column for live updates -----
+        task_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "progress" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN progress TEXT")
+            self.conn.commit()
+
         # Performance indexes
         perf_indexes = [
             "CREATE INDEX IF NOT EXISTS idx_brands_subreddit ON brands(subreddit_id)",
@@ -1180,9 +1186,16 @@ class Database:
         )
         self.conn.commit()
 
+    def update_task_progress(self, task_id, progress):
+        self.conn.execute(
+            "UPDATE tasks SET progress=? WHERE id=?",
+            (json.dumps(progress), task_id)
+        )
+        self.conn.commit()
+
     def get_task(self, task_id):
         row = self.conn.execute(
-            "SELECT id, type, status, result, error FROM tasks WHERE id=?", (task_id,)
+            "SELECT id, type, status, result, error, progress FROM tasks WHERE id=?", (task_id,)
         ).fetchone()
         if not row:
             return None
@@ -1190,7 +1203,8 @@ class Database:
             "status": row["status"],
             "type": row["type"],
             "result": json.loads(row["result"]) if row["result"] else None,
-            "error": row["error"]
+            "error": row["error"],
+            "progress": json.loads(row["progress"]) if row.get("progress") else None
         }
 
     def cleanup_old_tasks(self, hours=24):

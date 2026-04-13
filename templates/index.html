@@ -260,6 +260,13 @@ function _pollTask(taskId, label, onComplete) {
         try {
             const t = await api(`/api/tasks/${taskId}`);
             retries = 0;
+            // Update task pill with progress info
+            if (t.progress && _bgTasks.has(taskId)) {
+                const p = t.progress;
+                const progressLabel = `${label} (${p.generated || 0}/${p.total || '?'} generated${p.skipped ? `, ${p.skipped} skipped` : ''}${p.errors ? `, ${p.errors} failed` : ''})`;
+                _bgTasks.get(taskId).label = progressLabel;
+                _renderTaskBar();
+            }
             if (t.status === 'complete') {
                 clearInterval(poll);
                 _removeBgTask(taskId);

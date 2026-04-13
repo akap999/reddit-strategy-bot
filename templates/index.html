@@ -7177,9 +7177,9 @@ function lsRenderSavedTable() {
                     <td>${p.score}</td>
                     <td>${p.brand_name ? `<span class="badge badge-brand">${p.brand_name}</span>` : '<span class="text-gray-500 text-xs">none</span>'}</td>
                     <td>${p.comment_count || 0} gen</td>
-                    <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':'badge-draft'}">${p.status}</span></td>
+                    <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':p.status==='irrelevant'?'badge-removed':'badge-draft'}">${p.status}</span></td>
                     <td class="flex gap-2">
-                        ${p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
+                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
                         <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
                     </td>
                 </tr>`;
@@ -7217,7 +7217,7 @@ async function lsGenerateSelected() {
 
 async function lsGenerateAll() {
     const excludeSubs = lsGetExcludedSubs();
-    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
+    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && p.status !== 'irrelevant' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
     if (!filtered.length) { toast('No eligible posts (must have brand, not already generating/complete, not excluded)', 'error'); return; }
     if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;

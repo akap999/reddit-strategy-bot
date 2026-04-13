@@ -3007,7 +3007,7 @@ def api_generate_search_comments(pid):
             # Relevancy threshold — skip generation if score too low
             threshold = data.get("relevance_threshold", 6)
             if rel_score < threshold:
-                db2.update_search_post_status(pid, "saved")
+                db2.update_search_post_status(pid, "irrelevant")
                 return {
                     "skipped": True,
                     "relevance_score": rel_score,
@@ -3111,7 +3111,7 @@ def api_generate_search_comments_batch():
         post = db_check.get_search_post(pid)
         if not post:
             continue
-        if post.get("status") == "generating":
+        if post.get("status") in ("generating", "irrelevant"):
             continue
         brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
         if not brand:
@@ -3183,7 +3183,7 @@ def api_generate_search_comments_batch():
 
                     threshold = data.get("relevance_threshold", 6)
                     if rel_score < threshold:
-                        db2.update_search_post_status(pid, "saved")
+                        db2.update_search_post_status(pid, "irrelevant")
                         results.append({"pid": pid, "skipped": True, "reason": f"Low relevance ({rel_score})"})
                         continue
 

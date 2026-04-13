@@ -7372,23 +7372,21 @@ function lsFilterComments() {
     const brandName = document.getElementById('ls-cf-brand')?.value;
     const status = document.getElementById('ls-cf-status')?.value;
 
-    // Post-level aggregate status (highest-ranked status among a post's comments)
-    const STATUS_RANK = { draft:0, assigned:1, informed:2, deployed:3, removed:4, archived:-1 };
-    const postStatus = {};
-    _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived').forEach(c => {
-        const cur = postStatus[c.search_post_id];
-        const r = STATUS_RANK[c.status] ?? -1;
-        if (cur == null || r > (STATUS_RANK[cur] ?? -1)) postStatus[c.search_post_id] = c.status;
-    });
-
     // When "archived" filter selected, show archived; otherwise exclude them
     let filtered = status === 'archived'
         ? _lsComments.filter(c => c.status === 'archived')
         : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
-    // Status filter applies at the POST level — keep all comments of posts whose aggregate status matches
-    if (status) filtered = filtered.filter(c => postStatus[c.search_post_id] === status);
+    // Status filter: only show posts where ALL comments match the selected status
+    if (status && status !== 'archived') {
+        // Find posts that have ANY comment NOT matching the status
+        const postHasNonMatch = {};
+        filtered.forEach(c => {
+            if (c.status !== status) postHasNonMatch[c.search_post_id] = true;
+        });
+        filtered = filtered.filter(c => !postHasNonMatch[c.search_post_id]);
+    }
     // Subreddit multi-select filter
     const allSubsCount = lsAllSubsInComments().length;
     if (_lsSelectedSubs && _lsSelectedSubs.size < allSubsCount) {

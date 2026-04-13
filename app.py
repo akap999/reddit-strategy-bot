@@ -1266,6 +1266,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             db.mark_comment_deleted(item["id"])
         else:
             db.mark_search_comment_removed(item["id"])
+        db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
+                          "marked_dead", prev, "removed",
+                          item.get("account_id"), item.get("subreddit"), item.get("brand_name"))
         changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
                         "action": "marked_dead", "prev_status": prev, "new_status": "removed"})
 
@@ -1280,6 +1283,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             else:
                 db.restore_search_comment_to_deployed(item["id"])
             restored += 1
+            db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
+                              "restored", cur_status, "deployed",
+                              item.get("account_id"), item.get("subreddit"), item.get("brand_name"))
             changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
                             "action": "restored", "prev_status": cur_status, "new_status": "deployed"})
             print(f"[{log_prefix}] #{item['id']} ({src}) RESTORED to deployed (was {cur_status})", flush=True)
@@ -1549,6 +1555,20 @@ def api_check_live_search_comments():
 
     tid = start_task("check-live-search", task)
     return jsonify({"task_id": tid})
+
+
+@app.route("/api/check-live/logs", methods=["GET"])
+def api_check_live_logs():
+    db = get_db()
+    try:
+        limit = request.args.get("limit", 100, type=int)
+        offset = request.args.get("offset", 0, type=int)
+        action = request.args.get("action") or None
+        source = request.args.get("source") or None
+        logs = db.get_live_check_logs(limit=limit, offset=offset, action=action, source=source)
+        return jsonify(logs)
+    finally:
+        db.close()
 
 
 @app.route("/api/subreddits/<int:sid>/backfill-keywords", methods=["POST"])

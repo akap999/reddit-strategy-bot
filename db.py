@@ -1111,6 +1111,21 @@ class Database:
                 value TEXT
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS check_live_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                comment_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                reddit_url TEXT,
+                action TEXT NOT NULL,
+                prev_status TEXT NOT NULL,
+                new_status TEXT NOT NULL,
+                account_id TEXT,
+                subreddit TEXT,
+                brand_name TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         self.conn.commit()
 
         # Performance indexes
@@ -1624,8 +1639,11 @@ class Database:
     def get_deployed_search_comment_urls(self):
         """Get search comments with Reddit URLs for live checking (any status with a URL)."""
         rows = self.conn.execute(
-            """SELECT sc.id, sc.reddit_comment_url, sc.status
+            """SELECT sc.id, sc.reddit_comment_url, sc.status,
+                      sc.account_id, sp.subreddit, b.name as brand_name
                FROM search_comments sc
+               JOIN search_posts sp ON sc.search_post_id = sp.id
+               LEFT JOIN brands b ON sc.brand_id = b.id
                WHERE sc.reddit_comment_url IS NOT NULL"""
         ).fetchall()
         return [dict(r) for r in rows]
@@ -1670,13 +1688,18 @@ class Database:
         where1 = " AND ".join(w1)
         where2 = " AND ".join(w2)
 
-        q1 = f"""SELECT c.id, c.reddit_comment_url, 'comment' as source, c.status
+        q1 = f"""SELECT c.id, c.reddit_comment_url, 'comment' as source, c.status,
+                        c.account_id, s.name as subreddit, b.name as brand_name
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
                  WHERE {where1}"""
-        q2 = f"""SELECT sc.id, sc.reddit_comment_url, 'search_comment' as source, sc.status
+        q2 = f"""SELECT sc.id, sc.reddit_comment_url, 'search_comment' as source, sc.status,
+                        sc.account_id, sp.subreddit, b.name as brand_name
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
                  WHERE {where2}"""
 
         if source_filter == 'comment':
@@ -3781,3 +3804,31 @@ class Database:
              gate_penalty, scrutiny_score, subreddit_type)
         )
         self.conn.commit()
+
+    # ── Check-Live Logs ──────────────────────────────────────────────
+
+    def log_live_check(self, comment_id, source, reddit_url, action,
+                       prev_status, new_status, account_id=None,
+                       subreddit=None, brand_name=None):
+        self.conn.execute(
+            """INSERT INTO check_live_log
+               (comment_id, source, reddit_url, action, prev_status, new_status,
+                account_id, subreddit, brand_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (comment_id, source, reddit_url, action, prev_status, new_status,
+             account_id, subreddit, brand_name))
+        self.conn.commit()
+
+    def get_live_check_logs(self, limit=100, offset=0, action=None, source=None):
+        q = "SELECT * FROM check_live_log WHERE 1=1"
+        params = []
+        if action:
+            q += " AND action = ?"
+            params.append(action)
+        if source:
+            q += " AND source = ?"
+            params.append(source)
+        q += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self.conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]

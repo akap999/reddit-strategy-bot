@@ -6619,9 +6619,9 @@ function renderLsSearch(c) {
                     <input id="ls-keyword" placeholder="e.g. best testosterone clinic">
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400">Subreddit (optional)</label>
+                    <label class="text-xs text-gray-400">Subreddits (optional, comma-separated)</label>
                     <div class="flex gap-1">
-                        <input id="ls-subreddit" placeholder="e.g. testosterone" class="flex-1">
+                        <input id="ls-subreddit" placeholder="e.g. testosterone, fitness, health" class="flex-1">
                         <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability">Check</button>
                     </div>
                     <div id="ls-sub-check" class="text-xs mt-1"></div>
@@ -6678,18 +6678,23 @@ function renderLsSearch(c) {
 }
 
 async function lsCheckSubreddit() {
-    const name = document.getElementById('ls-subreddit').value.trim();
-    if (!name) { toast('Enter a subreddit name', 'error'); return; }
+    const raw = document.getElementById('ls-subreddit').value.trim();
+    if (!raw) { toast('Enter a subreddit name', 'error'); return; }
+    const names = raw.split(',').map(s => s.trim()).filter(Boolean);
     const el = document.getElementById('ls-sub-check');
     el.innerHTML = '<span class="text-gray-400">Checking...</span>';
-    try {
-        const res = await api(`/api/search/check-subreddit?name=${encodeURIComponent(name)}`);
-        if (res.exists) {
-            el.innerHTML = `<span class="text-green-400">r/${res.name} — ${(res.subscribers||0).toLocaleString()} subscribers, ${res.active_accounts||0} active</span>`;
-        } else {
-            el.innerHTML = '<span class="text-red-400">Subreddit not found or private</span>';
-        }
-    } catch(e) { el.innerHTML = '<span class="text-red-400">Check failed</span>'; }
+    const parts = [];
+    for (const name of names) {
+        try {
+            const res = await api(`/api/search/check-subreddit?name=${encodeURIComponent(name)}`);
+            if (res.exists) {
+                parts.push(`<span class="text-green-400">r/${res.name} — ${(res.subscribers||0).toLocaleString()} subs</span>`);
+            } else {
+                parts.push(`<span class="text-red-400">r/${name} — not found</span>`);
+            }
+        } catch(e) { parts.push(`<span class="text-red-400">r/${name} — check failed</span>`); }
+    }
+    el.innerHTML = parts.join(' &nbsp;|&nbsp; ');
 }
 
 function lsSetLowScrutiny() {
@@ -6818,7 +6823,7 @@ async function lsRunSearch() {
     const body = {
         keyword: autoOn ? undefined : keyword,
         auto_brand: autoBrand,
-        subreddit: document.getElementById('ls-subreddit').value.trim() || undefined,
+        subreddits: (() => { const r = document.getElementById('ls-subreddit').value.trim(); if (!r) return undefined; const l = r.split(',').map(s => s.trim()).filter(Boolean); return l.length ? l : undefined; })(),
         excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,
         min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
         min_score: parseInt(document.getElementById('ls-minscore').value) || 0,

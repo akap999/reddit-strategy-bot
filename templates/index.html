@@ -7360,6 +7360,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
+                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsExportCsv()">Export CSV</button>
             </span>
         </div>
         <div id="ls-comments-counts" class="flex flex-wrap gap-2 mb-3 text-xs"></div>
@@ -7940,6 +7941,37 @@ async function lsDeleteAllComments() {
     }
     toast(`Deleted ${done} comment(s)`, 'success');
     renderLsTabContent();
+}
+
+function lsExportCsv() {
+    const comments = _lsFilteredComments || [];
+    if (!comments.length) { toast('No comments to export', 'info'); return; }
+    const keyword = document.getElementById('ls-keyword')?.value?.trim() || '';
+    const csvEscape = (val) => {
+        if (val == null) return '';
+        const s = String(val);
+        if (s.includes('"') || s.includes(',') || s.includes('\n') || s.includes('\r')) {
+            return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+    };
+    const header = ['Deploy Date', 'Keyword', 'Post Link', 'Comment Link', 'Comment Content'];
+    const rows = comments.map(c => [
+        csvEscape(c.deployed_at || ''),
+        csvEscape(keyword),
+        csvEscape(c.post_url || ''),
+        csvEscape(c.reddit_comment_url || ''),
+        csvEscape(c.body || ''),
+    ].join(','));
+    const csv = [header.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ls-comments-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(`Exported ${comments.length} comment(s)`, 'success');
 }
 
 async function lsAutoAssignAll() {

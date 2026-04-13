@@ -7378,9 +7378,17 @@ function lsFilterComments() {
         : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
-    // Status filter: show only comments matching the selected status
+    // Status filter: post-level — show posts whose highest-ranked comment matches
+    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, removed: 6 };
     if (status && status !== 'archived') {
-        filtered = filtered.filter(c => c.status === status);
+        const postMaxStatus = {};
+        filtered.forEach(c => {
+            const pid = c.search_post_id;
+            const rank = LS_STATUS_RANK[c.status] ?? -1;
+            if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
+        });
+        const targetRank = LS_STATUS_RANK[status] ?? -1;
+        filtered = filtered.filter(c => postMaxStatus[c.search_post_id] === targetRank);
     }
     // Subreddit multi-select filter
     const allSubsCount = lsAllSubsInComments().length;
@@ -7407,7 +7415,10 @@ function lsFilterComments() {
     // Sort groups by newest comment first
     const sortedGroups = Object.entries(groups).sort((a, b) => (b[1].newest || '').localeCompare(a[1].newest || ''));
 
-    el.innerHTML = sortedGroups.map(([pid, g]) => `
+    el.innerHTML = sortedGroups.map(([pid, g]) => {
+        const _maxRank = Math.max(...g.comments.map(c => LS_STATUS_RANK[c.status] ?? -1));
+        const _postStatus = Object.keys(LS_STATUS_RANK).find(k => LS_STATUS_RANK[k] === _maxRank) || '';
+        return `
         <div class="card p-4 mb-4">
             <div class="flex justify-between items-center mb-3" style="border-bottom:1px solid #343536;padding-bottom:8px">
                 <div class="flex items-center gap-2">
@@ -7415,6 +7426,7 @@ function lsFilterComments() {
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
                     <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
+                    <span class="badge badge-${_postStatus}" style="font-size:10px">${_postStatus}</span>
                 </div>
                 <div class="flex gap-1 items-center">
                     ${g.comments.some(c => c.status === 'archived')
@@ -7475,7 +7487,7 @@ function lsFilterComments() {
                 `).join('')}</tbody>
             </table>
         </div>
-    `).join('');
+    `; }).join('');
 }
 
 async function lsMarkPaid(cid) {

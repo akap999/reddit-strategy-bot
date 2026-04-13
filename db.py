@@ -1204,7 +1204,7 @@ class Database:
             "type": row["type"],
             "result": json.loads(row["result"]) if row["result"] else None,
             "error": row["error"],
-            "progress": json.loads(row["progress"]) if row.get("progress") else None
+            "progress": json.loads(row["progress"]) if row["progress"] else None
         }
 
     def cleanup_old_tasks(self, hours=24):

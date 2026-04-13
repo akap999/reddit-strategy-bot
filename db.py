@@ -1199,7 +1199,8 @@ class Database:
         ).fetchone()
         prior = row["account_id"] if row else None
         self.conn.execute(
-            "UPDATE comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now') WHERE id = ?",
+            "UPDATE comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now'), "
+            "paid_at = NULL, deleted_at = NULL, reddit_comment_url = NULL, deployed_at = NULL WHERE id = ?",
             (account_id, comment_id)
         )
         if prior and prior != account_id:
@@ -3628,7 +3629,8 @@ class Database:
         ).fetchone()
         prior = row["account_id"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now') WHERE id = ?",
+            "UPDATE search_comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now'), "
+            "paid_at = NULL, deleted_at = NULL, reddit_comment_url = NULL, deployed_at = NULL WHERE id = ?",
             (account_id, comment_id))
         if prior and prior != account_id:
             self._decrement_lifetime(prior)

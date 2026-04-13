@@ -3308,7 +3308,7 @@ function renderCommentNodeFlat(c) {
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
     else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
-    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
+    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
 
     return `
         <div class="mb-2">
@@ -3353,7 +3353,7 @@ function renderCommentNode(c, depth) {
     else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
     else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
-    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
+    else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
 
     const escapedBody = (c.body || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
@@ -4753,7 +4753,7 @@ function renderAllCommentCard(c) {
     } else if (c.status === 'paid') {
         actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'removed') {
-        actionBtns = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="${_acAction(src, c.id, 'unremove')}">Unremove</button>`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="${_acAction(src, c.id, 'unremove')}">Unremove</button>`;
     } else if (c.status === 'archived') {
         actionBtns = `<button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsUnarchivePost(${c.source === 'search_comment' ? c.p_id : 0})">Unarchive Post</button>`;
     }
@@ -7473,6 +7473,8 @@ function lsFilterComments() {
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'removed' ? `
+                                    <button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button>
+                                    <button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>
                                     <button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="lsUnremoveComment(${c.id})">Unremove</button>
                                 ` : ''}
                                 ${c.status === 'archived' ? `

@@ -7415,7 +7415,6 @@ function lsFilterComments() {
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
                     <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
-                    ${postStatus[pid] ? `<span class="badge badge-${postStatus[pid]} ml-2" title="Post aggregate status">${postStatus[pid]}</span>` : ''}
                 </div>
                 <div class="flex gap-1 items-center">
                     ${g.comments.some(c => c.status === 'archived')

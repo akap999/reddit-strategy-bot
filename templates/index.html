@@ -7944,7 +7944,12 @@ async function lsDeleteAllComments() {
 }
 
 function lsExportCsv() {
-    const comments = _lsFilteredComments || [];
+    let comments = _lsFilteredComments || [];
+    // Apply exact status filter for export (post-level filter may include siblings)
+    const status = document.getElementById('ls-cf-status')?.value;
+    if (status) {
+        comments = comments.filter(c => c.status === status);
+    }
     if (!comments.length) { toast('No comments to export', 'info'); return; }
     const keyword = document.getElementById('ls-keyword')?.value?.trim() || '';
     const csvEscape = (val) => {
@@ -7955,9 +7960,10 @@ function lsExportCsv() {
         }
         return s;
     };
+    const dateOnly = (d) => d ? d.slice(0, 10) : '';
     const header = ['Deploy Date', 'Keyword', 'Post Link', 'Comment Link', 'Comment Content'];
     const rows = comments.map(c => [
-        csvEscape(c.deployed_at || ''),
+        csvEscape(dateOnly(c.deployed_at)),
         csvEscape(keyword),
         csvEscape(c.post_url || ''),
         csvEscape(c.reddit_comment_url || ''),

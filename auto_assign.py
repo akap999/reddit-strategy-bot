@@ -904,33 +904,23 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available"}
 
-    high_pool, low_pool = _split_pools(accounts)
+    high_pool, _low_pool = _split_pools(accounts)
+    if not high_pool:
+        return {"error": "No high-karma accounts available for Live Search assignment"}
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
     is_reply = comment.get("is_reply", 0)
 
-    # Determine pool from global slot
-    use_low = _next_pool_is_low(db) and low_pool
-    primary = low_pool if use_low else high_pool
-    fallback = high_pool if use_low else low_pool
-
+    # Live Search: only use high karma pool
     if is_reply:
-        pool_to_use = primary if primary else fallback
-        eligible = list(pool_to_use) if pool_to_use else []
+        eligible = list(high_pool)
         blocked = set()
     else:
         blocked = _get_search_post_toplevel_accounts(db, comment["search_post_id"])
-        eligible_primary = [a for a in primary if a["username"] not in blocked] if primary else []
-        eligible_fallback = [a for a in fallback if a["username"] not in blocked] if fallback else []
-        if eligible_primary:
-            eligible = eligible_primary
-        elif eligible_fallback:
-            eligible = eligible_fallback
-        else:
-            eligible = []
+        eligible = [a for a in high_pool if a["username"] not in blocked]
 
     if not eligible:
-        return {"error": "No eligible account — all accounts already used on this post."}
+        return {"error": "No eligible high-karma account — all high-karma accounts already used on this post."}
 
     scores = [(score_account(a, comment, lookups, batch_picks), a) for a in eligible]
     random.shuffle(scores); scores.sort(key=lambda x: -x[0])
@@ -939,10 +929,9 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
 
     db.assign_search_comment(comment_id, username)
     db.bump_assign_seq(username)
-    _increment_pool_slot(db)
     return {
         "ok": True, "account": username, "score": best_score,
-        "pool": "low" if use_low and username in {a["username"] for a in low_pool} else "high",
+        "pool": "high",
         "_debug_all_scores": {s[1]["username"]: s[0] for s in scores},
         "_debug_blocked": list(blocked),
     }
@@ -966,7 +955,9 @@ def auto_assign_search_comments(db, exclude_accounts=None):
     if not accounts:
         return {"error": "No accounts available after exclusions"}
 
-    high_pool, low_pool = _split_pools(accounts)
+    high_pool, _low_pool = _split_pools(accounts)
+    if not high_pool:
+        return {"error": "No high-karma accounts available for Live Search assignment"}
     lookups = _build_lookups(context)
     batch_picks = defaultdict(int)
     assignments = []
@@ -985,28 +976,15 @@ def auto_assign_search_comments(db, exclude_accounts=None):
         for comment in comments:
             is_reply = comment.get("is_reply", 0)
 
-            # Determine pool for this slot
-            use_low = _next_pool_is_low(db) and low_pool
-            primary = low_pool if use_low else high_pool
-            fallback = high_pool if use_low else low_pool
-
-            # Build eligible account list from the selected pool
+            # Live Search: only use high karma pool
             if is_reply:
-                eligible_primary = list(primary) if primary else []
-                eligible_fallback = list(fallback) if fallback else []
+                eligible = list(high_pool)
             else:
-                eligible_primary = [a for a in primary if a["username"] not in blocked] if primary else []
-                eligible_fallback = [a for a in fallback if a["username"] not in blocked] if fallback else []
+                eligible = [a for a in high_pool if a["username"] not in blocked]
 
-            if eligible_primary:
-                eligible = eligible_primary
-                picked_pool = "low" if use_low else "high"
-            elif eligible_fallback:
-                eligible = eligible_fallback
-                picked_pool = "high" if use_low else "low"
-            else:
+            if not eligible:
                 skipped += 1
-                warnings.append(f"No eligible account for comment {comment['id']} (all blocked on post)")
+                warnings.append(f"No eligible high-karma account for comment {comment['id']} (all blocked on post)")
                 continue
 
             # Score each eligible account
@@ -1021,13 +999,12 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             # Assign
             db.assign_search_comment(comment["id"], username)
             db.bump_assign_seq(username)
-            _increment_pool_slot(db)
             assignments.append({
                 "comment_id": comment["id"],
                 "account": username,
                 "score": best_score,
                 "subreddit": comment.get("subreddit", ""),
-                "pool": picked_pool,
+                "pool": "high",
             })
 
             # Update tracking

@@ -929,9 +929,22 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
 
     db.assign_search_comment(comment_id, username)
     db.bump_assign_seq(username)
+    lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
+
+    # Compute rotation info
+    pool_size = len(high_pool)
+    pool_seqs = sorted([lookups["assign_seq"].get(a["username"], 0) for a in high_pool])
+    rotation_complete = pool_size > 0 and (pool_seqs[-1] - pool_seqs[0]) == pool_size - 1 and len(set(pool_seqs)) == pool_size
+    # Position = how many accounts have been used in current rotation
+    min_seq = pool_seqs[0] if pool_seqs else 0
+    rotation_position = sum(1 for s in pool_seqs if s > min_seq) if not rotation_complete else pool_size
+
     return {
         "ok": True, "account": username, "score": best_score,
         "pool": "high",
+        "rotation_complete": rotation_complete,
+        "rotation_position": rotation_position,
+        "pool_size": pool_size,
         "_debug_all_scores": {s[1]["username"]: s[0] for s in scores},
         "_debug_blocked": list(blocked),
     }
@@ -1016,9 +1029,17 @@ def auto_assign_search_comments(db, exclude_accounts=None):
             if not is_reply:
                 blocked.add(username)
 
+    # Compute rotation info after all assignments
+    pool_size = len(high_pool)
+    full_rotations = len(assignments) // pool_size if pool_size > 0 else 0
+    rotation_into_next = len(assignments) % pool_size if pool_size > 0 else 0
+
     return {
         "assigned": len(assignments),
         "skipped": skipped,
         "assignments": assignments,
         "warnings": warnings,
+        "full_rotations": full_rotations,
+        "rotation_into_next": rotation_into_next,
+        "pool_size": pool_size,
     }

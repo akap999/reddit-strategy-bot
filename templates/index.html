@@ -7828,7 +7828,9 @@ async function _lsAutoAssignSingle() {
     try {
         const result = await api(`/api/search/comments/${cid}/auto-assign`, { method: 'POST', body: { exclude_accounts: exclude } });
         if (result.error) { toast(result.error, 'error'); return; }
-        toast(`Assigned to ${result.account} (score: ${result.score})`, 'success');
+        let rotMsg = result.pool_size ? ` — Rotation: ${result.rotation_position}/${result.pool_size}` : '';
+        if (result.rotation_complete) rotMsg = ' — Rotation Complete! Starting fresh rotation';
+        toast(`Assigned to ${result.account} (score: ${result.score})${rotMsg}`, 'success');
         closeModal();
         _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: result.account, assigned_at: new Date().toISOString() });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'assigned', account_id: result.account, assigned_at: new Date().toISOString() });
@@ -8091,6 +8093,11 @@ async function _submitLsAutoAssign() {
         let msg = `Assigned ${result.assigned} comment${result.assigned!==1?'s':''}`;
         if (result.skipped) msg += `, ${result.skipped} skipped`;
         if (breakdown) msg += `\n${breakdown}`;
+        if (result.pool_size) {
+            if (result.full_rotations) msg += `\n🔄 ${result.full_rotations} full rotation${result.full_rotations>1?'s':''} completed`;
+            if (result.rotation_into_next) msg += `, ${result.rotation_into_next}/${result.pool_size} into next`;
+            else if (result.full_rotations) msg += ` (clean finish)`;
+        }
         toast(msg, 'success', 8000);
         closeModal();
         renderLsTabContent();

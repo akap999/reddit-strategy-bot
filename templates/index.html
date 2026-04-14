@@ -300,18 +300,41 @@ async function runTask(url, body, onComplete, label) {
     }
 }
 
-function _restoreBgTasks() {
+async function _restoreBgTasks() {
+    // Primary: fetch running tasks from server (source of truth)
+    const _taskTypeLabels = {
+        generate_batch: 'Generating comments',
+        generate_single: 'Generating comment',
+        check_live: 'Checking live status',
+        refresh_accounts: 'Refreshing accounts',
+    };
+    try {
+        const running = await fetch('/api/tasks/running').then(r => r.json());
+        if (running && running.length) {
+            // Get labels from localStorage if available
+            const saved = JSON.parse(localStorage.getItem('_bgTasks') || '[]');
+            const labelMap = {};
+            saved.forEach(t => { labelMap[t.id] = t.label; });
+            for (const t of running) {
+                if (_bgTasks.has(t.id)) continue;
+                const label = labelMap[t.id] || _taskTypeLabels[t.type] || t.type || 'Background task';
+                _addBgTask(t.id, label);
+                _pollTask(t.id, label, null);
+            }
+            return;
+        }
+    } catch(e) {}
+    // Fallback: restore from localStorage
     try {
         const saved = JSON.parse(localStorage.getItem('_bgTasks') || '[]');
         if (!saved.length) return;
-        // Only restore tasks saved in the last 10 minutes — stale tasks are cleared
         const cutoff = Date.now() - 10 * 60 * 1000;
         const valid = saved.filter(t => (t.ts || 0) > cutoff);
         if (valid.length !== saved.length) {
             localStorage.setItem('_bgTasks', JSON.stringify(valid));
         }
         for (const { id, label } of valid) {
-            if (_bgTasks.has(id)) continue; // skip already tracked
+            if (_bgTasks.has(id)) continue;
             _addBgTask(id, label);
             _pollTask(id, label, null);
         }
@@ -3335,6 +3358,7 @@ function renderCommentNodeFlat(c) {
                         <button class="btn btn-sm btn-secondary" onclick="generateReplyToComment(${c.id}, ${c.post_id})">Reply</button>
                         <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                         ${actionBtns}
+                        ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                         ${c.status !== 'deployed' ? `<button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>` : ''}
                     </span>
                 </div>
@@ -3386,6 +3410,7 @@ function renderCommentNode(c, depth) {
                         <button class="btn btn-sm btn-secondary" onclick="generateReplyToComment(${c.id}, ${c.post_id})">Reply</button>
                         <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                         ${actionBtns}
+                        ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                         ${c.status !== 'deployed' ? `<button class="btn btn-sm btn-danger" onclick="deleteComment(${c.id})">Del</button>` : ''}
                     </span>
                 </div>
@@ -3841,6 +3866,17 @@ async function unremoveComment(cid) {
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, { status: 'deployed' });
     else loadCommentTree();
     _acUpdateLocal(cid, 'comment', { status: 'deployed' });
+}
+
+async function undoComment(cid) {
+    try {
+        const r = await api(`/api/comments/${cid}/undo`, { method: 'POST' });
+        if (r.error) { toast(r.error, 'error'); return; }
+        toast(`Undone to ${r.new_status}`, 'success');
+        if (currentView === 'comments') loadCommentTree();
+        _acUpdateLocal(cid, 'comment', { status: r.new_status, prev_status: null });
+        if (currentView === 'allcomments') renderAllCommentsList();
+    } catch(e) { toast('Cannot undo', 'error'); }
 }
 
 function editDeployedLinkModal(cid, source) {
@@ -4788,6 +4824,7 @@ function renderAllCommentCard(c) {
             <span class="ml-auto flex gap-1 flex-nowrap" style="white-space:nowrap">
                 <button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit')}">Edit</button>
                 ${actionBtns}
+                ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="${src === 'search_comment' ? `lsUndoComment(${c.id})` : `undoComment(${c.id})`}" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                 ${c.status !== 'deployed' ? `<button class="btn btn-sm btn-danger" onclick="${_acAction(src, c.id, 'delete')}">Del</button>` : ''}
             </span>
         </div>
@@ -6593,6 +6630,7 @@ let _lsSavedPosts = [];
 let _lsComments = [];
 let _lsFilteredComments = [];
 let _lsSelectedSubs = null; // null = all selected (default)
+let _lsSubNoneExplicit = false; // true when user explicitly clicks "None"
 
 function _lsUpdateCommentLocal(cid, patch) {
     const i = _lsComments.findIndex(c => c.id === cid);
@@ -7319,7 +7357,7 @@ async function renderLsComments(c) {
     const brands = [...new Set(active.map(c => c.brand_name).filter(Boolean))];
     c.innerHTML = `
         <div class="flex gap-3 mb-3 items-center flex-wrap">
-            <select id="ls-cf-post" onchange="lsFilterComments()" class="w-64">
+            <select id="ls-cf-post" onchange="lsBuildSubList();lsFilterComments()" class="w-64">
                 <option value="">All Posts</option>
                 ${[...new Set(active.map(c=>JSON.stringify({id:c.search_post_id,title:c.post_title})))].map(s=>{const p=JSON.parse(s);return `<option value="${p.id}">${(p.title||'').substring(0,50)}</option>`;}).join('')}
             </select>
@@ -7337,7 +7375,7 @@ async function renderLsComments(c) {
                     <div id="ls-cf-sub-list"></div>
                 </div>
             </div>
-            <select id="ls-cf-status" onchange="lsFilterComments()" class="w-36">
+            <select id="ls-cf-status" onchange="lsBuildSubList();lsFilterComments()" class="w-36">
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="assigned">Assigned</option>
@@ -7361,6 +7399,7 @@ async function renderLsComments(c) {
                 </div>
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()">Check Live Logs</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
+                <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsExportCsv()">Export CSV</button>
@@ -7380,12 +7419,35 @@ function lsAllSubsInComments() {
     if (brandName) pool = pool.filter(c => c.brand_name === brandName);
     return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
 }
+function _lsPreFilteredSubsInComments() {
+    // Get subs that have comments matching current non-sub filters (status, brand, postId)
+    const postId = document.getElementById('ls-cf-post')?.value;
+    const brandName = document.getElementById('ls-cf-brand')?.value;
+    const status = document.getElementById('ls-cf-status')?.value;
+    let pool = status === 'archived'
+        ? _lsComments.filter(c => c.status === 'archived')
+        : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
+    if (postId) pool = pool.filter(c => c.search_post_id == postId);
+    if (brandName) pool = pool.filter(c => c.brand_name === brandName);
+    if (status && status !== 'archived') {
+        const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, removed: 6 };
+        const postMaxStatus = {};
+        pool.forEach(c => {
+            const pid = c.search_post_id;
+            const rank = LS_STATUS_RANK[c.status] ?? -1;
+            if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
+        });
+        const targetRank = LS_STATUS_RANK[status] ?? -1;
+        pool = pool.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+    }
+    return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
+}
 function lsBuildSubList() {
-    const subs = lsAllSubsInComments();
+    const subs = _lsPreFilteredSubsInComments();
     if (_lsSelectedSubs === null) _lsSelectedSubs = new Set(subs);
     else _lsSelectedSubs = new Set([...subs].filter(s => _lsSelectedSubs.has(s)));
-    // If brand filter narrowed subs and nothing is selected, select all visible
-    if (_lsSelectedSubs.size === 0 && subs.length > 0) _lsSelectedSubs = new Set(subs);
+    // If brand filter narrowed subs and nothing is selected, select all visible (unless user explicitly clicked None)
+    if (_lsSelectedSubs.size === 0 && subs.length > 0 && !_lsSubNoneExplicit) _lsSelectedSubs = new Set(subs);
     const list = document.getElementById('ls-cf-sub-list');
     if (list) {
         list.innerHTML = subs.map(s => `
@@ -7399,6 +7461,7 @@ function lsBuildSubList() {
 }
 function lsOnBrandFilterChange() {
     _lsSelectedSubs = null; // reset sub selection when brand changes
+    _lsSubNoneExplicit = false;
     lsBuildSubList();
     lsFilterComments();
 }
@@ -7409,12 +7472,14 @@ function lsToggleSubFilter(ev) {
 }
 function lsToggleSub(s) {
     if (!_lsSelectedSubs) _lsSelectedSubs = new Set(lsAllSubsInComments());
-    if (_lsSelectedSubs.has(s)) _lsSelectedSubs.delete(s); else _lsSelectedSubs.add(s);
+    if (_lsSelectedSubs.has(s)) _lsSelectedSubs.delete(s); else { _lsSelectedSubs.add(s); _lsSubNoneExplicit = false; }
+    if (_lsSelectedSubs.size === 0) _lsSubNoneExplicit = true;
     lsUpdateSubCountBadge();
     lsFilterComments();
 }
 function lsSubFilterAll(on) {
     const subs = lsAllSubsInComments();
+    _lsSubNoneExplicit = !on;
     _lsSelectedSubs = new Set(on ? subs : []);
     lsBuildSubList();
     lsFilterComments();
@@ -7422,7 +7487,7 @@ function lsSubFilterAll(on) {
 function lsUpdateSubCountBadge() {
     const el = document.getElementById('ls-cf-sub-count');
     if (!el) return;
-    const t = lsAllSubsInComments().length;
+    const t = _lsPreFilteredSubsInComments().length;
     const n = _lsSelectedSubs ? _lsSelectedSubs.size : t;
     el.textContent = (n === t) ? ' (All)' : ` (${n}/${t})`;
 }
@@ -7577,6 +7642,7 @@ function lsFilterComments() {
                                 ${c.status === 'archived' ? `
                                     <span class="text-xs" style="color:#8888aa">Archived</span>
                                 ` : ''}
+                                ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="lsUndoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
                                 <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy">Copy</button>
@@ -7615,6 +7681,17 @@ async function lsUnremoveComment(cid) {
         _lsUpdateCommentLocal(cid, { status: 'deployed' });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'deployed' });
     } catch(e) { toast('Failed to unremove', 'error'); }
+}
+
+async function lsUndoComment(cid) {
+    try {
+        const r = await api(`/api/search/comments/${cid}/undo`, { method: 'POST' });
+        if (r.error) { toast(r.error, 'error'); return; }
+        toast(`Undone to ${r.new_status}`, 'success');
+        _lsUpdateCommentLocal(cid, { status: r.new_status, prev_status: null });
+        lsFilterComments();
+        if (currentView === 'allcomments') { _acUpdateLocal(cid, 'search_comment', { status: r.new_status, prev_status: null }); renderAllCommentsList(); }
+    } catch(e) { toast('Cannot undo', 'error'); }
 }
 
 async function lsArchivePost(postId) {
@@ -7904,6 +7981,15 @@ async function lsDeleteComment(cid) {
         _lsRemoveCommentLocal(cid);
         if (currentView === 'allcomments') { _acData = _acData.filter(c => !(c.id === cid && c.source === 'search_comment')); renderAllCommentsList(); }
     } catch(e) {}
+}
+
+function lsToggleAllPostChecks(checked) {
+    // Only toggle visible (not display:none) post checkboxes
+    document.querySelectorAll('.ls-cg-check').forEach(cb => {
+        if (cb.closest('.card') && cb.closest('.card').style.display !== 'none') {
+            cb.checked = checked;
+        }
+    });
 }
 
 async function lsDeleteSelectedPostComments() {

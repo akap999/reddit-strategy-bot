@@ -883,6 +883,7 @@ class Database:
             "assigned_at": "ALTER TABLE comments ADD COLUMN assigned_at TEXT",
             "informed_at": "ALTER TABLE comments ADD COLUMN informed_at TEXT",
             "last_live_check": "ALTER TABLE comments ADD COLUMN last_live_check TEXT",
+            "prev_status": "ALTER TABLE comments ADD COLUMN prev_status TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -984,6 +985,7 @@ class Database:
             "assigned_at": "ALTER TABLE search_comments ADD COLUMN assigned_at TEXT",
             "informed_at": "ALTER TABLE search_comments ADD COLUMN informed_at TEXT",
             "last_live_check": "ALTER TABLE search_comments ADD COLUMN last_live_check TEXT",
+            "prev_status": "ALTER TABLE search_comments ADD COLUMN prev_status TEXT",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -1207,6 +1209,14 @@ class Database:
             "progress": json.loads(row["progress"]) if row["progress"] else None
         }
 
+    def get_running_tasks(self):
+        rows = self.conn.execute(
+            "SELECT id, type, progress FROM tasks WHERE status='running'"
+        ).fetchall()
+        return [{"id": r["id"], "type": r["type"],
+                 "progress": json.loads(r["progress"]) if r["progress"] else None}
+                for r in rows]
+
     def cleanup_old_tasks(self, hours=24):
         self.conn.execute(
             "DELETE FROM tasks WHERE created_at < datetime('now', ?)",
@@ -1224,13 +1234,14 @@ class Database:
         # Read prior account so we can correctly adjust the lifetime counter
         # if the comment was already assigned to someone else (reassignment).
         row = self.conn.execute(
-            "SELECT account_id FROM comments WHERE id = ?", (comment_id,)
+            "SELECT account_id, status FROM comments WHERE id = ?", (comment_id,)
         ).fetchone()
         prior = row["account_id"] if row else None
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now'), "
+            "UPDATE comments SET account_id = ?, status = 'assigned', prev_status = ?, assigned_at = datetime('now'), "
             "paid_at = NULL, deleted_at = NULL, reddit_comment_url = NULL, deployed_at = NULL WHERE id = ?",
-            (account_id, comment_id)
+            (account_id, old_status, comment_id)
         )
         if prior and prior != account_id:
             self._decrement_lifetime(prior)
@@ -1254,9 +1265,11 @@ class Database:
     def deploy_comment(self, comment_id, reddit_comment_url, deployed_at=None):
         if not deployed_at:
             deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed' WHERE id = ?",
-            (reddit_comment_url, deployed_at, comment_id)
+            "UPDATE comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed', prev_status = ? WHERE id = ?",
+            (reddit_comment_url, deployed_at, old_status, comment_id)
         )
         self.conn.commit()
 
@@ -1280,7 +1293,7 @@ class Database:
 
     def inform_comment(self, comment_id):
         self.conn.execute(
-            "UPDATE comments SET status = 'informed', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
+            "UPDATE comments SET status = 'informed', prev_status = 'assigned', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
             (comment_id,)
         )
         self.conn.commit()
@@ -1295,9 +1308,11 @@ class Database:
 
     def mark_comment_removed(self, comment_id):
         """Mark a deployed comment as removed/deleted on Reddit."""
+        row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE comments SET status = 'removed', paid_at = NULL WHERE id = ? AND status IN ('deployed', 'paid')",
-            (comment_id,)
+            "UPDATE comments SET status = 'removed', prev_status = ?, paid_at = NULL WHERE id = ? AND status IN ('deployed', 'paid')",
+            (old_status, comment_id)
         )
         self.conn.commit()
 
@@ -1308,6 +1323,20 @@ class Database:
             (comment_id,)
         )
         self.conn.commit()
+
+    def undo_comment_status(self, comment_id):
+        """Revert a comment to its previous status. Returns the restored status or None."""
+        row = self.conn.execute(
+            "SELECT prev_status FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if not row or not row["prev_status"]:
+            return None
+        prev = row["prev_status"]
+        self.conn.execute(
+            "UPDATE comments SET status = ?, prev_status = NULL WHERE id = ?",
+            (prev, comment_id))
+        self.conn.commit()
+        return prev
 
     # --- Keyword Matching ---
 
@@ -1367,7 +1396,7 @@ class Database:
                        c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                        c.paid_at, c.reddit_comment_url, c.comment_type,
                        c.suggested_post_day, c.suggested_order,
-                       c.is_ours, c.matched_keywords,
+                       c.is_ours, c.matched_keywords, c.prev_status,
                        'comment' as source,
                        p.title as post_title, p.id as p_id,
                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
@@ -1398,7 +1427,7 @@ class Database:
                        sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                        sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                        0 as suggested_post_day, 0 as suggested_order,
-                       1 as is_ours, NULL as matched_keywords,
+                       1 as is_ours, NULL as matched_keywords, sc.prev_status,
                        'search_comment' as source,
                        sp.title as post_title, sp.id as p_id,
                        sp.reddit_url as post_reddit_url
@@ -1439,7 +1468,7 @@ class Database:
                         c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
                         c.paid_at, c.reddit_comment_url, c.comment_type,
                         c.suggested_post_day, c.suggested_order,
-                        c.is_ours, c.matched_keywords,
+                        c.is_ours, c.matched_keywords, c.prev_status,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name,
@@ -1456,7 +1485,7 @@ class Database:
                         sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
                         sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                         0 as suggested_post_day, 0 as suggested_order,
-                        1 as is_ours, NULL as matched_keywords,
+                        1 as is_ours, NULL as matched_keywords, sc.prev_status,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name,
@@ -1515,7 +1544,7 @@ class Database:
                         c.paid_at, c.reddit_comment_url, c.comment_type,
                         c.suggested_post_day, c.suggested_order,
                         c.is_ours, c.matched_keywords, c.assigned_at, c.informed_at,
-                        c.last_live_check,
+                        c.last_live_check, c.prev_status,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name, b.name as brand_name,
@@ -1531,7 +1560,7 @@ class Database:
                         sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                         0 as suggested_post_day, 0 as suggested_order,
                         1 as is_ours, NULL as matched_keywords, sc.assigned_at, sc.informed_at,
-                        sc.last_live_check,
+                        sc.last_live_check, sc.prev_status,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,
@@ -2939,9 +2968,11 @@ class Database:
         return [dict(r) for r in rows]
 
     def mark_comment_paid(self, comment_id):
+        row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE comments SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
-            (comment_id,)
+            "UPDATE comments SET status = 'paid', prev_status = ?, paid_at = datetime('now') WHERE id = ?",
+            (old_status, comment_id)
         )
         self.conn.commit()
 
@@ -2953,9 +2984,11 @@ class Database:
         self.conn.commit()
 
     def mark_search_comment_paid(self, comment_id):
+        row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET status = 'paid', paid_at = datetime('now') WHERE id = ?",
-            (comment_id,)
+            "UPDATE search_comments SET status = 'paid', prev_status = ?, paid_at = datetime('now') WHERE id = ?",
+            (old_status, comment_id)
         )
         self.conn.commit()
 
@@ -3662,13 +3695,14 @@ class Database:
 
     def assign_search_comment(self, comment_id, account_id):
         row = self.conn.execute(
-            "SELECT account_id FROM search_comments WHERE id = ?", (comment_id,)
+            "SELECT account_id, status FROM search_comments WHERE id = ?", (comment_id,)
         ).fetchone()
         prior = row["account_id"] if row else None
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET account_id = ?, status = 'assigned', assigned_at = datetime('now'), "
+            "UPDATE search_comments SET account_id = ?, status = 'assigned', prev_status = ?, assigned_at = datetime('now'), "
             "paid_at = NULL, deleted_at = NULL, reddit_comment_url = NULL, deployed_at = NULL WHERE id = ?",
-            (account_id, comment_id))
+            (account_id, old_status, comment_id))
         if prior and prior != account_id:
             self._decrement_lifetime(prior)
         if account_id and account_id != prior:
@@ -3689,9 +3723,11 @@ class Database:
 
     def deploy_search_comment(self, comment_id, reddit_url):
         deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed' WHERE id = ?",
-            (reddit_url, deployed_at, comment_id))
+            "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed', prev_status = ? WHERE id = ?",
+            (reddit_url, deployed_at, old_status, comment_id))
         self.conn.commit()
 
     def undeploy_search_comment(self, comment_id):
@@ -3710,7 +3746,7 @@ class Database:
 
     def inform_search_comment(self, comment_id):
         self.conn.execute(
-            "UPDATE search_comments SET status = 'informed', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
+            "UPDATE search_comments SET status = 'informed', prev_status = 'assigned', informed_at = datetime('now') WHERE id = ? AND status = 'assigned'",
             (comment_id,))
         self.conn.commit()
 
@@ -3733,9 +3769,11 @@ class Database:
 
     def mark_search_comment_removed(self, comment_id):
         """Mark a search comment as removed/deleted on Reddit."""
+        row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
+        old_status = row["status"] if row else None
         self.conn.execute(
-            "UPDATE search_comments SET status = 'removed', deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
-            (comment_id,))
+            "UPDATE search_comments SET status = 'removed', prev_status = ?, deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
+            (old_status, comment_id))
         self.conn.commit()
 
     def unremove_search_comment(self, comment_id):
@@ -3744,6 +3782,20 @@ class Database:
             "UPDATE search_comments SET status = 'deployed' WHERE id = ? AND status = 'removed'",
             (comment_id,))
         self.conn.commit()
+
+    def undo_search_comment_status(self, comment_id):
+        """Revert a search comment to its previous status. Returns the restored status or None."""
+        row = self.conn.execute(
+            "SELECT prev_status FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if not row or not row["prev_status"]:
+            return None
+        prev = row["prev_status"]
+        self.conn.execute(
+            "UPDATE search_comments SET status = ?, prev_status = NULL WHERE id = ?",
+            (prev, comment_id))
+        self.conn.commit()
+        return prev
 
     def archive_search_post(self, post_id):
         """Archive a search post and all its non-deployed/paid comments."""

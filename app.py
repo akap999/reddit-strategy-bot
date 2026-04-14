@@ -1155,6 +1155,17 @@ def api_mark_comment_paid(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/undo", methods=["POST"])
+def api_undo_comment(cid):
+    db = get_db()
+    try:
+        prev = db.undo_comment_status(cid)
+        if prev is None:
+            return jsonify({"error": "No previous status to undo"}), 400
+        return jsonify({"ok": True, "new_status": prev})
+    finally:
+        db.close()
+
 @app.route("/api/posts/<int:pid>/undeploy", methods=["POST"])
 def api_undeploy_post(pid):
     db = get_db()
@@ -2244,6 +2255,14 @@ def api_gen_live_comments():
 # ---------------------------------------------------------------------------
 # API: Task polling
 # ---------------------------------------------------------------------------
+
+@app.route("/api/tasks/running")
+def api_running_tasks():
+    db = get_db()
+    try:
+        return jsonify(db.get_running_tasks())
+    finally:
+        db.close()
 
 @app.route("/api/tasks/<task_id>")
 def api_task_status(task_id):
@@ -3392,6 +3411,17 @@ def api_unremove_search_comment(cid):
     try:
         db.unremove_search_comment(cid)
         return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/search/comments/<int:cid>/undo", methods=["POST"])
+def api_undo_search_comment(cid):
+    db = get_db()
+    try:
+        prev = db.undo_search_comment_status(cid)
+        if prev is None:
+            return jsonify({"error": "No previous status to undo"}), 400
+        return jsonify({"ok": True, "new_status": prev})
     finally:
         db.close()
 

@@ -931,13 +931,14 @@ def auto_assign_single_search_comment(db, comment_id, exclude_accounts=None):
     db.bump_assign_seq(username)
     lookups["assign_seq"][username] = max(lookups["assign_seq"].values() or [0]) + 1
 
-    # Compute rotation info
+    # Compute rotation info using a persistent counter
     pool_size = len(high_pool)
-    pool_seqs = sorted([lookups["assign_seq"].get(a["username"], 0) for a in high_pool])
-    rotation_complete = pool_size > 0 and (pool_seqs[-1] - pool_seqs[0]) == pool_size - 1 and len(set(pool_seqs)) == pool_size
-    # Position = how many accounts have been used in current rotation
-    min_seq = pool_seqs[0] if pool_seqs else 0
-    rotation_position = sum(1 for s in pool_seqs if s > min_seq) if not rotation_complete else pool_size
+    rot_val = db.meta_get("ls_rotation_count")
+    rot_count = int(rot_val) if rot_val else 0
+    rot_count += 1
+    db.meta_set("ls_rotation_count", str(rot_count))
+    rotation_position = ((rot_count - 1) % pool_size) + 1 if pool_size > 0 else 0
+    rotation_complete = pool_size > 1 and rotation_position == pool_size
 
     return {
         "ok": True, "account": username, "score": best_score,

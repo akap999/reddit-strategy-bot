@@ -7450,16 +7450,16 @@ function _lsPreFilteredSubsInComments() {
     return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
 }
 function lsBuildSubList() {
+    // Render checkboxes for currently-visible subs. Do NOT mutate _lsSelectedSubs
+    // here — status/post filter changes were previously clobbering the user's
+    // selection and auto-re-selecting all subs. Treat _lsSelectedSubs === null
+    // as "all selected" (default).
     const subs = _lsPreFilteredSubsInComments();
-    if (_lsSelectedSubs === null) _lsSelectedSubs = new Set(subs);
-    else _lsSelectedSubs = new Set([...subs].filter(s => _lsSelectedSubs.has(s)));
-    // If brand filter narrowed subs and nothing is selected, select all visible (unless user explicitly clicked None)
-    if (_lsSelectedSubs.size === 0 && subs.length > 0 && !_lsSubNoneExplicit) _lsSelectedSubs = new Set(subs);
     const list = document.getElementById('ls-cf-sub-list');
     if (list) {
         list.innerHTML = subs.map(s => `
             <label class="flex items-center gap-2 py-1" style="cursor:pointer">
-                <input type="checkbox" ${_lsSelectedSubs.has(s)?'checked':''} onchange="lsToggleSub('${s.replace(/'/g,"\\'")}')">
+                <input type="checkbox" ${(_lsSelectedSubs === null || _lsSelectedSubs.has(s)) ? 'checked' : ''} onchange="lsToggleSub('${s.replace(/'/g,"\\'")}')">
                 <span class="text-sm">r/${s}</span>
             </label>
         `).join('') || '<span class="text-xs text-gray-500">No subreddits</span>';
@@ -7478,9 +7478,14 @@ function lsToggleSubFilter(ev) {
     if (panel) panel.classList.toggle('hidden');
 }
 function lsToggleSub(s) {
+    // Initialize from the full universe so de-selecting a single sub
+    // doesn't wipe out selections for subs hidden by other filters.
     if (!_lsSelectedSubs) _lsSelectedSubs = new Set(lsAllSubsInComments());
     if (_lsSelectedSubs.has(s)) _lsSelectedSubs.delete(s); else { _lsSelectedSubs.add(s); _lsSubNoneExplicit = false; }
-    if (_lsSelectedSubs.size === 0) _lsSubNoneExplicit = true;
+    // Only flag "explicit none" if no sub in the current visible pool is selected
+    const visible = _lsPreFilteredSubsInComments();
+    const visibleSelected = visible.filter(x => _lsSelectedSubs.has(x)).length;
+    if (visibleSelected === 0) _lsSubNoneExplicit = true;
     lsUpdateSubCountBadge();
     lsFilterComments();
 }
@@ -7494,9 +7499,10 @@ function lsSubFilterAll(on) {
 function lsUpdateSubCountBadge() {
     const el = document.getElementById('ls-cf-sub-count');
     if (!el) return;
-    const t = _lsPreFilteredSubsInComments().length;
-    const n = _lsSelectedSubs ? _lsSelectedSubs.size : t;
-    el.textContent = (n === t) ? ' (All)' : ` (${n}/${t})`;
+    const visible = _lsPreFilteredSubsInComments();
+    const t = visible.length;
+    const n = (_lsSelectedSubs === null) ? t : visible.filter(s => _lsSelectedSubs.has(s)).length;
+    el.textContent = (n === t && !_lsSubNoneExplicit) ? ' (All)' : ` (${n}/${t})`;
 }
 document.addEventListener('click', function(e) {
     const panel = document.getElementById('ls-cf-sub-panel');

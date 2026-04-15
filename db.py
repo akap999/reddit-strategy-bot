@@ -1307,22 +1307,30 @@ class Database:
         self.conn.commit()
 
     def mark_comment_removed(self, comment_id):
-        """Mark a deployed comment as removed/deleted on Reddit."""
+        """Mark a comment as removed/deleted on Reddit (allowed for any status)."""
         row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
+        if old_status == 'removed':
+            return
         self.conn.execute(
-            "UPDATE comments SET status = 'removed', prev_status = ?, paid_at = NULL WHERE id = ? AND status IN ('deployed', 'paid')",
+            "UPDATE comments SET status = 'removed', prev_status = ?, paid_at = NULL WHERE id = ?",
             (old_status, comment_id)
         )
         self.conn.commit()
 
     def unremove_comment(self, comment_id):
-        """Revert a removed comment back to deployed status."""
-        self.conn.execute(
-            "UPDATE comments SET status = 'deployed' WHERE id = ? AND status = 'removed'",
+        """Revert a removed comment back to its previous status (fallback to deployed)."""
+        row = self.conn.execute(
+            "SELECT prev_status FROM comments WHERE id = ? AND status = 'removed'",
             (comment_id,)
+        ).fetchone()
+        restore_to = (row["prev_status"] if row and row["prev_status"] else 'deployed')
+        self.conn.execute(
+            "UPDATE comments SET status = ?, prev_status = NULL WHERE id = ? AND status = 'removed'",
+            (restore_to, comment_id)
         )
         self.conn.commit()
+        return restore_to
 
     def undo_comment_status(self, comment_id):
         """Revert a comment to its previous status. Returns the restored status or None."""
@@ -3768,20 +3776,28 @@ class Database:
         self.conn.commit()
 
     def mark_search_comment_removed(self, comment_id):
-        """Mark a search comment as removed/deleted on Reddit."""
+        """Mark a search comment as removed/deleted on Reddit (allowed for any status)."""
         row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
+        if old_status == 'removed':
+            return
         self.conn.execute(
             "UPDATE search_comments SET status = 'removed', prev_status = ?, deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
             (old_status, comment_id))
         self.conn.commit()
 
     def unremove_search_comment(self, comment_id):
-        """Revert a removed search comment back to deployed status."""
+        """Revert a removed search comment back to its previous status (fallback to deployed)."""
+        row = self.conn.execute(
+            "SELECT prev_status FROM search_comments WHERE id = ? AND status = 'removed'",
+            (comment_id,)
+        ).fetchone()
+        restore_to = (row["prev_status"] if row and row["prev_status"] else 'deployed')
         self.conn.execute(
-            "UPDATE search_comments SET status = 'deployed' WHERE id = ? AND status = 'removed'",
-            (comment_id,))
+            "UPDATE search_comments SET status = ?, prev_status = NULL WHERE id = ? AND status = 'removed'",
+            (restore_to, comment_id))
         self.conn.commit()
+        return restore_to
 
     def undo_search_comment_status(self, comment_id):
         """Revert a search comment to its previous status. Returns the restored status or None."""

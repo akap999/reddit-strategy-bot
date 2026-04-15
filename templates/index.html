@@ -7385,6 +7385,11 @@ async function renderLsComments(c) {
                 <option value="removed">Removed</option>
                 <option value="archived">Archived</option>
             </select>
+            <select id="ls-cf-sort" onchange="lsFilterComments()" class="w-44">
+                <option value="">Newest Comment</option>
+                <option value="post_date_desc">Post Date (newest)</option>
+                <option value="post_date_asc">Post Date (oldest)</option>
+            </select>
             <span style="margin-left:auto" class="flex gap-2">
                 <div style="position:relative;display:inline-block">
                     <button class="btn btn-secondary btn-sm" onclick="this.nextElementSibling.classList.toggle('hidden')">Check Live ▾</button>
@@ -7569,13 +7574,21 @@ function lsFilterComments() {
     const groups = {};
     filtered.forEach(c => {
         const key = c.search_post_id;
-        if (!groups[key]) groups[key] = { title: c.post_title, subreddit: c.post_subreddit, url: c.post_url, brand: c.brand_name, comments: [], newest: c.created_at || '' };
+        if (!groups[key]) groups[key] = { title: c.post_title, subreddit: c.post_subreddit, url: c.post_url, brand: c.brand_name, postDate: c.post_date || '', comments: [], newest: c.created_at || '' };
         groups[key].comments.push(c);
         if ((c.created_at || '') > groups[key].newest) groups[key].newest = c.created_at;
     });
 
-    // Sort groups by newest comment first
-    const sortedGroups = Object.entries(groups).sort((a, b) => (b[1].newest || '').localeCompare(a[1].newest || ''));
+    // Sort groups based on selected sort option
+    const sortOpt = document.getElementById('ls-cf-sort')?.value || '';
+    let sortedGroups;
+    if (sortOpt === 'post_date_desc') {
+        sortedGroups = Object.entries(groups).sort((a, b) => (b[1].postDate || '').localeCompare(a[1].postDate || ''));
+    } else if (sortOpt === 'post_date_asc') {
+        sortedGroups = Object.entries(groups).sort((a, b) => (a[1].postDate || '').localeCompare(b[1].postDate || ''));
+    } else {
+        sortedGroups = Object.entries(groups).sort((a, b) => (b[1].newest || '').localeCompare(a[1].newest || ''));
+    }
 
     el.innerHTML = sortedGroups.map(([pid, g]) => {
         const _maxRank = Math.max(...g.comments.map(c => LS_STATUS_RANK[c.status] ?? -1));
@@ -7587,6 +7600,7 @@ function lsFilterComments() {
                     <input type="checkbox" class="ls-cg-check" data-post-id="${pid}" title="Select post for bulk delete">
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
                     <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
+                    ${g.postDate ? `<span class="text-xs text-gray-500">${g.postDate.slice(0,10)}</span>` : ''}
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
                     <span class="badge badge-${_postStatus}" style="font-size:10px">${_postStatus}</span>
                 </div>

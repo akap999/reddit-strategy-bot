@@ -3677,7 +3677,7 @@ class Database:
 
     def list_search_comments(self, search_post_id=None, status=None):
         q = """SELECT sc.*, sp.title as post_title, sp.subreddit as post_subreddit,
-                      sp.reddit_url as post_url, b.name as brand_name
+                      sp.reddit_url as post_url, sp.post_date as post_date, b.name as brand_name
                FROM search_comments sc
                JOIN search_posts sp ON sc.search_post_id = sp.id
                LEFT JOIN brands b ON sc.brand_id = b.id

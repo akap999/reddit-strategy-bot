@@ -3613,6 +3613,13 @@ class Database:
     # --- Search Posts (Live Search) ---
 
     def save_search_post(self, data):
+        """Insert a search post, or update brand_id if URL already exists.
+
+        Returns (id, is_new). When the reddit_url already exists, the post's
+        brand_id is updated to data['brand_id'] (if provided) and the
+        existing row id is returned with is_new=False. This lets callers
+        re-point a saved post at a different brand in a single step.
+        """
         try:
             cur = self.conn.execute(
                 """INSERT INTO search_posts
@@ -3624,9 +3631,21 @@ class Database:
                  data.get("body_preview", "")[:500], data.get("brand_id"))
             )
             self.conn.commit()
-            return cur.lastrowid
+            return (cur.lastrowid, True)
         except sqlite3.IntegrityError:
-            return None  # duplicate URL
+            row = self.conn.execute(
+                "SELECT id FROM search_posts WHERE reddit_url = ?",
+                (data["reddit_url"],)
+            ).fetchone()
+            if not row:
+                return (None, False)
+            if data.get("brand_id"):
+                self.conn.execute(
+                    "UPDATE search_posts SET brand_id = ? WHERE id = ?",
+                    (data["brand_id"], row["id"])
+                )
+                self.conn.commit()
+            return (row["id"], False)
 
     def list_search_posts(self, brand_id=None, status=None):
         q = """SELECT sp.*, b.name as brand_name,

@@ -7087,7 +7087,7 @@ async function lsSaveSelected() {
     });
     try {
         const res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
-        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed)` : ''}`, 'success');
+        toast(`Saved ${res.saved} new post(s)${res.duplicates ? `, updated brand on ${res.duplicates} existing` : ''}`, 'success');
         _lsTab = 'saved'; renderLsTabContent();
     } catch(e) {}
 }
@@ -7109,30 +7109,37 @@ async function lsSaveAndGenerateAll() {
     let res;
     try {
         res = await api('/api/search/posts/bulk', { method: 'POST', body: { posts } });
-        toast(`Saved ${res.saved} posts${res.duplicates ? ` (${res.duplicates} already existed, skipped)` : ''}`, 'success');
+        toast(`Saved ${res.saved} new post(s)${res.duplicates ? `, updated brand on ${res.duplicates} existing` : ''}`, 'success');
     } catch(e) { toast('Failed to save posts', 'error'); return; }
 
-    // Step 2: Generate comments ONLY for posts that were newly inserted by
-    // this call. res.saved_ids contains exactly the rows the DB created —
-    // pre-existing duplicates are excluded by construction.
-    const newIds = new Set(res.saved_ids || []);
-    if (!newIds.size) {
-        toast('All posts already existed — nothing new to generate', 'info');
+    // Step 2: Generate comments for new posts + pre-existing posts that
+    // don't already have comments for the currently-targeted brand.
+    // res.all_ids includes both newly-inserted rows and pre-existing rows
+    // whose brand_id was just updated to the caller's brand.
+    const brandIdNum = parseInt(brandId);
+    const allIds = new Set(res.all_ids || res.saved_ids || []);
+    if (!allIds.size) {
+        toast('No posts to generate for', 'info');
         return;
     }
 
     try {
         const saved = await api('/api/search/posts');
+        // Refresh the LS comments cache so hasCommentsForBrand is accurate
+        try { _lsComments = await api('/api/search/comments'); } catch(e) {}
         const excludeSubs = lsGetExcludedSubs();
+        const hasCommentsForBrand = (p) => _lsComments.some(c =>
+            c.search_post_id === p.id && c.brand_id === brandIdNum && c.status !== 'deleted');
         const eligible = saved.filter(p =>
-            newIds.has(p.id) &&
+            allIds.has(p.id) &&
             p.brand_id &&
             p.status !== 'generating' &&
-            p.status !== 'complete' &&
+            p.status !== 'irrelevant' &&
+            !hasCommentsForBrand(p) &&
             !excludeSubs.has((p.subreddit || '').toLowerCase())
         );
         if (!eligible.length) {
-            toast('New posts saved but none eligible for generation (check excluded subs)', 'info');
+            toast(`Saved ${res.saved}${res.duplicates ? `, updated ${res.duplicates}` : ''} — none need new comments for this brand`, 'info');
             return;
         }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
@@ -7222,7 +7229,7 @@ function lsRenderSavedTable() {
                     <td>${p.comment_count || 0} gen</td>
                     <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':p.status==='irrelevant'?'badge-removed':'badge-draft'}">${p.status}</span></td>
                     <td class="flex gap-2">
-                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
+                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand for this post">Change Brand</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
                         <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
                     </td>
                 </tr>`;
@@ -7260,9 +7267,22 @@ async function lsGenerateSelected() {
 
 async function lsGenerateAll() {
     const excludeSubs = lsGetExcludedSubs();
-    const filtered = lsGetFilteredSaved().filter(p => p.brand_id && p.status !== 'generating' && p.status !== 'complete' && p.status !== 'irrelevant' && !excludeSubs.has((p.subreddit||'').toLowerCase()));
-    if (!filtered.length) { toast('No eligible posts (must have brand, not already generating/complete, not excluded)', 'error'); return; }
-    if (!confirm(`Generate comments for ${filtered.length} posts?`)) return;
+    // Refresh comments cache so hasCommentsForBrand is accurate
+    try { _lsComments = await api('/api/search/comments'); } catch(e) {}
+    // Brand-aware eligibility: a post is eligible if it has no non-deleted
+    // comments yet for its currently-assigned brand. This lets users re-point
+    // a saved post at a different brand (via "Change Brand") and re-run
+    // Generate All to get comments for the new brand.
+    const hasCommentsForBrand = (p) => _lsComments.some(c =>
+        c.search_post_id === p.id && c.brand_id === p.brand_id && c.status !== 'deleted');
+    const filtered = lsGetFilteredSaved().filter(p =>
+        p.brand_id &&
+        p.status !== 'generating' &&
+        p.status !== 'irrelevant' &&
+        !hasCommentsForBrand(p) &&
+        !excludeSubs.has((p.subreddit||'').toLowerCase()));
+    if (!filtered.length) { toast('No eligible posts (must have brand; no comments yet for that brand; not generating/irrelevant/excluded)', 'error'); return; }
+    if (!confirm(`Generate comments for ${filtered.length} post(s) that don't yet have comments for their current brand?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     runTask('/api/search/posts/generate-batch',
         { post_ids: filtered.map(p => p.id), num_comments: numComments },

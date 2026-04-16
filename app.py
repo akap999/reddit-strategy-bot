@@ -2928,10 +2928,10 @@ def api_save_search_post():
         data = request.json
         if not data.get("reddit_url"):
             return jsonify({"error": "reddit_url is required"}), 400
-        pid = db.save_search_post(data)
+        pid, is_new = db.save_search_post(data)
         if pid is None:
             return jsonify({"error": "Post already saved"}), 409
-        return jsonify({"id": pid})
+        return jsonify({"id": pid, "is_new": is_new})
     finally:
         db.close()
 
@@ -2941,17 +2941,21 @@ def api_save_search_posts_bulk():
     db = get_db()
     try:
         items = request.json.get("posts", [])
-        saved_ids = []
-        dupes = 0
+        new_ids, existing_ids = [], []
         for item in items:
             if not item.get("reddit_url"):
                 continue
-            pid = db.save_search_post(item)
-            if pid:
-                saved_ids.append(pid)
-            else:
-                dupes += 1
-        return jsonify({"saved": len(saved_ids), "duplicates": dupes, "saved_ids": saved_ids})
+            pid, is_new = db.save_search_post(item)
+            if pid is None:
+                continue
+            (new_ids if is_new else existing_ids).append(pid)
+        return jsonify({
+            "saved": len(new_ids),
+            "duplicates": len(existing_ids),
+            "saved_ids": new_ids,
+            "existing_ids": existing_ids,
+            "all_ids": new_ids + existing_ids,
+        })
     finally:
         db.close()
 

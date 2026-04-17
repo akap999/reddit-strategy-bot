@@ -1663,6 +1663,7 @@ async function editBrandContext(brandName) {
     const first = brandInstances[0];
     const context = first.context || '';
     const domainUrl = first.domain_url || '';
+    const serviceLocation = first.service_location || '';
     let keywords = [];
     try { keywords = JSON.parse(first.keywords || '[]'); } catch(e) {}
 
@@ -1681,6 +1682,10 @@ async function editBrandContext(brandName) {
                 <label class="text-xs text-gray-400">Keywords (comma-separated)</label>
                 <input id="edit-brand-keywords" value="${keywords.join(', ')}" class="w-full">
             </div>
+            <div>
+                <label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label>
+                <input id="edit-brand-location" value="${serviceLocation}" placeholder="e.g. Dallas, TX or US nationwide" class="w-full">
+            </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
         <div class="flex gap-2 mt-4">
@@ -1695,13 +1700,17 @@ async function saveBrandContext(brandName) {
     const domainUrl = document.getElementById('edit-brand-url').value;
     const keywordsRaw = document.getElementById('edit-brand-keywords').value;
     const keywords = keywordsRaw.split(',').map(k => k.trim()).filter(Boolean);
+    const serviceLocation = (document.getElementById('edit-brand-location')?.value || '').trim();
 
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
 
     // Update all instances of this brand across subreddits
     for (const b of brandInstances) {
-        await api(`/api/brands/${b.id}`, { method: 'PUT', body: { context, domain_url: domainUrl, keywords } });
+        await api(`/api/brands/${b.id}`, { method: 'PUT', body: {
+            context, domain_url: domainUrl, keywords,
+            service_location: serviceLocation,
+        }});
     }
 
     toast('Brand updated', 'success');
@@ -3334,8 +3343,8 @@ function renderCommentNodeFlat(c) {
 
     let actionBtns = '';
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
     else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
     else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
@@ -3380,8 +3389,8 @@ function renderCommentNode(c, depth) {
     // Status-dependent action buttons
     let actionBtns = '';
     if (c.status === 'draft' || c.status === 'complete') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'assigned') actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+    else if (c.status === 'informed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-sm btn-secondary" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-sm btn-accent" onclick="copyCommentMessage(${c.id})">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
     else if (c.status === 'deployed') actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeleted(${c.id})">Del</button>`;
     else if (c.status === 'paid') actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
     else if (c.status === 'removed') actionBtns = `<button class="btn btn-sm btn-primary" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignCommentPrompt(${c.id})">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
@@ -3422,10 +3431,23 @@ function renderCommentNode(c, depth) {
 }
 
 async function assignCommentPrompt(cid) {
+    window._assignReassign = false;
     showAssignmentModal(cid, (assignedAccount) => {
         if (assignedAccount) {
             _commentsTreeUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
             _acUpdateLocal(cid, 'comment', { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
+        } else loadCommentTree();
+    });
+}
+
+async function reassignCommentPrompt(cid) {
+    // Reassign keeps the current status ('assigned' or 'informed') — only account_id changes.
+    window._assignReassign = true;
+    showAssignmentModal(cid, (assignedAccount) => {
+        if (assignedAccount) {
+            // Do NOT patch status/assigned_at/informed_at — they must be preserved.
+            _commentsTreeUpdateLocal(cid, { account_id: assignedAccount });
+            _acUpdateLocal(cid, 'comment', { account_id: assignedAccount });
         } else loadCommentTree();
     });
 }
@@ -4346,8 +4368,8 @@ function renderManagedCommentsFromCache() {
                 let actions = '';
                 if (c.status === 'complete') actions = `<button class="btn btn-sm btn-secondary" onclick="assignCommentPromptMgmt(${c.id})">Assign</button> <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
                 else if (c.status === 'draft') actions = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-                else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button> <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
-                else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button> <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+                else if (c.status === 'assigned') actions = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button> <button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="reassignCommentPromptMgmt(${c.id})">Reassign</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button> <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
+                else if (c.status === 'informed') actions = `<button class="btn btn-sm btn-primary" onclick="deployCommentModal(${c.id})">Deploy</button> <button class="btn btn-sm btn-secondary" onclick="reassignCommentPromptMgmt(${c.id})">Reassign</button> <button class="btn btn-sm btn-secondary" onclick="unassignCommentMgmt(${c.id})">Unassign</button> <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>`;
                 else if (c.status === 'deployed') actions = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button><button class="btn btn-sm btn-danger" onclick="markCommentDeletedMgmt(${c.id})">Del</button>`;
                 else if (c.status === 'paid') actions = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button><button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'comment')">Edit Link</button>`;
                 else if (c.status === 'removed') actions = `<button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="unremoveComment(${c.id})">Unremove</button>`;
@@ -4373,8 +4395,17 @@ function renderManagedCommentsFromCache() {
 }
 
 async function assignCommentPromptMgmt(cid) {
+    window._assignReassign = false;
     showAssignmentModal(cid, (assignedAccount) => {
         if (assignedAccount) _managedCommentsUpdateLocal(cid, { status: 'assigned', account_id: assignedAccount, assigned_at: new Date().toISOString() });
+        else loadManagedComments();
+    });
+}
+
+async function reassignCommentPromptMgmt(cid) {
+    window._assignReassign = true;
+    showAssignmentModal(cid, (assignedAccount) => {
+        if (assignedAccount) _managedCommentsUpdateLocal(cid, { account_id: assignedAccount });
         else loadManagedComments();
     });
 }
@@ -4741,6 +4772,7 @@ function _acAction(source, cid, action) {
         const map = {
             auto_assign: `lsAssignComment(${cid})`,
             manual_assign: `lsManualAssignComment(${cid})`,
+            reassign: `lsReassignComment(${cid})`,
             inform: `lsInformComment(${cid})`,
             deploy: `lsDeployComment(${cid})`,
             unassign: `lsUnassignComment(${cid})`,
@@ -4758,6 +4790,7 @@ function _acAction(source, cid, action) {
         const map = {
             auto_assign: `autoAssignComment(${cid})`,
             manual_assign: `assignCommentPrompt(${cid})`,
+            reassign: `reassignCommentPrompt(${cid})`,
             inform: `informComment(${cid})`,
             deploy: `deployCommentModal(${cid})`,
             unassign: `unassignComment(${cid})`,
@@ -4790,9 +4823,9 @@ function renderAllCommentCard(c) {
     if (c.status === 'draft' || c.status === 'complete') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'assigned') {
-        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="${_acAction(src, c.id, 'inform')}">Inform</button><button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'reassign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'informed') {
-        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
+        actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'reassign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'deployed') {
         actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'paid') {
@@ -5839,9 +5872,14 @@ function filterAssignmentModal(query) {
 
 async function selectAccountForAssignment(username) {
     const cid = window._assignCid;
-    await api(`/api/comments/${cid}/assign`, { method: 'POST', body: { account_id: username } });
-    toast(`Assigned to u/${username}`, 'success');
+    const isReassign = !!window._assignReassign;
+    const endpoint = isReassign
+        ? `/api/comments/${cid}/reassign`
+        : `/api/comments/${cid}/assign`;
+    await api(endpoint, { method: 'POST', body: { account_id: username } });
+    toast(isReassign ? `Reassigned to u/${username}` : `Assigned to u/${username}`, 'success');
     closeModal();
+    window._assignReassign = false;
     if (window._assignOnSuccess) window._assignOnSuccess(username);
 }
 
@@ -6695,6 +6733,7 @@ function lsShowAddBrand() {
                 <div><label class="text-xs text-gray-400">Website URL</label><input id="ls-new-brand-url" placeholder="e.g. petermd.com"></div>
                 <div><label class="text-xs text-gray-400">Context</label><textarea id="ls-new-brand-ctx" rows="2" placeholder="What does the brand do?"></textarea></div>
                 <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="ls-new-brand-kw" placeholder="e.g. testosterone, TRT, hormone"></div>
+                <div><label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label><input id="ls-new-brand-loc" placeholder="e.g. Dallas, TX or US nationwide"></div>
             </div>
             <div class="flex justify-end gap-3 mt-4">
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -6714,6 +6753,7 @@ async function lsCreateBrand() {
             domain_url: document.getElementById('ls-new-brand-url').value.trim(),
             context: document.getElementById('ls-new-brand-ctx').value.trim(),
             keywords: kwRaw ? kwRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
+            service_location: (document.getElementById('ls-new-brand-loc')?.value || '').trim(),
         }});
         closeModal();
         toast('Brand created', 'success');
@@ -7657,12 +7697,14 @@ function lsFilterComments() {
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="lsReassignComment(${c.id})">Reassign</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                 ` : ''}
                                 ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="lsReassignComment(${c.id})">Reassign</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
@@ -7970,6 +8012,50 @@ async function lsDoAssign(cid, username) {
         toast(`Assigned to u/${username}`, 'success');
         _lsUpdateCommentLocal(cid, { status: 'assigned', account_id: username, assigned_at: new Date().toISOString() });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'assigned', account_id: username, assigned_at: new Date().toISOString() });
+    } catch(e) {}
+}
+
+async function lsReassignComment(cid) {
+    // Mirror lsManualAssignComment but submit to the /reassign endpoint so the
+    // comment's status ('assigned' or 'informed') and timestamps are preserved.
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2" style="color:#818384">Loading accounts...</p></div>`);
+    let accounts;
+    try { accounts = await api('/api/accounts'); } catch(e) { closeModal(); toast('Failed to load accounts', 'error'); return; }
+    if (!accounts.length) { closeModal(); toast('No accounts available', 'error'); return; }
+
+    const rows = accounts.map(a => {
+        const totalKarma = (a.link_karma || 0) + (a.comment_karma || 0);
+        const age = formatAccountAge(a.created_utc);
+        return `<tr>
+            <td class="text-sm text-orange-500">u/${a.username}</td>
+            <td class="text-sm">${totalKarma.toLocaleString()}</td>
+            <td class="text-sm text-gray-400">${age}</td>
+            <td class="text-sm text-gray-300">${a.reference || ''}</td>
+            <td><button class="btn btn-sm btn-accent" onclick="lsDoReassign(${cid},'${a.username.replace(/'/g,"\\'")}')">Reassign</button></td>
+        </tr>`;
+    }).join('');
+
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Reassign Comment</h3>
+        <p class="text-xs text-gray-500 mb-3">Keeps the current status (assigned / informed); only the account changes.</p>
+        <div style="max-height:60vh;overflow-y:auto">
+            <table class="w-full text-left">
+                <thead><tr class="text-xs text-gray-400"><th>Account</th><th>Karma</th><th>Age</th><th>Ref</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="flex justify-end mt-4"><button class="btn btn-secondary" onclick="closeModal()">Cancel</button></div>
+    `);
+}
+
+async function lsDoReassign(cid, username) {
+    try {
+        await api(`/api/search/comments/${cid}/reassign`, { method: 'POST', body: { account_id: username } });
+        closeModal();
+        toast(`Reassigned to u/${username}`, 'success');
+        // Preserve status — only patch account_id.
+        _lsUpdateCommentLocal(cid, { account_id: username });
+        if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { account_id: username });
     } catch(e) {}
 }
 

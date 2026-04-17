@@ -164,22 +164,24 @@ class Database:
 
     def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]",
                   category=None, audience=None, use_cases=None, pain_points=None,
-                  features=None, competitors=None, enriched_at=None):
+                  features=None, competitors=None, enriched_at=None,
+                  service_location=None):
         cur = self.conn.execute(
             """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
                                    category, audience, use_cases, pain_points,
-                                   features, competitors, enriched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   features, competitors, enriched_at, service_location)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, name, domain_url, context, keywords,
              category, audience, use_cases, pain_points,
-             features, competitors, enriched_at)
+             features, competitors, enriched_at, service_location)
         )
         self.conn.commit()
         return cur.lastrowid
 
     def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
                      category=None, audience=None, use_cases=None, pain_points=None,
-                     features=None, competitors=None, enriched_at=None):
+                     features=None, competitors=None, enriched_at=None,
+                     service_location=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -188,6 +190,7 @@ class Database:
             "category": category, "audience": audience, "use_cases": use_cases,
             "pain_points": pain_points, "features": features,
             "competitors": competitors, "enriched_at": enriched_at,
+            "service_location": service_location,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1087,13 +1090,14 @@ class Database:
         # ----- brands: GEO enrichment columns -----
         brand_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(brands)").fetchall()]
         brand_enrichment_cols = {
-            "category":    "ALTER TABLE brands ADD COLUMN category TEXT",
-            "audience":    "ALTER TABLE brands ADD COLUMN audience TEXT",
-            "use_cases":   "ALTER TABLE brands ADD COLUMN use_cases TEXT",
-            "pain_points": "ALTER TABLE brands ADD COLUMN pain_points TEXT",
-            "features":    "ALTER TABLE brands ADD COLUMN features TEXT",
-            "competitors": "ALTER TABLE brands ADD COLUMN competitors TEXT",
-            "enriched_at": "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
+            "category":         "ALTER TABLE brands ADD COLUMN category TEXT",
+            "audience":         "ALTER TABLE brands ADD COLUMN audience TEXT",
+            "use_cases":        "ALTER TABLE brands ADD COLUMN use_cases TEXT",
+            "pain_points":      "ALTER TABLE brands ADD COLUMN pain_points TEXT",
+            "features":         "ALTER TABLE brands ADD COLUMN features TEXT",
+            "competitors":      "ALTER TABLE brands ADD COLUMN competitors TEXT",
+            "enriched_at":      "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
+            "service_location": "ALTER TABLE brands ADD COLUMN service_location TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:
@@ -1260,6 +1264,25 @@ class Database:
         )
         if prior:
             self._decrement_lifetime(prior)
+        self.conn.commit()
+
+    def reassign_comment(self, comment_id, new_account_id):
+        """Change account_id on an already-assigned/informed comment without
+        resetting status, assigned_at, informed_at, or prev_status."""
+        row = self.conn.execute(
+            "SELECT account_id FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
+        if prior == new_account_id:
+            return
+        self.conn.execute(
+            "UPDATE comments SET account_id = ? WHERE id = ?",
+            (new_account_id, comment_id)
+        )
+        if prior:
+            self._decrement_lifetime(prior)
+        if new_account_id:
+            self._increment_lifetime(new_account_id)
         self.conn.commit()
 
     def deploy_comment(self, comment_id, reddit_comment_url, deployed_at=None):
@@ -3746,6 +3769,24 @@ class Database:
             (comment_id,))
         if prior:
             self._decrement_lifetime(prior)
+        self.conn.commit()
+
+    def reassign_search_comment(self, comment_id, new_account_id):
+        """Change account_id on an already-assigned/informed search comment
+        without resetting status, assigned_at, informed_at, or prev_status."""
+        row = self.conn.execute(
+            "SELECT account_id FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        prior = row["account_id"] if row else None
+        if prior == new_account_id:
+            return
+        self.conn.execute(
+            "UPDATE search_comments SET account_id = ? WHERE id = ?",
+            (new_account_id, comment_id))
+        if prior:
+            self._decrement_lifetime(prior)
+        if new_account_id:
+            self._increment_lifetime(new_account_id)
         self.conn.commit()
 
     def deploy_search_comment(self, comment_id, reddit_url):

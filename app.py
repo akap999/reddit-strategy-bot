@@ -503,10 +503,14 @@ def _extract_brand_enrichment_fields(data):
     for storage. Missing keys map to None so `update_brand` leaves them unchanged.
     """
     out = {}
-    for scalar in ("category", "audience"):
+    for scalar in ("category", "audience", "service_location"):
         if scalar in data:
             val = data.get(scalar)
-            out[scalar] = val.strip() if isinstance(val, str) else val
+            if isinstance(val, str):
+                stripped = val.strip()
+                out[scalar] = stripped if stripped else None
+            else:
+                out[scalar] = val
     for listf in ("use_cases", "pain_points", "features", "competitors"):
         if listf in data:
             v = data.get(listf)
@@ -894,6 +898,21 @@ def api_assign_comment(cid):
     try:
         data = request.json
         db.assign_comment(cid, data.get("account_id", ""))
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+@app.route("/api/comments/<int:cid>/reassign", methods=["POST"])
+def api_reassign_comment(cid):
+    """Change account_id on an already-assigned/informed comment without
+    resetting status, assigned_at, informed_at, or prev_status."""
+    db = get_db()
+    try:
+        data = request.json or {}
+        new_account = (data.get("account_id") or "").strip()
+        if not new_account:
+            return jsonify({"error": "account_id is required"}), 400
+        db.reassign_comment(cid, new_account)
         return jsonify({"ok": True})
     finally:
         db.close()
@@ -2188,6 +2207,7 @@ def api_gen_reply_to_comment():
             relevance={"best_angle": "replying to comment", "natural_fit": 2},
             brand_assignments=[brand if mention_brand else None],
             all_brand_names=[brand["name"]],
+            brand_service_location=brand.get("service_location") or None,
         )
 
         bodies = result.get("generated_comments", [])
@@ -3007,6 +3027,7 @@ def api_generate_search_comments(pid):
     brand_name = brand["name"]
     brand_context = brand["context"]
     brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+    brand_service_location = brand.get("service_location") or None
     num_comments = data.get("num_comments", 2)
 
     def task():
@@ -3034,7 +3055,8 @@ def api_generate_search_comments(pid):
             # Relevance check
             relevance = bot.check_relevance(
                 post["title"], post_body, post["subreddit"],
-                comments, brand_name, brand_context, brand_keywords
+                comments, brand_name, brand_context, brand_keywords,
+                brand_service_location=brand_service_location
             )
             rel_score = relevance.get("score", 0)
 
@@ -3154,7 +3176,8 @@ def api_generate_search_comments_batch():
             "pid": pid, "post": post,
             "brand_name": brand["name"],
             "brand_context": brand["context"],
-            "brand_keywords": json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+            "brand_keywords": json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else [],
+            "brand_service_location": brand.get("service_location") or None,
         })
     db_check.close()
 
@@ -3177,6 +3200,7 @@ def api_generate_search_comments_batch():
                 brand_name = vp["brand_name"]
                 brand_context = vp["brand_context"]
                 brand_keywords = vp["brand_keywords"]
+                brand_service_location = vp.get("brand_service_location") or None
 
                 # Update progress
                 if _task_id:
@@ -3211,7 +3235,8 @@ def api_generate_search_comments_batch():
 
                     relevance = bot.check_relevance(
                         post["title"], post_body, post["subreddit"],
-                        comments, brand_name, brand_context, brand_keywords
+                        comments, brand_name, brand_context, brand_keywords,
+                        brand_service_location=brand_service_location
                     )
                     rel_score = relevance.get("score", 0)
 
@@ -3321,6 +3346,22 @@ def api_assign_search_comment(cid):
         if not account_id:
             return jsonify({"error": "account_id required"}), 400
         db.assign_search_comment(cid, account_id)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/reassign", methods=["POST"])
+def api_reassign_search_comment(cid):
+    """Change account_id on an already-assigned/informed search comment without
+    resetting status, assigned_at, informed_at, or prev_status."""
+    db = get_db()
+    try:
+        data = request.json or {}
+        new_account = (data.get("account_id") or "").strip()
+        if not new_account:
+            return jsonify({"error": "account_id is required"}), 400
+        db.reassign_search_comment(cid, new_account)
         return jsonify({"ok": True})
     finally:
         db.close()
@@ -3520,9 +3561,10 @@ def api_create_standalone_brand():
         context = data.get("context", "").strip() or name
         domain_url = data.get("domain_url", "").strip()
         keywords = json.dumps(data.get("keywords", []))
+        service_location = (data.get("service_location") or "").strip() or None
         cur = db.conn.execute(
-            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords) VALUES (NULL, ?, ?, ?, ?)",
-            (name, domain_url, context, keywords)
+            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords, service_location) VALUES (NULL, ?, ?, ?, ?, ?)",
+            (name, domain_url, context, keywords, service_location)
         )
         db.conn.commit()
         return jsonify({"id": cur.lastrowid, "name": name})

@@ -156,7 +156,7 @@ STRUCTURE_TEMPLATES = [
     },
     {
         "id": "update_post",
-        "instruction": "Frame your comment as if you're sharing an update or following up on something ('so I actually tried what people suggested...', 'update on this since I was in the same boat'). Gives a before/after feel.",
+        "instruction": "ONLY use this framing if the EXISTING COMMENTS above contain clear advice or suggestions you could plausibly follow up on. When they do, frame your comment as an update ('tried what X suggested', 'update on this since I was in the same boat') and reference a specific piece of advice actually present in the comments. If the existing comments don't contain suggestions to follow up on — or there are no existing comments at all — DO NOT use this framing. Pick a different angle grounded in the actual post content.",
     },
     {
         "id": "anecdote",

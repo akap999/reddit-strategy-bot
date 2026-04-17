@@ -349,7 +349,7 @@ Return JSON only:
 
     def _compute_comment_stats(self, comments):
         if not comments:
-            return {"avg_chars": 200, "avg_words": 40, "median_chars": 200, "min_chars": 50, "max_chars": 500}
+            return {"avg_chars": 200, "avg_words": 40, "median_chars": 200, "min_chars": 50, "max_chars": 500, "count": 0}
 
         lengths_chars = [len(c["body"]) for c in comments]
         lengths_words = [len(c["body"].split()) for c in comments]
@@ -363,15 +363,26 @@ Return JSON only:
             "median_chars": median_chars,
             "min_chars": min(lengths_chars),
             "max_chars": max(lengths_chars),
+            "count": len(comments),
         }
 
-    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None):
+    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None, brand_service_location=None):
         if not comments:
             return {"score": 0, "disqualified": False, "reason": "No comments to analyze"}
 
         comments_text = "\n".join([f'- "{c["body"][:250]}"' for c in comments[:10]])
         keywords_text = f"\nBRAND KEYWORDS: {', '.join(brand_keywords)}" if brand_keywords else ""
         post_body_text = f'\nPOST BODY: "{post_body[:500]}"' if post_body else ""
+
+        location_text = ""
+        location_disqualifier = ""
+        if brand_service_location:
+            location_text = f"\nSERVICE LOCATION: {brand_service_location} (the brand only serves this area)"
+            location_disqualifier = (
+                " Post is specifically asking about, or tied to, a geographic area the brand does not serve — "
+                "only disqualify on location if the post clearly names a non-matching region. "
+                "If the post has no geographic context, DO NOT disqualify on location."
+            )
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 
@@ -382,7 +393,7 @@ TOP COMMENTS:
 {comments_text}
 
 BRAND: {brand_name}
-WHAT BRAND DOES: {brand_context}{keywords_text}
+WHAT BRAND DOES: {brand_context}{keywords_text}{location_text}
 
 Score 0-10 on these criteria:
 1. TOPIC MATCH (0-3)
@@ -390,7 +401,7 @@ Score 0-10 on these criteria:
 3. NATURAL FIT (0-2)
 4. CONVERSATION OPENING (0-2)
 
-DISQUALIFIERS: Meme/joke post, hostile to brands, brand already mentioned, completely off-topic.
+DISQUALIFIERS: Meme/joke post, hostile to brands, brand already mentioned, completely off-topic.{location_disqualifier}
 
 Return JSON only:
 {{
@@ -543,6 +554,7 @@ Return JSON only:
 
         best_angle = (relevance or {}).get("best_angle", "").lower()
         natural_fit = (relevance or {}).get("natural_fit", 1)
+        existing_comment_count = (comment_stats or {}).get("count", 0)
         structure_weights = []
         for s in STRUCTURE_TEMPLATES:
             w = 1.0
@@ -566,7 +578,12 @@ Return JSON only:
             if any(k in best_angle for k in ["experience", "story", "journey"]):
                 if sid in ("story_arc", "anecdote", "update_post"):
                     w += 1.5
-            w = max(w, 0.3)
+            # "update_post" requires existing advice in the thread to follow up on.
+            # Zero it out when the post has fewer than 3 existing comments to keep the
+            # model from inventing prior suggestions that don't exist.
+            if sid == "update_post" and existing_comment_count < 3:
+                w = 0.0
+            w = max(w, 0.3) if sid != "update_post" or existing_comment_count >= 3 else 0.0
             structure_weights.append(w)
 
         # Deduplicate against recent history
@@ -674,7 +691,8 @@ Return JSON only:
                           brand_name, brand_context, best_angle="", num_comments=2,
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
                           relevance=None, reply_targets=None, mention_brand_flags=None,
-                          brand_assignments=None, all_brand_names=None):
+                          brand_assignments=None, all_brand_names=None,
+                          brand_service_location=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -735,11 +753,16 @@ Return JSON only:
                 ctx = assigned.get("context", "")
                 if ctx:
                     brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {ctx}"
+                loc = assigned.get("service_location") or brand_service_location
+                if loc:
+                    brand_line += f"\n    SERVICE LOCATION: {loc} — only reference geography if the post already has geographic context."
             elif should_mention:
                 # Single-brand fallback
                 brand_line = f"\n    BRAND: Mention {brand_name} exactly once as a brief aside."
                 if brand_context:
                     brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {brand_context}"
+                if brand_service_location:
+                    brand_line += f"\n    SERVICE LOCATION: {brand_service_location} — only reference geography if the post already has geographic context."
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 
@@ -823,6 +846,8 @@ EACH COMMENT HAS A UNIQUE ASSIGNMENT:
 {pattern_avoidance}
 
 COMMENT QUALITY RULES:
+- Only reference things that actually appear in the POST BODY or EXISTING COMMENTS above. Do NOT invent prior suggestions, advice, attempts, updates, or thread history that isn't written there.
+- If there are no existing comments (or they contain no advice/suggestions), do NOT write as if you're responding to other commenters or "what people said" / "what people suggested". Respond only to the post itself.
 - Reference something specific from THIS post
 - Each comment must be structurally different
 - Your comment MUST be valuable even without brand mentions

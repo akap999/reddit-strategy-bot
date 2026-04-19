@@ -796,7 +796,7 @@ Return JSON only:
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored[0][1]
 
-    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None, brand_service_location=None):
+    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None):
         """Check if the post is relevant for brand mention. Returns raw scores — threshold applied by caller."""
 
         if not comments:
@@ -813,23 +813,6 @@ Return JSON only:
 
         keywords_text = f"\nBRAND KEYWORDS: {', '.join(brand_keywords)}" if brand_keywords else ""
         post_body_text = f"\nPOST BODY: \"{post_body[:500]}\"" if post_body else ""
-        location_text = f"\nSERVICE LOCATION: {brand_service_location} (the brand only serves this area)" if brand_service_location else ""
-        if brand_service_location:
-            location_disqualifier_line = (
-                "\n- Post is clearly tied to a geographic area the brand does not serve "
-                "(only disqualify if the post names a non-matching region; if the post has "
-                "no geographic context, DO NOT disqualify on location)"
-            )
-        else:
-            # Fallback: parse WHAT BRAND DOES for implicit service area.
-            location_disqualifier_line = (
-                "\n- If WHAT BRAND DOES explicitly describes a local/regional service area "
-                "(specific city, state, or region the brand is limited to), treat that as the "
-                "brand's service location and disqualify only if the post is clearly tied to a "
-                "different, non-matching region. If the context does not mention a specific "
-                "service area, implies a global/nationwide brand, or the post has no geographic "
-                "context, DO NOT disqualify on location"
-            )
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 
@@ -840,7 +823,7 @@ TOP COMMENTS:
 {comments_text}
 
 BRAND: {brand_name}
-WHAT BRAND DOES: {brand_context}{keywords_text}{location_text}
+WHAT BRAND DOES: {brand_context}{keywords_text}
 
 Score 0-10 on these criteria:
 
@@ -870,7 +853,7 @@ DISQUALIFIERS (auto-fail):
 - Meme/joke post
 - Hostile to brands/advertising
 - Brand already mentioned
-- Completely off-topic{location_disqualifier_line}
+- Completely off-topic
 
 Return JSON only:
 {{

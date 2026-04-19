@@ -366,33 +366,13 @@ Return JSON only:
             "count": len(comments),
         }
 
-    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None, brand_service_location=None):
+    def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None):
         if not comments:
             return {"score": 0, "disqualified": False, "reason": "No comments to analyze"}
 
         comments_text = "\n".join([f'- "{c["body"][:250]}"' for c in comments[:10]])
         keywords_text = f"\nBRAND KEYWORDS: {', '.join(brand_keywords)}" if brand_keywords else ""
         post_body_text = f'\nPOST BODY: "{post_body[:500]}"' if post_body else ""
-
-        location_text = ""
-        location_disqualifier = ""
-        if brand_service_location:
-            location_text = f"\nSERVICE LOCATION: {brand_service_location} (the brand only serves this area)"
-            location_disqualifier = (
-                " Post is specifically asking about, or tied to, a geographic area the brand does not serve — "
-                "only disqualify on location if the post clearly names a non-matching region. "
-                "If the post has no geographic context, DO NOT disqualify on location."
-            )
-        else:
-            # No explicit service_location set — fall back to parsing WHAT BRAND DOES.
-            location_disqualifier = (
-                " If WHAT BRAND DOES explicitly describes a local/regional service area "
-                "(e.g. a specific city, state, or region the brand is limited to), treat that "
-                "as the brand's service location and disqualify only if the post is clearly "
-                "tied to a different, non-matching region. If the context does not mention a "
-                "specific service area, or implies a global/nationwide brand, or if the post "
-                "has no geographic context, DO NOT disqualify on location."
-            )
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 
@@ -403,7 +383,7 @@ TOP COMMENTS:
 {comments_text}
 
 BRAND: {brand_name}
-WHAT BRAND DOES: {brand_context}{keywords_text}{location_text}
+WHAT BRAND DOES: {brand_context}{keywords_text}
 
 Score 0-10 on these criteria:
 1. TOPIC MATCH (0-3)
@@ -411,7 +391,7 @@ Score 0-10 on these criteria:
 3. NATURAL FIT (0-2)
 4. CONVERSATION OPENING (0-2)
 
-DISQUALIFIERS: Meme/joke post, hostile to brands, brand already mentioned, completely off-topic.{location_disqualifier}
+DISQUALIFIERS: Meme/joke post, hostile to brands, brand already mentioned, completely off-topic.
 
 Return JSON only:
 {{
@@ -701,8 +681,7 @@ Return JSON only:
                           brand_name, brand_context, best_angle="", num_comments=2,
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
                           relevance=None, reply_targets=None, mention_brand_flags=None,
-                          brand_assignments=None, all_brand_names=None,
-                          brand_service_location=None):
+                          brand_assignments=None, all_brand_names=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -763,16 +742,11 @@ Return JSON only:
                 ctx = assigned.get("context", "")
                 if ctx:
                     brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {ctx}"
-                loc = assigned.get("service_location") or brand_service_location
-                if loc:
-                    brand_line += f"\n    SERVICE LOCATION: {loc} — only reference geography if the post already has geographic context."
             elif should_mention:
                 # Single-brand fallback
                 brand_line = f"\n    BRAND: Mention {brand_name} exactly once as a brief aside."
                 if brand_context:
                     brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {brand_context}"
-                if brand_service_location:
-                    brand_line += f"\n    SERVICE LOCATION: {brand_service_location} — only reference geography if the post already has geographic context."
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 

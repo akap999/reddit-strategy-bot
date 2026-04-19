@@ -82,7 +82,7 @@ def _extract_visible_text(html: str, max_chars: int = 6000) -> str:
     return parser.text()[:max_chars]
 
 
-def _build_enrichment_prompt(name: str, domain_url: str, page_text: str, existing_context: str = "") -> str:
+def _build_enrichment_prompt(name: str, domain_url: str, page_text: str) -> str:
     if page_text:
         page_section = f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
     else:
@@ -92,13 +92,6 @@ def _build_enrichment_prompt(name: str, domain_url: str, page_text: str, existin
             "or empty arrays.)"
         )
 
-    context_section = ""
-    if existing_context and existing_context.strip():
-        context_section = (
-            f'\nUSER-PROVIDED BRAND CONTEXT (authoritative — anything stated here overrides '
-            f'inference from the homepage):\n"""\n{existing_context.strip()}\n"""\n'
-        )
-
     return f"""You are analyzing a brand to extract structured context for a GEO (Generative
 Engine Optimization) content strategy. The goal is to write Reddit posts that mirror
 the long-tail questions real users type into ChatGPT/Perplexity about this brand's
@@ -106,7 +99,7 @@ domain — WITHOUT naming the brand itself.
 
 BRAND NAME: {name}
 BRAND URL: {domain_url or "(none)"}
-{context_section}
+
 {page_section}
 
 Extract the following fields. Be specific and concrete — vague answers are useless.
@@ -118,7 +111,6 @@ Extract the following fields. Be specific and concrete — vague answers are use
 - features: 4-6 key differentiating features or capabilities. Each is a short phrase.
 - competitors: 3-8 direct competitor brand/product NAMES (real names like "Notion", "Asana", "Linear"). These will be used in comparison-intent posts, so accuracy matters. If you're unsure, include fewer but only confident ones.
 - context_summary: A 2-3 sentence narrative describing what the brand is and who it serves. This replaces or augments the existing brand context field.
-- service_location: The geographic area the brand serves, IF it is a location-specific/regional brand. Use a concise phrase like "Dallas, TX", "UK only", "California Bay Area", or "Mumbai, India". Return an empty string "" if the brand serves globally/internationally, nationwide in its home country without further restriction, or neither the homepage nor the user-provided context specifies a geographic limit. Check BOTH the user-provided context AND the homepage — if either explicitly names a local/regional service area, fill it in. Do NOT guess.
 
 Return JSON only, exactly this shape:
 {{
@@ -128,26 +120,20 @@ Return JSON only, exactly this shape:
   "pain_points": ["string", ...],
   "features": ["string", ...],
   "competitors": ["string", ...],
-  "context_summary": "string",
-  "service_location": "string"
+  "context_summary": "string"
 }}"""
 
 
-def enrich_brand(claude: ClaudeClient, name: str, domain_url: str, existing_context: str = "") -> dict:
-    """Fetch homepage + ask Claude to extract the enrichment fields.
-
-    `existing_context` is the user-provided free-text "what the brand does"
-    description. If supplied, it is included in the LLM prompt as authoritative
-    input so location and other fields can be pulled from it too, not just the
-    homepage.
+def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
+    """Fetch homepage + ask Claude to extract the 7 enrichment fields.
 
     Returns a dict with keys: category, audience, use_cases, pain_points,
-    features, competitors, context_summary, service_location. On total failure
-    returns an empty dict (caller should treat as error).
+    features, competitors, context_summary. On total failure returns an empty
+    dict (caller should treat as error).
     """
     html = _fetch_homepage(domain_url)
     page_text = _extract_visible_text(html)
-    prompt = _build_enrichment_prompt(name, domain_url, page_text, existing_context)
+    prompt = _build_enrichment_prompt(name, domain_url, page_text)
     result = claude.call(prompt, max_tokens=1500, temperature=0.3)
     if not isinstance(result, dict):
         return {}
@@ -164,63 +150,12 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str, existing_cont
         return str(v).strip() if v else ""
 
     return {
-        "category":         _as_str(result.get("category")),
-        "audience":         _as_str(result.get("audience")),
-        "use_cases":        _as_list(result.get("use_cases")),
-        "pain_points":      _as_list(result.get("pain_points")),
-        "features":         _as_list(result.get("features")),
-        "competitors":      _as_list(result.get("competitors")),
-        "context_summary":  _as_str(result.get("context_summary")),
-        "service_location": _as_str(result.get("service_location")),
-        "_page_fetched":    bool(page_text),
+        "category":        _as_str(result.get("category")),
+        "audience":        _as_str(result.get("audience")),
+        "use_cases":       _as_list(result.get("use_cases")),
+        "pain_points":     _as_list(result.get("pain_points")),
+        "features":        _as_list(result.get("features")),
+        "competitors":     _as_list(result.get("competitors")),
+        "context_summary": _as_str(result.get("context_summary")),
+        "_page_fetched":   bool(page_text),
     }
-
-
-def extract_service_location(claude: ClaudeClient, name: str, context: str,
-                              domain_url: str = "") -> str:
-    """Lightweight single-field extraction: pull the brand's service location
-    out of its free-text context + (optionally) homepage. Returns "" for
-    global brands or when no geographic area is explicitly mentioned.
-
-    Faster + cheaper than full enrichment — used by the "Extract from context"
-    button next to the Service Location input.
-    """
-    if not (context and context.strip()) and not domain_url:
-        return ""
-
-    page_text = ""
-    if domain_url:
-        html = _fetch_homepage(domain_url)
-        page_text = _extract_visible_text(html, max_chars=3000)
-
-    context_block = ""
-    if context and context.strip():
-        context_block = (
-            f'\nBRAND CONTEXT (user-provided — authoritative):\n"""\n{context.strip()}\n"""\n'
-        )
-    page_block = ""
-    if page_text:
-        page_block = f'\nHOMEPAGE TEXT:\n"""\n{page_text}\n"""\n'
-
-    prompt = f"""Extract the GEOGRAPHIC SERVICE AREA for this brand if it is a location-specific
-or regional business. Otherwise return an empty string.
-
-BRAND NAME: {name}
-{context_block}{page_block}
-
-Rules:
-- If the brand explicitly serves a specific city, state, region, country, or named area,
-  return that as a concise phrase (e.g. "Dallas, TX", "UK only", "California Bay Area").
-- If the brand serves globally, internationally, nationwide without restriction, or the
-  inputs do not mention a specific geographic area, return an empty string "".
-- Do NOT guess based on where the company is headquartered. Only return a location if the
-  inputs state the service area is limited to that location.
-
-Return JSON only:
-{{"service_location": "string"}}"""
-
-    result = claude.call(prompt, max_tokens=200, temperature=0.2)
-    if not isinstance(result, dict):
-        return ""
-    value = result.get("service_location", "")
-    return str(value).strip() if value else ""

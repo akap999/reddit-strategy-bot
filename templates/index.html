@@ -760,6 +760,13 @@ async function showAddBrandModal(subId) {
                     <div><label class="text-xs text-gray-400">Pain points solved</label><textarea id="brand-pain-points" rows="2" placeholder="tickets get lost between Slack and Jira"></textarea></div>
                     <div><label class="text-xs text-gray-400">Key features / differentiators</label><textarea id="brand-features" rows="2" placeholder="auto-backlog triage, built-in timeline view"></textarea></div>
                     <div><label class="text-xs text-gray-400">Competitors (used in comparison posts)</label><textarea id="brand-competitors" rows="2" placeholder="Notion, Asana, Linear"></textarea></div>
+                    <div>
+                        <label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label>
+                        <div class="flex gap-2 items-center">
+                            <input id="brand-service-location" placeholder="e.g. Dallas, TX or US nationwide" class="flex-1">
+                            <button type="button" class="btn btn-sm btn-secondary" id="brand-extract-loc-btn" onclick="extractLocationFromContext('brand-name','brand-url','brand-context','brand-service-location','brand-extract-loc-btn')" title="Extract service location from the Context field (and homepage if URL set)">📍 From Context</button>
+                        </div>
+                    </div>
                 </div>
             </details>
         </div>
@@ -770,16 +777,45 @@ async function showAddBrandModal(subId) {
     `);
 }
 
+async function extractLocationFromContext(nameId, urlId, ctxId, targetId, btnId, fallbackName) {
+    // Lightweight LLM call that reads the Context textarea (and homepage URL if
+    // given) and fills the Service Location input. Only populates if the LLM
+    // returns a non-empty string; otherwise toasts "no location detected".
+    const name = nameId ? (document.getElementById(nameId)?.value || '').trim() : (fallbackName || '');
+    const url = urlId ? (document.getElementById(urlId)?.value || '').trim() : '';
+    const ctx = ctxId ? (document.getElementById(ctxId)?.value || '').trim() : '';
+    const target = targetId ? document.getElementById(targetId) : null;
+    if (!ctx && !url) { toast('Enter a Context description or URL first', 'error'); return; }
+    const btn = btnId ? document.getElementById(btnId) : null;
+    const originalHtml = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span>'; }
+    try {
+        const res = await api('/api/brands/extract-location', { method: 'POST', body: { name, domain_url: url, context: ctx } });
+        const loc = (res && res.service_location) ? res.service_location.trim() : '';
+        if (loc && target) {
+            target.value = loc;
+            toast(`Detected service location: ${loc}`, 'success');
+        } else {
+            toast('No specific service location detected — leave blank for a global brand', 'info');
+        }
+    } catch (e) {
+        toast('Location extraction failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = originalHtml; }
+    }
+}
+
 async function enrichBrandDraft() {
     const name = document.getElementById('brand-name').value.trim();
     const url = document.getElementById('brand-url').value.trim();
+    const ctx = (document.getElementById('brand-context')?.value || '').trim();
     if (!name && !url) { toast('Enter brand name or URL first', 'error'); return; }
     const btn = document.getElementById('brand-enrich-btn');
     const original = btn.innerHTML;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>';
     btn.disabled = true;
     try {
-        const draft = await api('/api/brands/enrich', { method: 'POST', body: { name, domain_url: url } });
+        const draft = await api('/api/brands/enrich', { method: 'POST', body: { name, domain_url: url, context: ctx } });
         if (draft.category !== undefined) document.getElementById('brand-category').value = draft.category || '';
         if (draft.audience !== undefined) document.getElementById('brand-audience').value = draft.audience || '';
         const joinArr = a => Array.isArray(a) ? a.join('\n') : '';
@@ -790,6 +826,8 @@ async function enrichBrandDraft() {
         // Only overwrite context if empty or user confirms
         const ctxEl = document.getElementById('brand-context');
         if (!ctxEl.value.trim() && draft.context_summary) ctxEl.value = draft.context_summary;
+        const locEl = document.getElementById('brand-service-location');
+        if (locEl && !locEl.value.trim() && draft.service_location) locEl.value = draft.service_location;
         const msg = draft._page_fetched ? 'Enriched from homepage — review and Save' : 'Enriched (homepage unreachable — review carefully)';
         toast(msg, 'success');
     } catch (e) {
@@ -880,9 +918,10 @@ async function submitAddBrand(subId) {
         body.pain_points = _splitLines('brand-pain-points');
         body.features = _splitLines('brand-features');
         body.competitors = _splitLines('brand-competitors');
+        body.service_location = (document.getElementById('brand-service-location')?.value || '').trim();
         // Mark as enriched if any field is populated
         if (body.category || body.audience || body.use_cases.length || body.pain_points.length
-            || body.features.length || body.competitors.length) {
+            || body.features.length || body.competitors.length || body.service_location) {
             body.enriched_at = new Date().toISOString();
         }
     }
@@ -1365,11 +1404,52 @@ async function renderBrands(el) {
     el.innerHTML = `
         <div class="flex justify-between items-center mb-6">
             <h2 class="text-2xl font-bold">Brands</h2>
-            <button class="btn btn-primary" onclick="showAddBrandStandalone()">+ Add Brand</button>
+            <div class="flex gap-2">
+                <button class="btn btn-secondary" id="backfill-loc-btn" onclick="backfillServiceLocations(false)" title="For every brand with blank Service Location + a filled Context, run an LLM extraction and save any detected locations.">📍 Backfill Locations</button>
+                <button class="btn btn-primary" onclick="showAddBrandStandalone()">+ Add Brand</button>
+            </div>
         </div>
         ${brands.length ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="brands-grid">${brandCards}</div>` : '<p class="text-gray-500">No brands yet. Click + Add Brand to get started.</p>'}
         <div id="brand-detail-area" class="mt-6"></div>
     `;
+}
+
+async function backfillServiceLocations(dryRun) {
+    const btn = document.getElementById('backfill-loc-btn');
+    if (!confirm('Scan all brands with a filled Context but blank Service Location, and try to extract a location from each? This makes one LLM call per eligible brand.')) return;
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span> Working...'; }
+    try {
+        const res = await api('/api/brands/backfill-locations', { method: 'POST', body: { dry_run: !!dryRun, include_urls: true } });
+        if (res.processed === 0) {
+            toast(res.message || 'No brands need backfill', 'info');
+        } else {
+            const rows = (res.results || []).map(r => `
+                <tr>
+                    <td class="text-xs">${r.name}</td>
+                    <td class="text-xs">${r.detected ? `<span class="text-green-500">${r.detected}</span>` : '<span class="text-gray-500 italic">no location</span>'}</td>
+                    <td class="text-xs">${r.saved ? '<span class="text-green-500">✓ saved</span>' : (r.error ? `<span class="text-red-500">error</span>` : '<span class="text-gray-500">—</span>')}</td>
+                </tr>
+            `).join('');
+            showModal(`
+                <h3 class="text-xl font-bold mb-3">Backfill results</h3>
+                <p class="text-sm mb-3">Processed <b>${res.processed}</b> brands · populated <b>${res.populated}</b> · no-location <b>${res.skipped}</b>${res.dry_run ? ' <span class="text-yellow-500">(dry run — nothing saved)</span>' : ''}</p>
+                <div style="max-height:60vh;overflow-y:auto">
+                    <table class="w-full text-left">
+                        <thead><tr class="text-xs text-gray-400"><th>Brand</th><th>Detected</th><th>Status</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+                <div class="flex justify-end gap-2 mt-4">
+                    <button class="btn btn-primary" onclick="closeModal();const el=document.getElementById('app');if(el)renderBrands(el);">Done</button>
+                </div>
+            `);
+        }
+    } catch (e) {
+        toast('Backfill failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    }
 }
 
 async function showAddBrandStandalone() {
@@ -1684,7 +1764,10 @@ async function editBrandContext(brandName) {
             </div>
             <div>
                 <label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label>
-                <input id="edit-brand-location" value="${serviceLocation}" placeholder="e.g. Dallas, TX or US nationwide" class="w-full">
+                <div class="flex gap-2 items-center">
+                    <input id="edit-brand-location" value="${serviceLocation}" placeholder="e.g. Dallas, TX or US nationwide" class="flex-1">
+                    <button type="button" class="btn btn-sm btn-secondary" id="edit-extract-loc-btn" onclick="extractLocationFromContext(null,'edit-brand-url','edit-brand-context','edit-brand-location','edit-extract-loc-btn','${brandName.replace(/'/g,"\\'")}')" title="Extract service location from the Context field (and website if set)">📍 From Context</button>
+                </div>
             </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
@@ -6733,7 +6816,13 @@ function lsShowAddBrand() {
                 <div><label class="text-xs text-gray-400">Website URL</label><input id="ls-new-brand-url" placeholder="e.g. petermd.com"></div>
                 <div><label class="text-xs text-gray-400">Context</label><textarea id="ls-new-brand-ctx" rows="2" placeholder="What does the brand do?"></textarea></div>
                 <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="ls-new-brand-kw" placeholder="e.g. testosterone, TRT, hormone"></div>
-                <div><label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label><input id="ls-new-brand-loc" placeholder="e.g. Dallas, TX or US nationwide"></div>
+                <div>
+                    <label class="text-xs text-gray-400">Service Location <span class="text-gray-500">(optional — leave blank for global brands)</span></label>
+                    <div class="flex gap-2 items-center">
+                        <input id="ls-new-brand-loc" placeholder="e.g. Dallas, TX or US nationwide" class="flex-1">
+                        <button type="button" class="btn btn-sm btn-secondary" id="ls-extract-loc-btn" onclick="extractLocationFromContext('ls-new-brand-name','ls-new-brand-url','ls-new-brand-ctx','ls-new-brand-loc','ls-extract-loc-btn')" title="Extract service location from the Context field (and homepage if URL set)">📍 From Context</button>
+                    </div>
+                </div>
             </div>
             <div class="flex justify-end gap-3 mt-4">
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>

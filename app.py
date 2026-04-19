@@ -591,19 +591,20 @@ def api_update_brand(bid):
 def api_enrich_brand_draft():
     """Enrich a brand from its homepage + LLM. Returns a draft dict — does NOT save.
 
-    Payload: { "name": str, "domain_url": str }
+    Payload: { "name": str, "domain_url": str, "context": str (optional) }
     Response: { category, audience, use_cases[], pain_points[], features[],
-                competitors[], context_summary, _page_fetched }
+                competitors[], context_summary, service_location, _page_fetched }
     """
     from generators.brand_enrichment import enrich_brand
     data = request.json or {}
     name = (data.get("name") or "").strip()
     domain_url = (data.get("domain_url") or "").strip()
+    existing_context = (data.get("context") or "").strip()
     if not name:
         return jsonify({"error": "name is required"}), 400
 
     claude = ClaudeClient(ANTHROPIC_API_KEY)
-    draft = enrich_brand(claude, name, domain_url)
+    draft = enrich_brand(claude, name, domain_url, existing_context=existing_context)
     if not draft:
         return jsonify({
             "error": "Enrichment failed — LLM returned no usable data. "
@@ -613,8 +614,8 @@ def api_enrich_brand_draft():
 
 @app.route("/api/brands/<int:bid>/enrich", methods=["POST"])
 def api_enrich_existing_brand(bid):
-    """Enrich an existing brand by its ID. Uses the brand's stored name + domain_url.
-    Returns a draft dict (does NOT save)."""
+    """Enrich an existing brand by its ID. Uses the brand's stored name +
+    domain_url + context. Returns a draft dict (does NOT save)."""
     from generators.brand_enrichment import enrich_brand
     db = get_db()
     try:
@@ -625,13 +626,98 @@ def api_enrich_existing_brand(bid):
         db.close()
 
     claude = ClaudeClient(ANTHROPIC_API_KEY)
-    draft = enrich_brand(claude, brand["name"], brand.get("domain_url") or "")
+    draft = enrich_brand(
+        claude, brand["name"], brand.get("domain_url") or "",
+        existing_context=brand.get("context") or "",
+    )
     if not draft:
         return jsonify({
             "error": "Enrichment failed — LLM returned no usable data. "
                      "Check the brand's domain URL and try again."
         }), 502
     return jsonify(draft)
+
+
+@app.route("/api/brands/extract-location", methods=["POST"])
+def api_extract_brand_location():
+    """Lightweight single-field extraction — pull the service area out of
+    free-text brand context (and optionally homepage). Does NOT save.
+
+    Payload: { "name": str, "context": str, "domain_url": str (optional) }
+    Response: { "service_location": "string or empty" }
+    """
+    from generators.brand_enrichment import extract_service_location
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    context = (data.get("context") or "").strip()
+    domain_url = (data.get("domain_url") or "").strip()
+    if not context and not domain_url:
+        return jsonify({"service_location": ""})
+    claude = ClaudeClient(ANTHROPIC_API_KEY)
+    loc = extract_service_location(claude, name or "(unnamed)", context, domain_url)
+    return jsonify({"service_location": loc})
+
+
+@app.route("/api/brands/backfill-locations", methods=["POST"])
+def api_backfill_brand_locations():
+    """Walk every brand with a blank service_location + a non-empty context,
+    extract a service location via LLM, and save. Returns per-brand results.
+
+    Payload: { "include_urls": bool (default true — also consult homepage),
+               "dry_run": bool (default false — preview without saving) }
+    Response: { processed, populated, skipped, results: [{id, name, detected, saved}] }
+    """
+    from generators.brand_enrichment import extract_service_location
+    data = request.json or {}
+    include_urls = data.get("include_urls", True)
+    dry_run = bool(data.get("dry_run", False))
+
+    db = get_db()
+    try:
+        rows = db.conn.execute("""
+            SELECT id, name, context, domain_url, service_location
+            FROM brands
+            WHERE (service_location IS NULL OR TRIM(service_location) = '')
+              AND context IS NOT NULL AND TRIM(context) != ''
+            ORDER BY name
+        """).fetchall()
+
+        if not rows:
+            return jsonify({
+                "processed": 0, "populated": 0, "skipped": 0, "results": [],
+                "message": "No brands need backfill (all have service_location set, or no context to parse).",
+            })
+
+        claude = ClaudeClient(ANTHROPIC_API_KEY)
+        results = []
+        populated = 0
+        for r in rows:
+            name = r["name"]
+            ctx = (r["context"] or "").strip()
+            url = (r["domain_url"] or "").strip() if include_urls else ""
+            try:
+                loc = extract_service_location(claude, name, ctx, url)
+            except Exception as e:
+                results.append({"id": r["id"], "name": name, "detected": "", "saved": False, "error": str(e)})
+                continue
+            saved = False
+            if loc and not dry_run:
+                db.update_brand(brand_id=r["id"], service_location=loc)
+                saved = True
+                populated += 1
+            elif loc and dry_run:
+                populated += 1
+            results.append({"id": r["id"], "name": name, "detected": loc, "saved": saved})
+
+        return jsonify({
+            "processed": len(rows),
+            "populated": populated,
+            "skipped": len(rows) - populated,
+            "dry_run": dry_run,
+            "results": results,
+        })
+    finally:
+        db.close()
 
 # ---------------------------------------------------------------------------
 # API: Posts

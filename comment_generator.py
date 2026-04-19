@@ -808,10 +808,22 @@ Return JSON only:
         keywords_text = f"\nBRAND KEYWORDS: {', '.join(brand_keywords)}" if brand_keywords else ""
         post_body_text = f"\nPOST BODY: \"{post_body[:500]}\"" if post_body else ""
         location_text = f"\nSERVICE LOCATION: {brand_service_location} (the brand only serves this area)" if brand_service_location else ""
-        location_disqualifier_line = (
-            "\n- Post is clearly tied to a geographic area the brand does not serve (only disqualify if the post names a non-matching region; if the post has no geographic context, DO NOT disqualify on location)"
-            if brand_service_location else ""
-        )
+        if brand_service_location:
+            location_disqualifier_line = (
+                "\n- Post is clearly tied to a geographic area the brand does not serve "
+                "(only disqualify if the post names a non-matching region; if the post has "
+                "no geographic context, DO NOT disqualify on location)"
+            )
+        else:
+            # Fallback: parse WHAT BRAND DOES for implicit service area.
+            location_disqualifier_line = (
+                "\n- If WHAT BRAND DOES explicitly describes a local/regional service area "
+                "(specific city, state, or region the brand is limited to), treat that as the "
+                "brand's service location and disqualify only if the post is clearly tied to a "
+                "different, non-matching region. If the context does not mention a specific "
+                "service area, implies a global/nationwide brand, or the post has no geographic "
+                "context, DO NOT disqualify on location"
+            )
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 

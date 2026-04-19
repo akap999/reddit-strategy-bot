@@ -383,6 +383,16 @@ Return JSON only:
                 "only disqualify on location if the post clearly names a non-matching region. "
                 "If the post has no geographic context, DO NOT disqualify on location."
             )
+        else:
+            # No explicit service_location set — fall back to parsing WHAT BRAND DOES.
+            location_disqualifier = (
+                " If WHAT BRAND DOES explicitly describes a local/regional service area "
+                "(e.g. a specific city, state, or region the brand is limited to), treat that "
+                "as the brand's service location and disqualify only if the post is clearly "
+                "tied to a different, non-matching region. If the context does not mention a "
+                "specific service area, or implies a global/nationwide brand, or if the post "
+                "has no geographic context, DO NOT disqualify on location."
+            )
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 

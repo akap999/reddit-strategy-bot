@@ -413,9 +413,25 @@ class RedditSearchBot:
                 print(f"    Trying {api_name} API...", end=" ", flush=True)
 
                 if api_name == "reddit":
-                    batch = self._search_reddit_native(
-                        keyword, subreddit_path, reddit_sort, time_filter, needed_raw
-                    )
+                    if subreddit_path and "+" in subreddit_path:
+                        # Multi-sub: query each subreddit individually so every
+                        # one gets an equal quota, rather than letting Reddit's
+                        # combined-sub search (r/a+b+c) decide the mix (which
+                        # biases heavily toward the highest-scoring sub and can
+                        # starve the others).
+                        subs = [s.strip() for s in subreddit_path.split("+")
+                                if s.strip()]
+                        batch = []
+                        per_sub = max(needed_raw // max(len(subs), 1), 25)
+                        for sub in subs:
+                            sub_batch = self._search_reddit_native(
+                                keyword, sub, reddit_sort, time_filter, per_sub
+                            )
+                            batch.extend(sub_batch)
+                    else:
+                        batch = self._search_reddit_native(
+                            keyword, subreddit_path, reddit_sort, time_filter, needed_raw
+                        )
                 elif api_name == "pullpush":
                     if subreddit_path and "+" in subreddit_path:
                         # Multi-sub: Pullpush only accepts a single subreddit,

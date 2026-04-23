@@ -418,16 +418,23 @@ class RedditSearchBot:
                         # one gets an equal quota, rather than letting Reddit's
                         # combined-sub search (r/a+b+c) decide the mix (which
                         # biases heavily toward the highest-scoring sub and can
-                        # starve the others).
+                        # starve the others). Fan out the per-sub fetches in
+                        # parallel to avoid serial network latency.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 25)
-                        for sub in subs:
-                            sub_batch = self._search_reddit_native(
-                                keyword, sub, reddit_sort, time_filter, per_sub
-                            )
-                            batch.extend(sub_batch)
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 8)) as ex:
+                            futures = [
+                                ex.submit(self._search_reddit_native,
+                                          keyword, sub, reddit_sort, time_filter, per_sub)
+                                for sub in subs
+                            ]
+                            for f in as_completed(futures):
+                                try:
+                                    batch.extend(f.result() or [])
+                                except Exception as e:
+                                    print(f"    per-sub fetch error (reddit): {e}")
                     else:
                         batch = self._search_reddit_native(
                             keyword, subreddit_path, reddit_sort, time_filter, needed_raw
@@ -435,17 +442,23 @@ class RedditSearchBot:
                 elif api_name == "pullpush":
                     if subreddit_path and "+" in subreddit_path:
                         # Multi-sub: Pullpush only accepts a single subreddit,
-                        # so split and query each with equal quota.
+                        # so split and query each with equal quota — in parallel.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 50)
-                        for sub in subs:
-                            sub_batch = self._search_pullpush(
-                                keyword, sub, sort_by, max_days_old, per_sub,
-                                sort_order=sort_order,
-                            )
-                            batch.extend(sub_batch)
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 8)) as ex:
+                            futures = [
+                                ex.submit(self._search_pullpush,
+                                          keyword, sub, sort_by, max_days_old, per_sub,
+                                          sort_order=sort_order)
+                                for sub in subs
+                            ]
+                            for f in as_completed(futures):
+                                try:
+                                    batch.extend(f.result() or [])
+                                except Exception as e:
+                                    print(f"    per-sub fetch error (pullpush): {e}")
                     else:
                         batch = self._search_pullpush(
                             keyword, subreddit_path, sort_by, max_days_old,
@@ -459,7 +472,7 @@ class RedditSearchBot:
                         )
                     elif not subreddit_path:
                         # Global search — discover subreddits from prior
-                        # results, then query Arctic-Shift per subreddit
+                        # results, then query Arctic-Shift per subreddit in parallel.
                         discovered_subs = {}
                         sub_counts = {}
                         for post in filtered:
@@ -474,25 +487,37 @@ class RedditSearchBot:
 
                         batch = []
                         per_sub = max(needed_raw // max(len(top_subs), 1), 50)
-                        for sub_key in top_subs:
-                            sub_batch = self._search_arctic(
-                                keyword, discovered_subs[sub_key],
-                                max_days_old, per_sub,
-                            )
-                            batch.extend(sub_batch)
                         if top_subs:
+                            with ThreadPoolExecutor(max_workers=min(len(top_subs), 8)) as ex:
+                                futures = [
+                                    ex.submit(self._search_arctic,
+                                              keyword, discovered_subs[sub_key],
+                                              max_days_old, per_sub)
+                                    for sub_key in top_subs
+                                ]
+                                for f in as_completed(futures):
+                                    try:
+                                        batch.extend(f.result() or [])
+                                    except Exception as e:
+                                        print(f"    per-sub fetch error (arctic-global): {e}")
                             print(f"(queried {len(top_subs)} subs) ", end="")
                     else:
-                        # Multi-sub path (a+b+c) — query each individually
+                        # Multi-sub path (a+b+c) — query each individually in parallel.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 50)
-                        for sub in subs:
-                            sub_batch = self._search_arctic(
-                                keyword, sub, max_days_old, per_sub,
-                            )
-                            batch.extend(sub_batch)
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 8)) as ex:
+                            futures = [
+                                ex.submit(self._search_arctic,
+                                          keyword, sub, max_days_old, per_sub)
+                                for sub in subs
+                            ]
+                            for f in as_completed(futures):
+                                try:
+                                    batch.extend(f.result() or [])
+                                except Exception as e:
+                                    print(f"    per-sub fetch error (arctic): {e}")
                 else:
                     batch = []
 
@@ -970,7 +995,7 @@ class RedditSearchBot:
             return self.search(keyword, **kwargs)
 
         if concurrent and len(keywords) > 1:
-            with ThreadPoolExecutor(max_workers=min(len(keywords), 3)) as executor:
+            with ThreadPoolExecutor(max_workers=min(len(keywords), 5)) as executor:
                 futures = {executor.submit(_search_one, kw): kw for kw in keywords}
                 for future in as_completed(futures):
                     try:

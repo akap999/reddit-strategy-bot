@@ -2889,7 +2889,12 @@ def api_search_reddit():
             # Manual multi-keyword path
             if keywords_list:
                 n = max(len(keywords_list), 1)
-                per_kw_limit = max(10, math.ceil(requested_limit / n * 1.5))
+                # Each keyword runs the full cascade with the full requested
+                # limit as its budget. Heavy cross-keyword overlap (e.g.
+                # "testosterone" and "TRT") shrinks unique results fast, so
+                # dividing the budget across keywords starves the output.
+                # Dedup + final slice below cap the response at requested_limit.
+                per_kw_limit = requested_limit
                 print(f"    Multi-keyword search: {n} keywords, per_kw_limit={per_kw_limit}")
                 print(f"    Keywords: {keywords_list}")
                 merged = bot.search_multiple_keywords(
@@ -2901,7 +2906,7 @@ def api_search_reddit():
             # Auto-brand path
             keywords, source = _resolve_brand_keywords(auto_brand, db=task_db)
             n = max(len(keywords), 1)
-            per_kw_limit = max(10, math.ceil(requested_limit / n * 1.5))
+            per_kw_limit = requested_limit
             print(f"    Auto-brand search: {n} keywords, per_kw_limit={per_kw_limit}, source={source}")
             print(f"    Keywords: {keywords}")
             merged = bot.search_multiple_keywords(

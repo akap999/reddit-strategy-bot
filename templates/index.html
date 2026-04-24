@@ -6778,12 +6778,12 @@ function renderLsSearch(c) {
                             <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
                         </label>
                     </label>
-                    <input id="ls-keyword" placeholder="e.g. hr software, hris, human resources" oninput="this.dataset.prefilledFor=''">
+                    <textarea id="ls-keyword" rows="3" placeholder="e.g. hr software, hris, human resources&#10;(comma- or newline-separated)" oninput="this.dataset.prefilledFor=''" style="min-height:70px;resize:vertical;font-family:inherit"></textarea>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400">Subreddits (optional, comma-separated)</label>
-                    <div class="flex gap-1">
-                        <input id="ls-subreddit" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''">
+                    <label class="text-xs text-gray-400">Subreddits (optional, comma- or newline-separated)</label>
+                    <div class="flex gap-1 items-start">
+                        <textarea id="ls-subreddit" rows="3" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''" style="min-height:70px;resize:vertical;font-family:inherit"></textarea>
                         <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability">Check</button>
                     </div>
                     <div id="ls-sub-check" class="text-xs mt-1"></div>
@@ -6845,7 +6845,7 @@ function renderLsSearch(c) {
 async function lsCheckSubreddit() {
     const raw = document.getElementById('ls-subreddit').value.trim();
     if (!raw) { toast('Enter a subreddit name', 'error'); return; }
-    const names = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const names = raw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
     const el = document.getElementById('ls-sub-check');
     el.innerHTML = '<span class="text-gray-400">Checking...</span>';
     const parts = [];
@@ -6950,8 +6950,8 @@ async function lsSaveSearchToBrand() {
     if (!brandId) { toast('Pick a brand first', 'error'); return; }
     const kwRaw = (document.getElementById('ls-keyword')?.value || '').trim();
     const subRaw = (document.getElementById('ls-subreddit')?.value || '').trim();
-    const keywords = kwRaw ? kwRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
-    const subreddits = subRaw ? subRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const keywords = kwRaw ? kwRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
+    const subreddits = subRaw ? subRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
 
     const btn = document.getElementById('ls-save-to-brand-btn');
     const original = btn ? btn.innerHTML : '';
@@ -7048,13 +7048,13 @@ async function lsRunSearch() {
     const maxSubsVal = parseInt(document.getElementById('ls-maxsubs').value);
     const minSubsVal = parseInt(document.getElementById('ls-minsubs').value);
     const scrutinyVal = parseInt(document.getElementById('ls-scrutiny').value);
-    // Support comma-separated keywords
-    const kwList = keyword ? keyword.split(',').map(s => s.trim()).filter(Boolean) : [];
+    // Support comma- or newline-separated keywords
+    const kwList = keyword ? keyword.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
     const body = {
-        keyword: autoOn ? undefined : (kwList.length <= 1 ? keyword : undefined),
+        keyword: autoOn ? undefined : (kwList.length <= 1 ? (kwList[0] || keyword) : undefined),
         keywords: autoOn ? undefined : (kwList.length > 1 ? kwList : undefined),
         auto_brand: autoBrand,
-        subreddits: (() => { const r = document.getElementById('ls-subreddit').value.trim(); if (!r) return undefined; const l = r.split(',').map(s => s.trim()).filter(Boolean); return l.length ? l : undefined; })(),
+        subreddits: (() => { const r = document.getElementById('ls-subreddit').value.trim(); if (!r) return undefined; const l = r.split(/[,\n]/).map(s => s.trim()).filter(Boolean); return l.length ? l : undefined; })(),
         excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,
         min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
         min_score: parseInt(document.getElementById('ls-minscore').value) || 0,

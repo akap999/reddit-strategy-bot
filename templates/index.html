@@ -6770,30 +6770,32 @@ function renderLsTabContent() {
 function renderLsSearch(c) {
     c.innerHTML = `
         <div class="card p-5 mb-4">
-            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
-                <div class="col-span-2">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+                <div>
                     <label class="text-xs text-gray-400 flex items-center justify-between">
                         <span>Keyword <span id="ls-keyword-req">*</span></span>
                         <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
                             <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
                         </label>
                     </label>
-                    <textarea id="ls-keyword" rows="3" placeholder="e.g. hr software, hris, human resources&#10;(comma- or newline-separated)" oninput="this.dataset.prefilledFor=''" style="min-height:70px;resize:vertical;font-family:inherit"></textarea>
+                    <textarea id="ls-keyword" rows="5" placeholder="e.g. hr software, hris, human resources&#10;(comma- or newline-separated)" oninput="this.dataset.prefilledFor=''" style="min-height:110px;width:100%;resize:vertical;font-family:inherit"></textarea>
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Subreddits (optional, comma- or newline-separated)</label>
                     <div class="flex gap-1 items-start">
-                        <textarea id="ls-subreddit" rows="3" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''" style="min-height:70px;resize:vertical;font-family:inherit"></textarea>
-                        <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability">Check</button>
+                        <textarea id="ls-subreddit" rows="5" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''" style="min-height:110px;resize:vertical;font-family:inherit"></textarea>
+                        <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability" style="white-space:nowrap;align-self:flex-start">Check</button>
                     </div>
                     <div id="ls-sub-check" class="text-xs mt-1"></div>
                 </div>
-                <div>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-3">
+                <div class="lg:col-span-1">
                     <label class="text-xs text-gray-400 flex items-center justify-between">
                         <span>Brand (for saving)</span>
                         <button class="text-xs btn btn-sm btn-secondary" onclick="lsSaveSearchToBrand()" title="Save the current keywords + subreddits to this brand so they auto-fill next time" id="ls-save-to-brand-btn" style="display:none;padding:2px 6px;font-size:0.65rem">💾 Save to brand</button>
                     </label>
-                    <select id="ls-brand" onchange="lsOnBrandChange()"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
+                    <select id="ls-brand" onchange="lsOnBrandChange()" style="width:100%"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
                 </div>
             </div>
             <div id="ls-auto-panel" class="mb-3 p-3" style="display:none;background:#1a1a1a;border:1px solid #333;border-radius:6px">

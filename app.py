@@ -507,7 +507,7 @@ def _extract_brand_enrichment_fields(data):
         if scalar in data:
             val = data.get(scalar)
             out[scalar] = val.strip() if isinstance(val, str) else val
-    for listf in ("use_cases", "pain_points", "features", "competitors"):
+    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits"):
         if listf in data:
             v = data.get(listf)
             if v is None:
@@ -3562,9 +3562,18 @@ def api_create_standalone_brand():
         context = data.get("context", "").strip() or name
         domain_url = data.get("domain_url", "").strip()
         keywords = json.dumps(data.get("keywords", []))
+        # search_subreddits accepts list or comma-separated string from the UI
+        ss_raw = data.get("search_subreddits")
+        if isinstance(ss_raw, list):
+            ss_list = [str(s).strip() for s in ss_raw if str(s).strip()]
+        elif isinstance(ss_raw, str):
+            ss_list = [s.strip() for s in ss_raw.replace("\n", ",").split(",") if s.strip()]
+        else:
+            ss_list = []
+        search_subreddits = json.dumps(ss_list) if ss_list else None
         cur = db.conn.execute(
-            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords) VALUES (NULL, ?, ?, ?, ?)",
-            (name, domain_url, context, keywords)
+            "INSERT INTO brands (subreddit_id, name, domain_url, context, keywords, search_subreddits) VALUES (NULL, ?, ?, ?, ?, ?)",
+            (name, domain_url, context, keywords, search_subreddits)
         )
         db.conn.commit()
         return jsonify({"id": cur.lastrowid, "name": name})

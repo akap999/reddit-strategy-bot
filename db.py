@@ -164,22 +164,24 @@ class Database:
 
     def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]",
                   category=None, audience=None, use_cases=None, pain_points=None,
-                  features=None, competitors=None, enriched_at=None):
+                  features=None, competitors=None, enriched_at=None,
+                  search_subreddits=None):
         cur = self.conn.execute(
             """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
                                    category, audience, use_cases, pain_points,
-                                   features, competitors, enriched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   features, competitors, enriched_at, search_subreddits)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, name, domain_url, context, keywords,
              category, audience, use_cases, pain_points,
-             features, competitors, enriched_at)
+             features, competitors, enriched_at, search_subreddits)
         )
         self.conn.commit()
         return cur.lastrowid
 
     def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
                      category=None, audience=None, use_cases=None, pain_points=None,
-                     features=None, competitors=None, enriched_at=None):
+                     features=None, competitors=None, enriched_at=None,
+                     search_subreddits=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -188,6 +190,7 @@ class Database:
             "category": category, "audience": audience, "use_cases": use_cases,
             "pain_points": pain_points, "features": features,
             "competitors": competitors, "enriched_at": enriched_at,
+            "search_subreddits": search_subreddits,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1087,13 +1090,14 @@ class Database:
         # ----- brands: GEO enrichment columns -----
         brand_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(brands)").fetchall()]
         brand_enrichment_cols = {
-            "category":    "ALTER TABLE brands ADD COLUMN category TEXT",
-            "audience":    "ALTER TABLE brands ADD COLUMN audience TEXT",
-            "use_cases":   "ALTER TABLE brands ADD COLUMN use_cases TEXT",
-            "pain_points": "ALTER TABLE brands ADD COLUMN pain_points TEXT",
-            "features":    "ALTER TABLE brands ADD COLUMN features TEXT",
-            "competitors": "ALTER TABLE brands ADD COLUMN competitors TEXT",
-            "enriched_at": "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
+            "category":          "ALTER TABLE brands ADD COLUMN category TEXT",
+            "audience":          "ALTER TABLE brands ADD COLUMN audience TEXT",
+            "use_cases":         "ALTER TABLE brands ADD COLUMN use_cases TEXT",
+            "pain_points":       "ALTER TABLE brands ADD COLUMN pain_points TEXT",
+            "features":          "ALTER TABLE brands ADD COLUMN features TEXT",
+            "competitors":       "ALTER TABLE brands ADD COLUMN competitors TEXT",
+            "enriched_at":       "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
+            "search_subreddits": "ALTER TABLE brands ADD COLUMN search_subreddits TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

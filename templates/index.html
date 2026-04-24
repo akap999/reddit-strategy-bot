@@ -6778,18 +6778,21 @@ function renderLsSearch(c) {
                             <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
                         </label>
                     </label>
-                    <input id="ls-keyword" placeholder="e.g. hr software, hris, human resources">
+                    <input id="ls-keyword" placeholder="e.g. hr software, hris, human resources" oninput="this.dataset.prefilledFor=''">
                 </div>
                 <div>
                     <label class="text-xs text-gray-400">Subreddits (optional, comma-separated)</label>
                     <div class="flex gap-1">
-                        <input id="ls-subreddit" placeholder="e.g. testosterone, fitness, health" class="flex-1">
+                        <input id="ls-subreddit" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''">
                         <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability">Check</button>
                     </div>
                     <div id="ls-sub-check" class="text-xs mt-1"></div>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400">Brand (for saving)</label>
+                    <label class="text-xs text-gray-400 flex items-center justify-between">
+                        <span>Brand (for saving)</span>
+                        <button class="text-xs btn btn-sm btn-secondary" onclick="lsSaveSearchToBrand()" title="Save the current keywords + subreddits to this brand so they auto-fill next time" id="ls-save-to-brand-btn" style="display:none;padding:2px 6px;font-size:0.65rem">💾 Save to brand</button>
+                    </label>
                     <select id="ls-brand" onchange="lsOnBrandChange()"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
                 </div>
             </div>
@@ -6811,9 +6814,9 @@ function renderLsSearch(c) {
                 </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
-                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="3"></div>
+                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="1"></div>
                 <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="0"></div>
-                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="360"></div>
+                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="1"></div>
                 <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
                 <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50"></div>
             </div>
@@ -6890,23 +6893,86 @@ function lsToggleAutoKeywords(on) {
 }
 
 function lsOnBrandChange() {
-    // Prefill auto-panel fields when a saved brand is picked (but don't clobber user edits).
-    const autoOn = document.getElementById('ls-auto-kw')?.checked;
-    if (!autoOn) return;
     const brandId = document.getElementById('ls-brand').value;
-    const nameEl = document.getElementById('ls-auto-name');
-    const ctxEl = document.getElementById('ls-auto-context');
+    const saveBtn = document.getElementById('ls-save-to-brand-btn');
+
+    // Toggle the "Save to brand" button visibility — only meaningful when a brand is picked.
+    if (saveBtn) saveBtn.style.display = brandId ? '' : 'none';
+
     if (!brandId) return;
     const brand = _lsBrands.find(b => b.id == brandId);
     if (!brand) return;
-    // Only prefill if fields are empty or still contain the previously-prefilled brand values
-    if (!nameEl.value || nameEl.dataset.prefilledFor) {
-        nameEl.value = brand.name || '';
-        nameEl.dataset.prefilledFor = brandId;
+
+    // Prefill the keyword + subreddits inputs from the brand's saved values.
+    // Only overwrite when the input is empty or still holds a previous prefill
+    // (tracked via dataset.prefilledFor) — never clobber genuine user edits.
+    const kwEl = document.getElementById('ls-keyword');
+    if (kwEl) {
+        let savedKw = [];
+        try { savedKw = JSON.parse(brand.keywords || '[]'); } catch(e) {}
+        const kwStr = Array.isArray(savedKw) ? savedKw.join(', ') : '';
+        if (!kwEl.value.trim() || kwEl.dataset.prefilledFor) {
+            kwEl.value = kwStr;
+            kwEl.dataset.prefilledFor = brandId;
+        }
     }
-    if (!ctxEl.value || ctxEl.dataset.prefilledFor) {
-        ctxEl.value = brand.context || '';
-        ctxEl.dataset.prefilledFor = brandId;
+    const subEl = document.getElementById('ls-subreddit');
+    if (subEl) {
+        let savedSubs = [];
+        try { savedSubs = JSON.parse(brand.search_subreddits || '[]'); } catch(e) {}
+        const subStr = Array.isArray(savedSubs) ? savedSubs.join(', ') : '';
+        if (!subEl.value.trim() || subEl.dataset.prefilledFor) {
+            subEl.value = subStr;
+            subEl.dataset.prefilledFor = brandId;
+        }
+    }
+
+    // Auto-keyword panel prefill (existing behavior)
+    const autoOn = document.getElementById('ls-auto-kw')?.checked;
+    if (autoOn) {
+        const nameEl = document.getElementById('ls-auto-name');
+        const ctxEl = document.getElementById('ls-auto-context');
+        if (nameEl && (!nameEl.value || nameEl.dataset.prefilledFor)) {
+            nameEl.value = brand.name || '';
+            nameEl.dataset.prefilledFor = brandId;
+        }
+        if (ctxEl && (!ctxEl.value || ctxEl.dataset.prefilledFor)) {
+            ctxEl.value = brand.context || '';
+            ctxEl.dataset.prefilledFor = brandId;
+        }
+    }
+}
+
+async function lsSaveSearchToBrand() {
+    // Persist the current keyword + subreddits inputs back to the selected
+    // brand's keywords + search_subreddits columns.
+    const brandId = document.getElementById('ls-brand').value;
+    if (!brandId) { toast('Pick a brand first', 'error'); return; }
+    const kwRaw = (document.getElementById('ls-keyword')?.value || '').trim();
+    const subRaw = (document.getElementById('ls-subreddit')?.value || '').trim();
+    const keywords = kwRaw ? kwRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const subreddits = subRaw ? subRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+    const btn = document.getElementById('ls-save-to-brand-btn');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:10px;height:10px;border-width:2px"></span>'; }
+    try {
+        await api(`/api/brands/${brandId}`, { method: 'PUT', body: {
+            keywords,
+            search_subreddits: subreddits,
+        }});
+        // Refresh the in-memory brand list so the new values prefill correctly next time.
+        try { _lsBrands = await api('/api/search/brands'); } catch(e) {}
+        // Mark inputs as freshly-prefilled-for-this-brand so a brand re-select doesn't clobber them.
+        const kwEl = document.getElementById('ls-keyword');
+        const subEl = document.getElementById('ls-subreddit');
+        if (kwEl) kwEl.dataset.prefilledFor = brandId;
+        if (subEl) subEl.dataset.prefilledFor = brandId;
+        toast('Saved to brand', 'success');
+    } catch (e) {
+        toast('Save failed', 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
     }
 }
 

@@ -63,7 +63,7 @@ PERSONAS = [
     },
     {
         "id": "comparer",
-        "voice": "You've tried 2-3 different options and give honest pros/cons of each, including your current one. Your current choice has clear downsides too. No winner, no favorite. You're still not fully satisfied. Use phrases like 'tried X first', 'then Y', 'currently on Z but it's not perfect either'. Neutral, slightly resigned.",
+        "voice": "You've tried 2-3 different options and give honest pros/cons of each. No winner, no favorite — each has trade-offs. Use phrases like 'tried X first', 'then Y', 'currently on Z'. Neutral, slightly resigned. IMPORTANT: if any of the options you compare is the brand the comment is meant to mention, do NOT criticize it — describe it neutrally, save any complaints for the OTHER options or skip them entirely.",
         "length": "long",
     },
     {
@@ -1064,9 +1064,9 @@ Other brand rules:
 - When mentioning {brand_name}, be neutral and brief. Just name-drop and move on.
 
 ANTI-MARKETING RULES (CRITICAL):
+- Do NOT criticize, complain about, mention downsides of, or speak negatively about {brand_name}. The mention must stay neutral or mildly positive — never negative. If asked to add balance, do it by trimming praise of {brand_name}, not by inventing flaws.
 - Do NOT set up a negative experience (with other providers, products, approaches, the old way of doing things) and then introduce {brand_name} as the solution or next step. If you mention frustration with alternatives, {brand_name} must NOT appear nearby or as the resolution.
-- If you mention ANY frustration with alternatives, you MUST also mention at least one specific downside or annoyance about {brand_name}. Real users complain about everything, even things they use.
-- Do NOT position {brand_name}'s category (online vs local, app vs manual, new vs old) as obviously better. If you compare categories, be balanced or mention downsides.
+- Do NOT position {brand_name}'s category (online vs local, app vs manual, new vs old) as obviously better. If you compare categories, be neutral about both — describe trade-offs without praising one and trashing the other.
 - The brand mention must be in a COMPLETELY SEPARATE thought from any criticism of alternatives.
 
 ALSO BAD (problem-then-brand-solution arc):

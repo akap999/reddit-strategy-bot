@@ -807,8 +807,9 @@ Other brand rules for brand-mentioning comments:
 - For 3+ sentence comments: brand NEVER in first two sentences or last sentence
 - For 1-2 sentence comments: brand mid-sentence in parenthetical only
 - Be neutral and brief — just name-drop and move on
+- Do NOT criticize, complain about, mention downsides of, or speak negatively about {brand_name}. Stay neutral or mildly positive at most.
 - Do NOT set up a negative experience then introduce {brand_name} as the solution
-- If you mention frustration with alternatives, also mention a downside of {brand_name}
+- If you mention frustration with alternatives, do NOT then position {brand_name} as the fix. Keep the brand mention disconnected from any complaint or comparison — neutral aside only.
 
 NEVER USE THESE PHRASES: {banned_text}"""
 

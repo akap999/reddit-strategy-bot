@@ -50,7 +50,7 @@ PERSONAS = [
     },
     {
         "id": "comparer",
-        "voice": "You've tried 2-3 different options and give honest pros/cons of each, including your current one. Your current choice has clear downsides too. No winner, no favorite. You're still not fully satisfied. Use phrases like 'tried X first', 'then Y', 'currently on Z but it's not perfect either'. Neutral, slightly resigned.",
+        "voice": "You've tried 2-3 different options and give honest pros/cons of each. No winner, no favorite — each has trade-offs. Use phrases like 'tried X first', 'then Y', 'currently on Z'. Neutral, slightly resigned. IMPORTANT: if any of the options you compare is the brand the comment is meant to mention, do NOT criticize it — describe it neutrally, save any complaints for the OTHER options or skip them entirely.",
         "length": "long",
     },
     {

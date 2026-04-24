@@ -66,6 +66,10 @@
         .btn-secondary:hover { background: #343536; }
         .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
         table { width: 100%; border-collapse: collapse; }
+        /* Wrapper that forces wide tables to scroll inside their container
+           instead of pushing the page wider than the viewport. */
+        .table-scroll { overflow-x: auto; width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch; }
+        .table-scroll > table { min-width: 100%; }
         th { text-align: left; padding: 10px 12px; font-size: 0.75rem; text-transform: uppercase; color: #818384; border-bottom: 1px solid #343536; }
         td { padding: 10px 12px; border-bottom: 1px solid #272729; font-size: 0.875rem; }
         tr:hover td { background: rgba(255,69,0,0.05); }
@@ -7186,6 +7190,7 @@ function lsRenderResults() {
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
         </div>
+        <div class="table-scroll">
         <table>
             <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Comments</th><th>Date</th><th>Author</th></tr></thead>
             <tbody>${_lsSearchResults.map((r,i)=>{
@@ -7204,6 +7209,7 @@ function lsRenderResults() {
                 </tr>`;
             }).join('')}</tbody>
         </table>
+        </div>
     `;
 }
 
@@ -7354,8 +7360,8 @@ function lsRenderSavedTable() {
     const filtered = lsGetFilteredSaved();
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
     el.innerHTML = `
-        <div style="overflow-x:auto;width:100%;-webkit-overflow-scrolling:touch">
-        <table style="min-width:100%">
+        <div class="table-scroll">
+        <table>
             <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => {
                 const kws = lsMatchKeywords((p.title||'')+' '+(p.body_preview||''), p.brand_id);
@@ -7782,6 +7788,7 @@ function lsFilterComments() {
                     <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
                 </div>
             </div>
+            <div class="table-scroll">
             <table>
                 <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>${g.comments.map(c => `
@@ -7839,6 +7846,7 @@ function lsFilterComments() {
                     </tr>
                 `).join('')}</tbody>
             </table>
+            </div>
         </div>
     `; }).join('');
 }

@@ -6700,15 +6700,18 @@ function lsKeywordBadges(keywords) {
 async function renderLiveSearch(el) {
     try { _lsBrands = await api('/api/search/brands'); } catch(e) { _lsBrands = []; }
     el.innerHTML = `
-        <div class="flex justify-between items-center mb-4">
-            <h2 class="text-2xl font-bold" style="color:#0079D3">Live Search</h2>
-            <button class="btn btn-primary btn-sm" onclick="lsShowAddBrand()">+ Add Brand</button>
+        <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
+            <div>
+                <h2 class="text-2xl font-bold" style="color:#0079D3">Live Search</h2>
+                <p class="text-xs text-gray-500 mt-1">Search Reddit for posts matching a brand's keywords + subreddits, save the best ones, and generate comments.</p>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="lsShowAddBrand()" style="white-space:nowrap">+ Add Brand</button>
         </div>
         <div class="flex gap-1 mb-4" style="border-bottom:1px solid #343536">
-            <div class="tab ${_lsTab==='search'?'active':''}" onclick="_lsTab='search';renderLsTabContent()">Search</div>
-            <div class="tab ${_lsTab==='saved'?'active':''}" onclick="_lsTab='saved';renderLsTabContent()">Saved Posts</div>
-            <div class="tab ${_lsTab==='comments'?'active':''}" onclick="_lsTab='comments';renderLsTabContent()">Comments</div>
-            <div class="tab ${_lsTab==='assigned'?'active':''}" onclick="_lsTab='assigned';renderLsTabContent()">Assigned Accounts</div>
+            <div class="tab ${_lsTab==='search'?'active':''}" onclick="_lsTab='search';renderLsTabContent()">🔎 Search</div>
+            <div class="tab ${_lsTab==='saved'?'active':''}" onclick="_lsTab='saved';renderLsTabContent()">📑 Saved Posts</div>
+            <div class="tab ${_lsTab==='comments'?'active':''}" onclick="_lsTab='comments';renderLsTabContent()">💬 Comments</div>
+            <div class="tab ${_lsTab==='assigned'?'active':''}" onclick="_lsTab='assigned';renderLsTabContent()">👥 Assigned Accounts</div>
         </div>
         <div id="ls-tab-content"></div>
     `;
@@ -6769,37 +6772,44 @@ function renderLsTabContent() {
 // --- Search Tab ---
 function renderLsSearch(c) {
     c.innerHTML = `
-        <div class="card p-5 mb-4">
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <div class="card p-5 mb-4" style="background:#1a1a1b;border:1px solid #343536">
+
+            <!-- Brand row: select a brand to auto-fill keywords + subs, or save current entries back to it -->
+            <div class="flex flex-wrap items-center gap-3 mb-4 pb-4" style="border-bottom:1px solid #2a2a2b">
+                <div class="text-xs text-gray-400 font-medium" style="white-space:nowrap">Brand</div>
+                <select id="ls-brand" onchange="lsOnBrandChange()" style="flex:0 1 320px;min-width:220px"><option value="">— None / ad-hoc search —</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
+                <button class="btn btn-sm btn-secondary" onclick="lsSaveSearchToBrand()" title="Save the current keywords + subreddits to this brand so they auto-fill next time" id="ls-save-to-brand-btn" style="display:none;white-space:nowrap">💾 Save kw + subs to brand</button>
+                <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer ml-auto" title="Use Claude to generate 6 diverse search queries from the brand's name + context">
+                    <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto-generate keywords
+                </label>
+            </div>
+
+            <!-- Two big input areas: keywords on the left, subreddits on the right -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
                 <div>
-                    <label class="text-xs text-gray-400 flex items-center justify-between">
-                        <span>Keyword <span id="ls-keyword-req">*</span></span>
-                        <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
-                            <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto from brand
-                        </label>
+                    <label class="text-xs text-gray-400 mb-1 flex items-center justify-between">
+                        <span><span class="font-medium">Keywords</span> <span id="ls-keyword-req" class="text-orange-500">*</span> <span class="text-gray-600">— comma or newline separated</span></span>
                     </label>
-                    <textarea id="ls-keyword" rows="5" placeholder="e.g. hr software, hris, human resources&#10;(comma- or newline-separated)" oninput="this.dataset.prefilledFor=''" style="min-height:110px;width:100%;resize:vertical;font-family:inherit"></textarea>
+                    <textarea id="ls-keyword" rows="6" placeholder="hr software\nhris\nhuman resources" oninput="this.dataset.prefilledFor=''" style="min-height:140px;width:100%;resize:vertical;font-family:inherit"></textarea>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400">Subreddits (optional, comma- or newline-separated)</label>
-                    <div class="flex gap-1 items-start">
-                        <textarea id="ls-subreddit" rows="5" placeholder="e.g. testosterone, fitness, health" class="flex-1" oninput="this.dataset.prefilledFor=''" style="min-height:110px;resize:vertical;font-family:inherit"></textarea>
-                        <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability" style="white-space:nowrap;align-self:flex-start">Check</button>
+                    <label class="text-xs text-gray-400 mb-1 flex items-center justify-between">
+                        <span><span class="font-medium">Subreddits</span> <span class="text-gray-600">— optional, comma or newline separated</span></span>
+                    </label>
+                    <div class="flex gap-2 items-start">
+                        <textarea id="ls-subreddit" rows="6" placeholder="testosterone\nfitness\nhealth" class="flex-1" oninput="this.dataset.prefilledFor=''" style="min-height:140px;resize:vertical;font-family:inherit"></textarea>
+                        <div class="flex flex-col gap-1" style="width:84px">
+                            <button class="btn btn-sm btn-secondary" onclick="lsCheckSubreddit()" title="Check availability + subscriber counts" style="white-space:nowrap;width:100%">Check</button>
+                            <button class="btn btn-sm btn-secondary" onclick="lsSuggestSubreddits()" title="Suggest related subreddits from your current keyword/brand" style="white-space:nowrap;width:100%">✨ Suggest</button>
+                        </div>
                     </div>
                     <div id="ls-sub-check" class="text-xs mt-1"></div>
                 </div>
             </div>
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-3">
-                <div class="lg:col-span-1">
-                    <label class="text-xs text-gray-400 flex items-center justify-between">
-                        <span>Brand (for saving)</span>
-                        <button class="text-xs btn btn-sm btn-secondary" onclick="lsSaveSearchToBrand()" title="Save the current keywords + subreddits to this brand so they auto-fill next time" id="ls-save-to-brand-btn" style="display:none;padding:2px 6px;font-size:0.65rem">💾 Save to brand</button>
-                    </label>
-                    <select id="ls-brand" onchange="lsOnBrandChange()" style="width:100%"><option value="">Select brand...</option>${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
-                </div>
-            </div>
-            <div id="ls-auto-panel" class="mb-3 p-3" style="display:none;background:#1a1a1a;border:1px solid #333;border-radius:6px">
-                <div class="text-xs text-gray-400 mb-2">Auto-keyword mode — Claude will generate 6 diverse search queries from the brand info below. Pick a saved brand above (pre-fills fields) or enter ad-hoc details.</div>
+
+            <!-- Auto-keyword inputs (only visible when checkbox above is on) -->
+            <div id="ls-auto-panel" class="mb-4 p-3" style="display:none;background:#0e1418;border:1px solid #2a3540;border-radius:6px">
+                <div class="text-xs text-gray-400 mb-2">Claude will generate 6 diverse search queries from the brand info below. Pick a saved brand above to pre-fill, or enter ad-hoc details.</div>
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
                     <div>
                         <label class="text-xs text-gray-400">Brand Name</label>
@@ -6815,28 +6825,43 @@ function renderLsSearch(c) {
                     <span id="ls-regen-flag" class="text-xs text-yellow-400" style="display:none">Will regenerate on next search</span>
                 </div>
             </div>
-            <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
-                <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="1"></div>
-                <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="0"></div>
-                <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="1"></div>
-                <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
-                <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50"></div>
-            </div>
-            <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
-                <div><label class="text-xs text-gray-400">Exclude Subreddits</label><input id="ls-exclude" placeholder="sub1, sub2, ..."></div>
-                <div><label class="text-xs text-gray-400">Sort Order</label><select id="ls-sortorder"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
-                <div><label class="text-xs text-gray-400">NSFW</label><select id="ls-nsfw"><option value="">Include All</option><option value="false">Exclude NSFW</option><option value="true">NSFW Only</option></select></div>
-                <div><label class="text-xs text-gray-400">Min Upvote Ratio</label><input id="ls-ratio" type="number" step="0.1" min="0" max="1" placeholder="e.g. 0.7"></div>
-                <div><label class="text-xs text-gray-400">Min Subscribers</label><input id="ls-minsubs" type="number" placeholder="e.g. 500"></div>
-                <div><label class="text-xs text-gray-400">Max Subscribers</label><input id="ls-maxsubs" type="number" placeholder="e.g. 5000"></div>
-                <div><label class="text-xs text-gray-400">Max Scrutiny</label><select id="ls-scrutiny"><option value="">Any</option><option value="40">Low (&lt;40)</option><option value="20">Very Low (&lt;20)</option></select></div>
-            </div>
-            <div class="flex gap-3 items-center">
-                <button class="btn btn-accent" onclick="lsRunSearch()">Search Reddit</button>
-                <button class="btn btn-secondary" onclick="lsSuggestSubreddits()">Suggest Subreddits</button>
-                <button class="btn btn-secondary btn-sm" onclick="lsSetLowScrutiny()" title="Set filters for small, low-moderation subreddits">🎯 Low Scrutiny</button>
-                <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
-                <button class="btn btn-accent" onclick="lsSaveAndGenerateAll()" id="ls-save-gen-btn" style="display:none">Save & Generate All</button>
+
+            <!-- Collapsible filters (closed by default — most users won't touch these) -->
+            <details class="mb-4" style="background:#0e0e0f;border:1px solid #2a2a2b;border-radius:6px">
+                <summary class="px-3 py-2 cursor-pointer text-xs text-gray-300 select-none" style="user-select:none">
+                    <span class="font-medium">Filters &amp; limits</span>
+                    <span class="text-gray-500 ml-2">— min comments: <span id="ls-fs-mincom">1</span> · days old: <span id="ls-fs-days">1</span> · limit: <span id="ls-fs-limit">50</span> · click to edit</span>
+                </summary>
+                <div class="p-3 pt-1">
+                    <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-2">
+                        <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="1" oninput="document.getElementById('ls-fs-mincom').textContent=this.value||'0'"></div>
+                        <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="0"></div>
+                        <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="1" oninput="document.getElementById('ls-fs-days').textContent=this.value||'-'"></div>
+                        <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
+                        <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50" oninput="document.getElementById('ls-fs-limit').textContent=this.value||'50'"></div>
+                    </div>
+                    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+                        <div><label class="text-xs text-gray-400">Sort Order</label><select id="ls-sortorder"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
+                        <div><label class="text-xs text-gray-400">NSFW</label><select id="ls-nsfw"><option value="">Include All</option><option value="false">Exclude NSFW</option><option value="true">NSFW Only</option></select></div>
+                        <div><label class="text-xs text-gray-400">Min Upvote Ratio</label><input id="ls-ratio" type="number" step="0.1" min="0" max="1" placeholder="e.g. 0.7"></div>
+                        <div><label class="text-xs text-gray-400">Max Scrutiny</label><select id="ls-scrutiny"><option value="">Any</option><option value="40">Low (&lt;40)</option><option value="20">Very Low (&lt;20)</option></select></div>
+                    </div>
+                    <div class="grid grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
+                        <div><label class="text-xs text-gray-400">Exclude Subreddits</label><input id="ls-exclude" placeholder="sub1, sub2, ..."></div>
+                        <div><label class="text-xs text-gray-400">Min Subscribers</label><input id="ls-minsubs" type="number" placeholder="e.g. 500"></div>
+                        <div><label class="text-xs text-gray-400">Max Subscribers</label><input id="ls-maxsubs" type="number" placeholder="e.g. 5000"></div>
+                    </div>
+                    <button class="btn btn-secondary btn-sm mt-3" onclick="lsSetLowScrutiny()" title="Preset: small subs, low moderation, exclude big mainstream subs">🎯 Apply Low-Scrutiny preset</button>
+                </div>
+            </details>
+
+            <!-- Primary action bar -->
+            <div class="flex flex-wrap gap-2 items-center pt-3" style="border-top:1px solid #2a2a2b">
+                <button class="btn btn-accent" onclick="lsRunSearch()" style="font-size:0.95rem;padding:8px 22px">🔎 Search Reddit</button>
+                <div class="ml-auto flex flex-wrap gap-2">
+                    <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
+                    <button class="btn btn-accent" onclick="lsSaveAndGenerateAll()" id="ls-save-gen-btn" style="display:none">Save &amp; Generate All</button>
+                </div>
             </div>
         </div>
         <div id="ls-suggestions" class="mb-4"></div>
@@ -6868,6 +6893,9 @@ function lsSetLowScrutiny() {
     document.getElementById('ls-maxsubs').value = 5000;
     document.getElementById('ls-mincom').value = 2;
     document.getElementById('ls-minscore').value = 1;
+    // Keep the collapsed-filters summary in sync (the labels above the details summary).
+    const fsMc = document.getElementById('ls-fs-mincom');
+    if (fsMc) fsMc.textContent = '2';
     toast('Low scrutiny filters applied: max 5K subs, min 2 comments, min 1 score', 'info');
 }
 

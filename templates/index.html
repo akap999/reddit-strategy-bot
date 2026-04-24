@@ -7339,7 +7339,8 @@ function lsRenderSavedTable() {
     const filtered = lsGetFilteredSaved();
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
     el.innerHTML = `
-        <table>
+        <div style="overflow-x:auto;width:100%;-webkit-overflow-scrolling:touch">
+        <table style="min-width:100%">
             <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => {
                 const kws = lsMatchKeywords((p.title||'')+' '+(p.body_preview||''), p.brand_id);
@@ -7353,13 +7354,14 @@ function lsRenderSavedTable() {
                     <td>${p.brand_name ? `<span class="badge badge-brand">${p.brand_name}</span>` : '<span class="text-gray-500 text-xs">none</span>'}</td>
                     <td>${p.comment_count || 0} gen</td>
                     <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':p.status==='irrelevant'?'badge-removed':'badge-draft'}">${p.status}</span></td>
-                    <td class="flex gap-2">
-                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand for this post">Change Brand</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
+                    <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand for this post">Brand</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
                         <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
-                    </td>
+                    </div></td>
                 </tr>`;
             }).join('')}</tbody>
         </table>
+        </div>
     `;
 }
 

@@ -7194,26 +7194,30 @@ function lsRenderResults() {
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
         </div>
-        <div class="table-scroll">
         <table>
-            <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Comments</th><th>Date</th><th>Author</th></tr></thead>
+            <thead><tr>
+                <th style="width:24px"></th>
+                <th>Title</th>
+                <th style="width:140px">Keywords</th>
+                <th style="width:120px">Subreddit</th>
+                <th style="width:60px">Stats</th>
+                <th style="width:90px">Date / Author</th>
+            </tr></thead>
             <tbody>${_lsSearchResults.map((r,i)=>{
                 const brandId = document.getElementById('ls-brand')?.value;
                 const kws = lsMatchKeywords((r.title||'')+' '+(r.text||''), brandId);
+                const title = r.title || '';
                 return `
                 <tr>
                     <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
-                    <td><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${(r.title||'').substring(0,80)}${(r.title||'').length>80?'...':''}</a></td>
-                    <td>${lsKeywordBadges(kws)}</td>
-                    <td class="text-xs">r/${r.subreddit}${r.sub_subscribers != null ? ` <span class="text-gray-600">(${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers})</span>` : ''}${lsScrutinyPill(r.scrutiny_score)}</td>
-                    <td>${r.score}</td>
-                    <td>${r.comments}</td>
-                    <td class="text-xs">${(r.date||'').substring(0,10)}</td>
-                    <td class="text-xs">u/${r.author}</td>
+                    <td style="word-break:break-word"><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${title.length > 100 ? title.substring(0, 100) + '...' : title}</a></td>
+                    <td style="word-break:break-word">${lsKeywordBadges(kws)}</td>
+                    <td class="text-xs" style="word-break:break-word">r/${r.subreddit}${r.sub_subscribers != null ? `<br><span class="text-gray-600">${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers} subs</span>` : ''}${lsScrutinyPill(r.scrutiny_score)}</td>
+                    <td class="text-xs text-gray-400" style="white-space:nowrap">↑${r.score}<br>💬${r.comments}</td>
+                    <td class="text-xs"><span class="text-gray-400">${(r.date||'').substring(0,10)}</span><br><span class="text-gray-500">u/${r.author}</span></td>
                 </tr>`;
             }).join('')}</tbody>
         </table>
-        </div>
     `;
 }
 
@@ -7304,6 +7308,7 @@ let _lsSavedFilter = { keyword: '', brand: '', status: '' };
 
 async function renderLsSaved(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    _lsSavedShowAll = false; // reset pagination on tab entry
     try {
         _lsSavedPosts = await api('/api/search/posts');
     } catch(e) { _lsSavedPosts = []; }
@@ -7358,35 +7363,54 @@ function lsGetFilteredSaved() {
     return posts;
 }
 
+let _lsSavedShowAll = false;
 function lsRenderSavedTable() {
     const el = document.getElementById('ls-saved-table');
     if (!el) return;
     const filtered = lsGetFilteredSaved();
     if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
+    // Initial render limit — full render is slow when there are hundreds of posts.
+    // User clicks "Show all" to load the rest if they want to act on more.
+    const PAGE_SIZE = 100;
+    const showing = _lsSavedShowAll ? filtered : filtered.slice(0, PAGE_SIZE);
+    const moreLink = (filtered.length > showing.length)
+        ? `<div class="text-center mt-2"><button class="btn btn-sm btn-secondary" onclick="_lsSavedShowAll=true;lsRenderSavedTable()">Show all ${filtered.length} posts (currently showing ${showing.length})</button></div>`
+        : '';
     el.innerHTML = `
-        <div class="table-scroll">
         <table>
-            <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>${filtered.map(p => {
+            <thead><tr>
+                <th style="width:24px"></th>
+                <th>Post</th>
+                <th style="width:150px">Keywords</th>
+                <th style="width:60px">Stats</th>
+                <th style="width:80px">Status</th>
+                <th style="width:170px">Actions</th>
+            </tr></thead>
+            <tbody>${showing.map(p => {
                 const kws = lsMatchKeywords((p.title||'')+' '+(p.body_preview||''), p.brand_id);
+                const title = p.title || '';
                 return `
                 <tr>
                     <td><input type="checkbox" class="ls-sp-check" data-id="${p.id}" ${!p.brand_id?'disabled title="Assign brand first"':''}></td>
-                    <td><a href="${p.reddit_url}" target="_blank" class="hover:underline" style="color:#0079D3">${(p.title||'').substring(0,70)}${(p.title||'').length>70?'...':''}</a></td>
-                    <td>${lsKeywordBadges(kws)}</td>
-                    <td class="text-xs">r/${p.subreddit}</td>
-                    <td>${p.score}</td>
-                    <td>${p.brand_name ? `<span class="badge badge-brand">${p.brand_name}</span>` : '<span class="text-gray-500 text-xs">none</span>'}</td>
-                    <td>${p.comment_count || 0} gen</td>
+                    <td style="word-break:break-word">
+                        <a href="${p.reddit_url}" target="_blank" class="hover:underline" style="color:#0079D3">${title.length > 90 ? title.substring(0, 90) + '...' : title}</a>
+                        <div class="text-xs text-gray-500 mt-1">r/${p.subreddit} · ${p.brand_name ? `<span style="color:#FF8b60">${p.brand_name}</span>` : '<span class="text-gray-600">no brand</span>'}</div>
+                    </td>
+                    <td style="word-break:break-word">${lsKeywordBadges(kws)}</td>
+                    <td class="text-xs text-gray-400" style="white-space:nowrap">↑${p.score}<br>💬${p.comment_count || 0} gen</td>
                     <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':p.status==='irrelevant'?'badge-removed':'badge-draft'}">${p.status}</span></td>
-                    <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
-                        ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand for this post">Brand</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
-                        <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
+                    <td><div class="flex gap-1 flex-wrap">
+                        ${p.status==='irrelevant'
+                            ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>`
+                            : p.brand_id
+                                ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Gen</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand">Brand</button>`
+                                : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
+                        <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})" title="Delete">×</button>
                     </div></td>
                 </tr>`;
             }).join('')}</tbody>
         </table>
-        </div>
+        ${moreLink}
     `;
 }
 
@@ -7519,9 +7543,11 @@ async function lsDeleteSelected() {
 }
 
 // --- Comments Tab ---
+let _lsCommentsShowAll = false;
 async function renderLsComments(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
     _lsSelectedSubs = null; // reset on tab entry → defaults to all selected
+    _lsCommentsShowAll = false; // reset pagination on tab entry
     try {
         _lsComments = await api('/api/search/comments');
     } catch(e) { _lsComments = []; }
@@ -7770,7 +7796,15 @@ function lsFilterComments() {
         sortedGroups = Object.entries(groups).sort((a, b) => (b[1].newest || '').localeCompare(a[1].newest || ''));
     }
 
-    el.innerHTML = sortedGroups.map(([pid, g]) => {
+    // Initial render limit — rendering hundreds of nested tables is slow.
+    const PAGE_SIZE = 30;
+    const renderingAll = !!_lsCommentsShowAll;
+    const visibleGroups = renderingAll ? sortedGroups : sortedGroups.slice(0, PAGE_SIZE);
+    const moreLink = (sortedGroups.length > visibleGroups.length)
+        ? `<div class="text-center my-3"><button class="btn btn-sm btn-secondary" onclick="_lsCommentsShowAll=true;lsFilterComments()">Show all ${sortedGroups.length} posts (currently showing ${visibleGroups.length})</button></div>`
+        : '';
+
+    el.innerHTML = visibleGroups.map(([pid, g]) => {
         const _maxRank = Math.max(...g.comments.map(c => LS_STATUS_RANK[c.status] ?? -1));
         const _postStatus = Object.keys(LS_STATUS_RANK).find(k => LS_STATUS_RANK[k] === _maxRank) || '';
         return `
@@ -7792,9 +7826,8 @@ function lsFilterComments() {
                     <span class="text-xs text-gray-500">${g.comments.length} comment${g.comments.length>1?'s':''}</span>
                 </div>
             </div>
-            <div class="table-scroll">
             <table>
-                <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th style="width:200px">Actions</th></tr></thead>
                 <tbody>${g.comments.map(c => `
                     <tr>
                         <td style="max-width:400px"><span class="text-sm">${(c.body||'').substring(0,150)}${(c.body||'').length>150?'...':''}</span>
@@ -7805,32 +7838,32 @@ function lsFilterComments() {
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
                         <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}<br>${_commentStatusDate(c)}</td>
                         <td>
-                            <div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
-                                ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>` : ''}
+                            <div class="flex gap-1 flex-wrap">
+                                ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})" title="Mark removed">Rem</button>` : ''}
                                 ${c.status === 'assigned' ? `
                                     <button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="lsInformComment(${c.id})">Inform</button>
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsReassignComment(${c.id})">Reassign</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
-                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})" title="Mark removed">Rem</button>
                                 ` : ''}
                                 ${c.status === 'informed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsDeployComment(${c.id})">Deploy</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsReassignComment(${c.id})">Reassign</button>
                                     <button class="btn btn-secondary btn-sm" onclick="lsUnassignComment(${c.id})">Unassign</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsCopyMessage(${c.id})">Copy</button>
-                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})" title="Mark removed">Rem</button>
                                 ` : ''}
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>
-                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})" title="Mark removed">Rem</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'paid' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
-                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})" title="Mark removed">Rem</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'removed' ? `
@@ -7850,9 +7883,8 @@ function lsFilterComments() {
                     </tr>
                 `).join('')}</tbody>
             </table>
-            </div>
         </div>
-    `; }).join('');
+    `; }).join('') + moreLink;
 }
 
 async function lsMarkPaid(cid) {

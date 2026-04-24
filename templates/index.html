@@ -1665,6 +1665,8 @@ async function editBrandContext(brandName) {
     const domainUrl = first.domain_url || '';
     let keywords = [];
     try { keywords = JSON.parse(first.keywords || '[]'); } catch(e) {}
+    let searchSubs = [];
+    try { searchSubs = JSON.parse(first.search_subreddits || '[]'); } catch(e) {}
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -1677,9 +1679,15 @@ async function editBrandContext(brandName) {
                 <label class="text-xs text-gray-400">Context / Description</label>
                 <textarea id="edit-brand-context" rows="6" class="w-full">${context}</textarea>
             </div>
-            <div>
-                <label class="text-xs text-gray-400">Keywords (comma-separated)</label>
-                <input id="edit-brand-keywords" value="${keywords.join(', ')}" class="w-full">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                <div>
+                    <label class="text-xs text-gray-400">Keywords <span class="text-gray-600">(comma- or newline-separated)</span></label>
+                    <textarea id="edit-brand-keywords" rows="5" class="w-full" placeholder="e.g. testosterone, TRT, hormone therapy" style="min-height:110px;resize:vertical;font-family:inherit">${keywords.join(', ')}</textarea>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400">Search Subreddits <span class="text-gray-600">(used in Live Search; comma- or newline-separated)</span></label>
+                    <textarea id="edit-brand-search-subs" rows="5" class="w-full" placeholder="e.g. testosterone, fitness, health" style="min-height:110px;resize:vertical;font-family:inherit">${searchSubs.join(', ')}</textarea>
+                </div>
             </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
@@ -1694,14 +1702,21 @@ async function saveBrandContext(brandName) {
     const context = document.getElementById('edit-brand-context').value;
     const domainUrl = document.getElementById('edit-brand-url').value;
     const keywordsRaw = document.getElementById('edit-brand-keywords').value;
-    const keywords = keywordsRaw.split(',').map(k => k.trim()).filter(Boolean);
+    const subsRaw = (document.getElementById('edit-brand-search-subs')?.value || '');
+    const keywords = keywordsRaw.split(/[,\n]/).map(k => k.trim()).filter(Boolean);
+    const search_subreddits = subsRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
 
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
 
     // Update all instances of this brand across subreddits
     for (const b of brandInstances) {
-        await api(`/api/brands/${b.id}`, { method: 'PUT', body: { context, domain_url: domainUrl, keywords } });
+        await api(`/api/brands/${b.id}`, { method: 'PUT', body: {
+            context,
+            domain_url: domainUrl,
+            keywords,
+            search_subreddits,
+        }});
     }
 
     toast('Brand updated', 'success');

@@ -33,6 +33,44 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+def balance_posts_by_subreddit(posts, limit, subreddits):
+    """Cut a sorted list of posts down to `limit` with equal priority per
+    subreddit.
+
+    When multiple subreddits are requested, this takes up to `limit // N`
+    posts from each (preserving the input order within each sub, which is
+    assumed to already be sorted by score / comments / date / relevance).
+    Any remaining slots are filled with the top-scoring overflow posts.
+
+    When `subreddits` is None or length 1, or when the input is already at
+    or under the limit, returns `posts[:limit]` unchanged.
+
+    Callers: used both inside a single keyword search (after its own filter
+    stage) and at the multi-keyword merge stage so the final output is
+    balanced end-to-end, not just per-keyword.
+    """
+    if not subreddits or len(subreddits) <= 1 or len(posts) <= limit:
+        return posts[:limit]
+
+    n = len(subreddits)
+    per_sub = limit // n
+    by_sub = {}
+    for p in posts:
+        key = (p.get("subreddit") or "").lower()
+        by_sub.setdefault(key, []).append(p)
+
+    result = []
+    leftover = []
+    for sub in by_sub:
+        result.extend(by_sub[sub][:per_sub])
+        leftover.extend(by_sub[sub][per_sub:])
+    remaining = limit - len(result)
+    if remaining > 0:
+        leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
+        result.extend(leftover[:remaining])
+    return result
+
+
 class RedditSearchBot:
     def __init__(self, retry_attempts=2, retry_delay=1, reddit_base=None):
         """Initialize the Reddit bot with multiple API endpoints."""
@@ -604,23 +642,7 @@ class RedditSearchBot:
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
         # Equal distribution across subreddits when multiple are searched
-        if subreddits and len(subreddits) > 1 and len(filtered) > limit:
-            per_sub = limit // len(subreddits)
-            by_sub = {}
-            for p in filtered:
-                sub = p.get("subreddit", "").lower()
-                by_sub.setdefault(sub, []).append(p)
-            result = []
-            leftover = []
-            for sub in by_sub:
-                result.extend(by_sub[sub][:per_sub])
-                leftover.extend(by_sub[sub][per_sub:])
-            remaining = limit - len(result)
-            if remaining > 0:
-                leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
-                result.extend(leftover[:remaining])
-            return result
-        return filtered[:limit]
+        return balance_posts_by_subreddit(filtered, limit, subreddits)
 
     # Class-level subscriber cache (persists across searches within same process)
     _sub_cache = {}  # sub_name_lower -> (subscriber_count, timestamp)

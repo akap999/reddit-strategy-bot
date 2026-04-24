@@ -2847,7 +2847,7 @@ def api_search_reddit():
     triggers multi-keyword search with keywords auto-generated from a brand's
     name/context (saved or ad-hoc).
     """
-    from search.reddit_bot import RedditSearchBot
+    from search.reddit_bot import RedditSearchBot, balance_posts_by_subreddit
     import math
     data = request.json or {}
     keyword = (data.get("keyword") or "").strip()
@@ -2893,14 +2893,19 @@ def api_search_reddit():
                 # limit as its budget. Heavy cross-keyword overlap (e.g.
                 # "testosterone" and "TRT") shrinks unique results fast, so
                 # dividing the budget across keywords starves the output.
-                # Dedup + final slice below cap the response at requested_limit.
+                # Dedup + final balance below cap the response at requested_limit.
                 per_kw_limit = requested_limit
                 print(f"    Multi-keyword search: {n} keywords, per_kw_limit={per_kw_limit}")
                 print(f"    Keywords: {keywords_list}")
                 merged = bot.search_multiple_keywords(
                     keywords_list, concurrent=True, limit=per_kw_limit, **common_filters
                 )
-                trimmed = merged[:requested_limit]
+                # Final cross-keyword balance: take up to (limit // N_subs)
+                # posts from each requested subreddit first, fill remainder
+                # with top-scoring overflow. Without this, merged[:limit]
+                # would favor whichever subs have higher-karma posts.
+                subs_list = data.get("subreddits")
+                trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
                 return {"results": trimmed, "generated_keywords": keywords_list}
 
             # Auto-brand path
@@ -2912,8 +2917,9 @@ def api_search_reddit():
             merged = bot.search_multiple_keywords(
                 keywords, concurrent=True, limit=per_kw_limit, **common_filters
             )
-            # Trim merged (already sorted by score desc) to the requested limit
-            trimmed = merged[:requested_limit]
+            # Final cross-keyword balance — same rationale as the manual path.
+            subs_list = data.get("subreddits")
+            trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
             return {"results": trimmed, "generated_keywords": keywords, "keywords_source": source}
         finally:
             task_db.close()

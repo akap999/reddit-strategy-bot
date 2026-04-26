@@ -3153,6 +3153,210 @@ def api_generate_search_comments(pid):
     return jsonify({"task_id": tid})
 
 
+def _generate_hq_for_search_post(bot, db2, pid, post, brand, brand_name, brand_context,
+                                  brand_keywords, relevance_threshold=6):
+    """Run an HQ thread generation for a single saved search post.
+
+    Shared by /api/search/posts/<pid>/generate-hq and the batch endpoint.
+    Returns a result dict with keys: generated, comments (list), relevance_score,
+    or skipped/error fields. Caller is responsible for status updates and errors.
+    """
+    db2.update_search_post_status(pid, "generating")
+
+    comments, post_body, is_archived = bot.fetch_comments(post["reddit_url"], limit=20)
+    if is_archived:
+        db2.update_search_post_status(pid, "saved")
+        raise ValueError("Post is archived — cannot comment")
+    if len(comments) < 1:
+        db2.update_search_post_status(pid, "saved")
+        raise ValueError("No comments found on this post — cannot analyze tone/context")
+
+    comment_stats = bot._compute_comment_stats(comments)
+
+    relevance = bot.check_relevance(
+        post["title"], post_body, post["subreddit"],
+        comments, brand_name, brand_context, brand_keywords
+    )
+    rel_score = relevance.get("score", 0)
+    if rel_score < relevance_threshold:
+        db2.update_search_post_status(pid, "irrelevant")
+        return {
+            "skipped": True,
+            "relevance_score": rel_score,
+            "threshold": relevance_threshold,
+            "reason": f"Post relevance score ({rel_score}) is below threshold ({relevance_threshold})."
+        }
+
+    tone_analysis = bot.analyze_tone(
+        post["title"], post_body, post["subreddit"], comments, comment_stats
+    )
+
+    hq_results = bot.generate_hq_search(
+        post_title=post["title"], post_body=post_body, subreddit=post["subreddit"],
+        comments=comments, brand_name=brand_name, brand_context=brand_context,
+        tone_analysis=tone_analysis, comment_stats=comment_stats,
+        relevance=relevance, num_replies=4,
+    )
+    if not hq_results:
+        db2.update_search_post_status(pid, "saved")
+        raise ValueError("HQ generation failed")
+
+    # Save in the order returned (parents always come before children, since
+    # the shape iterates idx 0..4). Map list-idx → DB id so children link to
+    # their already-saved parent.
+    saved_id_by_idx = {}
+    stored = []
+    for entry in hq_results:
+        idx = entry["idx"]
+        parent_idx = entry["parent_idx"]
+        is_main = entry["is_main"]
+        parent_db_id = saved_id_by_idx.get(parent_idx) if parent_idx is not None else None
+
+        cid = db2.add_search_comment(
+            search_post_id=pid,
+            body=entry["body"],
+            brand_id=post.get("brand_id"),
+            persona_id=entry.get("persona_id"),
+            is_reply=0 if is_main else 1,
+            reply_to_url=None,  # filled at deploy time when parent gets a Reddit URL
+            mentions_brand=entry.get("mentions_brand", 0),
+            relevance_score=rel_score,
+            comment_type="hq",
+            parent_comment_id=parent_db_id,
+        )
+        saved_id_by_idx[idx] = cid
+        stored.append({"id": cid, "idx": idx, "parent_idx": parent_idx,
+                        "is_main": is_main, "body": entry["body"][:100]})
+
+    db2.update_search_post_status(pid, "complete")
+    return {"generated": len(stored), "comments": stored, "relevance_score": rel_score}
+
+
+@app.route("/api/search/posts/<int:pid>/generate-hq", methods=["POST"])
+def api_generate_search_hq(pid):
+    """Generate an HQ thread (1 main + 4 replies, possibly nested) for a saved
+    search post. Background task."""
+    from generate.comment_generator import CommentGeneratorBot
+    data = request.json or {}
+
+    db_check = get_db()
+    post = db_check.get_search_post(pid)
+    if not post:
+        db_check.close()
+        return jsonify({"error": "Post not found"}), 404
+    if post.get("status") == "generating":
+        db_check.close()
+        return jsonify({"error": "Already generating comments for this post"}), 400
+    brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
+    db_check.close()
+
+    if not brand:
+        return jsonify({"error": "Post must have a brand assigned"}), 400
+
+    brand_name = brand["name"]
+    brand_context = brand["context"]
+    brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
+    threshold = data.get("relevance_threshold", 6)
+
+    def task():
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        bot = CommentGeneratorBot(api_key, reddit_base=proxy.rstrip("/") if proxy else None)
+
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        try:
+            return _generate_hq_for_search_post(
+                bot, db2, pid, post, brand, brand_name, brand_context,
+                brand_keywords, relevance_threshold=threshold,
+            )
+        finally:
+            db2.close()
+
+    tid = start_task("generate-search-hq", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/search/posts/generate-hq-batch", methods=["POST"])
+def api_generate_search_hq_batch():
+    """Batch HQ generator: 1 main + 4 replies per post, sequentially in one task."""
+    from generate.comment_generator import CommentGeneratorBot
+    data = request.json or {}
+    post_ids = data.get("post_ids", [])
+    threshold = data.get("relevance_threshold", 6)
+
+    if not post_ids:
+        return jsonify({"error": "No post_ids provided"}), 400
+
+    db_check = get_db()
+    valid_posts = []
+    for pid in post_ids:
+        post = db_check.get_search_post(pid)
+        if not post:
+            continue
+        if post.get("status") in ("generating", "irrelevant"):
+            continue
+        brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
+        if not brand:
+            continue
+        valid_posts.append({
+            "pid": pid, "post": post, "brand": brand,
+            "brand_name": brand["name"],
+            "brand_context": brand["context"],
+            "brand_keywords": json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else [],
+        })
+    db_check.close()
+
+    if not valid_posts:
+        return jsonify({"error": "No eligible posts to generate for"}), 400
+
+    def task(_task_id=None):
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        bot = CommentGeneratorBot(api_key, reddit_base=proxy.rstrip("/") if proxy else None)
+        db2 = Database(DB_PATH)
+        db2.connect()
+        db2.initialize()
+        results = []
+        try:
+            for i, vp in enumerate(valid_posts):
+                pid = vp["pid"]
+                if _task_id:
+                    try:
+                        progress_db = Database(DB_PATH)
+                        progress_db.connect()
+                        progress_db.update_task_progress(_task_id, {
+                            "current": i + 1,
+                            "total": len(valid_posts),
+                            "generated": len([r for r in results if r.get("generated")]),
+                            "skipped": len([r for r in results if r.get("skipped")]),
+                            "errors": len([r for r in results if r.get("error")]),
+                        })
+                        progress_db.close()
+                    except Exception:
+                        pass
+
+                try:
+                    res = _generate_hq_for_search_post(
+                        bot, db2, pid, vp["post"], vp["brand"],
+                        vp["brand_name"], vp["brand_context"], vp["brand_keywords"],
+                        relevance_threshold=threshold,
+                    )
+                    res["pid"] = pid
+                    results.append(res)
+                except Exception as e:
+                    db2.update_search_post_status(pid, "saved")
+                    results.append({"pid": pid, "error": str(e)})
+                    print(f"[HQ-BATCH ERROR] post {pid}: {e}", flush=True)
+            return {"total": len(valid_posts), "results": results}
+        finally:
+            db2.close()
+
+    tid = start_task("generate-search-hq-batch", task, pass_task_id=True)
+    return jsonify({"task_id": tid, "post_count": len(valid_posts)})
+
+
 @app.route("/api/search/posts/generate-batch", methods=["POST"])
 def api_generate_search_comments_batch():
     """Generate comments for multiple search posts sequentially in one background task."""
@@ -3396,6 +3600,19 @@ def api_deploy_search_comment(cid):
         if not url:
             return jsonify({"error": "reddit_comment_url required"}), 400
         db.deploy_search_comment(cid, url)
+        # If this comment is the parent of an HQ thread, back-fill its
+        # children's reply_to_url so the user can deploy each reply
+        # straight to the parent on Reddit without manual URL copy/paste.
+        try:
+            db.conn.execute(
+                "UPDATE search_comments SET reply_to_url = ? "
+                "WHERE parent_comment_id = ? "
+                "  AND (reply_to_url IS NULL OR reply_to_url = '')",
+                (url, cid)
+            )
+            db.conn.commit()
+        except Exception as e:
+            print(f"[HQ deploy backfill] cid={cid}: {e}", flush=True)
         return jsonify({"ok": True})
     finally:
         db.close()

@@ -989,6 +989,10 @@ class Database:
             "informed_at": "ALTER TABLE search_comments ADD COLUMN informed_at TEXT",
             "last_live_check": "ALTER TABLE search_comments ADD COLUMN last_live_check TEXT",
             "prev_status": "ALTER TABLE search_comments ADD COLUMN prev_status TEXT",
+            # HQ thread support: 1 parent (comment_type='hq', parent_comment_id NULL)
+            # + N replies (comment_type='hq', parent_comment_id = parent's row id).
+            "comment_type": "ALTER TABLE search_comments ADD COLUMN comment_type TEXT",
+            "parent_comment_id": "ALTER TABLE search_comments ADD COLUMN parent_comment_id INTEGER REFERENCES search_comments(id)",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -3715,12 +3719,15 @@ class Database:
     # --- Search Comments (Live Search) ---
 
     def add_search_comment(self, search_post_id, body, brand_id=None, persona_id=None,
-                           is_reply=0, reply_to_url=None, mentions_brand=0, relevance_score=None):
+                           is_reply=0, reply_to_url=None, mentions_brand=0, relevance_score=None,
+                           comment_type=None, parent_comment_id=None):
         cur = self.conn.execute(
             """INSERT INTO search_comments
-               (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url, mentions_brand, relevance_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url, mentions_brand, relevance_score)
+               (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url,
+                mentions_brand, relevance_score, comment_type, parent_comment_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url,
+             mentions_brand, relevance_score, comment_type, parent_comment_id)
         )
         self.conn.commit()
         return cur.lastrowid

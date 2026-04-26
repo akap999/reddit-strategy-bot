@@ -6873,7 +6873,14 @@ function renderLsSearch(c) {
             <!-- Primary action bar -->
             <div class="flex flex-wrap gap-2 items-center pt-3" style="border-top:1px solid #2a2a2b">
                 <button class="btn btn-accent" onclick="lsRunSearch()" style="font-size:0.95rem;padding:8px 22px">🔎 Search Reddit</button>
-                <div class="ml-auto flex flex-wrap gap-2">
+                <div class="ml-auto flex flex-wrap gap-2 items-center">
+                    <label id="ls-gen-mode-wrap" class="text-xs text-gray-400 flex items-center gap-1" style="display:none" title="Pick the comment-thread style for the next generate">
+                        Mode:
+                        <select id="ls-gen-mode" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                            <option value="regular">Regular (N independent)</option>
+                            <option value="hq">HQ thread (1 parent + 4 replies)</option>
+                        </select>
+                    </label>
                     <button class="btn btn-primary" onclick="lsSaveSelected()" id="ls-save-btn" style="display:none">Save Selected</button>
                     <button class="btn btn-accent" onclick="lsSaveAndGenerateAll()" id="ls-save-gen-btn" style="display:none">Save &amp; Generate All</button>
                 </div>
@@ -7174,6 +7181,8 @@ function lsRenderResults() {
     if (!_lsSearchResults.length) { el.innerHTML = '<p class="text-gray-500">No results found.</p>'; return; }
     document.getElementById('ls-save-btn').style.display = '';
     document.getElementById('ls-save-gen-btn').style.display = '';
+    const modeWrap = document.getElementById('ls-gen-mode-wrap');
+    if (modeWrap) modeWrap.style.display = '';
     const genChips = (_lsGeneratedKeywords && _lsGeneratedKeywords.length) ? `
         <div class="mb-2 p-2" style="background:#1a1a1a;border:1px solid #333;border-radius:6px">
             <span class="text-xs text-gray-400 mr-2">🤖 Auto-generated keywords:</span>
@@ -7274,8 +7283,14 @@ async function lsSaveAndGenerateAll() {
         // Refresh the LS comments cache so hasCommentsForBrand is accurate
         try { _lsComments = await api('/api/search/comments'); } catch(e) {}
         const excludeSubs = lsGetExcludedSubs();
+        const mode = document.getElementById('ls-gen-mode')?.value || 'regular';
+        // Brand-aware dedup is mode-aware: HQ mode skips posts that already
+        // have an HQ thread for this brand; regular mode skips posts that
+        // already have any comments for this brand. This lets a user run
+        // both kinds on the same post.
         const hasCommentsForBrand = (p) => _lsComments.some(c =>
-            c.search_post_id === p.id && c.brand_id === brandIdNum && c.status !== 'deleted');
+            c.search_post_id === p.id && c.brand_id === brandIdNum && c.status !== 'deleted'
+            && (mode === 'hq' ? c.comment_type === 'hq' : c.comment_type !== 'hq'));
         const eligible = saved.filter(p =>
             allIds.has(p.id) &&
             p.brand_id &&
@@ -7285,13 +7300,17 @@ async function lsSaveAndGenerateAll() {
             !excludeSubs.has((p.subreddit || '').toLowerCase())
         );
         if (!eligible.length) {
-            toast(`Saved ${res.saved}${res.duplicates ? `, updated ${res.duplicates}` : ''} — none need new comments for this brand`, 'info');
+            toast(`Saved ${res.saved}${res.duplicates ? `, updated ${res.duplicates}` : ''} — none need new comments for this brand${mode === 'hq' ? ' (HQ)' : ''}`, 'info');
             return;
         }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-        runTask('/api/search/posts/generate-batch',
+        const generateUrl = mode === 'hq'
+            ? '/api/search/posts/generate-hq-batch'
+            : '/api/search/posts/generate-batch';
+        const labelPrefix = mode === 'hq' ? 'HQ Gen' : 'Gen';
+        runTask(generateUrl,
             { post_ids: eligible.map(p => p.id), num_comments: numComments },
-            _batchGenComplete, `Gen: ${eligible.length} posts`);
+            _batchGenComplete, `${labelPrefix}: ${eligible.length} posts`);
     } catch(e) { toast('Generation failed to start', 'error'); }
 }
 
@@ -7321,7 +7340,14 @@ async function renderLsSaved(c) {
                 <option value="generating" ${_lsSavedFilter.status==='generating'?'selected':''}>Generating</option>
             </select>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-sp-selectall" onchange="lsToggleSavedAll(this.checked)" class="mr-1"> Select All</label>
-            <div class="ml-auto flex gap-2">
+            <div class="ml-auto flex gap-2 items-center">
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="Comment-thread style for generation">
+                    Mode:
+                    <select id="ls-sp-gen-mode" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                        <option value="regular">Regular</option>
+                        <option value="hq">HQ thread</option>
+                    </select>
+                </label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelected()">Delete Selected</button>
                 <button class="btn btn-accent btn-sm" onclick="lsGenerateSelected()">Generate Selected</button>
                 <button class="btn btn-primary btn-sm" onclick="lsGenerateAll()">Generate All</button>
@@ -7393,6 +7419,18 @@ function lsGetExcludedSubs() {
     return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
 }
 
+function _lsGenMode() {
+    return document.getElementById('ls-sp-gen-mode')?.value || 'regular';
+}
+function _lsGenUrl(mode) {
+    return mode === 'hq'
+        ? '/api/search/posts/generate-hq-batch'
+        : '/api/search/posts/generate-batch';
+}
+function _lsGenLabel(mode) {
+    return mode === 'hq' ? 'HQ Gen' : 'Gen';
+}
+
 async function lsGenerateSelected() {
     const checks = document.querySelectorAll('.ls-sp-check:checked');
     if (!checks.length) { toast('Select at least one post', 'error'); return; }
@@ -7402,12 +7440,12 @@ async function lsGenerateSelected() {
         const p = _lsSavedPosts.find(sp => sp.id === id);
         return !p || !excludeSubs.has((p.subreddit||'').toLowerCase());
     });
-    const skipped = allIds.length - eligible.length;
     if (!eligible.length) { toast('All selected posts are in excluded subreddits', 'error'); return; }
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    runTask('/api/search/posts/generate-batch',
+    const mode = _lsGenMode();
+    runTask(_lsGenUrl(mode),
         { post_ids: eligible, num_comments: numComments },
-        _batchGenComplete, `Gen: ${eligible.length} posts`);
+        _batchGenComplete, `${_lsGenLabel(mode)}: ${eligible.length} posts`);
     renderLsTabContent();
 }
 
@@ -7416,23 +7454,25 @@ async function lsGenerateAll() {
     // Refresh comments cache so hasCommentsForBrand is accurate
     try { _lsComments = await api('/api/search/comments'); } catch(e) {}
     // Brand-aware eligibility: a post is eligible if it has no non-deleted
-    // comments yet for its currently-assigned brand. This lets users re-point
-    // a saved post at a different brand (via "Change Brand") and re-run
-    // Generate All to get comments for the new brand.
+    // comments yet for its currently-assigned brand. Mode-aware: HQ mode
+    // checks for HQ comments; regular mode checks for non-HQ comments —
+    // so a user can run both modes on the same post.
+    const mode = _lsGenMode();
     const hasCommentsForBrand = (p) => _lsComments.some(c =>
-        c.search_post_id === p.id && c.brand_id === p.brand_id && c.status !== 'deleted');
+        c.search_post_id === p.id && c.brand_id === p.brand_id && c.status !== 'deleted'
+        && (mode === 'hq' ? c.comment_type === 'hq' : c.comment_type !== 'hq'));
     const filtered = lsGetFilteredSaved().filter(p =>
         p.brand_id &&
         p.status !== 'generating' &&
         p.status !== 'irrelevant' &&
         !hasCommentsForBrand(p) &&
         !excludeSubs.has((p.subreddit||'').toLowerCase()));
-    if (!filtered.length) { toast('No eligible posts (must have brand; no comments yet for that brand; not generating/irrelevant/excluded)', 'error'); return; }
-    if (!confirm(`Generate comments for ${filtered.length} post(s) that don't yet have comments for their current brand?`)) return;
+    if (!filtered.length) { toast(`No eligible posts (must have brand; no ${mode === 'hq' ? 'HQ ' : ''}comments yet for that brand; not generating/irrelevant/excluded)`, 'error'); return; }
+    if (!confirm(`Generate ${mode === 'hq' ? 'HQ threads (1 + 4 each)' : 'comments'} for ${filtered.length} post(s)?`)) return;
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    runTask('/api/search/posts/generate-batch',
+    runTask(_lsGenUrl(mode),
         { post_ids: filtered.map(p => p.id), num_comments: numComments },
-        _batchGenComplete, `Gen: ${filtered.length} posts`);
+        _batchGenComplete, `${_lsGenLabel(mode)}: ${filtered.length} posts`);
     renderLsTabContent();
 }
 
@@ -7462,10 +7502,14 @@ async function lsConfirmBrand(postId) {
 
 async function lsGenerate(postId) {
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    toast('Comment generation started — running in background', 'info');
+    const mode = _lsGenMode();
+    const url = mode === 'hq'
+        ? `/api/search/posts/${postId}/generate-hq`
+        : `/api/search/posts/${postId}/generate`;
+    toast(mode === 'hq' ? 'HQ thread generation started (1 main + 4 replies) — running in background' : 'Comment generation started — running in background', 'info');
     try {
-        const { task_id } = await api(`/api/search/posts/${postId}/generate`, { method: 'POST', body: { num_comments: numComments } });
-        _addBgTask(task_id, 'Search Comments');
+        const { task_id } = await api(url, { method: 'POST', body: { num_comments: numComments } });
+        _addBgTask(task_id, mode === 'hq' ? 'Search HQ' : 'Search Comments');
         renderLsTabContent();
         const poll = setInterval(async () => {
             try {
@@ -7753,6 +7797,24 @@ function lsFilterComments() {
         if ((c.created_at || '') > groups[key].newest) groups[key].newest = c.created_at;
     });
 
+    // Within each group, sort comments so HQ parents come first, followed by
+    // their HQ children (in created_at order), then any non-HQ comments after.
+    // This makes nested HQ threads visually contiguous in the post card.
+    Object.values(groups).forEach(g => {
+        g.comments.sort((a, b) => {
+            const aIsHqParent = a.comment_type === 'hq' && !a.parent_comment_id;
+            const bIsHqParent = b.comment_type === 'hq' && !b.parent_comment_id;
+            const aIsHqChild = a.comment_type === 'hq' && a.parent_comment_id;
+            const bIsHqChild = b.comment_type === 'hq' && b.parent_comment_id;
+            // HQ parent first
+            if (aIsHqParent !== bIsHqParent) return aIsHqParent ? -1 : 1;
+            // Then HQ children (siblings of an HQ thread) before non-HQ comments
+            if (aIsHqChild !== bIsHqChild) return aIsHqChild ? -1 : 1;
+            // Tie-break: created_at ascending so the thread reads in order
+            return (a.created_at || '').localeCompare(b.created_at || '');
+        });
+    });
+
     // Sort groups based on selected sort option
     const sortOpt = document.getElementById('ls-cf-sort')?.value || '';
     let sortedGroups;
@@ -7793,6 +7855,8 @@ function lsFilterComments() {
                         <td style="max-width:400px"><span class="text-sm">${(c.body||'').substring(0,150)}${(c.body||'').length>150?'...':''}</span>
                             ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
                             ${c.mentions_brand ? '<span class="badge" style="background:#3a1a00;color:#FF8b60;margin-left:4px">Brand</span>' : ''}
+                            ${c.comment_type === 'hq' && !c.parent_comment_id ? '<span class="badge" style="background:#0e2a3d;color:#60a5fa;margin-left:4px" title="HQ thread parent">HQ Parent</span>' : ''}
+                            ${c.comment_type === 'hq' && c.parent_comment_id ? '<span class="badge" style="background:#1a2a3a;color:#7ab3d9;margin-left:4px" title="Reply in an HQ thread">HQ Child</span>' : ''}
                             ${lsKeywordBadges(lsMatchKeywords(c.body, c.brand_id))}
                         </td>
                         <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>

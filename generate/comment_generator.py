@@ -944,8 +944,13 @@ Return JSON only:
         result = self._call_claude(prompt, max_tokens=512, temperature=0.3)
         return result
 
-    def generate_comments(self, post_title, post_body, subreddit, comments, brand_name, brand_context, best_angle="", num_comments=2, tone_analysis=None, comment_stats=None, retry_feedback=None, relevance=None, reply_targets=None):
-        """Generate contextual, natural comments with analysis-driven anti-detection."""
+    def generate_comments(self, post_title, post_body, subreddit, comments, brand_name, brand_context, best_angle="", num_comments=2, tone_analysis=None, comment_stats=None, retry_feedback=None, relevance=None, reply_targets=None, mention_brand=True):
+        """Generate contextual, natural comments with analysis-driven anti-detection.
+
+        When mention_brand=False (used by HQ replies that shouldn't repeat the brand),
+        the opening framing and brand rules section switch to a strict
+        "do not mention any brand" instruction.
+        """
 
         if not comments:
             return {"generated_comments": [], "strategies_used": [], "_personas": [], "_structures": []}
@@ -1030,22 +1035,11 @@ Do NOT repeat the same mistakes."""
         banned_sample = random.sample(BANNED_PHRASES, min(10, len(BANNED_PHRASES)))
         banned_text = ", ".join(f'"{p}"' for p in banned_sample)
 
-        prompt = f"""You're commenting in a Reddit thread about a topic you know well. You happen to use {brand_name} but that's not what your comment is about — your comment is about the TOPIC itself.
-
-POST: "{post_title}"
-SUBREDDIT: r/{subreddit}{post_body_text}
-
-EXISTING COMMENTS:
-{comments_text}
-{tone_section}
-{length_section}
-
-STYLE PRIORITY: The EXISTING COMMENTS above are your primary style guide. Match their vocabulary, length, formality, and energy exactly. The anti-pattern examples at the bottom show what NOT to do.
-
-EACH COMMENT HAS A UNIQUE ASSIGNMENT — follow these carefully:
-{per_comment_section}
-
-BRAND RULES (follow these EXACTLY):
+        # Frame and brand-rules section depend on whether this comment must mention
+        # the brand (regular path / HQ parent) or must NOT mention it (HQ reply).
+        if mention_brand:
+            opening_line = f"""You're commenting in a Reddit thread about a topic you know well. You happen to use {brand_name} but that's not what your comment is about — your comment is about the TOPIC itself."""
+            brand_rules_block = f"""BRAND RULES (follow these EXACTLY):
 
 RULE #1 — MOST IMPORTANT: After you write "{brand_name}", IMMEDIATELY change topic. End the clause or start a new sentence about something else.
 Do NOT continue talking about {brand_name}. Do NOT use "they", "them", "their", "it" to refer back to the brand. Do NOT describe what they do.
@@ -1074,7 +1068,32 @@ ALSO BAD (problem-then-brand-solution arc):
   "got sick of waiting weeks for appointments. {brand_name} handles that"
   "after trying three bad options, {brand_name} was the one that worked"
 
-NEVER USE THESE PHRASES: {banned_text}
+NEVER USE THESE PHRASES: {banned_text}"""
+        else:
+            opening_line = """You're replying to a parent comment in a Reddit thread. Engage with what the parent commenter said — agree, disagree, add nuance, share a related experience, or push back. Stay on-topic with the original post but make it feel like a natural reply, not a fresh top-level take."""
+            brand_rules_block = f"""NO-BRAND RULE (CRITICAL — this comment is a thread reply):
+- Do NOT mention {brand_name} or ANY other brand, product, or service name in this comment.
+- Engage purely with what the parent commenter said. Don't name-drop anything.
+- If the topic naturally calls for a product reference, talk about the category in generic terms ("the clinic I went to", "an app I tried", "my doctor") without naming names.
+
+NEVER USE THESE PHRASES: {banned_text}"""
+
+        prompt = f"""{opening_line}
+
+POST: "{post_title}"
+SUBREDDIT: r/{subreddit}{post_body_text}
+
+EXISTING COMMENTS:
+{comments_text}
+{tone_section}
+{length_section}
+
+STYLE PRIORITY: The EXISTING COMMENTS above are your primary style guide. Match their vocabulary, length, formality, and energy exactly. The anti-pattern examples at the bottom show what NOT to do.
+
+EACH COMMENT HAS A UNIQUE ASSIGNMENT — follow these carefully:
+{per_comment_section}
+
+{brand_rules_block}
 {pattern_avoidance}
 
 COMMENT QUALITY RULES:
@@ -1116,6 +1135,123 @@ You MUST generate exactly {num_comments} comments. Return JSON only:
         result["_structures"] = [s["id"] for s in selected_structures[:num_comments]]
 
         return result
+
+    def generate_hq_search(self, post_title, post_body, subreddit, comments, brand_name,
+                            brand_context, tone_analysis=None, comment_stats=None,
+                            relevance=None, num_replies=4):
+        """Generate an HQ thread for a Live Search post.
+
+        Returns a list of dicts (in generation order) describing 1 main brand-mention
+        comment plus `num_replies` replies. parent_idx points back into this list
+        (or None for the main). Some shapes nest replies under earlier replies for
+        thread realism.
+
+        Caller is responsible for saving these to search_comments and translating
+        each parent_idx to the actual DB row id of the saved parent.
+
+        Each dict has: idx, parent_idx, body, is_main, mentions_brand,
+        persona_id, structure_id.
+        """
+        # Thread shapes: 5 comments total (1 main + 4 replies).
+        # Each tuple is (idx, parent_idx); parent_idx=None means top-level
+        # (replies to the post itself); int means replies to that earlier comment.
+        shapes = [
+            # All four hang off the main
+            [(0, None), (1, 0), (2, 0), (3, 0), (4, 0)],
+            # Two on main, one nested under R1, one under R2
+            [(0, None), (1, 0), (2, 0), (3, 1), (4, 2)],
+            # Three on main, one nested under R1
+            [(0, None), (1, 0), (2, 0), (3, 0), (4, 1)],
+            # Two on main, two nested under R1
+            [(0, None), (1, 0), (2, 0), (3, 1), (4, 1)],
+        ]
+        shape = random.choice(shapes)
+
+        hq_stats = {"avg_chars": 500, "avg_words": 100, "median_chars": 400,
+                    "min_chars": 80, "max_chars": 800}
+        reply_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
+                       "min_chars": 50, "max_chars": 600}
+
+        saved_bodies = {}     # idx -> body
+        saved_personas = {}   # idx -> persona id (for thread-author attribution)
+        results = []
+
+        print(f"    [HQ-LS] Generating thread (1 main + {num_replies} replies)")
+
+        for idx, parent_idx in shape:
+            is_main = parent_idx is None
+
+            # Thread context: real existing comments + already-generated thread
+            # comments so the reply LLM sees the developing conversation.
+            generated_so_far = [
+                {"body": saved_bodies[i], "score": 5,
+                 "author": saved_personas.get(i, "community_member"),
+                 "id": "", "permalink": ""}
+                for i in sorted(saved_bodies.keys())
+            ]
+            context_comments = (comments or []) + generated_so_far
+
+            reply_targets = {}
+            if not is_main:
+                reply_targets = {0: {
+                    "body": saved_bodies[parent_idx],
+                    "score": 5,
+                    "author": saved_personas.get(parent_idx, "community_member"),
+                    "id": "", "permalink": "",
+                }}
+
+            angle = (
+                "Give a thoughtful, detailed response showing genuine expertise"
+                if is_main else
+                "Respond naturally to the parent commenter — agree, disagree, "
+                "add nuance, or share a related experience"
+            )
+            local_relevance = dict(relevance or {})
+            local_relevance.setdefault("best_angle", angle)
+            local_relevance.setdefault("natural_fit", 3)
+
+            result = self.generate_comments(
+                post_title=post_title,
+                post_body=post_body,
+                subreddit=subreddit,
+                comments=context_comments,
+                brand_name=brand_name,
+                brand_context=brand_context,
+                num_comments=1,
+                tone_analysis=tone_analysis,
+                comment_stats=hq_stats if is_main else reply_stats,
+                relevance=local_relevance,
+                reply_targets=reply_targets if reply_targets else None,
+                mention_brand=is_main,
+            )
+
+            bodies = result.get("generated_comments", [])
+            if not bodies:
+                print(f"    [HQ-LS] failed at idx={idx}, skipping", flush=True)
+                continue
+
+            body = bodies[0]
+            mentions = is_main and (brand_name.lower() in body.lower())
+
+            personas_meta = result.get("_personas") or []
+            structures_meta = result.get("_structures") or []
+            p_id = personas_meta[0] if personas_meta else "lurker"
+            s_id = structures_meta[0] if structures_meta else ""
+
+            saved_bodies[idx] = body
+            saved_personas[idx] = p_id
+
+            results.append({
+                "idx": idx,
+                "parent_idx": parent_idx,
+                "body": body,
+                "is_main": is_main,
+                "mentions_brand": 1 if mentions else 0,
+                "persona_id": p_id,
+                "structure_id": s_id,
+            })
+
+        return results
 
     def validate_comments(self, post_title, post_body, subreddit, comments, brand_name, generated_comments, tone_analysis=None):
         """Score generated comments on authenticity and quality. Returns scores and feedback."""

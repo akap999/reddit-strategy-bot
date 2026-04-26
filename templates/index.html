@@ -8271,7 +8271,7 @@ async function lsDeleteAllComments() {
     renderLsTabContent();
 }
 
-function lsExportCsv() {
+async function lsExportCsv() {
     let comments = _lsFilteredComments || [];
     // Apply exact status filter for export (post-level filter may include siblings)
     const status = document.getElementById('ls-cf-status')?.value;
@@ -8279,6 +8279,47 @@ function lsExportCsv() {
         comments = comments.filter(c => c.status === status);
     }
     if (!comments.length) { toast('No comments to export', 'info'); return; }
+
+    // Fetch live engagement (upvotes + reply count) for any deployed comments
+    // that have a Reddit URL. Drafts/assigned comments stay blank for those
+    // columns. Skips /s/ share-URLs since the live-stats endpoint can't
+    // resolve them inline.
+    const urlItems = comments
+        .filter(c => c.reddit_comment_url && !c.reddit_comment_url.includes('/s/'))
+        .map(c => ({ id: c.id, reddit_comment_url: c.reddit_comment_url }));
+
+    let liveStats = {};
+    const exportBtn = event && event.target && event.target.tagName === 'BUTTON' ? event.target : null;
+    const originalBtn = exportBtn ? exportBtn.innerHTML : '';
+    if (urlItems.length) {
+        if (exportBtn) { exportBtn.disabled = true; exportBtn.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span> Fetching ${urlItems.length}…`; }
+        toast(`Fetching live upvotes + reply counts for ${urlItems.length} comment(s)…`, 'info');
+        try {
+            const { task_id } = await api('/api/comments/live-stats', { method: 'POST', body: { urls: urlItems } });
+            await new Promise((resolve, reject) => {
+                let retries = 0;
+                const poll = setInterval(async () => {
+                    try {
+                        const t = await api(`/api/tasks/${task_id}`);
+                        retries = 0;
+                        if (t.status === 'complete') {
+                            clearInterval(poll);
+                            liveStats = t.result || {};
+                            resolve();
+                        } else if (t.status === 'error') {
+                            clearInterval(poll);
+                            reject(new Error(t.error || 'Live stats failed'));
+                        }
+                    } catch (e) {
+                        if (++retries > 5) { clearInterval(poll); reject(e); }
+                    }
+                }, 2000);
+            });
+        } catch (e) {
+            toast(`Live stats failed: ${e.message} — exporting without engagement data`, 'error');
+        }
+    }
+
     const keyword = document.getElementById('ls-keyword')?.value?.trim() || '';
     const csvEscape = (val) => {
         if (val == null) return '';
@@ -8289,14 +8330,21 @@ function lsExportCsv() {
         return s;
     };
     const dateOnly = (d) => d ? d.slice(0, 10) : '';
-    const header = ['Deploy Date', 'Keyword', 'Post Link', 'Comment Link', 'Comment Content'];
-    const rows = comments.map(c => [
-        csvEscape(dateOnly(c.deployed_at)),
-        csvEscape(keyword),
-        csvEscape(c.post_url || ''),
-        csvEscape(c.reddit_comment_url || ''),
-        csvEscape(c.body || ''),
-    ].join(','));
+    const header = ['Deploy Date', 'Keyword', 'Post Link', 'Comment Link', 'Comment Content', 'Upvotes', 'Comments'];
+    const rows = comments.map(c => {
+        const stats = liveStats[String(c.id)] || {};
+        const upvotes = stats.score != null ? stats.score : '';
+        const replies = stats.num_replies != null ? stats.num_replies : '';
+        return [
+            csvEscape(dateOnly(c.deployed_at)),
+            csvEscape(keyword),
+            csvEscape(c.post_url || ''),
+            csvEscape(c.reddit_comment_url || ''),
+            csvEscape(c.body || ''),
+            csvEscape(upvotes),
+            csvEscape(replies),
+        ].join(',');
+    });
     const csv = [header.join(','), ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -8305,7 +8353,10 @@ function lsExportCsv() {
     a.download = `ls-comments-${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    toast(`Exported ${comments.length} comment(s)`, 'success');
+
+    if (exportBtn) { exportBtn.disabled = false; exportBtn.innerHTML = originalBtn || 'Export CSV'; }
+    const fetched = Object.keys(liveStats).length;
+    toast(`Exported ${comments.length} comment(s)${fetched ? ` (live stats for ${fetched})` : ''}`, 'success');
 }
 
 async function lsAutoAssignAll() {

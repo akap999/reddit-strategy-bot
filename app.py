@@ -1696,58 +1696,146 @@ def api_resolve_share_url():
 
 @app.route("/api/comments/live-stats", methods=["POST"])
 def api_comments_live_stats():
-    """Fetch live Reddit stats (upvotes, replies) for a list of comment URLs server-side."""
-    import time as _time
+    """Fetch live Reddit stats (upvotes, replies) for a list of comment URLs.
 
-    data = request.json
+    Mirrors the robustness of _check_live_batch:
+    - Resolves /s/ share-URLs through the proxy (or HEAD-redirect fallback).
+    - Strips every common Reddit subdomain (www / old / new / np / m).
+    - Treats 404 as removed, retries 429 / 5xx once with backoff, surfaces 403,
+      handles HTML-instead-of-JSON responses gracefully.
+    - Per-cid liveness lets the CSV exporter distinguish "removed" / "rate-
+      limited" / "fetch-failed" so missing rows are explainable.
+    """
+    import time as _time
+    import re as _re
+    import requests as _requests
+
+    data = request.json or {}
     urls = data.get("urls", [])  # list of {id, reddit_comment_url}
+
+    def _resolve_share(short_url):
+        """Best-effort resolution of an /s/ share link to its /comments/ URL."""
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        s_path = _re.sub(r'^https?://[^/]+', '', short_url)
+        try:
+            if proxy:
+                r = _requests.get(f"{proxy.rstrip('/')}/resolve{s_path}", timeout=15)
+                resolved = (r.json().get("url") or "").split("?")[0].rstrip("/")
+            else:
+                r = _requests.head(short_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }, allow_redirects=True, timeout=15)
+                resolved = r.url.split("?")[0].rstrip("/")
+            return resolved if "/comments/" in resolved else ""
+        except Exception:
+            return ""
+
+    def _parse_comment_body(rdata):
+        """Pull (score, author, num_replies, permalink, created_utc, liveness)
+        out of a Reddit comment JSON response. Returns None if the response
+        doesn't contain a t1 (comment) child."""
+        if not isinstance(rdata, list) or len(rdata) < 2:
+            return None
+        children = rdata[1].get("data", {}).get("children", [])
+        for child in children:
+            if child.get("kind") != "t1":
+                continue
+            cd = child.get("data", {})
+            replies_obj = cd.get("replies", "")
+            num_replies = 0
+            if isinstance(replies_obj, dict):
+                num_replies = len(replies_obj.get("data", {}).get("children", []))
+            body_text = cd.get("body", "")
+            is_removed = body_text in ("[deleted]", "[removed]")
+            return {
+                "score": cd.get("score", 0),
+                "author": cd.get("author", ""),
+                "num_replies": num_replies,
+                "permalink": cd.get("permalink", ""),
+                "created_utc": cd.get("created_utc", 0),
+                "liveness": "removed" if is_removed else "live",
+            }
+        return None
+
+    def _fetch_one(json_path, attempt=1):
+        """Single fetch with one retry on 429/5xx/timeout."""
+        try:
+            resp = _reddit_get(json_path, timeout=15)
+        except Exception as e:
+            if attempt < 2:
+                _time.sleep(3)
+                return _fetch_one(json_path, attempt + 1)
+            return {"error": "fetch_exception", "detail": str(e)}
+
+        sc = resp.status_code
+        if sc == 200:
+            try:
+                return {"data": resp.json()}
+            except Exception:
+                return {"error": "non_json"}
+        if sc == 404:
+            return {"removed": True}
+        if sc == 403:
+            return {"error": "forbidden"}
+        if sc == 429 or sc >= 500:
+            if attempt < 2:
+                _time.sleep(5)
+                return _fetch_one(json_path, attempt + 1)
+            return {"error": "rate_limited" if sc == 429 else f"http_{sc}"}
+        return {"error": f"http_{sc}"}
 
     def task():
         results = {}
-        for item in urls:
+        total = len(urls)
+        for i, item in enumerate(urls):
             cid = item.get("id")
-            url = item.get("reddit_comment_url", "")
+            url = (item.get("reddit_comment_url") or "").strip()
+            key = str(cid)
             if not url:
+                results[key] = {"liveness": "no_url"}
                 continue
-            try:
-                clean = url.split("?")[0].rstrip("/")
-                # Share URLs — skip, should be resolved via /api/resolve-share-url first
-                if "/s/" in clean:
-                    results[str(cid)] = {"liveness": "share_link"}
+
+            clean = url.split("?")[0].rstrip("/")
+            if "/s/" in clean:
+                resolved = _resolve_share(clean)
+                if not resolved:
+                    results[key] = {"liveness": "share_unresolved"}
+                    _time.sleep(1)
                     continue
-                path = clean.replace("https://www.reddit.com", "") + ".json"
-                resp = _reddit_get(path)
-                if resp.status_code == 404:
-                    results[str(cid)] = {
-                        "score": 0, "author": "", "num_replies": 0,
-                        "permalink": "", "created_utc": 0,
-                        "liveness": "removed",
-                    }
-                elif resp.status_code == 200:
-                    rdata = resp.json()
-                    if isinstance(rdata, list) and len(rdata) > 1:
-                        children = rdata[1].get("data", {}).get("children", [])
-                        for child in children:
-                            if child.get("kind") == "t1":
-                                cd = child.get("data", {})
-                                replies_obj = cd.get("replies", "")
-                                num_replies = 0
-                                if isinstance(replies_obj, dict):
-                                    num_replies = len(replies_obj.get("data", {}).get("children", []))
-                                body_text = cd.get("body", "")
-                                is_removed = body_text in ("[deleted]", "[removed]")
-                                results[str(cid)] = {
-                                    "score": cd.get("score", 0),
-                                    "author": cd.get("author", ""),
-                                    "num_replies": num_replies,
-                                    "permalink": cd.get("permalink", ""),
-                                    "created_utc": cd.get("created_utc", 0),
-                                    "liveness": "removed" if is_removed else "live",
-                                }
-                                break
-            except Exception as e:
-                print(f"[LIVE-STATS] Error fetching {url}: {e}", flush=True)
-            _time.sleep(2)
+                clean = resolved
+
+            if "/comment/" not in clean and "/comments/" not in clean:
+                results[key] = {"liveness": "bad_url"}
+                continue
+
+            # Strip every common Reddit subdomain (was hardcoded www only)
+            path = _re.sub(r'^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com', '', clean)
+            if not path.startswith('/'):
+                results[key] = {"liveness": "bad_url"}
+                continue
+            json_path = path + ".json"
+
+            res = _fetch_one(json_path)
+            if "removed" in res:
+                results[key] = {
+                    "score": 0, "author": "", "num_replies": 0,
+                    "permalink": "", "created_utc": 0,
+                    "liveness": "removed",
+                }
+            elif "data" in res:
+                parsed = _parse_comment_body(res["data"])
+                if parsed:
+                    results[key] = parsed
+                else:
+                    results[key] = {"liveness": "no_comment_in_response"}
+            else:
+                # error case — record it so the caller knows why this row is empty
+                results[key] = {"liveness": res.get("error") or "fetch_failed"}
+
+            # Modest pacing — _reddit_get is already proxied; 1s/req is safe.
+            # Bump to 3s after a transient error to be polite.
+            _time.sleep(3 if "error" in res else 1)
+        print(f"[LIVE-STATS] processed {total} url(s); successes={sum(1 for v in results.values() if v.get('liveness') == 'live')}", flush=True)
         return results
 
     tid = start_task("live-stats", task)

@@ -8346,10 +8346,10 @@ async function lsExportCsv() {
 
     // Fetch live engagement (upvotes + reply count) for any deployed comments
     // that have a Reddit URL. Drafts/assigned comments stay blank for those
-    // columns. Skips /s/ share-URLs since the live-stats endpoint can't
-    // resolve them inline.
+    // columns. /s/ share-URLs are passed through — the backend now resolves
+    // them via the proxy / HEAD-redirect (mirrors _check_live_batch).
     const urlItems = comments
-        .filter(c => c.reddit_comment_url && !c.reddit_comment_url.includes('/s/'))
+        .filter(c => c.reddit_comment_url)
         .map(c => ({ id: c.id, reddit_comment_url: c.reddit_comment_url }));
 
     let liveStats = {};
@@ -8419,8 +8419,18 @@ async function lsExportCsv() {
     URL.revokeObjectURL(url);
 
     if (exportBtn) { exportBtn.disabled = false; exportBtn.innerHTML = originalBtn || 'Export CSV'; }
-    const fetched = Object.keys(liveStats).length;
-    toast(`Exported ${comments.length} comment(s)${fetched ? ` (live stats for ${fetched})` : ''}`, 'success');
+    // Coverage breakdown so the user can see why some Upvotes/Comments cells
+    // are empty (rate-limited, removed, share-link unresolved, etc.).
+    const liveValues = Object.values(liveStats);
+    const live = liveValues.filter(v => v && v.liveness === 'live').length;
+    const removed = liveValues.filter(v => v && v.liveness === 'removed').length;
+    const failed = liveValues.length - live - removed;
+    let coverage = '';
+    if (urlItems.length) {
+        coverage = ` — engagement: ${live} live, ${removed} removed`;
+        if (failed) coverage += `, ${failed} unresolved`;
+    }
+    toast(`Exported ${comments.length} comment(s)${coverage}`, 'success');
 }
 
 async function lsAutoAssignAll() {

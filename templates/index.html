@@ -105,6 +105,7 @@
             <a onclick="navigate('allcomments')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="allcomments" style="color:#FF8b60">All Comments</a>
             <div style="border-top:1px solid #343536;margin:8px 16px"></div>
             <a onclick="navigate('livesearch')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesearch" style="color:#0079D3">Live Search</a>
+            <a onclick="navigate('livesubs')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesubs" style="color:#0079D3">Live Subreddits</a>
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
             <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
@@ -366,7 +367,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
     (views[view] || views.dashboard)(app);
 }
 
@@ -6710,6 +6711,326 @@ function lsMatchKeywords(text, brandId) {
 function lsKeywordBadges(keywords) {
     if (!keywords.length) return '';
     return keywords.map(kw => `<span class="badge" style="background:#1a3a2a;color:#4ade80;font-size:10px;margin:1px">${kw}</span>`).join(' ');
+}
+
+// =========================================================================
+// Live Subreddits — brand × saved-subreddit AI post generation
+// =========================================================================
+let _lsubsBrands = [];
+let _lsubsSubreddits = [];   // current brand's saved sub list
+let _lsubsLastResult = null; // last generate response (for the skipped accordion)
+
+async function renderLiveSubreddits(el) {
+    el.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    try { _lsubsBrands = await api('/api/search/brands'); } catch(e) { _lsubsBrands = []; }
+
+    el.innerHTML = `
+        <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
+            <div>
+                <h2 class="text-2xl font-bold" style="color:#0079D3">Live Subreddits</h2>
+                <p class="text-xs text-gray-500 mt-1">Pick a brand and one of its saved subreddits, then generate AI-focused posts (or describe a topic and let Claude flesh it out).</p>
+            </div>
+        </div>
+
+        <div class="card p-5 mb-4" style="background:#1a1a1b;border:1px solid #343536">
+            <!-- Brand + sub picker row -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Brand</label>
+                    <select id="lsubs-brand" onchange="lsubsOnBrandChange()" style="width:100%">
+                        <option value="">Select brand…</option>
+                        ${_lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                    </select>
+                </div>
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Subreddit <span class="text-gray-600">(from this brand's saved list)</span></label>
+                    <select id="lsubs-sub" disabled style="width:100%">
+                        <option value="">Pick a brand first…</option>
+                    </select>
+                    <div id="lsubs-sub-empty" class="text-xs text-yellow-400 mt-1" style="display:none">
+                        This brand has no saved subreddits yet. Add some via <a class="underline cursor-pointer" onclick="navigate('brands')" style="color:#FF8b60">Edit Brand</a> or save them while running a Live Search.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Primary action bar -->
+            <div class="flex flex-wrap gap-2 items-center pt-3" style="border-top:1px solid #2a2a2b">
+                <label class="text-xs text-gray-400 flex items-center gap-1">
+                    Count
+                    <select id="lsubs-count" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                        <option value="3">3 (1 commercial / 1 comparison / 1 informational)</option>
+                        <option value="6">6 (2-2-2)</option>
+                        <option value="9">9 (3-3-3)</option>
+                    </select>
+                </label>
+                <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
+                <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (topic only)</button>
+                <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
+            </div>
+            <div id="lsubs-fit-warn" class="mt-3 text-xs" style="display:none"></div>
+        </div>
+
+        <div id="lsubs-results"></div>
+        <div id="lsubs-skipped"></div>
+        <div id="lsubs-table" class="mt-4"></div>
+    `;
+}
+
+function lsubsOnBrandChange() {
+    const bid = document.getElementById('lsubs-brand')?.value;
+    const subEl = document.getElementById('lsubs-sub');
+    const emptyEl = document.getElementById('lsubs-sub-empty');
+    const genBtn = document.getElementById('lsubs-gen-btn');
+    const customBtn = document.getElementById('lsubs-custom-btn');
+    const fillerBtn = document.getElementById('lsubs-filler-btn');
+    if (!bid) {
+        subEl.disabled = true;
+        subEl.innerHTML = '<option value="">Pick a brand first…</option>';
+        if (emptyEl) emptyEl.style.display = 'none';
+        if (genBtn) genBtn.disabled = true;
+        if (customBtn) customBtn.disabled = true;
+        if (fillerBtn) fillerBtn.disabled = true;
+        _lsubsSubreddits = [];
+        return;
+    }
+    api(`/api/brands/${bid}/live-subreddits`).then(res => {
+        _lsubsSubreddits = res.subreddits || [];
+        if (!_lsubsSubreddits.length) {
+            subEl.disabled = true;
+            subEl.innerHTML = '<option value="">No saved subreddits</option>';
+            if (emptyEl) emptyEl.style.display = '';
+            if (genBtn) genBtn.disabled = true;
+            if (customBtn) customBtn.disabled = true;
+            if (fillerBtn) fillerBtn.disabled = true;
+            return;
+        }
+        if (emptyEl) emptyEl.style.display = 'none';
+        subEl.disabled = false;
+        subEl.innerHTML = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
+        if (genBtn) genBtn.disabled = false;
+        if (customBtn) customBtn.disabled = false;
+        if (fillerBtn) fillerBtn.disabled = false;
+    }).catch(() => {
+        toast('Failed to load brand subreddits', 'error');
+    });
+}
+
+function lsubsContext() {
+    const bid = parseInt(document.getElementById('lsubs-brand')?.value || '');
+    const sub = (document.getElementById('lsubs-sub')?.value || '').trim();
+    return { bid, sub };
+}
+
+async function lsubsGeneratePosts(force = false) {
+    const { bid, sub } = lsubsContext();
+    if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
+    const count = parseInt(document.getElementById('lsubs-count')?.value || '3');
+
+    document.getElementById('lsubs-fit-warn').style.display = 'none';
+    let res;
+    try {
+        res = await api('/api/live-posts/generate', {
+            method: 'POST',
+            body: { brand_id: bid, subreddit_name: sub, count, force }
+        });
+    } catch (e) {
+        // Subreddit-fit refusal comes back as 409 with structured payload
+        if (e && e.message && e.message.toLowerCase().includes('subreddit')) {
+            // try to surface fit details if api() captured them
+        }
+        // Try to fetch the JSON body manually for the fit-warn case
+        try {
+            const r = await fetch('/api/live-posts/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, count, force })
+            });
+            if (r.status === 409) {
+                const d = await r.json();
+                lsubsRenderFitWarn(d, () => lsubsGeneratePosts(true));
+                return;
+            }
+        } catch(_) {}
+        toast(e.message || 'Generation failed to start', 'error');
+        return;
+    }
+
+    const tid = res.task_id;
+    toast(`Generating ${count} post${count > 1 ? 's' : ''} for r/${sub}…`, 'info');
+    _addBgTask(tid, 'Live Posts');
+    const poll = setInterval(async () => {
+        try {
+            const t = await api(`/api/tasks/${tid}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                _removeBgTask(tid);
+                _lsubsLastResult = t.result || {};
+                lsubsRenderResult(_lsubsLastResult);
+                toast(`Generated ${(_lsubsLastResult.kept || []).length} post(s); ${(_lsubsLastResult.skipped || []).length} flagged as live duplicates`, 'success');
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                _removeBgTask(tid);
+                toast(`Generation error: ${t.error || ''}`, 'error');
+            }
+        } catch(e) {}
+    }, 2000);
+}
+
+function lsubsRenderFitWarn(d, retryFn) {
+    const el = document.getElementById('lsubs-fit-warn');
+    if (!el) return;
+    const sample = (d.sample_titles || []).slice(0, 5).map(t => `<li>${t}</li>`).join('');
+    el.style.display = '';
+    el.innerHTML = `
+        <div class="card p-3" style="background:#3d2a0b;border:1px solid #6b4a1a">
+            <div class="font-bold text-sm" style="color:#fb923c">⚠ Subreddit fit check refused</div>
+            <p class="text-sm mt-1" style="color:#f0c590">${d.reason || 'This subreddit does not seem to fit this brand.'}</p>
+            ${sample ? `<details class="text-xs mt-2" style="color:#bdbdbd"><summary class="cursor-pointer">Top recent posts on this sub</summary><ul class="list-disc pl-5 mt-1">${sample}</ul></details>` : ''}
+            <div class="flex gap-2 mt-3">
+                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('lsubs-fit-warn').style.display='none'">Dismiss</button>
+                <button class="btn btn-sm btn-accent" id="lsubs-force-btn">Force generate anyway</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('lsubs-force-btn').onclick = () => {
+        el.style.display = 'none';
+        retryFn();
+    };
+}
+
+function lsubsRenderResult(res) {
+    const out = document.getElementById('lsubs-results');
+    const skipEl = document.getElementById('lsubs-skipped');
+    if (!out) return;
+    const kept = res.kept || [];
+    const skipped = res.skipped || [];
+    out.innerHTML = `
+        <div class="card p-4 mb-3" style="background:#0e1a14;border:1px solid #1f3329">
+            <div class="font-bold mb-2" style="color:#46d160">Generated ${kept.length} post${kept.length === 1 ? '' : 's'} for r/${res.subreddit_name}</div>
+            ${kept.length ? `<ul class="text-sm space-y-1">${kept.map(p => `<li>· <span class="badge badge-${(p.intent || 'draft')}">${p.intent || '—'}</span> <a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.title}</a></li>`).join('')}</ul>` : '<p class="text-sm text-gray-400">No posts kept after dedup.</p>'}
+        </div>
+    `;
+    if (skipped.length && skipEl) {
+        skipEl.innerHTML = `
+            <details class="card p-3 mb-3" style="background:#1a0e0e;border:1px solid #3a1f1f">
+                <summary class="cursor-pointer text-sm" style="color:#fb923c">Skipped: ${skipped.length} candidate${skipped.length === 1 ? '' : 's'} matched existing live posts on Reddit</summary>
+                <ul class="text-xs space-y-2 mt-2">${skipped.map(p => {
+                    const m = p.matched_existing || {};
+                    return `<li>· <a href="javascript:void(0)" onclick="showPostDetail(${p.id})" style="color:#0079D3">${p.title}</a><br><span class="text-gray-500 ml-2">↳ matched <a href="${m.url}" target="_blank" style="color:#fb923c">${m.title}</a> (similarity ${m.similarity}, score ${m.score})</span></li>`;
+                }).join('')}</ul>
+            </details>
+        `;
+    } else if (skipEl) {
+        skipEl.innerHTML = '';
+    }
+}
+
+function lsubsShowCustomModal() {
+    const { bid, sub } = lsubsContext();
+    if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Custom Post — topic only</h3>
+        <p class="text-xs text-gray-400 mb-3">Describe the topic in one or two lines; Claude will write the title and body for r/${sub}.</p>
+        <div>
+            <label class="text-xs text-gray-400">Topic</label>
+            <textarea id="lsubs-custom-topic" rows="3" class="w-full" placeholder="e.g. how to compare TRT clinics for someone who's never been on testosterone before" style="font-family:inherit;min-height:90px"></textarea>
+        </div>
+        <div class="flex gap-2 mt-4 justify-end">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="lsubsSubmitCustom(false)">Generate</button>
+        </div>
+    `);
+}
+
+async function lsubsSubmitCustom(force) {
+    const { bid, sub } = lsubsContext();
+    const topic = (document.getElementById('lsubs-custom-topic')?.value || '').trim();
+    if (!topic) { toast('Enter a topic', 'error'); return; }
+
+    let res;
+    try {
+        res = await api('/api/live-posts/custom', {
+            method: 'POST',
+            body: { brand_id: bid, subreddit_name: sub, topic, force }
+        });
+    } catch (e) {
+        try {
+            const r = await fetch('/api/live-posts/custom', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force })
+            });
+            if (r.status === 409) {
+                const d = await r.json();
+                closeModal();
+                lsubsRenderFitWarn(d, () => { lsubsShowCustomModal(); });
+                return;
+            }
+        } catch(_) {}
+        toast(e.message || 'Custom post generation failed', 'error');
+        return;
+    }
+
+    const tid = res.task_id;
+    closeModal();
+    toast('Generating custom post…', 'info');
+    _addBgTask(tid, 'Custom Post');
+    const poll = setInterval(async () => {
+        try {
+            const t = await api(`/api/tasks/${tid}`);
+            if (t.status === 'complete') {
+                clearInterval(poll);
+                _removeBgTask(tid);
+                const r = t.result || {};
+                if (r.duplicate) {
+                    // Live-Reddit duplicate — show conflict modal so user can rephrase or force
+                    const m = r.matched_existing || {};
+                    showModal(`
+                        <h3 class="text-xl font-bold mb-3" style="color:#fb923c">⚠ Duplicate found on r/${sub}</h3>
+                        <p class="text-sm mb-3">Generated title:</p>
+                        <p class="text-sm mb-3" style="color:#0079D3">${r.draft.title}</p>
+                        <p class="text-sm mb-2">Already exists on Reddit (similarity ${m.similarity}, score ${m.score}):</p>
+                        <p class="text-sm mb-3"><a href="${m.url}" target="_blank" style="color:#fb923c">${m.title}</a></p>
+                        <div class="flex gap-2 mt-4 justify-end">
+                            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                            <button class="btn btn-primary" onclick="closeModal();lsubsShowCustomModal()">Rephrase &amp; retry</button>
+                        </div>
+                    `);
+                    return;
+                }
+                toast(`Custom post saved: "${r.post.title.substring(0, 60)}…"`, 'success');
+                _lsubsLastResult = { subreddit_name: r.subreddit_name, kept: [r.post], skipped: [] };
+                lsubsRenderResult(_lsubsLastResult);
+            } else if (t.status === 'error') {
+                clearInterval(poll);
+                _removeBgTask(tid);
+                toast(`Generation error: ${t.error || ''}`, 'error');
+            }
+        } catch(e) {}
+    }, 2000);
+}
+
+async function lsubsGenerateFiller() {
+    const { bid, sub } = lsubsContext();
+    if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
+    // Filler runs against the auto-provisioned subreddits row. We need its id.
+    const meta = await api(`/api/brands/${bid}/live-subreddits`).catch(() => null);
+    if (!meta) { toast('Failed to look up subreddit', 'error'); return; }
+    // Auto-provision & retrieve the row by name via the regular /api/subreddits endpoint
+    let subRow;
+    try {
+        const subs = await api('/api/subreddits');
+        subRow = (subs || []).find(s => (s.name || '').toLowerCase() === sub.toLowerCase());
+    } catch(_) {}
+    if (!subRow) {
+        toast('Run Generate Posts at least once to auto-provision this subreddit, then retry filler.', 'info');
+        return;
+    }
+    const count = parseInt(prompt('How many filler posts?', '3') || '3');
+    if (!count) return;
+    const res = await api('/api/generate/filler-posts', { method: 'POST', body: { subreddit_id: subRow.id, count } });
+    toast(`Filler generation started (${count} posts)`, 'info');
+    _addBgTask(res.task_id, 'Filler');
 }
 
 async function renderLiveSearch(el) {

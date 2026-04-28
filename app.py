@@ -2119,6 +2119,356 @@ def api_gen_filler_posts():
     tid = start_task("filler-posts", task)
     return jsonify({"task_id": tid})
 
+
+# ---------------------------------------------------------------------------
+# Live Subreddits — generate posts targeting a brand's saved sub list
+# ---------------------------------------------------------------------------
+
+# Module-level cache for subreddit-fit checks: {(brand_id, sub_name_lower): (ts, dict)}
+_LIVE_SUB_FIT_CACHE = {}
+_LIVE_SUB_FIT_TTL = 24 * 3600  # 24h
+
+def _normalize_sub_name(name):
+    """Strip r/ prefix and trailing slashes, lowercased."""
+    s = (name or "").strip()
+    if s.lower().startswith("r/"):
+        s = s[2:]
+    return s.strip("/").lower()
+
+
+def _brand_search_subs(brand):
+    """Parse the brand's search_subreddits JSON list. Returns lowercase names."""
+    raw = brand.get("search_subreddits") if brand else None
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(items, list):
+            return []
+        return [_normalize_sub_name(s) for s in items if str(s).strip()]
+    except Exception:
+        return []
+
+
+def _check_subreddit_fit(brand, sub_name):
+    """Ask Claude whether the brand's typical posts would fit r/<sub_name>.
+
+    Pulls top 25 posts of the sub for 1-month window via the Reddit proxy,
+    sends the title list + brand context to Claude, returns
+    {fits: bool, reason: str, sample_titles: [...]}. Cached 24h per
+    (brand_id, sub) so repeat clicks don't burn tokens.
+    """
+    bid = brand["id"]
+    sname = _normalize_sub_name(sub_name)
+    key = (bid, sname)
+    import time as _time
+    now = _time.time()
+    cached = _LIVE_SUB_FIT_CACHE.get(key)
+    if cached and (now - cached[0]) < _LIVE_SUB_FIT_TTL:
+        return cached[1]
+
+    titles = []
+    try:
+        resp = _reddit_get(f"/r/{sname}/top.json?limit=25&t=month", timeout=15)
+        if resp.status_code == 200:
+            jd = resp.json()
+            for ch in jd.get("data", {}).get("children", []):
+                t = ch.get("data", {}).get("title")
+                if t:
+                    titles.append(t)
+    except Exception as e:
+        print(f"[LIVE-FIT] fetch error r/{sname}: {e}", flush=True)
+
+    if not titles:
+        # Can't fetch — be permissive. Don't block; flag it.
+        result = {"fits": True, "reason": "Could not fetch top posts; skipping fit check.", "sample_titles": []}
+        _LIVE_SUB_FIT_CACHE[key] = (now, result)
+        return result
+
+    sample = "\n".join(f"  - {t}" for t in titles[:25])
+    brand_ctx = (brand.get("context") or "").strip()[:1500]
+    prompt = f"""You are checking whether posts about a brand's domain would fit on a specific subreddit.
+
+BRAND CONTEXT (what the brand does / who it's for):
+\"\"\"{brand_ctx or brand.get('name', '')}\"\"\"
+
+TARGET SUBREDDIT: r/{sname}
+
+TOP POSTS RECENTLY ON r/{sname} (sample of what the community actually posts):
+{sample}
+
+Decide whether posts about THIS BRAND'S domain would naturally fit r/{sname}.
+- "fits" = true means a long-tail user query about the brand's category would be on-topic
+  for this sub and likely get a useful response (not "wrong sub, try X" replies).
+- "fits" = false means the sub is clearly off-topic for this brand (different field /
+  audience), AND posting there would feel forced or get redirected.
+
+Be lenient on close-but-different subs (a fitness brand on r/cooking is OFF; a fitness brand
+on r/loseit is FINE). Only refuse on clearly mismatched pairs.
+
+Return JSON only:
+{{"fits": true|false, "reason": "one short sentence"}}"""
+    try:
+        from generators.base import ClaudeClient
+        claude = ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
+        out = claude.call(prompt, max_tokens=300, temperature=0.2)
+        if isinstance(out, dict) and "fits" in out:
+            result = {
+                "fits": bool(out.get("fits")),
+                "reason": str(out.get("reason") or ""),
+                "sample_titles": titles[:10],
+            }
+        else:
+            result = {"fits": True, "reason": "Fit check inconclusive; allowing.", "sample_titles": titles[:10]}
+    except Exception as e:
+        print(f"[LIVE-FIT] LLM error: {e}", flush=True)
+        result = {"fits": True, "reason": f"Fit check failed: {e}", "sample_titles": titles[:10]}
+    _LIVE_SUB_FIT_CACHE[key] = (now, result)
+    return result
+
+
+def _title_similarity(a, b):
+    """Token-set ratio in [0,1] — a cheap stand-in for fuzzy matching."""
+    import re as _re
+    def _tokens(s):
+        return set(_re.findall(r"[a-z0-9]+", (s or "").lower()))
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
+
+
+def _live_reddit_dup(sub_name, candidate_title, sim_threshold=0.85, min_score=3):
+    """Search r/<sub>/search.json for a candidate title; return the matching
+    post dict (with title, score, url) if any existing post has similarity >=
+    threshold AND score >= min_score, else None.
+    """
+    import urllib.parse as _u
+    sname = _normalize_sub_name(sub_name)
+    q = _u.quote(candidate_title[:200])
+    try:
+        resp = _reddit_get(f"/r/{sname}/search.json?q={q}&restrict_sr=on&limit=10&sort=relevance", timeout=15)
+        if resp.status_code != 200:
+            return None
+        jd = resp.json()
+        for ch in jd.get("data", {}).get("children", []):
+            d = ch.get("data", {})
+            existing = d.get("title", "")
+            sim = _title_similarity(existing, candidate_title)
+            if sim >= sim_threshold and (d.get("score") or 0) >= min_score:
+                return {
+                    "title": existing,
+                    "score": d.get("score", 0),
+                    "url": "https://www.reddit.com" + d.get("permalink", ""),
+                    "similarity": round(sim, 3),
+                }
+    except Exception as e:
+        print(f"[LIVE-DUP] search error r/{sname} '{candidate_title[:40]}': {e}", flush=True)
+    return None
+
+
+@app.route("/api/brands/<int:bid>/live-subreddits")
+def api_brand_live_subreddits(bid):
+    """Return the brand's saved Live Search subreddit list (the
+    search_subreddits JSON column, already populated by the LS Save-to-brand
+    button or the Edit Brand modal)."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "Brand not found"}), 404
+        return jsonify({"brand_id": bid, "subreddits": _brand_search_subs(brand)})
+    finally:
+        db.close()
+
+
+@app.route("/api/live-posts/generate", methods=["POST"])
+def api_live_posts_generate():
+    """Generate AI-focused posts for a brand × one of its saved subreddits.
+
+    Body: {brand_id, subreddit_name, count: 3|6|9, force?: bool}
+    - Auto-provisions a subreddits row (is_live=1) for the picked sub.
+    - Runs the subreddit-fit guardrail (skip with `force=true`).
+    - Reuses PostGenerator.generate_posts for the heavy lifting.
+    - Live-Reddit dedup: drops candidate titles that already exist on r/<sub>
+      with >= 0.85 token-set similarity AND score >= 3.
+    """
+    from config import POST_BATCH_SIZES
+    data = request.json or {}
+    bid = data.get("brand_id")
+    sub_name = _normalize_sub_name(data.get("subreddit_name", ""))
+    count = int(data.get("count", 3))
+    force = bool(data.get("force", False))
+    if not bid or not sub_name:
+        return jsonify({"error": "brand_id and subreddit_name required"}), 400
+    if count not in POST_BATCH_SIZES:
+        return jsonify({"error": f"count must be one of {list(POST_BATCH_SIZES)}"}), 400
+
+    db_check = get_db()
+    try:
+        brand = db_check.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "Brand not found"}), 404
+        if sub_name not in _brand_search_subs(brand):
+            return jsonify({
+                "error": f"r/{sub_name} is not in this brand's saved subreddits. "
+                         "Add it via Live Search → Save to brand or the Edit Brand modal."
+            }), 400
+    finally:
+        db_check.close()
+
+    # Subreddit-fit guardrail (uses the proxy + Claude, cached 24h)
+    if not force:
+        fit = _check_subreddit_fit(brand, sub_name)
+        if not fit.get("fits"):
+            return jsonify({
+                "error": "subreddit_unfit",
+                "reason": fit.get("reason") or "This subreddit doesn't fit this brand.",
+                "sample_titles": fit.get("sample_titles") or [],
+            }), 409
+
+    def task():
+        db, claude, _, post_gen, _ = make_generators()
+        try:
+            sub = db.ensure_live_subreddit(sub_name)
+            if not sub:
+                raise ValueError(f"Could not provision r/{sub_name}")
+            brand_full = db.get_brand(bid)
+            if not brand_full:
+                raise ValueError("Brand vanished")
+
+            # Generate the full intent-balanced batch first; then live-Reddit-dedup.
+            posts = post_gen.generate_posts(sub, [brand_full], count)
+
+            # Live-Reddit dedup pass — flag matches; we don't delete (the post is
+            # already saved, but it surfaces as a "skipped" hint in the response
+            # so the user can manually delete or edit).
+            skipped = []
+            kept = []
+            for p in posts:
+                hit = _live_reddit_dup(sub_name, p["title"])
+                if hit:
+                    skipped.append({**p, "matched_existing": hit})
+                else:
+                    kept.append(p)
+            return {
+                "subreddit_id": sub["id"],
+                "subreddit_name": sub["name"],
+                "kept": [
+                    {"id": p["id"], "title": p["title"], "intent": p.get("intent"),
+                     "storyline": p.get("storyline")}
+                    for p in kept
+                ],
+                "skipped": [
+                    {"id": p["id"], "title": p["title"], "intent": p.get("intent"),
+                     "storyline": p.get("storyline"),
+                     "matched_existing": p["matched_existing"]}
+                    for p in skipped
+                ],
+            }
+        finally:
+            db.close()
+
+    tid = start_task("live-posts", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/live-posts/custom", methods=["POST"])
+def api_live_posts_custom():
+    """Flesh out one full post from a user-supplied topic for brand × sub.
+
+    Body: {brand_id, subreddit_name, topic, force?: bool}
+    """
+    data = request.json or {}
+    bid = data.get("brand_id")
+    sub_name = _normalize_sub_name(data.get("subreddit_name", ""))
+    topic = (data.get("topic") or "").strip()
+    force = bool(data.get("force", False))
+    if not bid or not sub_name or not topic:
+        return jsonify({"error": "brand_id, subreddit_name, and topic are required"}), 400
+
+    db_check = get_db()
+    try:
+        brand = db_check.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "Brand not found"}), 404
+        if sub_name not in _brand_search_subs(brand):
+            return jsonify({
+                "error": f"r/{sub_name} is not in this brand's saved subreddits."
+            }), 400
+    finally:
+        db_check.close()
+
+    if not force:
+        fit = _check_subreddit_fit(brand, sub_name)
+        if not fit.get("fits"):
+            return jsonify({
+                "error": "subreddit_unfit",
+                "reason": fit.get("reason") or "This subreddit doesn't fit this brand.",
+                "sample_titles": fit.get("sample_titles") or [],
+            }), 409
+
+    def task():
+        db, claude, _, post_gen, _ = make_generators()
+        try:
+            sub = db.ensure_live_subreddit(sub_name)
+            if not sub:
+                raise ValueError(f"Could not provision r/{sub_name}")
+            brand_full = db.get_brand(bid)
+            if not brand_full:
+                raise ValueError("Brand vanished")
+            existing = db.get_all_post_titles_for_brand(brand_full["name"])
+            draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing)
+            if not draft:
+                raise ValueError("Topic generation failed")
+
+            # Live-Reddit dedup before saving
+            hit = _live_reddit_dup(sub_name, draft["title"])
+            if hit and not data.get("force_save"):
+                return {
+                    "duplicate": True,
+                    "draft": draft,
+                    "matched_existing": hit,
+                }
+
+            # Save with is_custom=1
+            from config import PROMPT_VERSION
+            post_id = db.save_post(
+                subreddit_id=sub["id"],
+                brand_id=brand_full["id"],
+                title=draft["title"],
+                body=draft["body"],
+                storyline=draft.get("storyline", "question"),
+                image_prompt=None,
+                image_url=None,
+                ai_query_score=draft.get("ai_query_score", 0),
+                is_custom=1,
+                is_filler=0,
+                status="complete",
+                suggested_post_day=0,
+                prompt_version=PROMPT_VERSION,
+                brand_ids=[brand_full["id"]],
+                intent=draft.get("intent"),
+            )
+            return {
+                "subreddit_id": sub["id"],
+                "subreddit_name": sub["name"],
+                "post": {
+                    "id": post_id,
+                    "title": draft["title"],
+                    "body": draft["body"],
+                    "intent": draft.get("intent"),
+                    "storyline": draft.get("storyline"),
+                },
+            }
+        finally:
+            db.close()
+
+    tid = start_task("live-posts-custom", task)
+    return jsonify({"task_id": tid})
+
 @app.route("/api/generate/comments", methods=["POST"])
 def api_gen_comments():
     data = request.json

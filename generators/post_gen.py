@@ -147,6 +147,98 @@ class PostGenerator:
 
         return saved
 
+    def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None):
+        """Live Subreddits — flesh out one full post from a single user-supplied topic.
+
+        Reuses the same brand-context scaffolding as `generate_posts` but:
+        - num_posts = 1
+        - the topic seeds the post's storyline (Claude is asked to pick the
+          best-fitting intent and storyline for it)
+        - returns one dict {title, body, storyline, intent, ai_query_score}
+          (NOT saved — caller persists)
+        """
+        if isinstance(brand, dict):
+            brands = [brand]
+        else:
+            brands = brand if isinstance(brand, list) else [brand]
+
+        brand_block, target_names, competitors = self._build_enriched_brand_block(brands)
+        target_names_str = ", ".join(target_names) if target_names else "(none)"
+        competitors_str = ", ".join(competitors) if competitors else "(none known)"
+
+        existing_text = ""
+        if existing_titles:
+            sample = list(existing_titles)[:30]
+            existing_lines = "\n".join(f'  - "{t}"' for t in sample)
+            existing_text = f"\nEXISTING POST TITLES (do NOT repeat or paraphrase):\n{existing_lines}\n"
+
+        banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
+        storylines_list = ", ".join(STORYLINE_TYPES.keys())
+
+        prompt = f"""Write ONE Reddit post for r/{subreddit['name']} based on the user's topic.
+
+SUBREDDIT DOMAIN: {subreddit['domain']}
+
+USER-SUPPLIED TOPIC (this is the seed — flesh it out into a full post):
+\"\"\"{topic.strip()}\"\"\"
+
+BRAND CONTEXT (for grounding the post — NEVER mention the target brand names):
+{brand_block}
+{existing_text}
+GOAL: Turn the topic into a long-tail QUESTION a real user would type into ChatGPT,
+Claude, or Perplexity. The TITLE is the query (6-15 words, natural, specific). The
+BODY is 2-4 short paragraphs of first-person context for why they're asking.
+
+STRICT RULES:
+  1. NEVER mention any TARGET brand name: {target_names_str}
+  2. Pick the best-fitting INTENT for this topic from: commercial / comparison / informational.
+     - commercial: ready to pick a tool/product/service.
+     - comparison: weighing 2+ options against each other (competitor names allowed: {competitors_str}).
+     - informational: wants to understand, not buy.
+  3. Pick a STORYLINE from: {storylines_list}.
+  4. Title must read like a natural AI prompt (long-tail, specific, 6-15 words).
+  5. Body is 2-4 short paragraphs of first-person context, conversational, with
+     minor imperfections (occasional typos, incomplete thoughts).
+  6. Do NOT look AI-generated. No marketing language. No excessive formatting.
+  7. The post should fit the user's topic — don't drift away from it.
+
+NEVER USE THESE PHRASES: {banned_sample}
+
+Return JSON only:
+{{
+    "title": "The long-tail AI query",
+    "body": "2-4 paragraph first-person body with context",
+    "storyline": "one of: {storylines_list}",
+    "intent": "commercial | comparison | informational"
+}}"""
+
+        result = self.claude.call(prompt, max_tokens=2500, temperature=0.85)
+        if not result or "title" not in result or "body" not in result:
+            return None
+
+        title = (result.get("title") or "").strip()
+        body = (result.get("body") or "").strip()
+        if not title or not body:
+            return None
+
+        storyline = result.get("storyline") or "question"
+        if storyline not in STORYLINE_TYPES:
+            storyline = "question"
+        intent = result.get("intent")
+        if intent not in INTENT_TYPES:
+            intent = "informational"
+
+        ai_score = self._score_ai_query_relevance(title, body)
+
+        return {
+            "title": title,
+            "body": body,
+            "storyline": storyline,
+            "intent": intent,
+            "ai_query_score": ai_score,
+            "is_custom": 1,
+        }
+
     def generate_welcome_post(self, subreddit):
         """Generate a single welcome/intro post for a new subreddit.
 

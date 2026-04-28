@@ -156,6 +156,36 @@ class Database:
         row = self.conn.execute("SELECT * FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
         return dict(row) if row else None
 
+    def ensure_live_subreddit(self, name):
+        """Auto-provision a subreddits row for a brand-driven Live Subreddits flow.
+
+        Returns the existing row if `name` already exists; otherwise creates a
+        minimal row with is_live=1 (so the rest of the post pipeline, which
+        requires a real subreddits.id FK, just works) and returns it.
+        Name is normalized: leading r/ stripped, lowercased.
+        """
+        clean = (name or "").strip()
+        if clean.lower().startswith("r/"):
+            clean = clean[2:]
+        clean = clean.strip("/").lower()
+        if not clean:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM subreddits WHERE LOWER(name) = ?", (clean,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        self.conn.execute(
+            "INSERT INTO subreddits (name, domain, description, rules, sidebar, welcome_message, is_live) "
+            "VALUES (?, '', '', '[]', '', '', 1)",
+            (clean,)
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT * FROM subreddits WHERE LOWER(name) = ?", (clean,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_subreddit_by_name(self, name):
         row = self.conn.execute("SELECT * FROM subreddits WHERE name = ?", (name,)).fetchone()
         return dict(row) if row else None
@@ -897,6 +927,12 @@ class Database:
         sub_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(subreddits)").fetchall()]
         if "owner_account" not in sub_cols:
             self.conn.execute("ALTER TABLE subreddits ADD COLUMN owner_account TEXT DEFAULT ''")
+            self.conn.commit()
+        # Live Subreddits module: marks rows that were auto-provisioned for a
+        # brand-driven generation flow (so the regular Subreddits page can
+        # distinguish them from manually-managed subreddits).
+        if "is_live" not in sub_cols:
+            self.conn.execute("ALTER TABLE subreddits ADD COLUMN is_live INTEGER DEFAULT 0")
             self.conn.commit()
 
         # Post owner migration

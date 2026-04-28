@@ -2131,16 +2131,21 @@ function _postsUpdateLocal(pid, patch) {
     const i = _postsCache.findIndex(p => p.id === pid);
     if (i >= 0) Object.assign(_postsCache[i], patch);
     renderPostsFromCache();
+    // The Live Subreddits page reuses the same post action handlers but renders
+    // into its own table — keep that view fresh too.
+    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
 }
 
 function _postsRemoveLocal(pid) {
     _postsCache = _postsCache.filter(p => p.id !== pid);
     renderPostsFromCache();
+    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
 }
 
 function _postsUpdateManyLocal(predicate, patch) {
     _postsCache.forEach(p => { if (predicate(p)) Object.assign(p, patch); });
     renderPostsFromCache();
+    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
 }
 
 async function loadPosts() {
@@ -6791,6 +6796,7 @@ function lsubsOnBrandChange() {
         if (customBtn) customBtn.disabled = true;
         if (fillerBtn) fillerBtn.disabled = true;
         _lsubsSubreddits = [];
+        document.getElementById('lsubs-table').innerHTML = '';
         return;
     }
     api(`/api/brands/${bid}/live-subreddits`).then(res => {
@@ -6807,12 +6813,81 @@ function lsubsOnBrandChange() {
         if (emptyEl) emptyEl.style.display = 'none';
         subEl.disabled = false;
         subEl.innerHTML = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
+        subEl.onchange = lsubsLoadTable;
         if (genBtn) genBtn.disabled = false;
         if (customBtn) customBtn.disabled = false;
         if (fillerBtn) fillerBtn.disabled = false;
+        // Auto-load table for the first sub so the user sees existing posts for this brand × sub.
+        lsubsLoadTable();
     }).catch(() => {
         toast('Failed to load brand subreddits', 'error');
     });
+}
+
+async function lsubsLoadTable() {
+    const { bid, sub } = lsubsContext();
+    const tableEl = document.getElementById('lsubs-table');
+    if (!tableEl) return;
+    if (!bid || !sub) { tableEl.innerHTML = ''; return; }
+    tableEl.innerHTML = '<div class="spinner mx-auto my-4"></div>';
+    try {
+        // Look up the auto-provisioned subreddits row by name. If it doesn't
+        // exist yet (before the first generate), show an empty-state hint.
+        const subs = await api('/api/subreddits');
+        const subRow = (subs || []).find(s => (s.name || '').toLowerCase() === sub.toLowerCase());
+        if (!subRow) {
+            tableEl.innerHTML = `<p class="text-sm text-gray-500 mt-2">No posts yet for r/${sub}. Click <b>Generate Posts</b> or <b>+ Custom Post</b> to create some.</p>`;
+            return;
+        }
+        const posts = await api(`/api/posts/all?subreddit_id=${subRow.id}&brand_id=${bid}`);
+        lsubsRenderTable(posts || []);
+    } catch (e) {
+        tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
+    }
+}
+
+function lsubsRenderTable(posts) {
+    const el = document.getElementById('lsubs-table');
+    if (!el) return;
+    if (!posts.length) {
+        el.innerHTML = '<p class="text-sm text-gray-500 mt-2">No posts yet for this brand × subreddit. Use the buttons above to generate.</p>';
+        return;
+    }
+    // Same row layout as renderPostsFromCache so action buttons work consistently.
+    el.innerHTML = `
+        <table>
+            <thead><tr><th>Day</th><th>Title</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+            <tbody>${posts.map(p => `
+                <tr>
+                    <td>${p.suggested_post_day}</td>
+                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
+                    <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
+                    <td class="text-gray-400">${p.storyline || ''}</td>
+                    <td>${p.ai_query_score || '-'}</td>
+                    <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span> ${_postStatusDate(p)}</td>
+                    <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
+                    <td class="text-xs">
+                        <span title="Assigned+Informed: ${(p.assigned_brand||0)-(p.deployed_brand||0)} brand + ${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)} non-brand / ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)} total">
+                            <span style="color:#4a9eff">${(p.assigned_brand||0)-(p.deployed_brand||0)}B</span>+<span style="color:#818384">${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)}NB</span>
+                            <span class="text-gray-600">/ ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)}</span>
+                        </span>
+                    </td>
+                    <td class="text-xs">
+                        <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand / ${p.comment_count||0} total deployed | Total generated: ${p.total_comments||0}">
+                            <span style="color:#FF8b60">${p.deployed_brand||0}B</span>+<span style="color:#818384">${p.deployed_non_brand||0}NB</span>
+                            <span class="text-gray-600">/ ${p.comment_count||0}</span>
+                        </span>
+                    </td>
+                    <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                        ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
+                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                        <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
+                    </div></td>
+                </tr>
+            `).join('')}</tbody>
+        </table>
+    `;
 }
 
 function lsubsContext() {
@@ -6867,6 +6942,7 @@ async function lsubsGeneratePosts(force = false) {
                 _lsubsLastResult = t.result || {};
                 lsubsRenderResult(_lsubsLastResult);
                 toast(`Generated ${(_lsubsLastResult.kept || []).length} post(s); ${(_lsubsLastResult.skipped || []).length} flagged as live duplicates`, 'success');
+                lsubsLoadTable();
             } else if (t.status === 'error') {
                 clearInterval(poll);
                 _removeBgTask(tid);
@@ -7001,6 +7077,7 @@ async function lsubsSubmitCustom(force) {
                 toast(`Custom post saved: "${r.post.title.substring(0, 60)}…"`, 'success');
                 _lsubsLastResult = { subreddit_name: r.subreddit_name, kept: [r.post], skipped: [] };
                 lsubsRenderResult(_lsubsLastResult);
+                lsubsLoadTable();
             } else if (t.status === 'error') {
                 clearInterval(poll);
                 _removeBgTask(tid);

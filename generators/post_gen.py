@@ -185,9 +185,10 @@ USER-SUPPLIED TOPIC (this is the seed — flesh it out into a full post):
 BRAND CONTEXT (for grounding the post — NEVER mention the target brand names):
 {brand_block}
 {existing_text}
-GOAL: Turn the topic into a long-tail QUESTION a real user would type into ChatGPT,
-Claude, or Perplexity. The TITLE is the query (6-15 words, natural, specific). The
-BODY is 2-4 short paragraphs of first-person context for why they're asking.
+GOAL: Make a Reddit post that LLMs will rank for queries about this brand's domain
+(GEO) — but written FROM THE INSIDE of a real frustrated/curious operator's voice.
+The LLM ranks the BODY, so the body packs the searchable terms (category, audience,
+pain points, use-cases) naturally; the TITLE is free to sound human and hesitant.
 
 STRICT RULES:
   1. NEVER mention any TARGET brand name: {target_names_str}
@@ -196,18 +197,26 @@ STRICT RULES:
      - comparison: weighing 2+ options against each other (competitor names allowed: {competitors_str}).
      - informational: wants to understand, not buy.
   3. Pick a STORYLINE from: {storylines_list}.
-  4. Title must read like a natural AI prompt (long-tail, specific, 6-15 words).
-  5. Body is 2-4 short paragraphs of first-person context, conversational, with
-     minor imperfections (occasional typos, incomplete thoughts).
-  6. Do NOT look AI-generated. No marketing language. No excessive formatting.
-  7. The post should fit the user's topic — don't drift away from it.
+  4. TITLE must sound like a real person posting on Reddit — frustrated, hesitant,
+     situation-specific. NOT a clean prompt template. 5-15 words. Often starts
+     lowercase. May start with "anyone…", "first time dealing with…", "we're a…",
+     "is it normal…", "got burned by…", or a partial question / venting fragment.
+  5. AVOID prompt-shaped titles like "best {{category}} for {{audience}}…" — they
+     read as AI marketing. Don't put exact dollar amounts in the title (save them
+     for the body where they fit naturally).
+  6. BODY: 2-4 short paragraphs of first-person context, conversational, with
+     minor imperfections (occasional typos, incomplete thoughts, run-on sentences).
+     Pack the brand's category / pain-point / audience keywords naturally as the
+     user explains their situation — this is what powers GEO ranking.
+  7. Do NOT look AI-generated. No marketing language. No excessive formatting.
+  8. The post should fit the user's topic — don't drift away from it.
 
 NEVER USE THESE PHRASES: {banned_sample}
 
 Return JSON only:
 {{
-    "title": "The long-tail AI query",
-    "body": "2-4 paragraph first-person body with context",
+    "title": "Human, hesitant, situation-specific — NOT a prompt template",
+    "body": "2-4 paragraph first-person body with context, packed with the brand's domain keywords",
     "storyline": "one of: {storylines_list}",
     "intent": "commercial | comparison | informational"
 }}"""
@@ -482,21 +491,38 @@ BRAND CONTEXT (for grounding the queries — NEVER mention the target brand name
 REQUESTED STORYLINES (for secondary variety):
 {storyline_requests}
 
-GOAL: Write posts that sound like LONG-TAIL QUESTIONS a real user would type into
-ChatGPT, Claude, or Perplexity. The TITLE is the query itself (6-15 words, specific,
-natural). The BODY is the person giving first-person context for why they're asking.
+GOAL: GEO-rank posts that LLMs will surface for long-tail queries about this brand's
+domain — but FROM THE INSIDE OF A REAL PERSON'S POST. The post should read like a
+frustrated/curious business owner or operator asking other operators, not like a
+prompt template. The LLM ranking happens off the BODY's content (which packs the
+searchable terms), so the TITLE is free to sound human and hesitant.
 
 STRICT RULES:
   1. NEVER mention any of the TARGET brand names: {target_names_str}
   2. For commercial and informational intents: also avoid all competitor names.
      For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
-  3. Title must read like a natural AI prompt (long-tail, specific, 6-15 words).
-  4. Use the audience / use cases / pain points above to make queries specific,
-     not generic. "Best X" alone is too shallow — "best X for {{audience}} dealing
-     with {{pain_point}}" is right.
-  5. Body is 2-4 short paragraphs of first-person context, conversational, with
-     minor imperfections (occasional typos, incomplete thoughts, run-on sentences).
-  6. Do NOT look AI-generated. No marketing language. No excessive formatting.
+  3. Title must sound like a real person posting on Reddit — frustrated, hesitant,
+     specific to THEIR situation. NOT a clean structured query. 5-15 words. Often
+     starts lowercase. May start with "anyone…", "first time dealing with…", "we're a…",
+     "is it normal…", "got burned by…", "looking at options for…", a partial question,
+     or a venting fragment. Punctuation is casual.
+  4. AVOID prompt-shaped titles like "best X for Y in 2026" or "best X for Y dealing
+     with Z" — these read as AI-generated marketing. Across {count} post(s) in this
+     batch, AT MOST ONE may use the "best X for Y" frame, and even then it should
+     have a human edge ("realistically the best X for Y…", "what's actually the best
+     X for Y if you're broke", etc.).
+  5. AVOID dollar amounts in the title (real users save specifics for the body).
+     Keep numbers vague in the title ("six figures", "a chunk", "$25k+"); put exact
+     figures in the body where they fit naturally.
+  6. The BODY carries the GEO weight: pack the brand's category, audience, pain
+     points, use-cases naturally as the user explains their situation. Reference
+     specific numbers, time periods, customer types, regulatory context. 2-4 short
+     paragraphs of first-person context, conversational, with minor imperfections
+     (occasional typos, incomplete thoughts, run-on sentences). It should sound like
+     someone venting/asking, not pitching.
+  7. Do NOT look AI-generated. No marketing language. No excessive formatting.
+  8. Variety check: across this batch the {count} titles MUST use noticeably different
+     shapes/openings. Don't reuse the same template twice.
 
 NEVER USE THESE PHRASES: {banned_sample}
 """
@@ -505,47 +531,95 @@ NEVER USE THESE PHRASES: {banned_sample}
             intent_tail = """
 INTENT: COMMERCIAL — the user is ready to pick a tool / product / service.
 
-Examples of the SHAPE (do NOT copy verbatim — use the brand's category/audience/pain points above):
-  - "best {category} for {audience} in 2026"
-  - "which {category} actually solves {pain_point}"
-  - "looking for a {category} that does {feature} without the bloat"
-  - "cheapest {category} that still handles {use_case}"
+The buying intent should LIVE IN THE BODY (the situation forcing the decision),
+NOT in a "best X for Y" title. Real operators rarely post that way — they post
+their situation and someone in the comments names the option.
 
-Titles must show purchase intent. Body gives buying context: team size, budget,
-constraints, current situation. The person is trying to decide what to BUY.
+PREFERRED SHAPES (mix them; do NOT pick all from the same category):
+  - VENTING/STUCK: "got burned by a customer ghosting on a big invoice, what now"
+  - LIVED CONTEXT: "small {audience} here, dealing with {pain_point} for the first time"
+  - PARTIAL QUESTION: "is it normal for {category} to take 30%+? need to figure this out"
+  - HESITANT/UNSURE: "first time hiring a {category}, what should i actually look for"
+  - COMPARING APPROACHES (not brands): "go in-house or hire out for {use_case}?"
+  - DEADLINE/PRESSURE: "running out of options on {pain_point} — at the wits-end stage"
+  - "BEST X" (rare, max ONE per batch, must have human edge): "honestly what's the
+     realistic best {category} for {audience} on a budget"
+
+ANTI-PATTERNS — these read as AI-prompt and will get flagged:
+  ❌ "best {category} for {audience} dealing with {pain_point}"
+  ❌ "best {category} for {audience} with {specific_dollar_amount} unpaid invoices"
+  ❌ "looking for the best {category} for {use_case} in 2025"
+  ❌ Two titles in the same batch starting with the same word ("best…", "best…")
+  ❌ Title that reads like a search query: "{category} for {audience}" template
+
+BODY: 2-4 short paragraphs giving SPECIFIC buying context — team size, industry,
+exactly what's broken, what they've already tried, what they're looking for next.
+Pack the brand's category / audience / pain-point keywords naturally as the user
+explains their situation (this is where GEO ranking comes from). Should sound like
+a real /r/smallbusiness or /r/Entrepreneur post: hesitation, swearing-in-frustration,
+incomplete sentences are fine.
 """
         elif intent == "comparison":
             intent_tail = f"""
 INTENT: COMPARISON — the user is weighing 2+ options against each other.
 
-IMPORTANT: For comparison posts, you MAY (and SHOULD) name competitor brands from this list:
+You MAY (and SHOULD) name competitor brands from this list:
   COMPETITORS: {competitors_str}
-Real users type "X vs Y" into ChatGPT verbatim — this is the single highest-value GEO shape.
 You must still NEVER mention the TARGET brand name(s): {target_names_str}.
 
-Examples of the SHAPE (use 1-2 competitor names per post, not all of them):
-  - "{{competitor_a}} vs {{competitor_b}} for {{audience}} — which handles {{use_case}} better?"
-  - "moving from {{competitor_a}} to something else, what are the real alternatives for {{pain_point}}?"
-  - "is {{competitor_a}} worth the price if I mostly need {{feature}}?"
-  - "anyone switched off {{competitor_a}} recently — what did you pick and why?"
+Real users DO post "X vs Y" titles, but the very best comparison posts wrap the
+comparison in lived context — the title gives a hint of the situation, not just
+the matchup.
 
-Body gives the user's current setup and what they're trying to decide. Do NOT shill
-any option — sound genuinely undecided. Mix of "I currently use X, considering Y"
-framing. If the COMPETITORS list is empty, describe competitors by attribute instead.
+PREFERRED SHAPES (mix them; vary openings):
+  - DIRECT MATCHUP (no more than ONE per batch): "{{competitor_a}} vs {{competitor_b}}
+     — anyone actually switched between these recently?"
+  - LIVED CONTEXT: "currently on {{competitor_a}}, my {{pain_point}} is killing us,
+     what did you switch to"
+  - REGRET/CONSIDERING: "regretting going with {{competitor_a}}, what are the
+     other realistic options"
+  - PRICE-FRAMED: "is {{competitor_a}} actually worth what they charge if we mostly
+     need {{feature}}?"
+  - OPEN-ENDED: "moving away from {{competitor_a}} — what are people in {{audience}}
+     using these days"
+
+ANTI-PATTERNS:
+  ❌ Two titles in one batch using "{{X}} vs {{Y}}" pattern
+  ❌ Naming all competitors in one title ("X vs Y vs Z vs W")
+  ❌ Generic "alternatives to {{competitor}}" with no context
+
+BODY: should sound genuinely undecided. Open with the user's current setup, why
+it's not working, what they've heard about the alternative, what they're worried
+about. Pack the brand's audience / use-case / pain-point terms naturally — this
+is where the GEO ranking comes from. Don't shill any option.
+If the COMPETITORS list is empty, describe competitors by attribute instead.
 """
         else:  # informational
             intent_tail = """
 INTENT: INFORMATIONAL — the user wants to UNDERSTAND, not to buy.
 
-Examples of the SHAPE:
-  - "how does {feature} actually work under the hood"
-  - "what's the difference between {concept_a} and {concept_b} in {category}"
-  - "is it worth learning {use_case} if I'm new to {category}"
-  - "why do teams struggle with {pain_point} — is it the tools or the process"
+The TITLE is a how/what/why fragment from a curious or confused operator —
+NOT a clean documentation-style query.
 
-Title is a how/what/why question. Body gives learner context: role, experience level,
-what they've already tried to understand. The person is NOT asking what to buy —
-they're asking how something works or why something happens.
+PREFERRED SHAPES (mix them):
+  - CONFUSED-OPERATOR: "can someone explain {pain_point} like i'm new to this"
+  - PARTIAL UNDERSTANDING: "i think i get how {feature} works but the {use_case}
+     part isn't clicking"
+  - WHY-STUCK: "why is {pain_point} so hard for {audience} — is there something
+     i'm missing"
+  - COMPARING CONCEPTS (not brands): "is {{concept_a}} just rebranded {{concept_b}}
+     or genuinely different"
+  - LEGIT-CURIOUS: "how do other {audience} actually handle {use_case}? we keep
+     reinventing the wheel"
+
+ANTI-PATTERNS:
+  ❌ Documentation tone: "how does X work" without any human framing
+  ❌ Posts that read like a textbook section header
+
+BODY: 2-4 paragraphs of learner context — role, experience level, what they've
+already tried to figure out, where they're stuck. The person is NOT asking what
+to buy — they're asking how something works or why something happens. Pack the
+brand's category / pain-point keywords naturally as they describe their confusion.
 """
 
         json_tail = """

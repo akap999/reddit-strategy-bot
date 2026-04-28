@@ -7615,7 +7615,15 @@ async function renderLsComments(c) {
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
-                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsExportCsv()">Export CSV</button>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="Limit CSV export to comments deployed on or after this date">
+                    Deployed
+                    <input type="date" id="ls-export-from" class="text-sm" style="background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:2px 6px">
+                </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="Limit CSV export to comments deployed on or before this date">
+                    →
+                    <input type="date" id="ls-export-to" class="text-sm" style="background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:2px 6px">
+                </label>
+                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsExportCsv()" title="Export filtered comments to CSV (date range above limits to deployed_at within range)">Export CSV</button>
             </span>
         </div>
         <div id="ls-comments-counts" class="flex flex-wrap gap-2 mb-3 text-xs"></div>
@@ -8338,6 +8346,20 @@ async function lsExportCsv() {
     if (status) {
         comments = comments.filter(c => c.status === status);
     }
+    // Optional deploy-date range — empty inputs mean "no constraint" so default
+    // behavior is unchanged. When set, drop drafts / assigned-but-undeployed
+    // since they have no deployed_at.
+    const fromDate = (document.getElementById('ls-export-from')?.value || '').trim();
+    const toDate   = (document.getElementById('ls-export-to')?.value   || '').trim();
+    if (fromDate || toDate) {
+        comments = comments.filter(c => {
+            const d = (c.deployed_at || '').slice(0, 10); // YYYY-MM-DD
+            if (!d) return false;
+            if (fromDate && d < fromDate) return false;
+            if (toDate   && d > toDate)   return false;
+            return true;
+        });
+    }
     if (!comments.length) { toast('No comments to export', 'info'); return; }
 
     // Fetch live engagement (upvotes + reply count) for any deployed comments
@@ -8424,7 +8446,9 @@ async function lsExportCsv() {
         coverage = ` — engagement: ${live} live, ${removed} removed`;
         if (failed) coverage += `, ${failed} unresolved`;
     }
-    toast(`Exported ${comments.length} comment(s)${coverage}`, 'success');
+    let rangeLabel = '';
+    if (fromDate || toDate) rangeLabel = ` (deployed ${fromDate || '…'} → ${toDate || '…'})`;
+    toast(`Exported ${comments.length} comment(s)${rangeLabel}${coverage}`, 'success');
 }
 
 async function lsAutoAssignAll() {

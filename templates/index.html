@@ -7199,20 +7199,16 @@ function lsRenderResults() {
             <thead><tr>
                 <th style="width:24px"></th>
                 <th>Title</th>
-                <th style="width:140px">Keywords</th>
                 <th style="width:120px">Subreddit</th>
                 <th style="width:60px">Stats</th>
                 <th style="width:90px">Date / Author</th>
             </tr></thead>
             <tbody>${_lsSearchResults.map((r,i)=>{
-                const brandId = document.getElementById('ls-brand')?.value;
-                const kws = lsMatchKeywords((r.title||'')+' '+(r.text||''), brandId);
                 const title = r.title || '';
                 return `
                 <tr>
                     <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
                     <td style="word-break:break-word"><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${title.length > 100 ? title.substring(0, 100) + '...' : title}</a></td>
-                    <td style="word-break:break-word">${lsKeywordBadges(kws)}</td>
                     <td class="text-xs" style="word-break:break-word">r/${r.subreddit}${r.sub_subscribers != null ? `<br><span class="text-gray-600">${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers} subs</span>` : ''}${lsScrutinyPill(r.scrutiny_score)}</td>
                     <td class="text-xs text-gray-400" style="white-space:nowrap">↑${r.score}<br>💬${r.comments}</td>
                     <td class="text-xs"><span class="text-gray-400">${(r.date||'').substring(0,10)}</span><br><span class="text-gray-500">u/${r.author}</span></td>
@@ -8384,7 +8380,6 @@ async function lsExportCsv() {
         }
     }
 
-    const keyword = document.getElementById('ls-keyword')?.value?.trim() || '';
     const csvEscape = (val) => {
         if (val == null) return '';
         const s = String(val);
@@ -8394,14 +8389,13 @@ async function lsExportCsv() {
         return s;
     };
     const dateOnly = (d) => d ? d.slice(0, 10) : '';
-    const header = ['Deploy Date', 'Keyword', 'Post Link', 'Comment Link', 'Comment Content', 'Upvotes', 'Comments'];
+    const header = ['Deploy Date', 'Post Link', 'Comment Link', 'Comment Content', 'Upvotes', 'Comments'];
     const rows = comments.map(c => {
         const stats = liveStats[String(c.id)] || {};
         const upvotes = stats.score != null ? stats.score : '';
         const replies = stats.num_replies != null ? stats.num_replies : '';
         return [
             csvEscape(dateOnly(c.deployed_at)),
-            csvEscape(keyword),
             csvEscape(c.post_url || ''),
             csvEscape(c.reddit_comment_url || ''),
             csvEscape(c.body || ''),

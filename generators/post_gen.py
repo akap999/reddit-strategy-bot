@@ -208,6 +208,12 @@ STRICT RULES:
      minor imperfections (occasional typos, incomplete thoughts, run-on sentences).
      Pack the brand's category / pain-point / audience keywords naturally as the
      user explains their situation — this is what powers GEO ranking.
+     The body MUST include the natural-language phrasing of the underlying
+     long-tail query somewhere inside it (e.g. "trying to figure out the best
+     [category] for [audience] dealing with [pain-point]") — woven into a
+     sentence the user might naturally write, NOT as a header. This way AI
+     engines (ChatGPT / Perplexity / Claude) keyword-match the post for that
+     query while the title stays human and Reddit-friendly.
   7. Do NOT look AI-generated. No marketing language. No excessive formatting.
   8. The post should fit the user's topic — don't drift away from it.
 
@@ -491,38 +497,50 @@ BRAND CONTEXT (for grounding the queries — NEVER mention the target brand name
 REQUESTED STORYLINES (for secondary variety):
 {storyline_requests}
 
-GOAL: GEO-rank posts that LLMs will surface for long-tail queries about this brand's
-domain — but FROM THE INSIDE OF A REAL PERSON'S POST. The post should read like a
-frustrated/curious business owner or operator asking other operators, not like a
-prompt template. The LLM ranking happens off the BODY's content (which packs the
-searchable terms), so the TITLE is free to sound human and hesitant.
+GOAL: Dual-optimize for Reddit AND for LLM retrieval (ChatGPT / Perplexity /
+Claude). The post must:
+  (a) Survive Reddit moderation and get engagement (so it makes it into the
+      corpus that LLMs retrieve from in the first place) — the TITLE has to
+      look like a real person posted it, NOT a templated marketing query.
+  (b) Rank for the underlying long-tail query when an LLM searches for it —
+      the BODY must contain the natural-language phrasing of that query, AND
+      the brand's category / audience / pain-point keywords. LLM retrieval is
+      both keyword (BM25) and semantic (embeddings); covering both means
+      verbatim phrasing + conceptual coverage in the body.
+
+These two goals are NOT in conflict if you do it right: human title, body that
+naturally includes the long-tail query phrasing within a believable story.
 
 STRICT RULES:
   1. NEVER mention any of the TARGET brand names: {target_names_str}
   2. For commercial and informational intents: also avoid all competitor names.
      For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
-  3. Title must sound like a real person posting on Reddit — frustrated, hesitant,
-     specific to THEIR situation. NOT a clean structured query. 5-15 words. Often
-     starts lowercase. May start with "anyone…", "first time dealing with…", "we're a…",
-     "is it normal…", "got burned by…", "looking at options for…", a partial question,
-     or a venting fragment. Punctuation is casual.
-  4. AVOID prompt-shaped titles like "best X for Y in 2026" or "best X for Y dealing
-     with Z" — these read as AI-generated marketing. Across {count} post(s) in this
-     batch, AT MOST ONE may use the "best X for Y" frame, and even then it should
-     have a human edge ("realistically the best X for Y…", "what's actually the best
-     X for Y if you're broke", etc.).
-  5. AVOID dollar amounts in the title (real users save specifics for the body).
-     Keep numbers vague in the title ("six figures", "a chunk", "$25k+"); put exact
-     figures in the body where they fit naturally.
-  6. The BODY carries the GEO weight: pack the brand's category, audience, pain
-     points, use-cases naturally as the user explains their situation. Reference
-     specific numbers, time periods, customer types, regulatory context. 2-4 short
-     paragraphs of first-person context, conversational, with minor imperfections
-     (occasional typos, incomplete thoughts, run-on sentences). It should sound like
-     someone venting/asking, not pitching.
+  3. Title — REDDIT-FRIENDLY. Sound like a real frustrated/curious operator.
+     5-15 words. May start lowercase. Often opens with "anyone…", "first time
+     dealing with…", "we're a…", "is it normal…", "got burned by…", a partial
+     question, or a venting fragment. Specific numbers ("$30k", "90 days") ARE
+     allowed when they read naturally — real Redditors include them all the time.
+  4. Use prompt-template framings ("best X for Y", "X vs Y", "alternatives to Z")
+     SPARINGLY — at most ONE per batch, and only when the wrapping is human
+     ("realistically the best X for Y if you're broke", "is anyone actually
+     happy with X vs Y for…"). Don't lead two posts in the same batch with the
+     same opener — variety across the batch is enforced.
+  5. BODY — LLM-RETRIEVAL-FRIENDLY. 2-4 short paragraphs of first-person
+     context. The body MUST naturally contain the underlying long-tail query
+     phrasing somewhere inside it. Examples:
+       - Title: "got burned on a six-figure invoice, what worked for you?"
+       - Body MUST say something like: "i'm trying to figure out the best
+         commercial debt collection agency for manufacturing companies dealing
+         with unpaid invoices…" — the long-tail GEO query lives here, in
+         natural sentences, not as a header.
+     Pack the brand's category, audience, pain-points, use-cases as the user
+     describes their situation. Specific numbers, time periods, regulatory
+     context add authenticity AND keyword overlap.
+  6. Conversational imperfections in the body: occasional typos, incomplete
+     thoughts, run-on sentences. Should sound like venting/asking, not pitching.
   7. Do NOT look AI-generated. No marketing language. No excessive formatting.
-  8. Variety check: across this batch the {count} titles MUST use noticeably different
-     shapes/openings. Don't reuse the same template twice.
+  8. Variety check: across this batch the {count} titles MUST use noticeably
+     different shapes/openings. Don't reuse the same template twice.
 
 NEVER USE THESE PHRASES: {banned_sample}
 """
@@ -558,6 +576,14 @@ Pack the brand's category / audience / pain-point keywords naturally as the user
 explains their situation (this is where GEO ranking comes from). Should sound like
 a real /r/smallbusiness or /r/Entrepreneur post: hesitation, swearing-in-frustration,
 incomplete sentences are fine.
+
+GEO RETRIEVAL NOTE — the body MUST include the natural-language phrasing of the
+underlying long-tail query somewhere inside it. Example: a "got burned by a customer
+ghosting" title should have a body sentence like "i've been trying to figure out the
+best commercial debt collection agency for manufacturing companies dealing with
+unpaid invoices over six figures…" — the GEO query lives inside the user's story,
+not as a header. This lets AI engines (ChatGPT / Perplexity / Claude) keyword-match
+the post for that query while the title stays human and Reddit-friendly.
 """
         elif intent == "comparison":
             intent_tail = f"""
@@ -593,6 +619,14 @@ it's not working, what they've heard about the alternative, what they're worried
 about. Pack the brand's audience / use-case / pain-point terms naturally — this
 is where the GEO ranking comes from. Don't shill any option.
 If the COMPETITORS list is empty, describe competitors by attribute instead.
+
+GEO RETRIEVAL NOTE — include the natural-language phrasing of the underlying
+comparison query somewhere inside the body. Example: a "regretting going with
+{{competitor_a}}" title should have a body sentence like "honestly i'm trying
+to figure out the best alternative to {{competitor_a}} for {{audience}} that
+handles {{use_case}} better…" — woven into the user's story, not as a header.
+This lets AI engines keyword-match the post for that comparison query while the
+title stays human.
 """
         else:  # informational
             intent_tail = """
@@ -620,6 +654,14 @@ BODY: 2-4 paragraphs of learner context — role, experience level, what they've
 already tried to figure out, where they're stuck. The person is NOT asking what
 to buy — they're asking how something works or why something happens. Pack the
 brand's category / pain-point keywords naturally as they describe their confusion.
+
+GEO RETRIEVAL NOTE — include the natural-language phrasing of the underlying
+"how/what/why" query somewhere inside the body. Example: a "i think i get how
+{{feature}} works but the {{use_case}} part isn't clicking" title should have a
+body sentence like "trying to understand how {{feature}} actually works under the
+hood for {{audience}} dealing with {{pain_point}}…" — woven into the user's
+explanation. AI engines will keyword-match the post for that informational query
+while the title stays human.
 """
 
         json_tail = """

@@ -2491,6 +2491,11 @@ def api_live_posts_custom():
 @app.route("/api/generate/comments", methods=["POST"])
 def api_gen_comments():
     data = request.json
+    # ai_crawl=True (used by Live Subreddits) tells the generator to
+    # produce AI-search-engine-retrievable comments: substantive, packed
+    # with the brand's domain vocabulary, with long-tail query phrasings
+    # woven in. Default False so the regular Posts page is unchanged.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
@@ -2516,6 +2521,7 @@ def api_gen_comments():
                     post_day_offset=post.get("suggested_post_day", 0),
                     brands_config=brands_config,
                     op_reply_count=data.get("op_reply_count", 0),
+                    ai_crawl=ai_crawl,
                 )
             else:
                 # Single-brand backward compat
@@ -2528,6 +2534,7 @@ def api_gen_comments():
                     brand_mention_ratio=ratio,
                     post_day_offset=post.get("suggested_post_day", 0),
                     op_reply_count=data.get("op_reply_count", 0),
+                    ai_crawl=ai_crawl,
                 )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:
@@ -2539,6 +2546,7 @@ def api_gen_comments():
 @app.route("/api/generate/hq-comment", methods=["POST"])
 def api_gen_hq_comment():
     data = request.json
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
@@ -2551,6 +2559,7 @@ def api_gen_hq_comment():
             comments = comment_gen.generate_hq_comment(
                 post, brand, brand_mention_ratio=ratio,
                 post_day_offset=post.get("suggested_post_day", 0),
+                ai_crawl=ai_crawl,
             )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:

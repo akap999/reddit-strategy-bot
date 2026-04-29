@@ -681,12 +681,17 @@ Return JSON only:
                           brand_name, brand_context, best_angle="", num_comments=2,
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
                           relevance=None, reply_targets=None, mention_brand_flags=None,
-                          brand_assignments=None, all_brand_names=None):
+                          brand_assignments=None, all_brand_names=None,
+                          ai_crawl=False):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
         or a brand dict (mention that specific brand). all_brand_names lists all brand
         names to avoid in organic comments.
+
+        ai_crawl=True (used by Live Subreddits) injects an extra prompt block that
+        demands AI-search-engine-friendly comment content: substance, brand domain
+        vocabulary, long-tail query phrasing.
         """
 
         if not comments and not post_body:
@@ -817,6 +822,29 @@ NEVER USE THESE PHRASES: {banned_text}"""
         if comments_text:
             existing_comments_section = f"\nEXISTING COMMENTS:\n{comments_text}"
 
+        # When ai_crawl=True, inject an extra rule block telling the LLM to
+        # produce comments that AI search engines will keyword/embedding-match
+        # for queries about the brand's domain. Used by Live Subreddits where
+        # the post itself is meant to rank on ChatGPT / Perplexity / Claude.
+        ai_crawl_section = ""
+        if ai_crawl:
+            ai_crawl_section = f"""
+
+AI-CRAWL NOTE (CRITICAL — every comment must satisfy these):
+- SUBSTANCE: each comment must be substantive — target at least 30 words.
+  No 1-liners. AI retrievers down-weight thin / fluff content.
+- BRAND DOMAIN VOCABULARY: every comment (whether or not it name-drops the
+  brand) should naturally use the brand's category / audience / pain-point
+  / use-case keywords as the commenter reacts to the post. The brand's
+  domain context above tells you what those keywords are — weave them in.
+- LONG-TAIL QUERY PHRASING: at least one comment in this batch must
+  contain a natural-language phrasing of the underlying long-tail query
+  the post is meant to rank for (e.g. "honestly the best [category] for
+  [audience] dealing with [pain-point]…") — woven into the commenter's
+  voice, not stamped as a header. This is what BM25 retrieval matches.
+- AUTHENTICITY: keep the anti-shill / banned-phrase rules above active.
+  AI retrievers de-rank obviously templated content — don't sound AI."""
+
         prompt = f"""You're commenting in a Reddit thread about a topic you know well.
 
 POST: "{post_title}"
@@ -828,7 +856,7 @@ SUBREDDIT: r/{subreddit}{post_body_text}
 EACH COMMENT HAS A UNIQUE ASSIGNMENT:
 {per_comment_section}
 {brand_rules}
-{pattern_avoidance}
+{pattern_avoidance}{ai_crawl_section}
 
 COMMENT QUALITY RULES:
 - Only reference things that actually appear in the POST BODY or EXISTING COMMENTS above. Do NOT invent prior suggestions, advice, attempts, updates, or thread history that isn't written there.
@@ -993,7 +1021,8 @@ Return JSON only:
 
     def generate_comment_tree(self, post, brand_or_brands, num_comments,
                                brand_mention_ratio=None, post_day_offset=0,
-                               brands_config=None, op_reply_count=0):
+                               brands_config=None, op_reply_count=0,
+                               ai_crawl=False):
         """Generate a full comment tree for a fresh post (no existing Reddit comments).
 
         Args:
@@ -1004,6 +1033,10 @@ Return JSON only:
             post_day_offset: the day the post is scheduled for
             brands_config: list of {"brand": brand_dict, "mention_count": int} for multi-brand
             op_reply_count: number of OP replies to include in the tree
+            ai_crawl: when True, each comment's prompt gains an AI-CRAWL NOTE
+                      block (substance, brand-domain vocabulary, long-tail
+                      query phrasing) so the thread is more retrievable by
+                      ChatGPT / Perplexity / Claude. Used by Live Subreddits.
 
         Returns:
             list of saved comment dicts with IDs and tree structure
@@ -1088,6 +1121,7 @@ Return JSON only:
             relevance={"best_angle": "general discussion", "natural_fit": 2},
             brand_assignments=top_assignments,
             all_brand_names=all_brand_names,
+            ai_crawl=ai_crawl,
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -1201,6 +1235,7 @@ Return JSON only:
                     relevance={"best_angle": "replying to comment", "natural_fit": 2},
                     brand_assignments=[r_assigned],
                     all_brand_names=all_brand_names,
+                    ai_crawl=ai_crawl,
                 )
 
                 reply_comments = reply_result.get("generated_comments", [])
@@ -1248,9 +1283,13 @@ Return JSON only:
 
         return saved
 
-    def generate_hq_comment(self, post, brand, brand_mention_ratio=None, post_day_offset=0):
+    def generate_hq_comment(self, post, brand, brand_mention_ratio=None, post_day_offset=0, ai_crawl=False):
         """Generate one high-quality top-level comment with brand mention plus 5
         relevant replies forming a realistic nested conversation thread (6 total).
+
+        ai_crawl=True (used by Live Subreddits) injects an AI-CRAWL NOTE rule
+        into the per-comment prompt so the thread is more retrievable by AI
+        search engines (substance + brand-domain vocab + long-tail query phrasing).
 
         The main comment (index 0) always mentions the brand. Replies do not.
         Thread shapes are randomized — some replies target the main comment,
@@ -1362,6 +1401,7 @@ Return JSON only:
                     ),
                     "natural_fit": 3,
                 },
+                ai_crawl=ai_crawl,
             )
 
             bodies = result.get("generated_comments", [])

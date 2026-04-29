@@ -7171,10 +7171,31 @@ async function renderLsubsPosts(c) {
                     <option value="informational">Informational</option>
                 </select>
             </label>
+            <div class="ml-auto flex items-center gap-2">
+                <label class="text-xs text-gray-400"><input type="checkbox" id="lsubs-posts-selectall" onchange="lsubsToggleSelectAll(this.checked)" class="mr-1"> Select All</label>
+                <label class="text-xs text-gray-400 flex items-center gap-1">
+                    Count
+                    <select id="lsubs-batch-count" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                        <option value="3">3</option>
+                        <option value="5" selected>5</option>
+                        <option value="8">8</option>
+                    </select>
+                </label>
+                <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('comments')" title="Generate comments for selected posts (AI-crawl optimized)">Gen Comments (selected)</button>
+                <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('hq')" title="Generate HQ thread (1 main + 4 replies) for selected posts">Gen HQ (selected)</button>
+            </div>
         </div>
         <div id="lsubs-posts-table"></div>
     `;
     lsubsLoadPosts();
+}
+
+function lsubsToggleSelectAll(on) {
+    document.querySelectorAll('.lsubs-post-check').forEach(cb => cb.checked = on);
+}
+
+function lsubsGetSelectedPostIds() {
+    return Array.from(document.querySelectorAll('.lsubs-post-check:checked')).map(cb => parseInt(cb.dataset.id));
 }
 
 async function lsubsLoadPosts() {
@@ -7199,9 +7220,10 @@ async function lsubsLoadPosts() {
         // can span multiple live subs for the brand.
         tableEl.innerHTML = `
             <table>
-                <thead><tr><th>Day</th><th>Subreddit</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+                <thead><tr><th style="width:24px"></th><th>Day</th><th>Subreddit</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
                 <tbody>${posts.map(p => `
                     <tr>
+                        <td><input type="checkbox" class="lsubs-post-check" data-id="${p.id}" data-brand="${(p.brands && p.brands[0] && p.brands[0].id) || ''}"></td>
                         <td>${p.suggested_post_day}</td>
                         <td class="text-xs text-gray-400">r/${p.subreddit_name || ''}</td>
                         <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
@@ -7224,7 +7246,9 @@ async function lsubsLoadPosts() {
                                 <span class="text-gray-600">/ ${p.comment_count||0}</span>
                             </span>
                         </td>
-                        <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                        <td><div class="flex gap-1 flex-wrap" style="white-space:nowrap">
+                            <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${p.id})" title="Generate comments (AI-crawl optimized)">Gen Cmts</button>
+                            <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${p.id})" title="Generate HQ thread (1 main + 4 replies)">Gen HQ</button>
                             ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                             ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
                             <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
@@ -7235,6 +7259,93 @@ async function lsubsLoadPosts() {
         `;
     } catch (e) {
         tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
+    }
+}
+
+// -------------------------------------------------------------------------
+// Live Subreddits — comment & HQ generation handlers
+// -------------------------------------------------------------------------
+
+async function _lsubsLookupPostBrand(pid) {
+    // Look up the brand for a post via /api/posts/all (live=1) and find the row.
+    try {
+        const posts = await api(`/api/posts/all?live=1`);
+        const post = (posts || []).find(p => p.id === pid);
+        if (post && post.brands && post.brands.length) return post.brands[0].id;
+    } catch (e) {}
+    return null;
+}
+
+async function lsubsGenCommentsForPost(pid) {
+    const count = parseInt(document.getElementById('lsubs-batch-count')?.value || '5');
+    const bid = await _lsubsLookupPostBrand(pid);
+    if (!bid) { toast('Post has no brand assigned', 'error'); return; }
+    try {
+        const { task_id } = await api('/api/generate/comments', {
+            method: 'POST',
+            body: { post_id: pid, brand_id: bid, count, ai_crawl: true },
+        });
+        toast(`Generating ${count} AI-crawl-optimized comment(s) for post #${pid}…`, 'info');
+        _addBgTask(task_id, 'Live Cmts');
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    _removeBgTask(task_id);
+                    const n = (t.result || []).length;
+                    toast(`Generated ${n} comment(s)`, 'success');
+                    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+                    if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    _removeBgTask(task_id);
+                    toast(`Generation error: ${t.error || ''}`, 'error');
+                }
+            } catch (e) {}
+        }, 2000);
+    } catch (e) { toast(`Failed to start generation: ${e.message}`, 'error'); }
+}
+
+async function lsubsGenHqForPost(pid) {
+    const bid = await _lsubsLookupPostBrand(pid);
+    if (!bid) { toast('Post has no brand assigned', 'error'); return; }
+    try {
+        const { task_id } = await api('/api/generate/hq-comment', {
+            method: 'POST',
+            body: { post_id: pid, brand_id: bid, ai_crawl: true },
+        });
+        toast(`Generating HQ thread (1 main + 5 replies) for post #${pid}…`, 'info');
+        _addBgTask(task_id, 'Live HQ');
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll);
+                    _removeBgTask(task_id);
+                    const n = (t.result || []).length;
+                    toast(`Generated ${n} HQ comment(s)`, 'success');
+                    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+                    if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+                } else if (t.status === 'error') {
+                    clearInterval(poll);
+                    _removeBgTask(task_id);
+                    toast(`Generation error: ${t.error || ''}`, 'error');
+                }
+            } catch (e) {}
+        }, 2000);
+    } catch (e) { toast(`Failed to start HQ generation: ${e.message}`, 'error'); }
+}
+
+async function lsubsBatchGenerate(mode) {
+    const ids = lsubsGetSelectedPostIds();
+    if (!ids.length) { toast('Select at least one post', 'error'); return; }
+    if (!confirm(`Generate ${mode === 'hq' ? 'HQ threads' : 'comments'} for ${ids.length} post(s)?`)) return;
+    for (const pid of ids) {
+        if (mode === 'hq') await lsubsGenHqForPost(pid);
+        else await lsubsGenCommentsForPost(pid);
+        // Brief gap so the bg task UI shows multiple rows distinctly
+        await new Promise(r => setTimeout(r, 250));
     }
 }
 
@@ -7309,7 +7420,11 @@ async function lsubsLoadComments() {
                         <span class="text-xs text-gray-500 ml-2">r/${g.subreddit_name}</span>
                         ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
                     </div>
-                    <span class="text-xs text-gray-500">${g.items.length} comment${g.items.length === 1 ? '' : 's'}</span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-500">${g.items.length} comment${g.items.length === 1 ? '' : 's'}</span>
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate 3 more AI-crawl-optimized comments for this post">+3 Cmts</button>
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+HQ</button>
+                    </div>
                 </div>
                 <table>
                     <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>

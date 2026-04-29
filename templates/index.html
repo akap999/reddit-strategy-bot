@@ -257,11 +257,26 @@ function _removeBgTask(taskId) {
 
 function _pollTask(taskId, label, onComplete) {
     let retries = 0;
+    // Use raw fetch instead of api() so we can distinguish a 404
+    // (task completed and was garbage-collected on the server) from
+    // a real network error. Without this, the BG task pill spins
+    // forever on tasks the server has already cleaned up.
     const poll = setInterval(async () => {
         try {
-            const t = await api(`/api/tasks/${taskId}`);
+            const resp = await fetch(`/api/tasks/${taskId}`);
+            if (resp.status === 404) {
+                // Task no longer exists — almost always means it
+                // completed and the server cleaned it up before we
+                // saw the terminal status. Silently remove the pill.
+                clearInterval(poll);
+                _removeBgTask(taskId);
+                return;
+            }
+            if (!resp.ok) {
+                throw new Error(resp.statusText || `HTTP ${resp.status}`);
+            }
+            const t = await resp.json();
             retries = 0;
-            // Update task pill with progress info
             if (t.progress && _bgTasks.has(taskId)) {
                 const p = t.progress;
                 const progressLabel = `${label} (${p.generated || 0}/${p.total || '?'} generated${p.skipped ? `, ${p.skipped} skipped` : ''}${p.errors ? `, ${p.errors} failed` : ''})`;
@@ -3269,6 +3284,24 @@ function renderCommentTreeFromCache() {
 }
 
 async function loadCommentTree() {
+    // Many comment-action handlers (markCommentRemoved, informComment,
+    // assignCommentPrompt, etc.) fall back to `loadCommentTree()` after a
+    // mutation when no specific view-update applies. Originally that was
+    // safe because there was only one comments view. With Live Subs added,
+    // that fallback was running this function even on the Live Subs page
+    // — reading from filter <select>s that don't exist there and silently
+    // corrupting the view. The user perceived this as "any action on Live
+    // Subreddits refreshes the page".
+    //
+    // Re-route the fallback: on Live Subs Comments tab, refresh that
+    // tab's data; on any other unrelated view, no-op.
+    if (currentView !== 'comments') {
+        if (currentView === 'livesubs' && _lsubsTab === 'comments'
+            && typeof lsubsLoadComments === 'function') {
+            return lsubsLoadComments();
+        }
+        return;  // unrelated view — don't touch anything
+    }
     const pid = document.getElementById('comments-post-filter')?.value;
     const sid = document.getElementById('comments-sub-filter')?.value;
     const brandId = document.getElementById('comments-brand-filter')?.value;
@@ -7328,23 +7361,16 @@ async function _lsubsRunGenComments(pid) {
         });
         toast(`Generating ${count} ${bmode === 'none' ? 'organic ' : ''}comment(s) for post #${pid}${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
         _addBgTask(task_id, 'Live Cmts');
-        const poll = setInterval(async () => {
-            try {
-                const t = await api(`/api/tasks/${task_id}`);
-                if (t.status === 'complete') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    const n = (t.result || []).length;
-                    toast(`Generated ${n} comment(s) — switch to Comments tab to see them`, 'success');
-                    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
-                    if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
-                } else if (t.status === 'error') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    toast(`Generation error: ${t.error || ''}`, 'error');
-                }
-            } catch (e) {}
-        }, 2000);
+        // Use the central _pollTask helper — it handles 404 / network errors
+        // with bounded retries and removes the BG task on terminal status.
+        // Inline polls were silently swallowing errors, leaving the spinner
+        // running forever when the task was completed and GC'd server-side.
+        _pollTask(task_id, 'Live Cmts', (result) => {
+            const n = (result || []).length;
+            toast(`Generated ${n} comment(s) — switch to Comments tab to see them`, 'success');
+            if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+        });
     } catch (e) { toast(`Failed to start generation: ${e.message}`, 'error'); }
 }
 
@@ -7385,23 +7411,12 @@ async function _lsubsRunGenHq(pid) {
         });
         toast(`Generating HQ thread (1 main + ${replies} replies)${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
         _addBgTask(task_id, 'Live HQ');
-        const poll = setInterval(async () => {
-            try {
-                const t = await api(`/api/tasks/${task_id}`);
-                if (t.status === 'complete') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    const n = (t.result || []).length;
-                    toast(`Generated ${n} HQ comment(s) — switch to Comments tab to see them`, 'success');
-                    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
-                    if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
-                } else if (t.status === 'error') {
-                    clearInterval(poll);
-                    _removeBgTask(task_id);
-                    toast(`Generation error: ${t.error || ''}`, 'error');
-                }
-            } catch (e) {}
-        }, 2000);
+        _pollTask(task_id, 'Live HQ', (result) => {
+            const n = (result || []).length;
+            toast(`Generated ${n} HQ comment(s) — switch to Comments tab to see them`, 'success');
+            if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+        });
     } catch (e) { toast(`Failed to start HQ generation: ${e.message}`, 'error'); }
 }
 
@@ -7461,7 +7476,15 @@ async function _lsubsRunBatchGenerate(mode) {
                 if (bmode === 'none') body.brand_mention_ratio = 0;
             }
             const { task_id } = await api(url, { method: 'POST', body });
-            _addBgTask(task_id, mode === 'hq' ? `Live HQ #${pid}` : `Live Cmts #${pid}`);
+            const label = mode === 'hq' ? `Live HQ #${pid}` : `Live Cmts #${pid}`;
+            _addBgTask(task_id, label);
+            // Without a poll, the BG task pill would never clear — the
+            // batch flow used to fire-and-forget. Use _pollTask so each
+            // task disappears from the bar when done.
+            _pollTask(task_id, label, () => {
+                if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+                if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+            });
         } catch (e) {}
         await new Promise(r => setTimeout(r, 250));
     }

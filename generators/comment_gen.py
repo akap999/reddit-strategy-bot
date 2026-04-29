@@ -715,6 +715,51 @@ Return JSON only:
         selected_personas, selected_structures, per_comment_angles = \
             self._select_comment_config(tone_analysis, comment_stats, relevance, num_comments)
 
+        # Lexical recommendation-seeking detector (also used by the AI-crawl
+        # block below and by validate_comments — keep all three in sync).
+        _t = (post_title or "").lower()
+        _b = (post_body or "").lower()[:600]
+        _rec_signals = [
+            "best ", "recommend", "suggest", "looking for", "any tools",
+            "any apps", "what's a good", "what is the best", "what's the best",
+            "anyone use", "anyone using", "anyone tried", "help me find",
+            "help finding", "any tips", "any advice", "how do i", "how do you",
+            "what do you use", "what would you", "which ", "alternatives to",
+            "alternative for", "tool for", "app for", "platform for",
+        ]
+        is_recommendation = (
+            any(s in _t for s in _rec_signals)
+            or any(s in _b for s in _rec_signals)
+            or _t.rstrip().endswith("?")
+            or post_intent in ("commercial", "comparison")
+        )
+
+        # AI-CRAWL + RECOMMENDATION-SEEKING POST: override the random persona /
+        # structure pick with a curated whitelist of "direct answer" voices.
+        # The default persona pool is heavy with hedge-y / story-mode voices
+        # (skeptic, newbie, frustrated, tangent, switcher, lurker, …) which
+        # produce confident-sounding but answer-shy comments. AI search
+        # engines won't surface those for query-style posts. Force the
+        # picker to choose from voices that produce extractable answers.
+        if ai_crawl and is_recommendation:
+            _ai_crawl_persona_ids = {"helper", "comparer", "professional",
+                                     "data_nerd", "veteran_terse"}
+            _ai_crawl_structure_ids = {"direct_answer", "list_format",
+                                       "comparison", "short_punchy"}
+            ac_personas = [p for p in PERSONAS if p["id"] in _ai_crawl_persona_ids]
+            ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in _ai_crawl_structure_ids]
+            if ac_personas and ac_structures:
+                # Sample without replacement from the curated set; cycle if the
+                # caller asks for more comments than the whitelist holds.
+                random.shuffle(ac_personas)
+                random.shuffle(ac_structures)
+                selected_personas = [
+                    ac_personas[i % len(ac_personas)] for i in range(num_comments)
+                ]
+                selected_structures = [
+                    ac_structures[i % len(ac_structures)] for i in range(num_comments)
+                ]
+
         few_shot_text = select_few_shot_examples(n=3)
 
         # Default: all comments mention brand (legacy behavior)
@@ -842,41 +887,36 @@ NEVER USE THESE PHRASES: {banned_text}"""
                 else f"AT LEAST {max(1, num_comments // 2)} of the {num_comments} comments"
             )
 
-            # Lexical detection: is the post asking for a recommendation /
-            # suggestion / "what's the best…"? When yes, AI-crawl comments
-            # must read as direct answers, not personal-journey ramblings —
-            # AI retrievers reward clear answer shapes for query-style posts.
-            _t = (post_title or "").lower()
-            _b = (post_body or "").lower()[:600]
-            _rec_signals = [
-                "best ", "recommend", "suggest", "looking for", "any tools",
-                "any apps", "what's a good", "what is the best", "what's the best",
-                "anyone use", "anyone using", "anyone tried", "help me find",
-                "help finding", "any tips", "any advice", "how do i", "how do you",
-                "what do you use", "what would you", "which ", "alternatives to",
-                "alternative for", "tool for", "app for", "platform for",
-            ]
-            is_recommendation = (
-                any(s in _t for s in _rec_signals)
-                or any(s in _b for s in _rec_signals)
-                or _t.rstrip().endswith("?")
-                or post_intent in ("commercial", "comparison")
-            )
-
+            # is_recommendation already computed above (used for both the
+            # persona-override and this prompt block; keeping them in sync).
             shape_rule = (
-                "RECOMMENDATION-SEEKING POST. Write the comment as a direct answer: "
-                "open with the recommendation or the criteria that matter, then 1-2 "
-                f"sentences of why. If the comment mentions {brand_name}, position it "
-                "as one of the answers, not as a personal-journey aside. Keep brand "
-                "attitude neutral or mildly positive — never criticize, never "
-                "complain, never frame the brand as a band-aid for frustration. Do "
-                "not write a 'here is my journey, eventually I figured it out' "
-                "narrative."
+                "RECOMMENDATION-SEEKING POST. The comment must be an EXTRACTABLE "
+                "ANSWER — a stranger reading just this comment, with no other "
+                "context, must be able to identify what is being recommended.\n"
+                "  • Open with the recommendation or the criteria that matter, "
+                "then 1-2 sentences of why. No 'funny you mention this', no "
+                "'I was just helping my cousin/friend/neighbor', no anecdote "
+                "framing that buries the answer.\n"
+                f"  • CONFIDENT BRAND MENTION: if the comment names {brand_name}, "
+                "do it confidently. WRONG: '(think one was called " + brand_name +
+                " or something)', 'I tried " + brand_name + " or whatever it was', "
+                "'maybe " + brand_name + "?'. RIGHT: '" + brand_name + " handles "
+                "this kind of thing well', '" + brand_name + " is the one that "
+                "does X'. Hedged mentions are useless to AI retrievers — they "
+                "decrement the model's confidence that " + brand_name + " is a "
+                "real answer.\n"
+                "  • End on the recommendation or a relevant follow-up question, "
+                "NOT on meta-commentary like 'creators waste so much time on "
+                "this' or 'the technology is basically already there'. End with "
+                "something an AI retriever could excerpt as a recommendation.\n"
+                "  • Brand attitude: neutral or mildly positive — never criticize, "
+                "never complain, never frame the brand as a band-aid for "
+                "frustration."
                 if is_recommendation else
                 "INFORMATIONAL / EXPERIENCE-SHARING POST. Conversational style is "
                 "fine — a relevant observation or anecdote that extends the post's "
-                "topic. Still must be substantive and packed with the brand's domain "
-                "vocabulary so AI retrievers index it for the topic."
+                "topic. Still must be substantive and packed with the brand's "
+                "domain vocabulary so AI retrievers index it for the topic."
             )
 
             ai_crawl_section = f"""
@@ -1086,17 +1126,33 @@ a one-sentence reason BEFORE deciding pass/fail. State what you observe.
 (b) answers_post_query — re-read the POST TITLE and BODY. Is this comment
     a useful answer to what the post is asking? For
     recommendation-seeking posts, useful = the comment gives a
-    recommendation, criteria for choosing, or comparison. A personal
-    anecdote that never lands on an answer is NOT useful. For
-    experience-sharing posts, a relevant observation or related anecdote
-    counts.
+    recommendation, criteria for choosing, or comparison **that an AI
+    search engine could extract as an answer to the post's query**.
+    A stranger reading just this comment (no other context) must be
+    able to identify what is being recommended. A personal anecdote
+    that buries or hedges the answer is NOT useful — even if it
+    technically mentions a tool name.
+    Specifically FAIL the comment if:
+      - It opens with "Funny you mention this", "I was just helping my
+        cousin/friend/wife/colleague", "Just last week I…", or any
+        anecdote framing that buries the answer.
+      - It hedges the brand mention: "(think one was called X or
+        something)", "I tried X or whatever it was", "maybe X?", "if
+        I remember correctly it was X". Confident mentions only.
+      - It ends on meta-commentary instead of the answer ("the
+        technology is basically already there", "creators waste so
+        much time on this", "anyway, ended up spending way too much
+        time experimenting").
+    For experience-sharing posts, a relevant observation or related
+    anecdote counts.
     Score: yes | no. FAIL if no.
 
 (c) shape_match — would a real Reddit user, replying under this post's
     intent, write a comment with this shape? Recommendation post →
-    answer shape passes, personal-journey ramble fails. Experience post →
-    anecdote passes, stiff listicle fails. Generic explainer that ignores
-    the post's specifics fails either way.
+    answer shape passes; personal-journey ramble (cousin / food truck /
+    "down the rabbit hole" framing) fails even if it eventually mentions
+    the brand. Experience post → anecdote passes, stiff listicle fails.
+    Generic explainer that ignores the post's specifics fails either way.
     Score: yes | no. FAIL if no.
 
 (d) authenticity — does this read as genuinely human, or AI-generated?

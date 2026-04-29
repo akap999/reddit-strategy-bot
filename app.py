@@ -2671,6 +2671,7 @@ def api_gen_reply_to_comment():
             relevance={"best_angle": "replying to comment", "natural_fit": 2},
             brand_assignments=[brand if mention_brand else None],
             all_brand_names=[brand["name"]],
+            post_intent=post.get("intent"),
         )
 
         bodies = result.get("generated_comments", [])

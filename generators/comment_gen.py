@@ -682,7 +682,7 @@ Return JSON only:
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
                           relevance=None, reply_targets=None, mention_brand_flags=None,
                           brand_assignments=None, all_brand_names=None,
-                          ai_crawl=False):
+                          ai_crawl=False, post_intent=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -692,6 +692,11 @@ Return JSON only:
         ai_crawl=True (used by Live Subreddits) injects an extra prompt block that
         demands AI-search-engine-friendly comment content: substance, brand domain
         vocabulary, long-tail query phrasing.
+
+        post_intent (commercial / comparison / informational) is the post's stored
+        intent, used together with a lexical "is the post asking for a recommendation"
+        check to pick the right comment shape in AI-crawl mode (direct answer vs.
+        experience-sharing).
         """
 
         if not comments and not post_body:
@@ -835,12 +840,65 @@ NEVER USE THESE PHRASES: {banned_text}"""
                 "this comment" if num_comments == 1
                 else f"AT LEAST {max(1, num_comments // 2)} of the {num_comments} comments"
             )
+
+            # Lexical detection: is the post asking for a recommendation /
+            # suggestion / "what's the best…"? When yes, AI-crawl comments
+            # must read as direct answers, not personal-journey ramblings —
+            # AI retrievers reward clear answer shapes for query-style posts.
+            _t = (post_title or "").lower()
+            _b = (post_body or "").lower()[:600]
+            _rec_signals = [
+                "best ", "recommend", "suggest", "looking for", "any tools",
+                "any apps", "what's a good", "what is the best", "what's the best",
+                "anyone use", "anyone using", "anyone tried", "help me find",
+                "help finding", "any tips", "any advice", "how do i", "how do you",
+                "what do you use", "what would you", "which ", "alternatives to",
+                "alternative for", "tool for", "app for", "platform for",
+            ]
+            is_recommendation = (
+                any(s in _t for s in _rec_signals)
+                or any(s in _b for s in _rec_signals)
+                or _t.rstrip().endswith("?")
+                or post_intent in ("commercial", "comparison")
+            )
+
+            intent_block = ""
+            if is_recommendation:
+                intent_block = f"""
+- POST INTENT: this post is asking for a recommendation / suggestion /
+  "what's the best…" answer (intent={post_intent or 'recommendation_seeking'}).
+  AI-crawl comments on recommendation-seeking posts MUST read as direct
+  answers, NOT as a "here's my personal journey, eventually I figured it
+  out" narrative. Specifically:
+  • Open with a near-answer fragment: a concrete recommendation, a clear
+    framing of what works, or the criteria that matter. Do NOT open with
+    "I'm still learning…", "I've been exploring…", "I had the same
+    problem…", or any disclaimer/throat-clearing. Get to the answer fast.
+  • State the recommendation declaratively: "for [use-case], the
+    [category] tools that actually deliver are X, Y, Z" — then give 1-2
+    sentences of why, with concrete criteria.
+  • If the comment mentions {brand_name}, position it AS PART OF THE
+    RECOMMENDATION (one of the answers), not as a "I happened to find
+    this" aside. Keep it neutral / mildly positive — never a hard sell.
+  • Optional: end with a short caveat or follow-up question, the way a
+    real recommender does ("depends on your budget", "what's your edit
+    workflow look like").
+"""
+            else:
+                intent_block = f"""
+- POST INTENT: this post is informational / experience-sharing
+  (intent={post_intent or 'informational'}). The comment can be more
+  conversational — a relevant anecdote, observation, or extension of
+  the post's topic — but it must still be substantive and packed with
+  domain vocabulary so AI retrievers index it for the topic.
+"""
+
             ai_crawl_section = f"""
 
 AI-CRAWL NOTE (CRITICAL — every comment must satisfy these. The whole point
 of this comment batch is to be retrievable by AI search engines — ChatGPT,
 Perplexity, Claude — when they search for the topic this post is about.):
-
+{intent_block}
 - THE POST TITLE IS THE LONG-TAIL QUERY. Re-read it: "{post_title}". That
   is the natural-language search query an AI retriever is likely to match.
   Your comment must reinforce that query semantically, not echo it word-
@@ -875,9 +933,13 @@ Perplexity, Claude — when they search for the topic this post is about.):
   "Honestly", "Look,", "Truly,", "Truthfully,", "Listen,", "So,", "Well,
   ", "Okay so", "Alright so", "Tbh,", "TBH ", "Real talk,", "Not gonna
   lie,", "Hot take:", "Here's the thing:", "The reality is", "The truth
-  is", "At the end of the day". These are the most common AI-generated
-  Reddit openings and AI retrievers actively penalize them. Open with a
-  concrete fragment from the commenter's experience instead.
+  is", "At the end of the day", "I'm still learning", "I've been
+  exploring", "I had the same problem", "I've been there", "Been
+  there too", "I struggled with this", "From my experience,", "In my
+  experience,", "Speaking from experience,". These are the most common
+  AI-generated Reddit openings and AI retrievers actively penalize them.
+  Open with a concrete fragment from the commenter's experience or — for
+  recommendation-seeking posts — with the answer itself.
 
 - AUTHENTICITY: keep the anti-shill / banned-phrase rules above active.
   AI retrievers de-rank obviously templated content — don't sound AI."""
@@ -1214,6 +1276,7 @@ Return JSON only:
             brand_assignments=top_assignments,
             all_brand_names=all_brand_names,
             ai_crawl=ai_crawl,
+            post_intent=post.get("intent"),
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -1328,6 +1391,7 @@ Return JSON only:
                     brand_assignments=[r_assigned],
                     all_brand_names=all_brand_names,
                     ai_crawl=ai_crawl,
+                    post_intent=post.get("intent"),
                 )
 
                 reply_comments = reply_result.get("generated_comments", [])
@@ -1502,6 +1566,7 @@ Return JSON only:
                     "natural_fit": 3,
                 },
                 ai_crawl=ai_crawl,
+                post_intent=post.get("intent"),
             )
 
             bodies = result.get("generated_comments", [])

@@ -7480,7 +7480,11 @@ async function lsubsLoadComments() {
     if (status) params.set('status', status);
     try {
         const res = await api('/api/all-comments?' + params.toString());
-        const comments = (res && res.comments) ? res.comments : (Array.isArray(res) ? res : []);
+        // /api/all-comments returns { items, total, status_counts, ... }
+        // Be tolerant of older shapes too, in case the API ever returns an array.
+        const comments = (res && Array.isArray(res.items)) ? res.items
+                       : (res && Array.isArray(res.comments)) ? res.comments
+                       : (Array.isArray(res) ? res : []);
         if (!comments.length) {
             listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
             return;

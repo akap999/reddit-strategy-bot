@@ -862,87 +862,60 @@ NEVER USE THESE PHRASES: {banned_text}"""
                 or post_intent in ("commercial", "comparison")
             )
 
-            intent_block = ""
-            if is_recommendation:
-                intent_block = f"""
-- POST INTENT: this post is asking for a recommendation / suggestion /
-  "what's the best…" answer (intent={post_intent or 'recommendation_seeking'}).
-  AI-crawl comments on recommendation-seeking posts MUST read as direct
-  answers, NOT as a "here's my personal journey, eventually I figured it
-  out" narrative. Specifically:
-  • Open with a near-answer fragment: a concrete recommendation, a clear
-    framing of what works, or the criteria that matter. Do NOT open with
-    "I'm still learning…", "I've been exploring…", "I had the same
-    problem…", or any disclaimer/throat-clearing. Get to the answer fast.
-  • State the recommendation declaratively: "for [use-case], the
-    [category] tools that actually deliver are X, Y, Z" — then give 1-2
-    sentences of why, with concrete criteria.
-  • If the comment mentions {brand_name}, position it AS PART OF THE
-    RECOMMENDATION (one of the answers), not as a "I happened to find
-    this" aside. Keep it neutral / mildly positive — never a hard sell.
-  • Optional: end with a short caveat or follow-up question, the way a
-    real recommender does ("depends on your budget", "what's your edit
-    workflow look like").
-"""
-            else:
-                intent_block = f"""
-- POST INTENT: this post is informational / experience-sharing
-  (intent={post_intent or 'informational'}). The comment can be more
-  conversational — a relevant anecdote, observation, or extension of
-  the post's topic — but it must still be substantive and packed with
-  domain vocabulary so AI retrievers index it for the topic.
-"""
+            shape_rule = (
+                "RECOMMENDATION-SEEKING POST. Write the comment as a direct answer: "
+                "open with the recommendation or the criteria that matter, then 1-2 "
+                f"sentences of why. If the comment mentions {brand_name}, position it "
+                "as one of the answers, not as a personal-journey aside. Keep brand "
+                "attitude neutral or mildly positive — never criticize, never "
+                "complain, never frame the brand as a band-aid for frustration. Do "
+                "not write a 'here is my journey, eventually I figured it out' "
+                "narrative."
+                if is_recommendation else
+                "INFORMATIONAL / EXPERIENCE-SHARING POST. Conversational style is "
+                "fine — a relevant observation or anecdote that extends the post's "
+                "topic. Still must be substantive and packed with the brand's domain "
+                "vocabulary so AI retrievers index it for the topic."
+            )
 
             ai_crawl_section = f"""
 
-AI-CRAWL NOTE (CRITICAL — every comment must satisfy these. The whole point
-of this comment batch is to be retrievable by AI search engines — ChatGPT,
-Perplexity, Claude — when they search for the topic this post is about.):
-{intent_block}
-- THE POST TITLE IS THE LONG-TAIL QUERY. Re-read it: "{post_title}". That
-  is the natural-language search query an AI retriever is likely to match.
-  Your comment must reinforce that query semantically, not echo it word-
-  for-word.
+AI-CRAWL MODE — every comment must be retrievable by AI search engines
+(ChatGPT, Perplexity, Claude) for queries about the brand's domain.
 
-- LONG-TAIL QUERY PHRASING ({longtail_scope} must contain this):
-  Weave a natural-language phrasing of the post's underlying query into
-  the commenter's voice. NOT as a header, NOT in quotes — just the way a
-  real person would casually restate the question they're answering.
-  Example shapes (adapt to this post's actual topic, do not copy):
-    • "for anyone dealing with [pain-point], the [category] tools that
-       actually work for [audience] are…"
-    • "the best [category] for [use-case] honestly comes down to…"
-    • "if you're trying to find [thing] for [audience/use-case]…"
-  The phrasing should map onto the post's title — same intent, different
-  words.
+PRINCIPLES (apply all of them; an LLM judge will validate against these
+and you will be retried with the judge's feedback if you miss):
 
-- SUBSTANCE: each comment must be substantive — target at least 30 words.
-  No 1-liners. AI retrievers down-weight thin / fluff content.
+- POST TITLE IS THE LONG-TAIL QUERY. Re-read it: "{post_title}". That is
+  the natural-language search query an AI retriever will match. Reinforce
+  that query semantically — same intent, different words. Do NOT echo it
+  word-for-word.
 
-- BRAND DOMAIN VOCABULARY: every comment (mentioning the brand or not)
-  must naturally use the brand's category / audience / pain-point /
-  use-case keywords as the commenter reacts to the post. The brand
-  context above lists what those keywords are — weave 3-6 of them in
-  per comment. Concrete nouns over abstractions.
+- LONG-TAIL PHRASING ({longtail_scope} must carry this): weave a natural-
+  language restatement of the post's question into the commenter's voice.
+  Not a header, not in quotes — just the way a real person would casually
+  rephrase what they're answering.
 
-- CONCRETE DETAIL: include at least one specific, verifiable-feeling
-  detail (a number, a workflow step, a tool category, a real-sounding
-  scenario). Vague generality reads as AI fluff and gets de-ranked.
+- SUBSTANCE: ≥30 words, concrete, no fluff.
 
-- BANNED OPENERS (AI tells — never start a comment with these): "Honestly,",
-  "Honestly", "Look,", "Truly,", "Truthfully,", "Listen,", "So,", "Well,
-  ", "Okay so", "Alright so", "Tbh,", "TBH ", "Real talk,", "Not gonna
-  lie,", "Hot take:", "Here's the thing:", "The reality is", "The truth
-  is", "At the end of the day", "I'm still learning", "I've been
-  exploring", "I had the same problem", "I've been there", "Been
-  there too", "I struggled with this", "From my experience,", "In my
-  experience,", "Speaking from experience,". These are the most common
-  AI-generated Reddit openings and AI retrievers actively penalize them.
-  Open with a concrete fragment from the commenter's experience or — for
-  recommendation-seeking posts — with the answer itself.
+- BRAND DOMAIN VOCABULARY: weave in 3-6 of the brand's category /
+  audience / pain-point / use-case keywords from the brand context above.
 
-- AUTHENTICITY: keep the anti-shill / banned-phrase rules above active.
-  AI retrievers de-rank obviously templated content — don't sound AI."""
+- CONCRETE DETAIL: at least one specific, verifiable-feeling detail
+  (number, workflow step, tool category, real-sounding scenario).
+
+- BRAND ATTITUDE: positive or neutral toward {brand_name} — never
+  negative, including by association with the brand's category. No
+  problem-then-brand arcs. No "I gave up and tried X". No "all of these
+  tools require…" when the brand is one of those tools.
+
+- AUTHENTICITY: write like a real Reddit user, not an AI. No throat-
+  clearing openers ANYWHERE in the comment, no listicle structure, no
+  marketing flavor, no answer-then-pivot-to-complaining hybrid. The
+  validator will fail you on these by judgment, not by string match —
+  so don't try to game a banned-phrase list.
+
+SHAPE for this specific post: {shape_rule}"""
 
         prompt = f"""You're commenting in a Reddit thread about a topic you know well.
 
@@ -1010,164 +983,325 @@ Generate exactly {num_comments} comments. Return JSON only:
     # ------------------------------------------------------------------
 
     def validate_comments(self, post_title, post_body, subreddit, comments,
-                          brand_name, generated_comments, tone_analysis=None):
+                          brand_name, generated_comments, tone_analysis=None,
+                          ai_crawl=False, post_intent=None):
+        """LLM-driven quality gate for generated comments.
+
+        Each comment is scored on four binary judgments by an LLM rubric:
+          (a) brand_attitude     — positive | neutral | negative (FAIL on negative)
+          (b) answers_post_query — yes | no                       (FAIL on no)
+          (c) shape_match        — yes | no                       (FAIL on no)
+          (d) authenticity       — yes | no                       (FAIL on no)
+
+        PASS = all four. Caller retries with the rubric's natural-language
+        feedback as `retry_feedback`. After 2 retries, drop the comment.
+
+        A narrow set of cheap programmatic pre-filters (dashes, brand
+        sentence-ratio, narrow BANNED_PHRASES) still runs as a fast-fail.
+        The long lists of "criticism words" and "AI tells" have been
+        retired — that's the LLM rubric's job, by judgment, not regex.
+        """
         if not generated_comments:
             return {"evaluations": [], "any_failed": True}
 
-        real_comments_text = "\n".join([
-            f'- u/{c["author"]}: "{c["body"][:200]}"' for c in (comments or [])[:5]
-        ])
+        # Re-derive the same recommendation-seeking signal the generator
+        # uses, so the rubric judges the comment against the same intent
+        # we asked the generator to write for.
+        _t = (post_title or "").lower()
+        _b = (post_body or "").lower()[:600]
+        _rec_signals = [
+            "best ", "recommend", "suggest", "looking for", "any tools",
+            "any apps", "what's a good", "what is the best", "what's the best",
+            "anyone use", "anyone using", "anyone tried", "help me find",
+            "help finding", "any tips", "any advice", "how do i", "how do you",
+            "what do you use", "what would you", "which ", "alternatives to",
+            "alternative for", "tool for", "app for", "platform for",
+        ]
+        is_recommendation = (
+            any(s in _t for s in _rec_signals)
+            or any(s in _b for s in _rec_signals)
+            or _t.rstrip().endswith("?")
+            or post_intent in ("commercial", "comparison")
+        )
+        post_intent_label = post_intent or ("recommendation_seeking" if is_recommendation else "informational")
+
         gen_text = "\n".join([
             f'Comment {i+1}: """{comment}"""' for i, comment in enumerate(generated_comments)
         ])
-        tone_section = ""
-        if tone_analysis:
-            tone_section = f"\nEXPECTED TONE: {tone_analysis.get('formality', '?')} | {tone_analysis.get('overall_vibe', '?')}"
 
-        prompt = f"""Evaluate if these generated Reddit comments would pass as genuine.
+        ai_crawl_strictness = ""
+        if ai_crawl:
+            ai_crawl_strictness = (
+                "\nAI-CRAWL MODE is ON. Apply stricter shape_match: the comment must "
+                "demonstrably reinforce the post title's underlying long-tail query "
+                "(re-read the post title — that IS the query an AI search engine would "
+                "match). For recommendation-seeking posts, the comment must read as a "
+                "direct answer (recommendation, criteria, comparison) — NOT a "
+                "personal-journey ramble that opens with answer-framing then pivots "
+                "to complaining about the category."
+            )
 
-ORIGINAL POST: "{post_title}" in r/{subreddit}
-Body: {(post_body or '')[:500]}
+        rec_shape_hint = ""
+        if is_recommendation:
+            rec_shape_hint = (
+                "\nThis post is RECOMMENDATION-SEEKING. shape_match passes only if the "
+                "comment is answer-shaped: it gives a recommendation, criteria, or "
+                "comparison. shape_match FAILS for personal-journey rambles, "
+                "anecdotes that don't land on an answer, and 'answer-framing then "
+                "pivot to complaining' hybrids."
+            )
 
-REAL COMMENTS: {real_comments_text}
-{tone_section}
+        prompt = f"""You are a strict Reddit comment quality reviewer. For each generated
+comment below, decide whether it is GOOD ENOUGH to post under the given
+post, with the given brand attached. Be skeptical — if anything in the
+comment would embarrass a brand-marketing reviewer or tip off a Reddit
+user as AI-generated, fail it.
 
+POST TITLE: "{post_title}"
+POST BODY: {(post_body or '')[:600]}
+SUBREDDIT: r/{subreddit}
 BRAND: {brand_name}
+POST INTENT: {post_intent_label}
+{rec_shape_hint}{ai_crawl_strictness}
 
 GENERATED COMMENTS:
 {gen_text}
 
-Score each on: AUTHENTICITY (1-10), POST RELEVANCE (1-10), TONE MATCH (1-10).
-Check for: marketing_language (banned phrases), structural_promotion (testimonial patterns), brand_criticism (the comment criticizes / complains about / mocks / dismisses / speaks negatively about {brand_name}, including indirect references like "they", "that company", "the one I tried", or unfavorable comparisons).
-PASS: avg scores >= 7 AND no marketing language AND no structural promotion AND no brand criticism.
+For each comment, score these FOUR binary judgments. For each one, write
+a one-sentence reason BEFORE deciding pass/fail. State what you observe.
+
+(a) brand_attitude — does the comment criticize, complain about, mock,
+    downplay, or otherwise speak negatively about "{brand_name}"?
+    Negative includes:
+      - Direct criticism ("X is overpriced", "X has bad customer service")
+      - Indirect criticism via the brand's category ("most of these tools
+        require a ton of post work" when the brand is one of those tools)
+      - Problem-then-brand arcs ("I gave up and tried X, but even then I
+        had to tweak everything manually")
+      - Second-hand criticism ("a friend says X doesn't work that well")
+      - Unfavorable comparison ("X is fine, but Y is way better")
+    Score: positive | neutral | negative. FAIL if negative.
+
+(b) answers_post_query — re-read the POST TITLE and BODY. Is this comment
+    a useful answer to what the post is asking? For
+    recommendation-seeking posts, useful = the comment gives a
+    recommendation, criteria for choosing, or comparison. A personal
+    anecdote that never lands on an answer is NOT useful. For
+    experience-sharing posts, a relevant observation or related anecdote
+    counts.
+    Score: yes | no. FAIL if no.
+
+(c) shape_match — would a real Reddit user, replying under this post's
+    intent, write a comment with this shape? Recommendation post →
+    answer shape passes, personal-journey ramble fails. Experience post →
+    anecdote passes, stiff listicle fails. Generic explainer that ignores
+    the post's specifics fails either way.
+    Score: yes | no. FAIL if no.
+
+(d) authenticity — does this read as genuinely human, or AI-generated?
+    Tells include:
+      - Throat-clearing openers anywhere (not just first word):
+        "honestly", "the reality is", "the truth is", "at the end of
+        the day", "still figuring out", "from my experience", "I'm still
+        learning", "I had the same problem"
+      - "Answer-framing then pivot to complaining" hybrids
+      - Stiff listicle structure where a Redditor wouldn't use one
+      - Over-polished or marketing-flavored phrasing
+      - Hollow generic statements that could fit any post
+    Score: yes | no. FAIL if no.
+
+PASS = brand_attitude is positive OR neutral, AND answers_post_query=yes,
+AND shape_match=yes, AND authenticity=yes.
 
 Return JSON only:
 {{
     "evaluations": [
         {{
-            "comment_index": 0, "authenticity_score": 1-10, "post_relevance_score": 1-10,
-            "tone_match_score": 1-10, "marketing_language": true/false,
-            "marketing_phrases_found": [], "structural_promotion": true/false,
-            "structural_promotion_reason": "", "brand_criticism": true/false,
-            "brand_criticism_reason": "", "overall_score": 0,
-            "pass": true/false, "feedback": ""
+            "comment_index": 0,
+            "brand_attitude": "positive" | "neutral" | "negative",
+            "brand_attitude_reason": "one sentence",
+            "answers_post_query": "yes" | "no",
+            "answers_post_query_reason": "one sentence",
+            "shape_match": "yes" | "no",
+            "shape_match_reason": "one sentence",
+            "authenticity": "yes" | "no",
+            "authenticity_reason": "one sentence",
+            "pass": true | false,
+            "feedback": "concatenation of all FAIL reasons, empty if pass"
         }}
     ],
-    "any_failed": true/false
+    "any_failed": true | false
 }}"""
 
-        result = self.claude.call(prompt, max_tokens=1024, temperature=0.2)
+        result = self.claude.call(prompt, max_tokens=1500, temperature=0.2)
         if not result:
-            return {"evaluations": [], "any_failed": False}
+            # If the validator itself fails, do not block the pipeline;
+            # let the comment through with a noted-but-not-failing eval.
+            return {"evaluations": [
+                {"comment_index": i, "pass": True, "feedback": "(validator unavailable)"}
+                for i in range(len(generated_comments))
+            ], "any_failed": False}
 
-        # Programmatic checks (preserved from original)
         evals = result.get("evaluations", [])
+
+        # Reconcile pass/fail from the four rubric items (the LLM may set
+        # pass=true while flagging a fail elsewhere; recompute).
+        for ev in evals:
+            fails = []
+            if ev.get("brand_attitude") == "negative":
+                fails.append(f"brand_attitude=negative: {ev.get('brand_attitude_reason', '')}".strip())
+            if ev.get("answers_post_query") == "no":
+                fails.append(f"answers_post_query=no: {ev.get('answers_post_query_reason', '')}".strip())
+            if ev.get("shape_match") == "no":
+                fails.append(f"shape_match=no: {ev.get('shape_match_reason', '')}".strip())
+            if ev.get("authenticity") == "no":
+                fails.append(f"authenticity=no: {ev.get('authenticity_reason', '')}".strip())
+            if fails:
+                ev["pass"] = False
+                ev["feedback"] = " | ".join(fails)
+            else:
+                ev["pass"] = True
+                ev.setdefault("feedback", "")
+
         brand_lower = brand_name.lower()
 
+        # Narrow programmatic pre-filter — cheap, unambiguous failures.
+        # The long lists of "criticism words", "AI tells", and problem
+        # precursors have been retired; the LLM rubric above handles
+        # those judgments by reading the comment, not by regex.
         for ev_idx, ev in enumerate(evals):
             if ev_idx >= len(generated_comments):
                 continue
-            comment_lower = generated_comments[ev_idx].lower()
+            comment_text = generated_comments[ev_idx]
+            comment_lower = comment_text.lower()
 
-            # Banned phrase check
+            # Dashes — never allowed (we control via prompt)
+            if re.search(r'[\u2013\u2014]| - |--', comment_text):
+                ev["pass"] = False
+                ev["feedback"] = ("Contains dashes (-, em-dash, --). " + (ev.get("feedback") or "")).strip()
+
+            # Marketing-speak BANNED_PHRASES (narrow, unambiguous)
             found = [p for p in BANNED_PHRASES if p in comment_lower]
             if found:
-                ev["marketing_language"] = True
-                ev["marketing_phrases_found"] = found
                 ev["pass"] = False
-                ev["feedback"] = f"Marketing phrases detected: {found}. " + ev.get("feedback", "")
+                ev["feedback"] = (f"Banned marketing phrases: {found}. " + (ev.get("feedback") or "")).strip()
 
-            # Dash check — no dashes of any kind allowed
-            if re.search(r'[\u2013\u2014]| - |--', generated_comments[ev_idx]):
-                ev["pass"] = False
-                ev["feedback"] = "Contains dashes (-, —, --). Rewrite without any dashes. " + ev.get("feedback", "")
-
-            # Brand sentence ratio check
+            # Brand-sentence ratio — over-mention is structural promotion
             if brand_lower in comment_lower:
                 sentences = comment_lower.replace('!', '.').replace('?', '.').split('.')
                 sentences = [s.strip() for s in sentences if s.strip()]
-                brand_sentences = sum(1 for s in sentences if brand_lower in s)
-                if sentences and brand_sentences / len(sentences) > 0.3:
-                    ev["pass"] = False
-                    ev["structural_promotion"] = True
-                    ev["feedback"] = f"Brand in {brand_sentences}/{len(sentences)} sentences. " + ev.get("feedback", "")
-
-            # Brand continuation check
-            _continuation_patterns = [
-                f"{brand_lower} and they", f"{brand_lower} and their",
-                f"{brand_lower} since they", f"{brand_lower} because they",
-                f"{brand_lower} who ", f"{brand_lower} where they",
-                f"{brand_lower} which ", f"{brand_lower} that ",
-                f"{brand_lower} and it", f"{brand_lower} and the ",
-                f"{brand_lower}, they", f"{brand_lower}, which",
-                f"{brand_lower}, and they",
-            ]
-            if brand_lower in comment_lower:
-                for pat in _continuation_patterns:
-                    if pat in comment_lower:
+                if sentences:
+                    brand_sentences = sum(1 for s in sentences if brand_lower in s)
+                    if brand_sentences / len(sentences) > 0.3:
                         ev["pass"] = False
-                        ev["feedback"] = f"Brand continuation detected ('{pat}'). " + ev.get("feedback", "")
-                        break
-
-            # Problem-then-brand-solution arc check
-            _negative_precursors = [
-                "useless", "terrible", "awful", "horrible", "worst", "sucked",
-                "dismissing", "dismissed", "ignored", "brushed off", "wouldn't listen",
-                "waste of time", "waste of money", "rip off", "scam",
-                "sick of", "fed up", "frustrated", "gave up", "out of options",
-                "didn't work", "wasn't working", "stopped working", "failed",
-                "too expensive", "overcharged", "nickel and dime",
-                "long wait", "took forever", "weeks to", "months to",
-                "switched from", "left my", "ditched", "dropped",
-            ]
-            if brand_lower in comment_lower:
-                brand_pos = comment_lower.find(brand_lower)
-                pre_brand = comment_lower[max(0, brand_pos - 150):brand_pos]
-                found_negatives = [n for n in _negative_precursors if n in pre_brand]
-                if found_negatives:
-                    ev["pass"] = False
-                    ev["feedback"] = f"Problem-then-brand arc detected ({', '.join(found_negatives[:3])}). " + ev.get("feedback", "")
-
-            # Brand-criticism check — flag any negative descriptor that appears
-            # in the same sentence as the brand name. Catches "X is overpriced",
-            # "X has bad customer service", "I tried X but it was awful", etc.
-            # Applies only when the brand is explicitly named in the comment.
-            _criticism_words = [
-                "overpriced", "expensive", "buggy", "broken", "slow", "clunky",
-                "bloated", "outdated", "confusing", "unintuitive", "ugly",
-                "annoying", "frustrating", "disappointing", "underwhelming",
-                "mediocre", "subpar", "lackluster", "lacking", "limited",
-                "restrictive", "garbage", "trash", "junk", "useless",
-                "terrible", "awful", "horrible", "worst", "sucks", "sucked",
-                "hate", "dislike", "avoid", "stay away", "not worth",
-                "regret", "ripoff", "rip off", "scam", "shady", "sketchy",
-                "complaints", "complaint", "problems with", "issues with",
-                "wouldn't recommend", "do not recommend", "don't recommend",
-                "don't bother", "don't trust", "not great",
-            ]
-            if brand_lower in comment_lower:
-                # split into rough sentences; check the sentence containing the brand
-                _sents = re.split(r'[.!?\n]+', comment_lower)
-                bad_sentences = []
-                for s in _sents:
-                    if brand_lower in s:
-                        hits = [w for w in _criticism_words if w in s]
-                        if hits:
-                            bad_sentences.append((s.strip()[:80], hits))
-                if bad_sentences:
-                    ev["pass"] = False
-                    ev["brand_criticism"] = True
-                    snippet, hits = bad_sentences[0]
-                    ev["feedback"] = f"Brand criticism near brand mention ({', '.join(hits[:3])}): \"{snippet}\". " + ev.get("feedback", "")
-
-            # Honor LLM-flagged brand_criticism even if no programmatic hit
-            if ev.get("brand_criticism"):
-                ev["pass"] = False
-                if "Brand criticism" not in (ev.get("feedback") or ""):
-                    ev["feedback"] = (ev.get("brand_criticism_reason") or "Brand criticism detected by validator. ") + ev.get("feedback", "")
+                        ev["feedback"] = (
+                            f"Brand in {brand_sentences}/{len(sentences)} sentences (over-mentioning). "
+                            + (ev.get("feedback") or "")
+                        ).strip()
 
         result["any_failed"] = any(not ev.get("pass") for ev in evals)
         return result
+
+    # ------------------------------------------------------------------
+    # Validate-and-retry wrapper (the one quality gate every comment
+    # generation flow goes through). Drop-in replacement for
+    # self.generate_comments(...) — same kwargs, same return shape — but
+    # the returned `generated_comments` only contains comments that
+    # passed validation. Up to `max_retries` retries per failed comment,
+    # each retry seeded with the validator's natural-language feedback.
+    # ------------------------------------------------------------------
+    def _generate_with_validation(self, max_retries=2, **kwargs):
+        post_title   = kwargs.get("post_title", "")
+        post_body    = kwargs.get("post_body", "")
+        subreddit    = kwargs.get("subreddit", "")
+        comments     = kwargs.get("comments", []) or []
+        brand_name   = kwargs.get("brand_name", "")
+        tone_analysis = kwargs.get("tone_analysis")
+        ai_crawl     = kwargs.get("ai_crawl", False)
+        post_intent  = kwargs.get("post_intent", None)
+
+        # Initial generation (full batch)
+        result = self.generate_comments(**kwargs)
+        bodies     = list(result.get("generated_comments") or [])
+        personas   = list(result.get("_personas") or [])
+        structures = list(result.get("_structures") or [])
+        strategies = list(result.get("strategies_used") or [])
+        if not bodies:
+            return result
+
+        # Validate the whole batch in one call
+        val = self.validate_comments(
+            post_title=post_title, post_body=post_body, subreddit=subreddit,
+            comments=comments, brand_name=brand_name,
+            generated_comments=bodies, tone_analysis=tone_analysis,
+            ai_crawl=ai_crawl, post_intent=post_intent,
+        )
+        evals = val.get("evaluations") or []
+
+        # For each comment that failed: retry with feedback. Up to max_retries.
+        final_bodies, final_personas, final_structures = [], [], []
+        for idx, body in enumerate(bodies):
+            ev = evals[idx] if idx < len(evals) else {"pass": True, "feedback": ""}
+            persona   = personas[idx]   if idx < len(personas)   else None
+            structure = structures[idx] if idx < len(structures) else None
+
+            if ev.get("pass"):
+                final_bodies.append(body)
+                final_personas.append(persona)
+                final_structures.append(structure)
+                continue
+
+            # Retry just this one slot. Project the per-comment kwargs
+            # down to a 1-comment generation so the prompt is focused.
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["num_comments"] = 1
+            mbf = retry_kwargs.get("mention_brand_flags") or []
+            if mbf:
+                retry_kwargs["mention_brand_flags"] = [mbf[idx] if idx < len(mbf) else False]
+            ba = retry_kwargs.get("brand_assignments") or []
+            if ba:
+                retry_kwargs["brand_assignments"] = [ba[idx] if idx < len(ba) else None]
+            rt = retry_kwargs.get("reply_targets")
+            if isinstance(rt, dict):
+                # original key was the comment index in the batch; on retry
+                # we collapse to a single-comment batch keyed at index 0.
+                retry_kwargs["reply_targets"] = {0: rt[idx]} if idx in rt else None
+
+            passed = False
+            last_feedback = ev.get("feedback") or "Comment failed validation."
+            for attempt in range(max_retries):
+                print(f"    [validate] comment {idx+1} failed: {last_feedback[:200]}")
+                print(f"    [validate] retry {attempt+1}/{max_retries}")
+                retry_kwargs["retry_feedback"] = last_feedback
+                r2 = self.generate_comments(**retry_kwargs)
+                new_bodies = r2.get("generated_comments") or []
+                if not new_bodies:
+                    continue
+                new_body = new_bodies[0]
+                v2 = self.validate_comments(
+                    post_title=post_title, post_body=post_body, subreddit=subreddit,
+                    comments=comments, brand_name=brand_name,
+                    generated_comments=[new_body], tone_analysis=tone_analysis,
+                    ai_crawl=ai_crawl, post_intent=post_intent,
+                )
+                ev2 = (v2.get("evaluations") or [{}])[0]
+                if ev2.get("pass"):
+                    final_bodies.append(new_body)
+                    final_personas.append((r2.get("_personas") or [persona])[0])
+                    final_structures.append((r2.get("_structures") or [structure])[0])
+                    print(f"    [validate] comment {idx+1} passed on retry {attempt+1}")
+                    passed = True
+                    break
+                last_feedback = ev2.get("feedback") or last_feedback
+            if not passed:
+                print(f"    [validate] comment {idx+1} dropped after {max_retries} retries")
+
+        return {
+            "generated_comments": final_bodies,
+            "_personas": final_personas,
+            "_structures": final_structures,
+            "strategies_used": strategies,
+        }
 
     # ------------------------------------------------------------------
     # NEW: Comment tree generation for fresh posts
@@ -1261,7 +1395,7 @@ Return JSON only:
         # Generate top-level comments
         print(f"    Generating {num_top} top-level comments...")
         top_assignments = mention_assignments[:num_top]
-        top_level_result = self.generate_comments(
+        top_level_result = self._generate_with_validation(
             post_title=post["title"],
             post_body=post["body"],
             subreddit=subreddit["name"],
@@ -1375,7 +1509,7 @@ Return JSON only:
 
                 reply_day = parent_day + random.randint(1, 3)
 
-                reply_result = self.generate_comments(
+                reply_result = self._generate_with_validation(
                     post_title=post["title"],
                     post_body=post["body"],
                     subreddit=subreddit["name"],
@@ -1543,7 +1677,7 @@ Return JSON only:
             persona_id = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
             structure_id = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
 
-            result = self.generate_comments(
+            result = self._generate_with_validation(
                 post_title=post["title"],
                 post_body=post["body"],
                 subreddit=subreddit["name"],
@@ -1799,7 +1933,7 @@ Return JSON only:
                     reply_targets[num_top + r] = target
 
         print(f"    Generating {num_top} top-level + {num_reply} replies...")
-        result = self.generate_comments(
+        result = self._generate_with_validation(
             post_title=post_title,
             post_body=post_body,
             subreddit=subreddit_name,

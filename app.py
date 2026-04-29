@@ -2656,7 +2656,7 @@ def api_gen_reply_to_comment():
             "permalink": "",
         }
 
-        result = comment_gen.generate_comments(
+        result = comment_gen._generate_with_validation(
             post_title=post["title"],
             post_body=post.get("body", ""),
             subreddit=subreddit["name"],
@@ -2672,6 +2672,7 @@ def api_gen_reply_to_comment():
             brand_assignments=[brand if mention_brand else None],
             all_brand_names=[brand["name"]],
             post_intent=post.get("intent"),
+            ai_crawl=bool(data.get("ai_crawl", False)),
         )
 
         bodies = result.get("generated_comments", [])

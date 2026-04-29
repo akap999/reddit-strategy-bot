@@ -422,11 +422,27 @@ def api_deployment_analytics():
 # API: Subreddits
 # ---------------------------------------------------------------------------
 
+def _parse_live_param():
+    """Parse ?live=0|1|all into the value db helpers expect.
+    None = both (rare, mostly for admin/debug)
+    False = regular only (default — existing pages behave as before)
+    True = live only (Live Subreddits page calls with this)
+    """
+    raw = request.args.get("live")
+    if raw is None or raw == "":
+        return False
+    if raw in ("1", "true", "yes"):
+        return True
+    if raw == "all":
+        return None
+    return False
+
+
 @app.route("/api/subreddits")
 def api_list_subreddits():
     db = get_db()
     try:
-        return jsonify(db.list_subreddits())
+        return jsonify(db.list_subreddits(live=_parse_live_param()))
     finally:
         db.close()
 
@@ -643,6 +659,7 @@ def api_all_posts():
             status=request.args.get("status") or None,
             date=request.args.get("date") or None,
             limit=200,
+            live=_parse_live_param(),
         )
         return jsonify(posts)
     finally:
@@ -1232,7 +1249,8 @@ def api_brand_all_comments(bid):
         status = request.args.get("status")
         sort_by = request.args.get("sort_by")
         comments = db.get_all_comments_by_brand(
-            bid, status=status or None, sort_by=sort_by or None
+            bid, status=status or None, sort_by=sort_by or None,
+            live=_parse_live_param(),
         )
         return jsonify(comments)
     finally:
@@ -1263,6 +1281,7 @@ def api_global_all_comments():
             date=date,
             limit=limit,
             offset=offset,
+            live=_parse_live_param(),
         )
         return jsonify(result)
     finally:

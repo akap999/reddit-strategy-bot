@@ -137,8 +137,17 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
-    def list_subreddits(self):
-        rows = self.conn.execute("""
+    def list_subreddits(self, live=False):
+        """List subreddits. By default excludes Live Subreddits (is_live=1) so
+        the regular Subreddits page stays clean. Pass live=True to fetch only
+        live subs, or live=None for both."""
+        where = ""
+        params = []
+        if live is False:
+            where = "WHERE COALESCE(s.is_live, 0) = 0 "
+        elif live is True:
+            where = "WHERE COALESCE(s.is_live, 0) = 1 "
+        rows = self.conn.execute(f"""
             SELECT s.*,
                    COUNT(DISTINCT b.id) as brand_count,
                    COUNT(DISTINCT CASE WHEN p.status IN ('published', 'paid') THEN p.id END) as post_count,
@@ -147,9 +156,10 @@ class Database:
             LEFT JOIN brands b ON b.subreddit_id = s.id
             LEFT JOIN posts p ON p.subreddit_id = s.id
             LEFT JOIN comments c ON c.post_id = p.id
+            {where}
             GROUP BY s.id
             ORDER BY s.created_at DESC
-        """).fetchall()
+        """, params).fetchall()
         return [dict(r) for r in rows]
 
     def get_subreddit(self, subreddit_id):
@@ -320,14 +330,20 @@ class Database:
                   is_custom=0, is_filler=0, status="draft",
                   suggested_post_day=0, prompt_version=None, brand_ids=None,
                   intent=None):
+        # Inherit is_live from the parent subreddit so list/aggregation queries
+        # can cheaply filter live vs. regular without re-joining subreddits.
+        sub_row = self.conn.execute(
+            "SELECT is_live FROM subreddits WHERE id = ?", (subreddit_id,)
+        ).fetchone()
+        is_live = 1 if (sub_row and sub_row["is_live"]) else 0
         cur = self.conn.execute(
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
-               status, suggested_post_day, prompt_version, intent)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               status, suggested_post_day, prompt_version, intent, is_live)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, brand_id, title, body, storyline,
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
-             status, suggested_post_day, prompt_version, intent)
+             status, suggested_post_day, prompt_version, intent, is_live)
         )
         post_id = cur.lastrowid
         # Populate junction table
@@ -337,18 +353,25 @@ class Database:
         self.conn.commit()
         return post_id
 
-    def get_posts(self, subreddit_id, brand_id=None, limit=50, include_filler=True):
+    def get_posts(self, subreddit_id, brand_id=None, limit=50, include_filler=True, live=None):
+        """Posts for a single subreddit. `live` is normally None (the
+        subreddit_id implicitly scopes the result), but set to True/False if
+        you want a sanity check that posts match the sub's flag."""
         if brand_id is not None:
             query = """SELECT DISTINCT p.* FROM posts p
                        JOIN post_brands pb ON pb.post_id = p.id
                        WHERE p.subreddit_id = ? AND pb.brand_id = ?"""
             params = [subreddit_id, brand_id]
         else:
-            query = "SELECT * FROM posts WHERE subreddit_id = ?"
+            query = "SELECT * FROM posts p WHERE p.subreddit_id = ?"
             params = [subreddit_id]
         if not include_filler:
-            query += " AND is_filler = 0"
-        query += " ORDER BY suggested_post_day ASC, created_at DESC LIMIT ?"
+            query += " AND p.is_filler = 0"
+        if live is False:
+            query += " AND COALESCE(p.is_live, 0) = 0"
+        elif live is True:
+            query += " AND COALESCE(p.is_live, 0) = 1"
+        query += " ORDER BY p.suggested_post_day ASC, p.created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
@@ -416,8 +439,12 @@ class Database:
             results.append(p)
         return results
 
-    def get_all_posts(self, brand_id=None, subreddit_id=None, status=None, date=None, limit=200):
-        """Get all posts across all subreddits with comment counts."""
+    def get_all_posts(self, brand_id=None, subreddit_id=None, status=None, date=None, limit=200, live=False):
+        """Get all posts across all subreddits with comment counts.
+
+        `live` controls Live Subreddits filtering: False (default) excludes
+        live posts, True returns only live posts, None returns both.
+        """
         comment_counts = """
                        COUNT(DISTINCT CASE WHEN c.status != 'deleted' THEN c.id END) as total_comments,
                        COUNT(DISTINCT CASE WHEN c.status = 'deployed' THEN c.id END) as comment_count,
@@ -450,6 +477,10 @@ class Database:
         if date:
             query += " AND DATE(COALESCE(p.deployed_at, p.created_at)) = ?"
             params.append(date)
+        if live is False:
+            query += " AND COALESCE(p.is_live, 0) = 0"
+        elif live is True:
+            query += " AND COALESCE(p.is_live, 0) = 1"
         query += " GROUP BY p.id ORDER BY p.created_at DESC LIMIT ?"
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
@@ -1042,6 +1073,17 @@ class Database:
         if "deployed_at" not in post_cols2:
             self.conn.execute("ALTER TABLE posts ADD COLUMN deployed_at TEXT")
             self.conn.commit()
+        # Live Subreddits separation: denormalize subreddits.is_live onto posts so
+        # list/aggregation queries can filter without joining the subreddits table
+        # every time. Backfill from the parent subreddit row once.
+        if "is_live" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN is_live INTEGER DEFAULT 0")
+            self.conn.commit()
+            self.conn.execute(
+                "UPDATE posts SET is_live = 1 "
+                "WHERE subreddit_id IN (SELECT id FROM subreddits WHERE is_live = 1)"
+            )
+            self.conn.commit()
 
         # Migrate existing paid items: set status='paid' where paid_at is set
         self.conn.execute("UPDATE comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
@@ -1530,10 +1572,19 @@ class Database:
         rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
-    def get_all_comments_by_brand(self, brand_id, status=None, sort_by=None):
-        """Get all comments (regular + search) for a brand across all subreddits."""
+    def get_all_comments_by_brand(self, brand_id, status=None, sort_by=None, live=False):
+        """Get all comments (regular + search) for a brand across all subreddits.
+
+        `live` controls Live Subreddits filtering on the regular comments table:
+        False (default) excludes live, True returns only live, None returns both.
+        Search comments live in their own pipeline so this flag doesn't affect them.
+        """
         status_filter_reg = "AND c.status = ?" if status else "AND c.status != 'deleted'"
         status_filter_sc = "AND sc.status = ?" if status else "AND sc.status != 'deleted'"
+        if live is False:
+            status_filter_reg += " AND COALESCE(p.is_live, 0) = 0"
+        elif live is True:
+            status_filter_reg += " AND COALESCE(p.is_live, 0) = 1"
 
         q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                         c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
@@ -1573,17 +1624,34 @@ class Database:
         else:
             order = "ORDER BY created_at DESC, id DESC"
 
-        query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
-        rows = self.conn.execute(query, p1 + p2).fetchall()
+        # When live=True the user is on the Live Subreddits Comments view; search
+        # comments aren't part of that flow, so suppress them.
+        if live is True:
+            query = f"SELECT * FROM ({q1}) combined {order}"
+            rows = self.conn.execute(query, p1).fetchall()
+        else:
+            query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
+            rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,
                                 account_id=None, sort_by=None, source=None,
-                                date=None, limit=200, offset=0):
-        """Get all comments (regular + search) globally with optional filters and pagination."""
+                                date=None, limit=200, offset=0, live=False):
+        """Get all comments (regular + search) globally with optional filters and pagination.
+
+        `live` controls Live Subreddits filtering (regular `comments` table only;
+        `search_comments` is unaffected since it lives in its own pipeline):
+        - False (default): exclude comments on live posts.
+        - True: only comments on live posts.
+        - None: both.
+        """
         # Build WHERE clauses dynamically
         w1, w2 = ["c.status NOT IN ('deleted','archived')"], ["sc.status NOT IN ('deleted','archived')"]
         p1, p2 = [], []
+        if live is False:
+            w1.append("COALESCE(p.is_live, 0) = 0")
+        elif live is True:
+            w1.append("COALESCE(p.is_live, 0) = 1")
 
         if status:
             w1 = ["c.status = ?"]; p1.append(status)
@@ -1648,8 +1716,10 @@ class Database:
         else:
             order = "ORDER BY created_at DESC, id DESC"
 
-        # Source filter: only one table if specified
-        if source == 'comment':
+        # Source filter: only one table if specified.
+        # When live=True (Live Subreddits Comments view), suppress search_comments
+        # entirely — search comments live in their own pipeline, not on live posts.
+        if source == 'comment' or live is True:
             inner = q1
             all_params = p1
         elif source == 'search_comment':

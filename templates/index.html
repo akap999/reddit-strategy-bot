@@ -3200,6 +3200,11 @@ function _commentsTreeUpdateLocal(cid, patch) {
     }
     if (!_commentsTreeIsFlat) _deepUpdate(_commentsTreeCache);
     renderCommentTreeFromCache();
+    // Live Subreddits Comments tab reuses the same comment-action handlers;
+    // refresh its list when the user is viewing it.
+    if (currentView === 'livesubs' && _lsubsTab === 'comments' && typeof lsubsLoadComments === 'function') {
+        lsubsLoadComments();
+    }
 }
 
 function _commentsTreeRemoveLocal(cid) {
@@ -3215,6 +3220,9 @@ function _commentsTreeRemoveLocal(cid) {
     }
     if (!_commentsTreeIsFlat) _deepRemove(_commentsTreeCache);
     renderCommentTreeFromCache();
+    if (currentView === 'livesubs' && _lsubsTab === 'comments' && typeof lsubsLoadComments === 'function') {
+        lsubsLoadComments();
+    }
 }
 
 function renderCommentTreeFromCache() {
@@ -6725,6 +6733,8 @@ let _lsubsBrands = [];
 let _lsubsSubreddits = [];   // current brand's saved sub list
 let _lsubsLastResult = null; // last generate response (for the skipped accordion)
 
+let _lsubsTab = 'generate';   // 'generate' | 'posts' | 'comments'
+
 async function renderLiveSubreddits(el) {
     el.innerHTML = '<div class="spinner mx-auto my-8"></div>';
     try { _lsubsBrands = await api('/api/search/brands'); } catch(e) { _lsubsBrands = []; }
@@ -6733,12 +6743,34 @@ async function renderLiveSubreddits(el) {
         <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
             <div>
                 <h2 class="text-2xl font-bold" style="color:#0079D3">Live Subreddits</h2>
-                <p class="text-xs text-gray-500 mt-1">Pick a brand and one of its saved subreddits, then generate AI-focused posts (or describe a topic and let Claude flesh it out).</p>
+                <p class="text-xs text-gray-500 mt-1">Brand-driven AI post generation, kept separate from regular subreddits/posts/comments. Posts and comments here only show up in this module.</p>
             </div>
         </div>
+        <div class="flex gap-1 mb-4" style="border-bottom:1px solid #343536">
+            <div class="tab ${_lsubsTab==='generate'?'active':''}" onclick="_lsubsTab='generate';renderLsubsTabContent()">🤖 Generate</div>
+            <div class="tab ${_lsubsTab==='posts'?'active':''}" onclick="_lsubsTab='posts';renderLsubsTabContent()">📝 Posts</div>
+            <div class="tab ${_lsubsTab==='comments'?'active':''}" onclick="_lsubsTab='comments';renderLsubsTabContent()">💬 Comments</div>
+        </div>
+        <div id="lsubs-tab-content"></div>
+    `;
+    renderLsubsTabContent();
+}
 
+function renderLsubsTabContent() {
+    const c = document.getElementById('lsubs-tab-content');
+    if (!c) return;
+    c.parentElement.querySelectorAll('.tab').forEach((t, i) => {
+        const tabs = ['generate', 'posts', 'comments'];
+        t.className = `tab ${_lsubsTab === tabs[i] ? 'active' : ''}`;
+    });
+    if (_lsubsTab === 'generate') renderLsubsGenerate(c);
+    else if (_lsubsTab === 'posts') renderLsubsPosts(c);
+    else if (_lsubsTab === 'comments') renderLsubsComments(c);
+}
+
+function renderLsubsGenerate(c) {
+    c.innerHTML = `
         <div class="card p-5 mb-4" style="background:#1a1a1b;border:1px solid #343536">
-            <!-- Brand + sub picker row -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Brand</label>
@@ -6757,8 +6789,6 @@ async function renderLiveSubreddits(el) {
                     </div>
                 </div>
             </div>
-
-            <!-- Primary action bar -->
             <div class="flex flex-wrap gap-2 items-center pt-3" style="border-top:1px solid #2a2a2b">
                 <label class="text-xs text-gray-400 flex items-center gap-1">
                     Count
@@ -6831,15 +6861,15 @@ async function lsubsLoadTable() {
     if (!bid || !sub) { tableEl.innerHTML = ''; return; }
     tableEl.innerHTML = '<div class="spinner mx-auto my-4"></div>';
     try {
-        // Look up the auto-provisioned subreddits row by name. If it doesn't
-        // exist yet (before the first generate), show an empty-state hint.
-        const subs = await api('/api/subreddits');
+        // Live subs are filtered out of /api/subreddits by default — pass live=1
+        // to find the auto-provisioned row.
+        const subs = await api('/api/subreddits?live=1');
         const subRow = (subs || []).find(s => (s.name || '').toLowerCase() === sub.toLowerCase());
         if (!subRow) {
             tableEl.innerHTML = `<p class="text-sm text-gray-500 mt-2">No posts yet for r/${sub}. Click <b>Generate Posts</b> or <b>+ Custom Post</b> to create some.</p>`;
             return;
         }
-        const posts = await api(`/api/posts/all?subreddit_id=${subRow.id}&brand_id=${bid}`);
+        const posts = await api(`/api/posts/all?subreddit_id=${subRow.id}&brand_id=${bid}&live=1`);
         lsubsRenderTable(posts || []);
     } catch (e) {
         tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
@@ -7090,13 +7120,10 @@ async function lsubsSubmitCustom(force) {
 async function lsubsGenerateFiller() {
     const { bid, sub } = lsubsContext();
     if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
-    // Filler runs against the auto-provisioned subreddits row. We need its id.
-    const meta = await api(`/api/brands/${bid}/live-subreddits`).catch(() => null);
-    if (!meta) { toast('Failed to look up subreddit', 'error'); return; }
-    // Auto-provision & retrieve the row by name via the regular /api/subreddits endpoint
+    // Live subs aren't in the default /api/subreddits list anymore.
     let subRow;
     try {
-        const subs = await api('/api/subreddits');
+        const subs = await api('/api/subreddits?live=1');
         subRow = (subs || []).find(s => (s.name || '').toLowerCase() === sub.toLowerCase());
     } catch(_) {}
     if (!subRow) {
@@ -7108,6 +7135,211 @@ async function lsubsGenerateFiller() {
     const res = await api('/api/generate/filler-posts', { method: 'POST', body: { subreddit_id: subRow.id, count } });
     toast(`Filler generation started (${count} posts)`, 'info');
     _addBgTask(res.task_id, 'Filler');
+}
+
+// =========================================================================
+// Live Subreddits — Posts tab (all live posts for a brand, full action toolbar)
+// =========================================================================
+async function renderLsubsPosts(c) {
+    const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    c.innerHTML = `
+        <div class="flex flex-wrap gap-3 items-center mb-4">
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                Brand
+                <select id="lsubs-posts-brand" onchange="lsubsLoadPosts()" style="min-width:220px">
+                    <option value="">All brands</option>
+                    ${brandOptions}
+                </select>
+            </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                Status
+                <select id="lsubs-posts-status" onchange="lsubsLoadPosts()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All status</option>
+                    <option value="draft">Draft</option>
+                    <option value="complete">Complete</option>
+                    <option value="published">Published</option>
+                    <option value="paid">Paid</option>
+                    <option value="informed">Informed</option>
+                </select>
+            </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                Intent
+                <select id="lsubs-posts-intent" onchange="lsubsLoadPosts()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All intents</option>
+                    <option value="commercial">Commercial</option>
+                    <option value="comparison">Comparison</option>
+                    <option value="informational">Informational</option>
+                </select>
+            </label>
+        </div>
+        <div id="lsubs-posts-table"></div>
+    `;
+    lsubsLoadPosts();
+}
+
+async function lsubsLoadPosts() {
+    const tableEl = document.getElementById('lsubs-posts-table');
+    if (!tableEl) return;
+    tableEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
+    const params = new URLSearchParams({ live: '1' });
+    const bid = document.getElementById('lsubs-posts-brand')?.value;
+    const status = document.getElementById('lsubs-posts-status')?.value;
+    if (bid) params.set('brand_id', bid);
+    if (status) params.set('status', status);
+    try {
+        let posts = await api('/api/posts/all?' + params.toString());
+        const intent = document.getElementById('lsubs-posts-intent')?.value || '';
+        if (intent) posts = posts.filter(p => (p.intent || '') === intent);
+        if (!posts.length) {
+            tableEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No live posts match these filters. Use the Generate tab to create some.</p>';
+            return;
+        }
+        // Reuse the same row template as the regular Posts page so action
+        // buttons behave identically. Show the subreddit name since live posts
+        // can span multiple live subs for the brand.
+        tableEl.innerHTML = `
+            <table>
+                <thead><tr><th>Day</th><th>Subreddit</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+                <tbody>${posts.map(p => `
+                    <tr>
+                        <td>${p.suggested_post_day}</td>
+                        <td class="text-xs text-gray-400">r/${p.subreddit_name || ''}</td>
+                        <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                        <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
+                        <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
+                        <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
+                        <td class="text-gray-400">${p.storyline || ''}</td>
+                        <td>${p.ai_query_score || '-'}</td>
+                        <td><span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span> ${_postStatusDate(p)}</td>
+                        <td class="text-xs text-yellow-400">${p.owner_account || '<span class="text-gray-600 italic">unassigned</span>'}</td>
+                        <td class="text-xs">
+                            <span title="Assigned+Informed: ${(p.assigned_brand||0)-(p.deployed_brand||0)} brand + ${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)} non-brand / ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)} total">
+                                <span style="color:#4a9eff">${(p.assigned_brand||0)-(p.deployed_brand||0)}B</span>+<span style="color:#818384">${(p.assigned_non_brand||0)-(p.deployed_non_brand||0)}NB</span>
+                                <span class="text-gray-600">/ ${(p.assigned_brand||0)+(p.assigned_non_brand||0)-(p.comment_count||0)}</span>
+                            </span>
+                        </td>
+                        <td class="text-xs">
+                            <span title="Deployed: ${p.deployed_brand||0} brand + ${p.deployed_non_brand||0} non-brand / ${p.comment_count||0} total">
+                                <span style="color:#FF8b60">${p.deployed_brand||0}B</span>+<span style="color:#818384">${p.deployed_non_brand||0}NB</span>
+                                <span class="text-gray-600">/ ${p.comment_count||0}</span>
+                            </span>
+                        </td>
+                        <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                            ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
+                            ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                            <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
+                        </div></td>
+                    </tr>
+                `).join('')}</tbody>
+            </table>
+        `;
+    } catch (e) {
+        tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
+    }
+}
+
+// =========================================================================
+// Live Subreddits — Comments tab (comments on live posts, grouped by post)
+// =========================================================================
+async function renderLsubsComments(c) {
+    const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    c.innerHTML = `
+        <div class="flex flex-wrap gap-3 items-center mb-4">
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                Brand
+                <select id="lsubs-cmt-brand" onchange="lsubsLoadComments()" style="min-width:220px">
+                    <option value="">All brands</option>
+                    ${brandOptions}
+                </select>
+            </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                Status
+                <select id="lsubs-cmt-status" onchange="lsubsLoadComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All status</option>
+                    <option value="draft">Draft</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="informed">Informed</option>
+                    <option value="deployed">Deployed</option>
+                    <option value="paid">Paid</option>
+                    <option value="removed">Removed</option>
+                </select>
+            </label>
+        </div>
+        <div id="lsubs-cmt-list"></div>
+    `;
+    lsubsLoadComments();
+}
+
+async function lsubsLoadComments() {
+    const listEl = document.getElementById('lsubs-cmt-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
+    const params = new URLSearchParams({ live: '1', source: 'comment' });
+    const bid = document.getElementById('lsubs-cmt-brand')?.value;
+    const status = document.getElementById('lsubs-cmt-status')?.value;
+    if (bid) params.set('brand_id', bid);
+    if (status) params.set('status', status);
+    try {
+        const res = await api('/api/all-comments?' + params.toString());
+        const comments = (res && res.comments) ? res.comments : (Array.isArray(res) ? res : []);
+        if (!comments.length) {
+            listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
+            return;
+        }
+        // Group by post
+        const groups = {};
+        for (const c of comments) {
+            const key = c.p_id;
+            if (!groups[key]) {
+                groups[key] = {
+                    post_title: c.post_title || '',
+                    subreddit_name: c.subreddit_name || '',
+                    post_url: c.post_reddit_url || '',
+                    brand_name: c.brand_name || '',
+                    items: [],
+                };
+            }
+            groups[key].items.push(c);
+        }
+        listEl.innerHTML = Object.entries(groups).map(([pid, g]) => `
+            <div class="card p-3 mb-3">
+                <div class="flex justify-between items-center mb-2 pb-2" style="border-bottom:1px solid #2a2a2b">
+                    <div>
+                        <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline" style="color:#0079D3">${g.post_title.substring(0, 90)}</a>
+                        <span class="text-xs text-gray-500 ml-2">r/${g.subreddit_name}</span>
+                        ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
+                    </div>
+                    <span class="text-xs text-gray-500">${g.items.length} comment${g.items.length === 1 ? '' : 's'}</span>
+                </div>
+                <table>
+                    <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody>${g.items.map(c => `
+                        <tr>
+                            <td style="max-width:400px"><span class="text-sm">${(c.body || '').substring(0, 150)}${(c.body || '').length > 150 ? '…' : ''}</span>
+                                ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
+                                ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
+                                ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
+                            </td>
+                            <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
+                            <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                            <td>
+                                <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
+                                    ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
+                                    ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                                    ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                                    ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
+                                    ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
+                                </div>
+                            </td>
+                        </tr>
+                    `).join('')}</tbody>
+                </table>
+            </div>
+        `).join('');
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load comments: ${e.message || e}</p>`;
+    }
 }
 
 async function renderLiveSearch(el) {

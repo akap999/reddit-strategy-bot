@@ -2142,25 +2142,35 @@ function onPostsBrandChange() {
 
 let _postsCache = [];
 
+// Helper: route a Live-Subs post-update to whichever tab is showing posts.
+// _lsubsTab can be 'generate' (uses lsubsLoadTable), 'posts' (uses
+// lsubsLoadPosts), or 'comments' (no posts visible — no-op).
+function _refreshLiveSubsPostView() {
+    if (currentView !== 'livesubs') return;
+    if (_lsubsTab === 'posts' && typeof lsubsLoadPosts === 'function') {
+        lsubsLoadPosts(true);  // silent — no spinner flicker
+    } else if (_lsubsTab === 'generate' && typeof lsubsLoadTable === 'function') {
+        lsubsLoadTable();
+    }
+}
+
 function _postsUpdateLocal(pid, patch) {
     const i = _postsCache.findIndex(p => p.id === pid);
     if (i >= 0) Object.assign(_postsCache[i], patch);
     renderPostsFromCache();
-    // The Live Subreddits page reuses the same post action handlers but renders
-    // into its own table — keep that view fresh too.
-    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
+    _refreshLiveSubsPostView();
 }
 
 function _postsRemoveLocal(pid) {
     _postsCache = _postsCache.filter(p => p.id !== pid);
     renderPostsFromCache();
-    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
+    _refreshLiveSubsPostView();
 }
 
 function _postsUpdateManyLocal(predicate, patch) {
     _postsCache.forEach(p => { if (predicate(p)) Object.assign(p, patch); });
     renderPostsFromCache();
-    if (currentView === 'livesubs' && typeof lsubsLoadTable === 'function') lsubsLoadTable();
+    _refreshLiveSubsPostView();
 }
 
 async function loadPosts() {
@@ -4814,6 +4824,16 @@ function _acRefreshIfActive() {
 }
 
 function _acUpdateLocal(cid, source, patch) {
+    // Live Subreddits Comments tab piggy-backs on this hook: every comment-
+    // action handler (deploy / undeploy / inform / mark-paid / mark-removed /
+    // assign / unassign / undo / edit / delete) calls _acUpdateLocal, so
+    // routing Live Subs through here means we don't have to patch every
+    // handler individually. silent=true → no spinner flicker.
+    if (currentView === 'livesubs' && _lsubsTab === 'comments'
+        && typeof lsubsLoadComments === 'function') {
+        lsubsLoadComments(true);
+        return;
+    }
     if (currentView !== 'allcomments') return;
     const item = _acData.find(c => c.id === cid && c.source === source);
     if (item) { Object.assign(item, patch); renderAllCommentsList(); }
@@ -7231,10 +7251,13 @@ function lsubsGetSelectedPostIds() {
     return Array.from(document.querySelectorAll('.lsubs-post-check:checked')).map(cb => parseInt(cb.dataset.id));
 }
 
-async function lsubsLoadPosts() {
+async function lsubsLoadPosts(silent = false) {
     const tableEl = document.getElementById('lsubs-posts-table');
     if (!tableEl) return;
-    tableEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
+    // silent=true is used by post-action handlers (deploy / undeploy / paid /
+    // delete) to refresh the row state without the spinner flicker that
+    // otherwise makes every action look like a full page reload.
+    if (!silent) tableEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1' });
     const bid = document.getElementById('lsubs-posts-brand')?.value;
     const status = document.getElementById('lsubs-posts-status')?.value;
@@ -7549,10 +7572,11 @@ async function renderLsubsComments(c) {
     lsubsLoadComments();
 }
 
-async function lsubsLoadComments() {
+async function lsubsLoadComments(silent = false) {
     const listEl = document.getElementById('lsubs-cmt-list');
     if (!listEl) return;
-    listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
+    // silent=true is used by post-action handlers — no spinner flicker.
+    if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1', source: 'comment' });
     const bid = document.getElementById('lsubs-cmt-brand')?.value;
     const status = document.getElementById('lsubs-cmt-status')?.value;

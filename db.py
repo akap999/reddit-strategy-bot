@@ -285,14 +285,31 @@ class Database:
         return row["reddit_url"] if row else None
 
     def link_url_to_post(self, post_id, reddit_url, subreddit_id):
-        """Link a Reddit URL to a generated post (after manual publishing)."""
+        """Link a Reddit URL to a generated post (after manual publishing).
+
+        Re-publishing a post with a NEW URL must replace the previous link,
+        not accumulate. The previous behavior left orphan rows in post_urls,
+        and `get_url_for_post` (which returns the first match) ended up
+        returning the OLD url after an undeploy+redeploy with a different
+        link.
+
+        Now we always clear any existing post_urls for this post_id before
+        creating/repointing the row for the new URL.
+        """
+        # Drop any prior URL rows that point to this post — undeploy may
+        # not have cleaned them up.
+        self.conn.execute(
+            "DELETE FROM post_urls WHERE post_id = ?", (post_id,)
+        )
+        # If the same URL was previously linked to a DIFFERENT post, repoint
+        # that row; otherwise insert a fresh one.
         existing = self.conn.execute(
             "SELECT id FROM post_urls WHERE reddit_url = ?", (reddit_url,)
         ).fetchone()
         if existing:
             self.conn.execute(
-                "UPDATE post_urls SET post_id = ? WHERE reddit_url = ?",
-                (post_id, reddit_url)
+                "UPDATE post_urls SET post_id = ?, subreddit_id = ? WHERE reddit_url = ?",
+                (post_id, subreddit_id, reddit_url)
             )
         else:
             self.conn.execute(
@@ -513,12 +530,18 @@ class Database:
         self.conn.commit()
 
     def undeploy_post(self, post_id):
-        """Revert a deployed (published) post back to complete status."""
+        """Revert a deployed (published) post back to complete status.
+
+        Also clears the linked Reddit URL — leaving it would mean a later
+        redeploy without a fresh URL would still report the old link, and
+        any "View" buttons would point at the wrong reddit thread.
+        """
         self.conn.execute(
             """UPDATE posts SET status = 'complete', deployed_at = NULL, paid_at = NULL
                WHERE id = ? AND status IN ('published', 'paid')""",
             (post_id,)
         )
+        self.conn.execute("DELETE FROM post_urls WHERE post_id = ?", (post_id,))
         self.conn.commit()
 
     def delete_subreddit(self, subreddit_id):

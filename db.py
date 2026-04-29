@@ -689,21 +689,45 @@ class Database:
         self.conn.commit()
 
     def delete_comment(self, comment_id):
-        # Free the rotation slot for any child replies + this comment itself,
-        # for every row that had a non-null account_id and wasn't already a draft.
+        """Delete a comment AND all of its descendants (replies, nested replies, …).
+
+        Walks the parent_comment_id tree recursively so HQ thread roots
+        cascade-delete the entire cluster. Frees rotation slots for every
+        deployed/assigned/etc descendant before deleting.
+        """
+        # BFS to collect every descendant id under comment_id
+        all_ids = [comment_id]
+        frontier = [comment_id]
+        while frontier:
+            placeholders = ",".join("?" * len(frontier))
+            kids = self.conn.execute(
+                f"SELECT id FROM comments WHERE parent_comment_id IN ({placeholders})",
+                frontier
+            ).fetchall()
+            kid_ids = [r["id"] for r in kids]
+            if not kid_ids:
+                break
+            all_ids.extend(kid_ids)
+            frontier = kid_ids
+
+        # Free rotation slots for every row about to be deleted that was
+        # actually using a slot (account_id set, status != draft).
+        placeholders = ",".join("?" * len(all_ids))
         rows = self.conn.execute(
-            """SELECT account_id, COUNT(*) AS cnt FROM comments
-               WHERE (id = ? OR parent_comment_id = ?)
-                 AND account_id IS NOT NULL
-                 AND status != 'draft'
-               GROUP BY account_id""",
-            (comment_id, comment_id)
+            f"""SELECT account_id, COUNT(*) AS cnt FROM comments
+                WHERE id IN ({placeholders})
+                  AND account_id IS NOT NULL
+                  AND status != 'draft'
+                GROUP BY account_id""",
+            all_ids
         ).fetchall()
         for r in rows:
             self._decrement_lifetime(r["account_id"], r["cnt"])
-        # Delete child replies first
-        self.conn.execute("DELETE FROM comments WHERE parent_comment_id = ?", (comment_id,))
-        self.conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+
+        # Delete leaves-first to keep parent_comment_id FKs clean. Since
+        # all_ids is in BFS order (roots first), reverse for leaves-first.
+        for cid in reversed(all_ids):
+            self.conn.execute("DELETE FROM comments WHERE id = ?", (cid,))
         self.conn.commit()
 
     def get_all_comment_bodies_for_brand(self, brand_name, limit=200):

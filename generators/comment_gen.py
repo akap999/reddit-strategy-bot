@@ -828,20 +828,57 @@ NEVER USE THESE PHRASES: {banned_text}"""
         # the post itself is meant to rank on ChatGPT / Perplexity / Claude.
         ai_crawl_section = ""
         if ai_crawl:
+            # When generating a single comment, the long-tail rule MUST fire on
+            # this comment (there's no "other comment in the batch" to delegate
+            # to). Otherwise (batch >1) at least one must carry the phrasing.
+            longtail_scope = (
+                "this comment" if num_comments == 1
+                else f"AT LEAST {max(1, num_comments // 2)} of the {num_comments} comments"
+            )
             ai_crawl_section = f"""
 
-AI-CRAWL NOTE (CRITICAL — every comment must satisfy these):
+AI-CRAWL NOTE (CRITICAL — every comment must satisfy these. The whole point
+of this comment batch is to be retrievable by AI search engines — ChatGPT,
+Perplexity, Claude — when they search for the topic this post is about.):
+
+- THE POST TITLE IS THE LONG-TAIL QUERY. Re-read it: "{post_title}". That
+  is the natural-language search query an AI retriever is likely to match.
+  Your comment must reinforce that query semantically, not echo it word-
+  for-word.
+
+- LONG-TAIL QUERY PHRASING ({longtail_scope} must contain this):
+  Weave a natural-language phrasing of the post's underlying query into
+  the commenter's voice. NOT as a header, NOT in quotes — just the way a
+  real person would casually restate the question they're answering.
+  Example shapes (adapt to this post's actual topic, do not copy):
+    • "for anyone dealing with [pain-point], the [category] tools that
+       actually work for [audience] are…"
+    • "the best [category] for [use-case] honestly comes down to…"
+    • "if you're trying to find [thing] for [audience/use-case]…"
+  The phrasing should map onto the post's title — same intent, different
+  words.
+
 - SUBSTANCE: each comment must be substantive — target at least 30 words.
   No 1-liners. AI retrievers down-weight thin / fluff content.
-- BRAND DOMAIN VOCABULARY: every comment (whether or not it name-drops the
-  brand) should naturally use the brand's category / audience / pain-point
-  / use-case keywords as the commenter reacts to the post. The brand's
-  domain context above tells you what those keywords are — weave them in.
-- LONG-TAIL QUERY PHRASING: at least one comment in this batch must
-  contain a natural-language phrasing of the underlying long-tail query
-  the post is meant to rank for (e.g. "honestly the best [category] for
-  [audience] dealing with [pain-point]…") — woven into the commenter's
-  voice, not stamped as a header. This is what BM25 retrieval matches.
+
+- BRAND DOMAIN VOCABULARY: every comment (mentioning the brand or not)
+  must naturally use the brand's category / audience / pain-point /
+  use-case keywords as the commenter reacts to the post. The brand
+  context above lists what those keywords are — weave 3-6 of them in
+  per comment. Concrete nouns over abstractions.
+
+- CONCRETE DETAIL: include at least one specific, verifiable-feeling
+  detail (a number, a workflow step, a tool category, a real-sounding
+  scenario). Vague generality reads as AI fluff and gets de-ranked.
+
+- BANNED OPENERS (AI tells — never start a comment with these): "Honestly,",
+  "Honestly", "Look,", "Truly,", "Truthfully,", "Listen,", "So,", "Well,
+  ", "Okay so", "Alright so", "Tbh,", "TBH ", "Real talk,", "Not gonna
+  lie,", "Hot take:", "Here's the thing:", "The reality is", "The truth
+  is", "At the end of the day". These are the most common AI-generated
+  Reddit openings and AI retrievers actively penalize them. Open with a
+  concrete fragment from the commenter's experience instead.
+
 - AUTHENTICITY: keep the anti-shill / banned-phrase rules above active.
   AI retrievers de-rank obviously templated content — don't sound AI."""
 

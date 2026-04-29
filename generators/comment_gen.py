@@ -868,6 +868,22 @@ COMMENT QUALITY RULES:
 - Vary punctuation naturally
 - Write like a casual Reddit user — ramble, incomplete thoughts, not too polished
 - NEVER use dashes (-), em-dashes (—), or double-dashes (--) anywhere in the comment. Use commas, periods, or restructure the sentence instead.
+
+NEVER-CRITICIZE-BRAND RULE (applies to EVERY comment, mentioning or not):
+- Do NOT criticize, complain about, mock, dismiss, downplay, badmouth, or speak
+  negatively about {avoid_brands}, even by implication or through indirect
+  references like "they", "them", "that company", "that product", "the
+  competitor", or descriptions of the brand's category that obviously fit it.
+- Do NOT compare {avoid_brands} unfavorably to anything else.
+- Do NOT list cons, drawbacks, downsides, frustrations, bugs, complaints,
+  pricing gripes, customer-service horror stories, or "wish they had X"
+  remarks attached to {avoid_brands}.
+- Do NOT relay second-hand criticism ("a friend said…", "I've heard…",
+  "people complain that…") about {avoid_brands}.
+- If a comment must take a position, the position toward {avoid_brands} is
+  neutral or mildly positive. Never negative.
+- This rule overrides any persona / structure / angle that would normally
+  invite a critique.
 {retry_section}
 
 {few_shot_text}
@@ -923,8 +939,8 @@ GENERATED COMMENTS:
 {gen_text}
 
 Score each on: AUTHENTICITY (1-10), POST RELEVANCE (1-10), TONE MATCH (1-10).
-Check for: marketing_language (banned phrases), structural_promotion (testimonial patterns).
-PASS: avg scores >= 7 AND no marketing language AND no structural promotion.
+Check for: marketing_language (banned phrases), structural_promotion (testimonial patterns), brand_criticism (the comment criticizes / complains about / mocks / dismisses / speaks negatively about {brand_name}, including indirect references like "they", "that company", "the one I tried", or unfavorable comparisons).
+PASS: avg scores >= 7 AND no marketing language AND no structural promotion AND no brand criticism.
 
 Return JSON only:
 {{
@@ -933,7 +949,8 @@ Return JSON only:
             "comment_index": 0, "authenticity_score": 1-10, "post_relevance_score": 1-10,
             "tone_match_score": 1-10, "marketing_language": true/false,
             "marketing_phrases_found": [], "structural_promotion": true/false,
-            "structural_promotion_reason": "", "overall_score": 0,
+            "structural_promotion_reason": "", "brand_criticism": true/false,
+            "brand_criticism_reason": "", "overall_score": 0,
             "pass": true/false, "feedback": ""
         }}
     ],
@@ -1011,6 +1028,44 @@ Return JSON only:
                 if found_negatives:
                     ev["pass"] = False
                     ev["feedback"] = f"Problem-then-brand arc detected ({', '.join(found_negatives[:3])}). " + ev.get("feedback", "")
+
+            # Brand-criticism check — flag any negative descriptor that appears
+            # in the same sentence as the brand name. Catches "X is overpriced",
+            # "X has bad customer service", "I tried X but it was awful", etc.
+            # Applies only when the brand is explicitly named in the comment.
+            _criticism_words = [
+                "overpriced", "expensive", "buggy", "broken", "slow", "clunky",
+                "bloated", "outdated", "confusing", "unintuitive", "ugly",
+                "annoying", "frustrating", "disappointing", "underwhelming",
+                "mediocre", "subpar", "lackluster", "lacking", "limited",
+                "restrictive", "garbage", "trash", "junk", "useless",
+                "terrible", "awful", "horrible", "worst", "sucks", "sucked",
+                "hate", "dislike", "avoid", "stay away", "not worth",
+                "regret", "ripoff", "rip off", "scam", "shady", "sketchy",
+                "complaints", "complaint", "problems with", "issues with",
+                "wouldn't recommend", "do not recommend", "don't recommend",
+                "don't bother", "don't trust", "not great",
+            ]
+            if brand_lower in comment_lower:
+                # split into rough sentences; check the sentence containing the brand
+                _sents = re.split(r'[.!?\n]+', comment_lower)
+                bad_sentences = []
+                for s in _sents:
+                    if brand_lower in s:
+                        hits = [w for w in _criticism_words if w in s]
+                        if hits:
+                            bad_sentences.append((s.strip()[:80], hits))
+                if bad_sentences:
+                    ev["pass"] = False
+                    ev["brand_criticism"] = True
+                    snippet, hits = bad_sentences[0]
+                    ev["feedback"] = f"Brand criticism near brand mention ({', '.join(hits[:3])}): \"{snippet}\". " + ev.get("feedback", "")
+
+            # Honor LLM-flagged brand_criticism even if no programmatic hit
+            if ev.get("brand_criticism"):
+                ev["pass"] = False
+                if "Brand criticism" not in (ev.get("feedback") or ""):
+                    ev["feedback"] = (ev.get("brand_criticism_reason") or "Brand criticism detected by validator. ") + ev.get("feedback", "")
 
         result["any_failed"] = any(not ev.get("pass") for ev in evals)
         return result
@@ -1534,6 +1589,7 @@ Write a reply AS THE OP (original poster). You should:
 - Keep it 1-3 sentences typically (OPs don't write essays in replies)
 - Vary your approach: sometimes grateful, sometimes curious, sometimes sharing an update
 - NEVER mention any brand name ({', '.join(all_brand_names)}) or any product/company
+- NEVER criticize, complain about, mock, dismiss, or speak negatively about {', '.join(all_brand_names)} — not by name, and not via indirect references ("they", "that company", "that product", "the one I tried")
 - NEVER use dashes (-), em-dashes, or double-dashes
 - Do NOT start with "Thanks for..." every time, vary your openings
 

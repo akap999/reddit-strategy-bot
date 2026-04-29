@@ -2547,6 +2547,7 @@ def api_gen_comments():
 def api_gen_hq_comment():
     data = request.json
     ai_crawl = bool(data.get("ai_crawl", False))
+    num_replies = int(data.get("num_replies", 5))
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
@@ -2560,6 +2561,7 @@ def api_gen_hq_comment():
                 post, brand, brand_mention_ratio=ratio,
                 post_day_offset=post.get("suggested_post_day", 0),
                 ai_crawl=ai_crawl,
+                num_replies=num_replies,
             )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:

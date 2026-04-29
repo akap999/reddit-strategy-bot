@@ -1598,8 +1598,8 @@ class Database:
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
-                 WHERE c.brand_id = ? {status_filter_reg}"""
-        p1 = [brand_id]
+                 WHERE (c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?))) {status_filter_reg}"""
+        p1 = [brand_id, brand_id]
         if status:
             p1.append(status)
 
@@ -1657,7 +1657,14 @@ class Database:
             w1 = ["c.status = ?"]; p1.append(status)
             w2 = ["sc.status = ?"]; p2.append(status)
         if brand_id:
-            w1.append("c.brand_id = ?"); p1.append(brand_id)
+            # Comments side: match comments tagged with this brand_id, OR
+            # organic comments (brand_id NULL) on a post associated with this
+            # brand via the post_brands junction. Without this, "organic"
+            # comments saved with brand_id=NULL by generate_comment_tree are
+            # invisible when a brand filter is applied — even though they
+            # belong to the brand's post.
+            w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?)))")
+            p1.append(brand_id); p1.append(brand_id)
             w2.append("sc.brand_id = ?"); p2.append(brand_id)
         if account_id:
             w1.append("c.account_id = ?"); p1.append(account_id)

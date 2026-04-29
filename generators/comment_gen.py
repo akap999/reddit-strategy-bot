@@ -1283,9 +1283,14 @@ Return JSON only:
 
         return saved
 
-    def generate_hq_comment(self, post, brand, brand_mention_ratio=None, post_day_offset=0, ai_crawl=False):
-        """Generate one high-quality top-level comment with brand mention plus 5
-        relevant replies forming a realistic nested conversation thread (6 total).
+    def generate_hq_comment(self, post, brand, brand_mention_ratio=None, post_day_offset=0,
+                             ai_crawl=False, num_replies=5):
+        """Generate one high-quality top-level comment with brand mention plus
+        `num_replies` relevant replies forming a realistic nested conversation.
+
+        Total comments saved = 1 + num_replies. Caller may pass any num_replies >= 1;
+        the shape is generated dynamically (most replies hang off main, ~1/3 nest
+        under earlier replies for thread realism).
 
         ai_crawl=True (used by Live Subreddits) injects an AI-CRAWL NOTE rule
         into the per-comment prompt so the thread is more retrievable by AI
@@ -1298,20 +1303,23 @@ Return JSON only:
         # brand_mention_ratio is ignored — main comment always mentions brand
 
         # --- Thread shape ---------------------------------------------------
-        # Each shape is a list of (index, parent_index) tuples
-        shapes = [
-            # Shape A: main -> [R1,R2,R3], R1->[R4], R2->[R5]
-            [(0, None), (1, 0), (2, 0), (3, 0), (4, 1), (5, 2)],
-            # Shape B: main -> [R1,R2,R3], R1->[R4,R5]
-            [(0, None), (1, 0), (2, 0), (3, 0), (4, 1), (5, 1)],
-            # Shape C: main -> [R1,R2], R1->[R3,R4], R3->[R5]
-            [(0, None), (1, 0), (2, 0), (3, 1), (4, 1), (5, 3)],
-        ]
-        shape = random.choice(shapes)
+        # 1 main (idx 0) + num_replies replies. Some replies hang off main,
+        # ~30% nest under an earlier reply for realism.
+        nr = max(1, int(num_replies))
+        shape = [(0, None)]
+        nest_count = nr // 3   # how many replies nest under earlier replies
+        direct_count = nr - nest_count
+        for i in range(1, direct_count + 1):
+            shape.append((i, 0))
+        for i in range(direct_count + 1, nr + 1):
+            # nest under a random earlier reply (not main, not future)
+            candidates = list(range(1, i))
+            parent_idx = random.choice(candidates) if candidates else 0
+            shape.append((i, parent_idx))
 
         # --- Brand mentions --------------------------------------------------
         # Main comment (index 0) always mentions brand, replies never do
-        mention_flags = [True, False, False, False, False, False]
+        mention_flags = [True] + [False] * nr
 
         # --- Setup (mirrors generate_comment_tree) ---------------------------
         subreddit = self.db.get_subreddit(post["subreddit_id"])
@@ -1340,11 +1348,11 @@ Return JSON only:
             dedup_text = ("\nPREVIOUS COMMENTS (do NOT repeat these openings or structures):\n"
                           + "\n".join(f'  - "{b[:80]}..."' for b in sample))
 
-        # Pre-select 6 distinct personas/structures
+        # Pre-select distinct personas/structures (1 main + num_replies)
         all_personas, all_structures, all_angles = self._select_comment_config(
             mock_tone, hq_stats,
             {"best_angle": "detailed thoughtful response", "natural_fit": 3},
-            6,
+            len(shape),
         )
 
         saved = []          # list of dicts with id, body, etc.
@@ -1352,7 +1360,7 @@ Return JSON only:
         saved_bodies = {}    # index -> body text
         saved_personas = {}  # index -> persona id
 
-        print(f"    Generating HQ comment thread (1 main + 5 replies)...")
+        print(f"    Generating HQ comment thread (1 main + {nr} replies)...")
 
         for idx, parent_idx in shape:
             is_main = parent_idx is None

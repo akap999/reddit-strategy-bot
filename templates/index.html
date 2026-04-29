@@ -7276,16 +7276,43 @@ async function _lsubsLookupPostBrand(pid) {
     return null;
 }
 
-async function lsubsGenCommentsForPost(pid) {
-    const count = parseInt(document.getElementById('lsubs-batch-count')?.value || '5');
+// Open the Gen Comments modal (per-post). Form lets the user pick count
+// + AI-crawl toggle. Submit calls _lsubsRunGenComments with the chosen values.
+function lsubsGenCommentsForPost(pid) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Generate Comments</h3>
+        <p class="text-xs text-gray-400 mb-3">Post #${pid}. Choose how many comments to generate and whether to optimize them for AI search-engine retrieval.</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Number of comments</label>
+                <input type="number" id="lsubs-cmts-count" value="5" min="1" max="20" class="w-full">
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-cmts-aicrawl" checked>
+                <span>AI-crawl optimized
+                    <span class="text-xs text-gray-500 block ml-6">Each comment is substantive, packed with the brand's domain vocabulary, and includes natural-language phrasings of the long-tail GEO query the post is meant to rank for. Recommended for Live Subreddits.</span>
+                </span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunGenComments(${pid})">Generate</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunGenComments(pid) {
+    const count = parseInt(document.getElementById('lsubs-cmts-count')?.value) || 5;
+    const aiCrawl = !!document.getElementById('lsubs-cmts-aicrawl')?.checked;
+    closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
     if (!bid) { toast('Post has no brand assigned', 'error'); return; }
     try {
         const { task_id } = await api('/api/generate/comments', {
             method: 'POST',
-            body: { post_id: pid, brand_id: bid, count, ai_crawl: true },
+            body: { post_id: pid, brand_id: bid, count, ai_crawl: aiCrawl },
         });
-        toast(`Generating ${count} AI-crawl-optimized comment(s) for post #${pid}…`, 'info');
+        toast(`Generating ${count} comment(s) for post #${pid}${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
         _addBgTask(task_id, 'Live Cmts');
         const poll = setInterval(async () => {
             try {
@@ -7294,7 +7321,7 @@ async function lsubsGenCommentsForPost(pid) {
                     clearInterval(poll);
                     _removeBgTask(task_id);
                     const n = (t.result || []).length;
-                    toast(`Generated ${n} comment(s)`, 'success');
+                    toast(`Generated ${n} comment(s) — switch to Comments tab to see them`, 'success');
                     if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
                     if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
                 } else if (t.status === 'error') {
@@ -7307,15 +7334,42 @@ async function lsubsGenCommentsForPost(pid) {
     } catch (e) { toast(`Failed to start generation: ${e.message}`, 'error'); }
 }
 
-async function lsubsGenHqForPost(pid) {
+// Open the Gen HQ modal (per-post). Lets the user pick the number of replies.
+function lsubsGenHqForPost(pid) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Generate HQ Thread</h3>
+        <p class="text-xs text-gray-400 mb-3">Post #${pid}. An HQ thread is 1 main brand-mention top-level reply + N nested replies that respond to it.</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Number of replies (under the main reply)</label>
+                <input type="number" id="lsubs-hq-replies" value="5" min="1" max="15" class="w-full">
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-hq-aicrawl" checked>
+                <span>AI-crawl optimized
+                    <span class="text-xs text-gray-500 block ml-6">Substance + brand domain vocabulary + long-tail query phrasing. Recommended for Live Subreddits.</span>
+                </span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunGenHq(${pid})">Generate</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunGenHq(pid) {
+    const replies = parseInt(document.getElementById('lsubs-hq-replies')?.value) || 5;
+    const aiCrawl = !!document.getElementById('lsubs-hq-aicrawl')?.checked;
+    closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
     if (!bid) { toast('Post has no brand assigned', 'error'); return; }
     try {
         const { task_id } = await api('/api/generate/hq-comment', {
             method: 'POST',
-            body: { post_id: pid, brand_id: bid, ai_crawl: true },
+            body: { post_id: pid, brand_id: bid, ai_crawl: aiCrawl, num_replies: replies },
         });
-        toast(`Generating HQ thread (1 main + 5 replies) for post #${pid}…`, 'info');
+        toast(`Generating HQ thread (1 main + ${replies} replies)${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
         _addBgTask(task_id, 'Live HQ');
         const poll = setInterval(async () => {
             try {
@@ -7324,7 +7378,7 @@ async function lsubsGenHqForPost(pid) {
                     clearInterval(poll);
                     _removeBgTask(task_id);
                     const n = (t.result || []).length;
-                    toast(`Generated ${n} HQ comment(s)`, 'success');
+                    toast(`Generated ${n} HQ comment(s) — switch to Comments tab to see them`, 'success');
                     if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
                     if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
                 } else if (t.status === 'error') {
@@ -7337,16 +7391,50 @@ async function lsubsGenHqForPost(pid) {
     } catch (e) { toast(`Failed to start HQ generation: ${e.message}`, 'error'); }
 }
 
+// Batch generate prompts once for count/replies + ai_crawl, then loops
+// through selected posts using those values directly (skips the per-post modal).
 async function lsubsBatchGenerate(mode) {
     const ids = lsubsGetSelectedPostIds();
     if (!ids.length) { toast('Select at least one post', 'error'); return; }
-    if (!confirm(`Generate ${mode === 'hq' ? 'HQ threads' : 'comments'} for ${ids.length} post(s)?`)) return;
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Batch Generate ${mode === 'hq' ? 'HQ Threads' : 'Comments'}</h3>
+        <p class="text-xs text-gray-400 mb-3">Will run on ${ids.length} selected post(s).</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">${mode === 'hq' ? 'Replies per thread' : 'Comments per post'}</label>
+                <input type="number" id="lsubs-batch-num" value="5" min="1" max="15" class="w-full">
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-batch-aicrawl" checked>
+                <span>AI-crawl optimized</span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunBatchGenerate('${mode}')">Generate ${ids.length}</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunBatchGenerate(mode) {
+    const ids = lsubsGetSelectedPostIds();
+    const num = parseInt(document.getElementById('lsubs-batch-num')?.value) || 5;
+    const aiCrawl = !!document.getElementById('lsubs-batch-aicrawl')?.checked;
+    closeModal();
     for (const pid of ids) {
-        if (mode === 'hq') await lsubsGenHqForPost(pid);
-        else await lsubsGenCommentsForPost(pid);
-        // Brief gap so the bg task UI shows multiple rows distinctly
+        const bid = await _lsubsLookupPostBrand(pid);
+        if (!bid) continue;
+        try {
+            const url = mode === 'hq' ? '/api/generate/hq-comment' : '/api/generate/comments';
+            const body = mode === 'hq'
+                ? { post_id: pid, brand_id: bid, ai_crawl: aiCrawl, num_replies: num }
+                : { post_id: pid, brand_id: bid, count: num, ai_crawl: aiCrawl };
+            const { task_id } = await api(url, { method: 'POST', body });
+            _addBgTask(task_id, mode === 'hq' ? `Live HQ #${pid}` : `Live Cmts #${pid}`);
+        } catch (e) {}
         await new Promise(r => setTimeout(r, 250));
     }
+    toast(`Started ${ids.length} ${mode === 'hq' ? 'HQ' : 'comment'} generation task(s)`, 'success');
 }
 
 // =========================================================================

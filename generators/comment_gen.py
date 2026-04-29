@@ -1766,11 +1766,14 @@ Return JSON only:
         # Pure read of `self`; no shared state mutated. Safe to run concurrently.
         def _gen_one(idx, parent_idx, parent_body, sibling_bodies, persona_id, structure_id):
             is_main_local = parent_idx is None
-            thread_comments = [
-                {"body": b, "score": 5, "author": "community_member",
-                 "id": "", "permalink": ""}
-                for b in sibling_bodies
-            ]
+            # CONTEXT: for HQ MAIN, pass no thread context — main is the
+            # first comment. For HQ REPLIES, pass ONLY the parent body, not
+            # all siblings. Sibling bodies in `EXISTING COMMENTS:` were
+            # confusing the model into responding to siblings instead of the
+            # actual parent — replies came out off-topic. Strict parent-only
+            # context plus the explicit `reply_targets` keeps the model
+            # focused on what it's actually replying to.
+            thread_comments = []
             reply_targets = None
             if parent_body is not None:
                 reply_targets = {0: {
@@ -1798,8 +1801,25 @@ Return JSON only:
                             f"{brand['name']} is and what it does for their "
                             "use-case. Tight 50-90 words, no anecdote."
                             if is_main_local
-                            else "Respond naturally to the conversation — agree, "
-                                 "disagree, or add a new angle"
+                            # Replies were coming back off-topic because the
+                            # angle was too vague. Force engagement with a
+                            # SPECIFIC point or claim from the parent body
+                            # so the reply reads like a real follow-up, not
+                            # a fresh comment dropped into the thread.
+                            else (
+                                "Reply to the TARGET COMMENT specifically. Read "
+                                "what they said carefully, then engage with one "
+                                "concrete point or claim from their comment — "
+                                "agree and add a supporting detail, push back "
+                                "on a specific phrase, share a contrasting "
+                                "experience that connects to what they said, "
+                                "or ask a follow-up about something they "
+                                "mentioned. Reference a specific phrase or "
+                                "idea from their comment so it's clear you "
+                                "read it. DO NOT change the topic, restart "
+                                "the conversation, or write a generic 'this "
+                                "is a complex space' aside."
+                            )
                         ),
                         "natural_fit": 3,
                     },
@@ -1953,6 +1973,279 @@ Return JSON only:
 
         print(f"    HQ thread complete — {len(saved)} comments generated in {time.time()-_hq_t0:.1f}s")
         return saved
+
+    # ------------------------------------------------------------------
+    # Append more replies to an existing HQ cluster
+    # ------------------------------------------------------------------
+    def add_replies_to_hq_cluster(self, root_comment_id, num_replies=3,
+                                   ai_crawl=False):
+        """Generate `num_replies` more replies under an existing HQ root.
+
+        Reads the existing cluster (root + all current HQ/op_reply
+        descendants) so the new replies have full thread context and don't
+        rehash points the existing replies already made. Most are direct
+        replies to the root (parent=root); a small fraction nest under one
+        of the existing replies for shape variety.
+        """
+        root = self.db.get_comment(root_comment_id)
+        if not root:
+            raise ValueError(f"HQ root {root_comment_id} not found")
+        post = self.db.get_post(root["post_id"])
+        if not post:
+            raise ValueError("Post not found for HQ root")
+        brand = self.db.get_brand(root["brand_id"]) if root.get("brand_id") else None
+        if not brand:
+            brands = self.db.get_brands_for_post(post["id"])
+            brand = brands[0] if brands else None
+        if not brand:
+            raise ValueError("No brand found for HQ root's post")
+        subreddit = self.db.get_subreddit(post["subreddit_id"])
+
+        # Pull every HQ comment in this cluster — root + descendants
+        all_in_post = self.db.get_comments(post["id"])
+        cluster = {root["id"]: root}
+        added = True
+        while added:
+            added = False
+            for c in all_in_post:
+                if c["id"] in cluster:
+                    continue
+                if c.get("parent_comment_id") in cluster:
+                    cluster[c["id"]] = c
+                    added = True
+        existing_replies = [c for c in cluster.values() if c["id"] != root["id"]]
+        existing_reply_bodies = [c["body"] for c in existing_replies]
+
+        nr = max(1, int(num_replies))
+        post_day_offset = post.get("suggested_post_day", 0)
+
+        # Pick personas/structures for the new batch (curated for replies).
+        mock_tone = {
+            "formality": "casual to semi-formal",
+            "humor_style": "occasional dry humor",
+            "technical_level": "moderate",
+            "common_phrases": [],
+            "overall_vibe": "helpful community discussion",
+            "sentence_structure": "mix of short and medium",
+            "capitalization": "mostly lowercase with normal caps",
+            "punctuation_style": "casual, minimal",
+            "emotional_tone": "generally supportive",
+        }
+        reply_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
+                       "min_chars": 50, "max_chars": 600}
+        all_personas, all_structures, _ = self._select_comment_config(
+            mock_tone, reply_stats,
+            {"best_angle": "reply to existing thread comment", "natural_fit": 3},
+            nr,
+        )
+
+        # Decide parents: 70% direct to root, 30% nest under a random existing reply
+        parent_choices = []
+        for _i in range(nr):
+            if existing_replies and random.random() < 0.30:
+                parent_choices.append(random.choice(existing_replies))
+            else:
+                parent_choices.append(root)
+
+        saved = []
+        next_order = max([c.get("suggested_order", 0) for c in cluster.values()] or [0]) + 1
+        with ThreadPoolExecutor(max_workers=min(8, nr)) as ex:
+            fut_meta = {}
+            for i in range(nr):
+                parent_c = parent_choices[i]
+                pid = all_personas[i]["id"] if i < len(all_personas) else random.choice(PERSONAS)["id"]
+                sid = all_structures[i]["id"] if i < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
+                # Build a single-comment generate_comments call targeted at this parent.
+                kwargs = dict(
+                    post_title=post["title"],
+                    post_body=post["body"],
+                    subreddit=subreddit["name"],
+                    comments=[],  # parent goes via reply_targets only — keeps focus
+                    brand_name=brand["name"],
+                    brand_context=brand.get("context", ""),
+                    num_comments=1,
+                    tone_analysis=mock_tone,
+                    comment_stats=reply_stats,
+                    mention_brand_flags=[False],
+                    reply_targets={0: {
+                        "body": parent_c["body"], "score": 5,
+                        "author": parent_c.get("account_id") or "community_member",
+                        "id": "", "permalink": "",
+                    }},
+                    relevance={
+                        "best_angle": (
+                            "Reply to the TARGET COMMENT specifically. Engage "
+                            "with one concrete point or claim from their "
+                            "comment — agree and add a supporting detail, "
+                            "push back on a specific phrase, share a "
+                            "contrasting experience that connects to what "
+                            "they said, or ask a follow-up about something "
+                            "they mentioned. Reference a specific phrase or "
+                            "idea from their comment so it's clear you read "
+                            "it. DO NOT change the topic or rehash points "
+                            "made in OTHER existing replies in the thread."
+                        ),
+                        "natural_fit": 3,
+                    },
+                    ai_crawl=ai_crawl,
+                    post_intent=post.get("intent"),
+                    slim_prompt=True,
+                )
+                # Pass existing replies as plain-text dedup hints in retry_feedback
+                # (it's already plumbed into the prompt as "PREVIOUS ATTEMPT FAILED"
+                # — a small abuse, but keeps the prompt simple).
+                if existing_reply_bodies:
+                    dedup = "\n".join(f"  - {b[:120]}..." for b in existing_reply_bodies[:6])
+                    kwargs["retry_feedback"] = (
+                        "DO NOT repeat or rehash the substance of these existing "
+                        "replies in the same thread:\n" + dedup
+                    )
+                fut = ex.submit(self.generate_comments, **kwargs)
+                fut_meta[fut] = (i, parent_c, pid, sid)
+
+            for fut in as_completed(fut_meta):
+                i, parent_c, pid, sid = fut_meta[fut]
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    print(f"    [add-replies] worker exception i={i}: {e}")
+                    continue
+                bodies = result.get("generated_comments") or []
+                if not bodies:
+                    continue
+                body = bodies[0]
+                cid = self.db.save_comment(
+                    post_id=post["id"],
+                    brand_id=brand["id"],
+                    body=body,
+                    persona_id=(result.get("_personas") or [pid])[0],
+                    structure_id=(result.get("_structures") or [sid])[0],
+                    is_reply=1,
+                    parent_comment_id=parent_c["id"],
+                    mentions_brand=0,
+                    status="complete",
+                    suggested_post_day=post_day_offset + (1 if parent_c["id"] == root["id"] else 2),
+                    suggested_order=next_order + i,
+                    prompt_version=PROMPT_VERSION,
+                    comment_type="hq",
+                )
+                saved.append({"id": cid, "body": body, "parent_id": parent_c["id"]})
+                print(f"    [add-replies] saved reply #{cid} → parent #{parent_c['id']}")
+
+        return saved
+
+    # ------------------------------------------------------------------
+    # Generate an OP reply that engages with an existing cluster's discussion
+    # ------------------------------------------------------------------
+    def generate_op_reply_to_cluster(self, root_comment_id, ai_crawl=False):
+        """Generate a single OP-voice reply that engages with the whole cluster.
+
+        Reads the root comment + every existing reply, then writes a reply
+        from the post author's voice that:
+          - reacts to the discussion (acknowledges, asks follow-up, agrees,
+            shares an update)
+          - never mentions any brand
+          - is parented to the root (so it appears as a top-level OP reply
+            inside the cluster)
+        """
+        root = self.db.get_comment(root_comment_id)
+        if not root:
+            raise ValueError(f"HQ root {root_comment_id} not found")
+        post = self.db.get_post(root["post_id"])
+        if not post:
+            raise ValueError("Post not found for HQ root")
+        subreddit = self.db.get_subreddit(post["subreddit_id"])
+        brand_for_avoid = None
+        brands = self.db.get_brands_for_post(post["id"])
+        if brands:
+            brand_for_avoid = brands[0]
+        all_brand_names = [b["name"] for b in brands] or [""]
+
+        # Collect cluster bodies for context
+        all_in_post = self.db.get_comments(post["id"])
+        cluster = {root["id"]: root}
+        added = True
+        while added:
+            added = False
+            for c in all_in_post:
+                if c["id"] in cluster:
+                    continue
+                if c.get("parent_comment_id") in cluster:
+                    cluster[c["id"]] = c
+                    added = True
+        ordered = sorted(cluster.values(), key=lambda c: (c.get("suggested_order", 0), c["id"]))
+        thread_text = "\n".join(
+            f"  {'(MAIN)' if c['id'] == root['id'] else '  reply'}: \"{c['body'][:300]}\""
+            for c in ordered
+        )
+
+        prompt = f"""You are the person who wrote this Reddit post. You are coming back
+to the thread after some replies have come in, and replying to the
+top-level commenter's brand-mention comment in a way that engages with
+the WHOLE discussion under it.
+
+YOUR POST TITLE: "{post['title']}"
+YOUR POST BODY: "{(post['body'] or '')[:600]}"
+SUBREDDIT: r/{subreddit['name']}
+
+EXISTING THREAD (the comment you're replying to + the replies already
+written under it — read all of them, your reply should sound like you
+read them):
+{thread_text}
+
+Write ONE reply AS THE OP. You should:
+- Sound like the same person who wrote the post above.
+- React to the actual discussion — acknowledge a point someone made,
+  ask a follow-up, share a small update, or agree/disagree with one
+  specific detail. NOT a generic "thanks everyone".
+- Reference at least one concrete thing from the existing thread so
+  it's clear you read it.
+- Be casual and conversational, 1-3 sentences typically.
+- NEVER mention any brand name ({', '.join(all_brand_names)}) or any
+  product/company.
+- NEVER criticize, complain about, mock, or speak negatively about
+  {', '.join(all_brand_names)} — not by name, not via indirect
+  references ("they", "that one"), and not by trashing the brand's
+  category.
+- NEVER use dashes (-), em-dashes, or double-dashes.
+- Do not start with "Thanks for..." every time, vary your opening.
+
+Return JSON only:
+{{
+    "reply": "your OP reply text"
+}}"""
+        try:
+            result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
+        except Exception as e:
+            print(f"    [op-reply-cluster] API error: {e}")
+            return None
+        if not result or "reply" not in result:
+            print("    [op-reply-cluster] no reply generated")
+            return None
+        body = result["reply"]
+        # Sanity: never accept a body that mentions a brand
+        for bname in all_brand_names:
+            if bname and bname.lower() in body.lower():
+                print(f"    [op-reply-cluster] reply mentioned brand {bname} — rejecting")
+                return None
+        post_day_offset = post.get("suggested_post_day", 0)
+        cid = self.db.save_comment(
+            post_id=post["id"],
+            brand_id=brand_for_avoid["id"] if brand_for_avoid else None,
+            body=body,
+            persona_id="op",
+            structure_id="op_reply",
+            is_reply=1,
+            parent_comment_id=root["id"],
+            mentions_brand=0,
+            status="complete",
+            suggested_post_day=post_day_offset + 1,
+            suggested_order=1000,  # sort to end of cluster
+            prompt_version=PROMPT_VERSION,
+            comment_type="op_reply",
+        )
+        print(f"    [op-reply-cluster] saved op reply #{cid} → root #{root['id']}")
+        return {"id": cid, "body": body, "parent_id": root["id"]}
 
     # ------------------------------------------------------------------
     # OP Reply generation — post author replies to comments

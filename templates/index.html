@@ -4824,15 +4824,15 @@ function _acRefreshIfActive() {
 }
 
 function _acUpdateLocal(cid, source, patch) {
-    // Live Subreddits Comments tab piggy-backs on this hook: every comment-
-    // action handler (deploy / undeploy / inform / mark-paid / mark-removed /
-    // assign / unassign / undo / edit / delete) calls _acUpdateLocal, so
-    // routing Live Subs through here means we don't have to patch every
-    // handler individually. silent=true → no spinner flicker.
+    // Live Subs Comments tab: every handler (deploy / undeploy / inform /
+    // paid / removed / assign / unassign / undo / edit / delete) ends with
+    // _acUpdateLocal, so this single hook routes them to in-place patches —
+    // no fetch, no flicker. The patch swaps just the affected <tr> via
+    // _lsubsApplyCommentPatch, which is why "edit save" no longer looks
+    // like a page refresh.
     if (currentView === 'livesubs' && _lsubsTab === 'comments'
-        && typeof lsubsLoadComments === 'function') {
-        lsubsLoadComments(true);
-        return;
+        && typeof _lsubsApplyCommentPatch === 'function') {
+        if (_lsubsApplyCommentPatch(cid, patch)) return;
     }
     if (currentView !== 'allcomments') return;
     const item = _acData.find(c => c.id === cid && c.source === source);
@@ -7522,21 +7522,81 @@ async function lsubsDeleteComment(cid) {
     try {
         await api(`/api/comments/${cid}`, { method: 'DELETE' });
         toast(`Comment #${cid} deleted`, 'success');
-        if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
-        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+        // In-place: drop from cache + re-render. No spinner flicker.
+        if (!_lsubsRemoveCommentLocal(cid)) {
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments(true);
+        }
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
     } catch (e) { toast(`Delete failed: ${e.message || e}`, 'error'); }
 }
 
-// Delete an entire HQ thread cluster — the root + every reply (nested or not).
-// Goes through the same endpoint; the root id is enough because delete_comment
-// on the server now recursively cascades.
+// Per-cluster button: generate N more replies under an existing HQ root.
+function lsubsAddRepliesToCluster(rootId) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Add Replies to HQ Thread</h3>
+        <p class="text-xs text-gray-400 mb-3">Generates more replies under the brand-mention parent. Reads the existing replies first so new ones engage with the discussion instead of repeating it.</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Number of new replies</label>
+                <input type="number" id="lsubs-cluster-replies-num" value="3" min="1" max="10" class="w-full">
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-cluster-replies-aicrawl" checked>
+                <span>AI-crawl optimized</span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunAddReplies(${rootId})">Generate</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunAddReplies(rootId) {
+    const num = parseInt(document.getElementById('lsubs-cluster-replies-num')?.value) || 3;
+    const aiCrawl = !!document.getElementById('lsubs-cluster-replies-aicrawl')?.checked;
+    closeModal();
+    try {
+        const { task_id } = await api(`/api/comments/${rootId}/hq/add-replies`, {
+            method: 'POST',
+            body: { num_replies: num, ai_crawl: aiCrawl },
+        });
+        const label = `+${num} replies → #${rootId}`;
+        toast(`Generating ${num} more replies under #${rootId}…`, 'info');
+        _addBgTask(task_id, label);
+        _pollTask(task_id, label, () => {
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments(true);
+        });
+    } catch (e) { toast(`Failed to start: ${e.message || e}`, 'error'); }
+}
+
+// Per-cluster button: append a single OP-voice reply that reacts to the
+// whole existing thread (root + all replies).
+async function lsubsAddOpReplyToCluster(rootId) {
+    if (!confirm(`Generate an OP reply that engages with the existing HQ thread under comment #${rootId}?`)) return;
+    try {
+        const { task_id } = await api(`/api/comments/${rootId}/hq/op-reply`, {
+            method: 'POST',
+            body: { ai_crawl: true },
+        });
+        const label = `OP reply → #${rootId}`;
+        toast(`Generating OP reply for thread #${rootId}…`, 'info');
+        _addBgTask(task_id, label);
+        _pollTask(task_id, label, () => {
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments(true);
+        });
+    } catch (e) { toast(`Failed to start: ${e.message || e}`, 'error'); }
+}
+
 async function lsubsDeleteHqCluster(rootId, count) {
     if (!confirm(`Delete this entire HQ thread? ${count} comment${count === 1 ? '' : 's'} will be removed and cannot be recovered.`)) return;
     try {
         await api(`/api/comments/${rootId}`, { method: 'DELETE' });
         toast(`HQ thread deleted (${count} comment${count === 1 ? '' : 's'})`, 'success');
-        if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
-        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+        if (!_lsubsRemoveCommentLocal(rootId)) {
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments(true);
+        }
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
     } catch (e) { toast(`Delete failed: ${e.message || e}`, 'error'); }
 }
 
@@ -7572,10 +7632,49 @@ async function renderLsubsComments(c) {
     lsubsLoadComments();
 }
 
+// Cache for in-place updates. Editing or status-changing a comment patches
+// THIS array and re-renders without touching the network — no spinner, no
+// flicker, no perceived "page refresh".
+let _lsubsCommentsCache = [];
+
+// Per-row template. Lives at module scope so _lsubsApplyCommentPatch can
+// rebuild a single <tr> without re-running the full clustering pass.
+function _lsubsBuildCommentRowHtml(c, opts = {}) {
+    const numLabel = opts.num != null
+        ? `<span class="badge mr-1" style="background:#1a2a3d;color:#9ec4ff">#${opts.num}</span>`
+        : '';
+    const indentPx = (opts.depth || 0) * 24;
+    const arrow = (opts.depth || 0) > 0 ? '<span class="text-gray-500 mr-1">↳</span>' : '';
+    const numAttr = opts.num != null ? `data-num="${opts.num}"` : '';
+    return `
+        <tr data-cid="${c.id}" data-depth="${opts.depth || 0}" ${numAttr}>
+            <td style="max-width:520px;padding-left:${indentPx + 8}px">
+                ${arrow}${numLabel}<span class="text-sm">${(c.body || '').substring(0, 150)}${(c.body || '').length > 150 ? '…' : ''}</span>
+                ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
+                ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
+                ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
+                ${c.comment_type === 'op_reply' ? '<span class="badge ml-1" style="background:#3d2a0e;color:#ffb347">OP</span>' : ''}
+            </td>
+            <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
+            <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+            <td>
+                <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
+                    <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
+                    ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
+                    ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                    ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                    ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
+                    ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
+                    <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="lsubsDeleteComment(${c.id})" title="Delete this comment (and any replies under it)">Del</button>
+                </div>
+            </td>
+        </tr>`;
+}
+
 async function lsubsLoadComments(silent = false) {
     const listEl = document.getElementById('lsubs-cmt-list');
     if (!listEl) return;
-    // silent=true is used by post-action handlers — no spinner flicker.
     if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1', source: 'comment' });
     const bid = document.getElementById('lsubs-cmt-brand')?.value;
@@ -7584,155 +7683,184 @@ async function lsubsLoadComments(silent = false) {
     if (status) params.set('status', status);
     try {
         const res = await api('/api/all-comments?' + params.toString());
-        // /api/all-comments returns { items, total, status_counts, ... }
-        // Be tolerant of older shapes too, in case the API ever returns an array.
         const comments = (res && Array.isArray(res.items)) ? res.items
                        : (res && Array.isArray(res.comments)) ? res.comments
                        : (Array.isArray(res) ? res : []);
-        if (!comments.length) {
-            listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
-            return;
-        }
-        // Group by post
-        const groups = {};
-        for (const c of comments) {
-            const key = c.p_id;
-            if (!groups[key]) {
-                groups[key] = {
-                    post_title: c.post_title || '',
-                    subreddit_name: c.subreddit_name || '',
-                    post_url: c.post_reddit_url || '',
-                    brand_name: c.brand_name || '',
-                    items: [],
-                };
-            }
-            groups[key].items.push(c);
-        }
-        listEl.innerHTML = Object.entries(groups).map(([pid, g]) => {
-            // ---- Cluster HQ threads --------------------------------------
-            // Each HQ run produced by `generate_hq_comment` is one cluster:
-            //   root = comment_type='hq' AND parent_comment_id IS NULL
-            //   members = root + all descendants reachable via parent_comment_id
-            //             (only those with comment_type='hq').
-            // Multiple runs on the same post → multiple roots → multiple clusters.
-            // Organic (non-HQ) comments fall into the "Other comments" bucket.
-            const items = g.items || [];
-            const byId = {};
-            const kids = {};
-            for (const it of items) {
-                byId[it.id] = it;
-                const pcid = it.parent_comment_id;
-                if (pcid) (kids[pcid] = kids[pcid] || []).push(it);
-            }
-            const hqRoots = items
-                .filter(it => it.comment_type === 'hq' && !it.parent_comment_id)
-                .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-            const used = new Set();
-            const clusters = [];
-            for (const root of hqRoots) {
-                const cluster = [];
-                // DFS pre-order; sort children by suggested_order ASC then created_at ASC
-                const sortKids = (arr) => arr.slice().sort((a, b) => {
-                    const oa = a.suggested_order ?? 0, ob = b.suggested_order ?? 0;
-                    if (oa !== ob) return oa - ob;
-                    return (a.created_at || '').localeCompare(b.created_at || '');
-                });
-                const walk = (node, depth) => {
-                    if (used.has(node.id)) return;
-                    used.add(node.id);
-                    cluster.push({ c: node, depth });
-                    const ch = sortKids((kids[node.id] || []).filter(k => k.comment_type === 'hq'));
-                    for (const k of ch) walk(k, depth + 1);
-                };
-                walk(root, 0);
-                clusters.push(cluster);
-            }
-            const organic = items.filter(it => !used.has(it.id));
+        _lsubsCommentsCache = comments;
+        _lsubsRenderComments();
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load comments: ${e.message || e}</p>`;
+    }
+}
 
-            // ---- Per-row template (used by both clustered + organic) ----
-            const rowHtml = (c, opts = {}) => {
-                const numLabel = opts.num != null
-                    ? `<span class="badge mr-1" style="background:#1a2a3d;color:#9ec4ff">#${opts.num}</span>`
-                    : '';
-                const indentPx = (opts.depth || 0) * 24;
-                const arrow = (opts.depth || 0) > 0 ? '<span class="text-gray-500 mr-1">↳</span>' : '';
-                return `
-                <tr>
-                    <td style="max-width:520px;padding-left:${indentPx + 8}px">
-                        ${arrow}${numLabel}<span class="text-sm">${(c.body || '').substring(0, 150)}${(c.body || '').length > 150 ? '…' : ''}</span>
-                        ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
-                        ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
-                        ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
-                    </td>
-                    <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
-                    <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
-                    <td>
-                        <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
-                            <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
-                            ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
-                            ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
-                            ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
-                            ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
-                            <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
-                            ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
-                            <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="lsubsDeleteComment(${c.id})" title="Delete this comment (and any replies under it)">Del</button>
-                        </div>
-                    </td>
-                </tr>`;
+// Pure render from cache. Called by lsubsLoadComments after a fetch and
+// by patch helpers when an in-place row swap isn't sufficient (e.g. delete
+// or new comment appearance).
+function _lsubsRenderComments() {
+    const listEl = document.getElementById('lsubs-cmt-list');
+    if (!listEl) return;
+    const comments = _lsubsCommentsCache;
+    if (!comments.length) {
+        listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
+        return;
+    }
+    const groups = {};
+    for (const c of comments) {
+        const key = c.p_id;
+        if (!groups[key]) {
+            groups[key] = {
+                post_title: c.post_title || '',
+                subreddit_name: c.subreddit_name || '',
+                post_url: c.post_reddit_url || '',
+                brand_name: c.brand_name || '',
+                items: [],
             };
-            const tableShell = (rowsHtml) => `
-                <table>
-                    <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
-                    <tbody>${rowsHtml}</tbody>
-                </table>`;
+        }
+        groups[key].items.push(c);
+    }
+    listEl.innerHTML = Object.entries(groups).map(([pid, g]) => {
+        const items = g.items || [];
+        const kids = {};
+        for (const it of items) {
+            const pcid = it.parent_comment_id;
+            if (pcid) (kids[pcid] = kids[pcid] || []).push(it);
+        }
+        const hqRoots = items
+            .filter(it => it.comment_type === 'hq' && !it.parent_comment_id)
+            .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+        const used = new Set();
+        const clusters = [];
+        const sortKids = (arr) => arr.slice().sort((a, b) => {
+            const oa = a.suggested_order ?? 0, ob = b.suggested_order ?? 0;
+            if (oa !== ob) return oa - ob;
+            return (a.created_at || '').localeCompare(b.created_at || '');
+        });
+        for (const root of hqRoots) {
+            const cluster = [];
+            const walk = (node, depth) => {
+                if (used.has(node.id)) return;
+                used.add(node.id);
+                cluster.push({ c: node, depth });
+                // Pull HQ children AND op_reply children — both belong to the
+                // cluster visually (op_reply is rendered with an OP badge).
+                const ch = sortKids((kids[node.id] || []).filter(
+                    k => k.comment_type === 'hq' || k.comment_type === 'op_reply'
+                ));
+                for (const k of ch) walk(k, depth + 1);
+            };
+            walk(root, 0);
+            clusters.push(cluster);
+        }
+        const organic = items.filter(it => !used.has(it.id));
 
-            const clustersHtml = clusters.map((cluster, k) => {
-                const rootCreated = cluster[0]?.c?.created_at || '';
-                const rootId = cluster[0]?.c?.id;
-                const rows = cluster.map((node, idx) => rowHtml(node.c, { num: idx + 1, depth: node.depth })).join('');
-                return `
-                    <div class="mt-2 mb-3" style="border:1px solid #2a3a4a;border-radius:6px;overflow:hidden">
-                        <div class="px-2 py-1 text-xs flex items-center justify-between gap-2" style="background:#0e2a3d;color:#9ec4ff">
-                            <div class="flex items-center gap-2">
-                                <span class="font-bold">HQ Thread #${k + 1}</span>
-                                <span>· ${cluster.length} comment${cluster.length === 1 ? '' : 's'}</span>
-                                ${rootCreated ? `<span class="text-gray-500">· ${rootCreated.substring(0, 16).replace('T', ' ')}</span>` : ''}
-                            </div>
+        const tableShell = (rowsHtml) => `
+            <table>
+                <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>${rowsHtml}</tbody>
+            </table>`;
+
+        const clustersHtml = clusters.map((cluster, k) => {
+            const rootCreated = cluster[0]?.c?.created_at || '';
+            const rootId = cluster[0]?.c?.id;
+            const rows = cluster.map((node, idx) =>
+                _lsubsBuildCommentRowHtml(node.c, { num: idx + 1, depth: node.depth })
+            ).join('');
+            return `
+                <div class="mt-2 mb-3" style="border:1px solid #2a3a4a;border-radius:6px;overflow:hidden">
+                    <div class="px-2 py-1 text-xs flex items-center justify-between gap-2" style="background:#0e2a3d;color:#9ec4ff">
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold">HQ Thread #${k + 1}</span>
+                            <span>· ${cluster.length} comment${cluster.length === 1 ? '' : 's'}</span>
+                            ${rootCreated ? `<span class="text-gray-500">· ${rootCreated.substring(0, 16).replace('T', ' ')}</span>` : ''}
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4"
+                                onclick="lsubsAddRepliesToCluster(${rootId})"
+                                title="Generate more replies under this thread's main comment">+ Replies</button>
+                            <button class="btn btn-sm" style="background:#3d2a0e;color:#ffb347"
+                                onclick="lsubsAddOpReplyToCluster(${rootId})"
+                                title="Generate an OP reply that engages with the existing thread">+ OP Reply</button>
                             <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b"
                                 onclick="lsubsDeleteHqCluster(${rootId}, ${cluster.length})"
                                 title="Delete this entire HQ thread (parent + all replies)">Delete cluster</button>
                         </div>
-                        ${tableShell(rows)}
-                    </div>`;
-            }).join('');
-
-            const organicHtml = organic.length ? `
-                <div class="mt-3">
-                    <div class="text-xs text-gray-400 mb-1">Other comments · ${organic.length}</div>
-                    ${tableShell(organic.map(c => rowHtml(c)).join(''))}
-                </div>` : '';
-
-            return `
-            <div class="card p-3 mb-3">
-                <div class="flex justify-between items-center mb-2 pb-2" style="border-bottom:1px solid #2a2a2b">
-                    <div>
-                        <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline" style="color:#0079D3">${g.post_title.substring(0, 90)}</a>
-                        <span class="text-xs text-gray-500 ml-2">r/${g.subreddit_name}</span>
-                        ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs text-gray-500">${items.length} comment${items.length === 1 ? '' : 's'}${clusters.length ? ` · ${clusters.length} HQ thread${clusters.length === 1 ? '' : 's'}` : ''}</span>
-                        <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
-                        <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
-                    </div>
-                </div>
-                ${clustersHtml}
-                ${organicHtml}
-            </div>`;
+                    ${tableShell(rows)}
+                </div>`;
         }).join('');
-    } catch (e) {
-        listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load comments: ${e.message || e}</p>`;
+
+        const organicHtml = organic.length ? `
+            <div class="mt-3">
+                <div class="text-xs text-gray-400 mb-1">Other comments · ${organic.length}</div>
+                ${tableShell(organic.map(c => _lsubsBuildCommentRowHtml(c)).join(''))}
+            </div>` : '';
+
+        return `
+        <div class="card p-3 mb-3">
+            <div class="flex justify-between items-center mb-2 pb-2" style="border-bottom:1px solid #2a2a2b">
+                <div>
+                    <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline" style="color:#0079D3">${g.post_title.substring(0, 90)}</a>
+                    <span class="text-xs text-gray-500 ml-2">r/${g.subreddit_name}</span>
+                    ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-gray-500">${items.length} comment${items.length === 1 ? '' : 's'}${clusters.length ? ` · ${clusters.length} HQ thread${clusters.length === 1 ? '' : 's'}` : ''}</span>
+                    <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
+                    <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
+                </div>
+            </div>
+            ${clustersHtml}
+            ${organicHtml}
+        </div>`;
+    }).join('');
+}
+
+// In-place patch: update one comment in cache and swap its <tr> only.
+// No fetch, no spinner, no flicker. THIS is what makes "edit save" feel
+// instant instead of triggering a perceived page refresh.
+function _lsubsApplyCommentPatch(cid, patch) {
+    if (currentView !== 'livesubs' || _lsubsTab !== 'comments') return false;
+    const item = _lsubsCommentsCache.find(c => c.id === cid);
+    if (!item) {
+        // Not in cache (e.g. just-generated comment that the cache predates).
+        // Fall back to a silent refetch so the new row appears.
+        lsubsLoadComments(true);
+        return true;
     }
+    Object.assign(item, patch);
+    const tr = document.querySelector(`#lsubs-cmt-list tr[data-cid="${cid}"]`);
+    if (tr) {
+        const num = tr.dataset.num ? parseInt(tr.dataset.num) : null;
+        const depth = parseInt(tr.dataset.depth || '0');
+        const tmp = document.createElement('tbody');
+        tmp.innerHTML = _lsubsBuildCommentRowHtml(item, { num, depth });
+        const newTr = tmp.firstElementChild;
+        if (newTr) tr.replaceWith(newTr);
+        return true;
+    }
+    // Fallback: full re-render (no fetch).
+    _lsubsRenderComments();
+    return true;
+}
+
+// Remove a comment from cache and re-render (cluster numbering may change).
+function _lsubsRemoveCommentLocal(cid) {
+    if (currentView !== 'livesubs' || _lsubsTab !== 'comments') return false;
+    const before = _lsubsCommentsCache.length;
+    _lsubsCommentsCache = _lsubsCommentsCache.filter(c => c.id !== cid && c.parent_comment_id !== cid);
+    // Also drop deeper descendants (multi-level subtree)
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const ids = new Set(_lsubsCommentsCache.map(c => c.id));
+        const filtered = _lsubsCommentsCache.filter(c => !c.parent_comment_id || ids.has(c.parent_comment_id));
+        if (filtered.length !== _lsubsCommentsCache.length) {
+            _lsubsCommentsCache = filtered;
+            changed = true;
+        }
+    }
+    if (_lsubsCommentsCache.length !== before) _lsubsRenderComments();
+    return true;
 }
 
 async function renderLiveSearch(el) {

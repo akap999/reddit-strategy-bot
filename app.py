@@ -2570,6 +2570,65 @@ def api_gen_hq_comment():
     tid = start_task("hq-comment", task)
     return jsonify({"task_id": tid})
 
+
+# ---------------------------------------------------------------------------
+# Add MORE replies to an existing HQ cluster (per-cluster +Replies button)
+# ---------------------------------------------------------------------------
+@app.route("/api/comments/<int:cid>/hq/add-replies", methods=["POST"])
+def api_hq_add_replies(cid):
+    """Append more replies to an existing HQ thread.
+
+    The frontend's per-cluster '+ Replies' button hits this. Reads the
+    existing cluster for context so the new replies don't rehash points
+    the existing replies already covered.
+    """
+    data = request.json or {}
+    num_replies = int(data.get("num_replies", 3))
+    ai_crawl = bool(data.get("ai_crawl", True))  # default on for HQ
+
+    def task():
+        db, claude, _, _, comment_gen = make_generators()
+        try:
+            saved = comment_gen.add_replies_to_hq_cluster(
+                cid, num_replies=num_replies, ai_crawl=ai_crawl,
+            )
+            return [{"id": s["id"], "body": s["body"][:100]} for s in saved]
+        finally:
+            db.close()
+
+    tid = start_task("hq-add-replies", task)
+    return jsonify({"task_id": tid})
+
+
+# ---------------------------------------------------------------------------
+# Add an OP-voice reply to an existing HQ cluster (per-cluster +OP Reply)
+# ---------------------------------------------------------------------------
+@app.route("/api/comments/<int:cid>/hq/op-reply", methods=["POST"])
+def api_hq_op_reply(cid):
+    """Generate an OP reply that engages with the existing HQ cluster.
+
+    Reads the root + every existing reply, then writes a single OP-voice
+    reply parented to the root. Never mentions brands, never criticizes.
+    """
+    data = request.json or {}
+    ai_crawl = bool(data.get("ai_crawl", True))
+
+    def task():
+        db, claude, _, _, comment_gen = make_generators()
+        try:
+            saved = comment_gen.generate_op_reply_to_cluster(
+                cid, ai_crawl=ai_crawl,
+            )
+            if saved is None:
+                return []
+            return [{"id": saved["id"], "body": saved["body"][:100]}]
+        finally:
+            db.close()
+
+    tid = start_task("hq-op-reply", task)
+    return jsonify({"task_id": tid})
+
+
 @app.route("/api/generate/op-replies", methods=["POST"])
 def api_gen_op_replies():
     data = request.json

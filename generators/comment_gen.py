@@ -1133,7 +1133,10 @@ Return JSON only:
     "any_failed": true | false
 }}"""
 
-        result = self.claude.call(prompt, max_tokens=1500, temperature=0.2)
+        # The rubric output is 4 short reasons + judgments per comment.
+        # 800 tokens is plenty for 5 comments; lowering this from 1500 to 800
+        # noticeably cuts validator round-trip time.
+        result = self.claude.call(prompt, max_tokens=800, temperature=0.2)
         if not result:
             # If the validator itself fails, do not block the pipeline;
             # let the comment through with a noted-but-not-failing eval.
@@ -1210,7 +1213,7 @@ Return JSON only:
     # passed validation. Up to `max_retries` retries per failed comment,
     # each retry seeded with the validator's natural-language feedback.
     # ------------------------------------------------------------------
-    def _generate_with_validation(self, max_retries=2, **kwargs):
+    def _generate_with_validation(self, max_retries=1, **kwargs):
         post_title   = kwargs.get("post_title", "")
         post_body    = kwargs.get("post_body", "")
         subreddit    = kwargs.get("subreddit", "")
@@ -1655,6 +1658,18 @@ Return JSON only:
         for idx, parent_idx in shape:
             is_main = parent_idx is None
 
+            # If a previous comment was dropped (validation failure with no
+            # successful retry), saved_bodies won't have its key and any
+            # reply that hangs off it can't be built. Re-parent to main if
+            # main is alive; otherwise abort the whole thread.
+            if not is_main and parent_idx not in saved_bodies:
+                if 0 in saved_bodies and parent_idx != 0:
+                    print(f"    HQ: parent {parent_idx} was dropped — re-parenting reply {idx} to main")
+                    parent_idx = 0
+                else:
+                    print(f"    HQ: parent {parent_idx} unavailable — skipping reply {idx}")
+                    continue
+
             # Build context from previously generated comments
             thread_comments = [
                 {"body": saved_bodies[i], "score": 5,
@@ -1677,7 +1692,13 @@ Return JSON only:
             persona_id = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
             structure_id = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
 
-            result = self._generate_with_validation(
+            # Speed: validate-and-retry only the MAIN brand-mention comment.
+            # Replies don't mention the brand, so brand_attitude / answer-shape
+            # judgments are mostly moot, and the validator is the expensive
+            # part of the loop (each call ~30s). Skipping validation for the
+            # 4-5 replies cuts HQ thread generation time roughly in half.
+            gen_fn = self._generate_with_validation if is_main else self.generate_comments
+            result = gen_fn(
                 post_title=post["title"],
                 post_body=post["body"],
                 subreddit=subreddit["name"],
@@ -1706,6 +1727,12 @@ Return JSON only:
             bodies = result.get("generated_comments", [])
             if not bodies:
                 print(f"    Warning: failed to generate comment at index {idx}")
+                # If MAIN fails validation+retries, the whole thread is doomed:
+                # every reply needs a parent body. Abort early so we don't
+                # KeyError on `saved_bodies[0]` and don't waste more LLM calls.
+                if is_main:
+                    print("    HQ: main brand-mention comment failed — aborting thread")
+                    break
                 continue
 
             body = bodies[0]

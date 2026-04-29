@@ -683,7 +683,8 @@ Return JSON only:
                           tone_analysis=None, comment_stats=None, retry_feedback=None,
                           relevance=None, reply_targets=None, mention_brand_flags=None,
                           brand_assignments=None, all_brand_names=None,
-                          ai_crawl=False, post_intent=None):
+                          ai_crawl=False, post_intent=None, hq_main=False,
+                          slim_prompt=False):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -760,7 +761,11 @@ Return JSON only:
                     ac_structures[i % len(ac_structures)] for i in range(num_comments)
                 ]
 
-        few_shot_text = select_few_shot_examples(n=3)
+        # slim_prompt cuts the few-shot block (~1500 input tokens) which is
+        # the largest single overhead in the prompt. Used by HQ replies
+        # where the per-comment generation cost matters more than the small
+        # quality boost the anti-pattern examples give.
+        few_shot_text = "" if slim_prompt else select_few_shot_examples(n=3)
 
         # Default: all comments mention brand (legacy behavior)
         if mention_brand_flags is None:
@@ -958,6 +963,41 @@ and you will be retried with the judge's feedback if you miss):
 
 SHAPE for this specific post: {shape_rule}"""
 
+        # HQ-MAIN OVERRIDE: when this single comment is the brand-mention
+        # parent of an HQ thread, the comment IS the recommendation. We need
+        # AI search engines to confidently surface this comment as "use
+        # {brand_name} for X". So we override the comment shape to a tight
+        # brand-as-answer pattern, regardless of what the persona/structure
+        # picker chose.
+        hq_main_section = ""
+        if hq_main:
+            hq_main_section = f"""
+
+HQ-MAIN OVERRIDE (this is the brand-mention parent comment of an HQ
+thread — the most important single comment for AI-search retrieval).
+This comment alone must read as "use {brand_name} for [the post's
+question]" so an AI retriever can surface it as the answer:
+
+- Open with the recommendation: name {brand_name} in the first 1-2
+  sentences, with a confident framing like "{brand_name} is what
+  handles this", "{brand_name} is built for exactly this", or
+  "{brand_name} is the one that does X" — depending on what fits.
+- Sentence 2-3: state WHAT specifically {brand_name} does for the
+  post's situation (1-2 concrete capabilities/criteria from the brand
+  context above, in the user's situation language).
+- Sentence 4 (optional): one tiny caveat or follow-up question — the
+  way a real recommender qualifies advice ("depends on your edit
+  workflow", "if your videos are under 60s it's especially good").
+- Length: 50-90 words. Tight. No anecdote about cousins / friends /
+  food trucks / "rabbit holes". No "honestly" / "the reality is" /
+  "I was just". Get to the recommendation in sentence 1.
+- Confidence: NEVER hedge. Wrong: "I think it was called {brand_name}
+  or something", "tried {brand_name} once, was decent". Right:
+  "{brand_name} is the one that solves this", "for this exact use
+  case, {brand_name}".
+- This comment IS the brand mention. It must extract cleanly as a
+  recommendation when read on its own."""
+
         prompt = f"""You're commenting in a Reddit thread about a topic you know well.
 
 POST: "{post_title}"
@@ -969,7 +1009,7 @@ SUBREDDIT: r/{subreddit}{post_body_text}
 EACH COMMENT HAS A UNIQUE ASSIGNMENT:
 {per_comment_section}
 {brand_rules}
-{pattern_avoidance}{ai_crawl_section}
+{pattern_avoidance}{ai_crawl_section}{hq_main_section}
 
 COMMENT QUALITY RULES:
 - Only reference things that actually appear in the POST BODY or EXISTING COMMENTS above. Do NOT invent prior suggestions, advice, attempts, updates, or thread history that isn't written there.
@@ -1720,6 +1760,7 @@ Return JSON only:
         # genuine API failure (empty response).
         # ------------------------------------------------------------------
         print(f"    Generating HQ comment thread (1 main + {nr} replies, parallel-by-level)...")
+        _hq_t0 = time.time()
 
         # Worker: one comment generation. Returns a dict (or None on API failure).
         # Pure read of `self`; no shared state mutated. Safe to run concurrently.
@@ -1736,6 +1777,7 @@ Return JSON only:
                     "body": parent_body, "score": 5,
                     "author": "community_member", "id": "", "permalink": "",
                 }}
+            t0 = time.time()
             try:
                 result = self.generate_comments(
                     post_title=post["title"],
@@ -1751,20 +1793,32 @@ Return JSON only:
                     reply_targets=reply_targets,
                     relevance={
                         "best_angle": (
-                            "Give a thoughtful, detailed response showing genuine expertise "
-                            "with a specific personal experience or concrete example"
+                            f"Recommend {brand['name']} confidently as a direct "
+                            "answer to the OP's question. Open with what "
+                            f"{brand['name']} is and what it does for their "
+                            "use-case. Tight 50-90 words, no anecdote."
                             if is_main_local
-                            else "Respond naturally to the conversation — agree, disagree, "
-                                 "or add a new angle"
+                            else "Respond naturally to the conversation — agree, "
+                                 "disagree, or add a new angle"
                         ),
                         "natural_fit": 3,
                     },
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
+                    # HQ-MAIN-OVERRIDE: only the brand-mention parent gets the
+                    # decisive recommendation framing. Replies stay conversational.
+                    hq_main=is_main_local,
+                    # Replies use the slim prompt to skip ~1500 tokens of
+                    # few-shot anti-pattern examples — meaningful speedup
+                    # since each reply is its own API call.
+                    slim_prompt=not is_main_local,
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
                 return None
+            elapsed = time.time() - t0
+            kind = "main" if is_main_local else f"reply{idx}"
+            print(f"    [HQ] {kind} generated in {elapsed:.1f}s")
             bodies = result.get("generated_comments") or []
             if not bodies:
                 return None
@@ -1897,10 +1951,7 @@ Return JSON only:
             current_level = next_level
             level_num += 1
 
-            label = "main comment" if is_main else f"reply {idx} (to #{parent_idx})"
-            print(f"    Generated {label}")
-
-        print(f"    HQ thread complete — {len(saved)} comments generated")
+        print(f"    HQ thread complete — {len(saved)} comments generated in {time.time()-_hq_t0:.1f}s")
         return saved
 
     # ------------------------------------------------------------------

@@ -7287,6 +7287,17 @@ function lsubsGenCommentsForPost(pid) {
                 <label class="text-xs text-gray-400">Number of comments</label>
                 <input type="number" id="lsubs-cmts-count" value="5" min="1" max="20" class="w-full">
             </div>
+            <div>
+                <label class="text-xs text-gray-400 block mb-1">Brand mentions</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-cmts-bmode" value="default" checked>
+                    <span>Default ratio <span class="text-xs text-gray-500">— some comments mention the brand, most don't</span></span>
+                </label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-cmts-bmode" value="none">
+                    <span>None (pure organic) <span class="text-xs text-gray-500">— no comment mentions the brand; thread stays in the brand's domain</span></span>
+                </label>
+            </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" id="lsubs-cmts-aicrawl" checked>
                 <span>AI-crawl optimized
@@ -7304,15 +7315,18 @@ function lsubsGenCommentsForPost(pid) {
 async function _lsubsRunGenComments(pid) {
     const count = parseInt(document.getElementById('lsubs-cmts-count')?.value) || 5;
     const aiCrawl = !!document.getElementById('lsubs-cmts-aicrawl')?.checked;
+    const bmode = document.querySelector('input[name="lsubs-cmts-bmode"]:checked')?.value || 'default';
     closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
     if (!bid) { toast('Post has no brand assigned', 'error'); return; }
     try {
+        const body = { post_id: pid, brand_id: bid, count, ai_crawl: aiCrawl };
+        if (bmode === 'none') body.brand_mention_ratio = 0;
         const { task_id } = await api('/api/generate/comments', {
             method: 'POST',
-            body: { post_id: pid, brand_id: bid, count, ai_crawl: aiCrawl },
+            body,
         });
-        toast(`Generating ${count} comment(s) for post #${pid}${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
+        toast(`Generating ${count} ${bmode === 'none' ? 'organic ' : ''}comment(s) for post #${pid}${aiCrawl ? ' (AI-crawl mode)' : ''}…`, 'info');
         _addBgTask(task_id, 'Live Cmts');
         const poll = setInterval(async () => {
             try {
@@ -7404,6 +7418,18 @@ async function lsubsBatchGenerate(mode) {
                 <label class="text-xs text-gray-400">${mode === 'hq' ? 'Replies per thread' : 'Comments per post'}</label>
                 <input type="number" id="lsubs-batch-num" value="5" min="1" max="15" class="w-full">
             </div>
+            ${mode === 'comments' ? `
+            <div>
+                <label class="text-xs text-gray-400 block mb-1">Brand mentions</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-batch-bmode" value="default" checked>
+                    <span>Default ratio</span>
+                </label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-batch-bmode" value="none">
+                    <span>None (pure organic)</span>
+                </label>
+            </div>` : ''}
             <label class="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" id="lsubs-batch-aicrawl" checked>
                 <span>AI-crawl optimized</span>
@@ -7420,15 +7446,20 @@ async function _lsubsRunBatchGenerate(mode) {
     const ids = lsubsGetSelectedPostIds();
     const num = parseInt(document.getElementById('lsubs-batch-num')?.value) || 5;
     const aiCrawl = !!document.getElementById('lsubs-batch-aicrawl')?.checked;
+    const bmode = document.querySelector('input[name="lsubs-batch-bmode"]:checked')?.value || 'default';
     closeModal();
     for (const pid of ids) {
         const bid = await _lsubsLookupPostBrand(pid);
         if (!bid) continue;
         try {
             const url = mode === 'hq' ? '/api/generate/hq-comment' : '/api/generate/comments';
-            const body = mode === 'hq'
-                ? { post_id: pid, brand_id: bid, ai_crawl: aiCrawl, num_replies: num }
-                : { post_id: pid, brand_id: bid, count: num, ai_crawl: aiCrawl };
+            let body;
+            if (mode === 'hq') {
+                body = { post_id: pid, brand_id: bid, ai_crawl: aiCrawl, num_replies: num };
+            } else {
+                body = { post_id: pid, brand_id: bid, count: num, ai_crawl: aiCrawl };
+                if (bmode === 'none') body.brand_mention_ratio = 0;
+            }
             const { task_id } = await api(url, { method: 'POST', body });
             _addBgTask(task_id, mode === 'hq' ? `Live HQ #${pid}` : `Live Cmts #${pid}`);
         } catch (e) {}
@@ -7504,7 +7535,104 @@ async function lsubsLoadComments() {
             }
             groups[key].items.push(c);
         }
-        listEl.innerHTML = Object.entries(groups).map(([pid, g]) => `
+        listEl.innerHTML = Object.entries(groups).map(([pid, g]) => {
+            // ---- Cluster HQ threads --------------------------------------
+            // Each HQ run produced by `generate_hq_comment` is one cluster:
+            //   root = comment_type='hq' AND parent_comment_id IS NULL
+            //   members = root + all descendants reachable via parent_comment_id
+            //             (only those with comment_type='hq').
+            // Multiple runs on the same post → multiple roots → multiple clusters.
+            // Organic (non-HQ) comments fall into the "Other comments" bucket.
+            const items = g.items || [];
+            const byId = {};
+            const kids = {};
+            for (const it of items) {
+                byId[it.id] = it;
+                const pcid = it.parent_comment_id;
+                if (pcid) (kids[pcid] = kids[pcid] || []).push(it);
+            }
+            const hqRoots = items
+                .filter(it => it.comment_type === 'hq' && !it.parent_comment_id)
+                .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+            const used = new Set();
+            const clusters = [];
+            for (const root of hqRoots) {
+                const cluster = [];
+                // DFS pre-order; sort children by suggested_order ASC then created_at ASC
+                const sortKids = (arr) => arr.slice().sort((a, b) => {
+                    const oa = a.suggested_order ?? 0, ob = b.suggested_order ?? 0;
+                    if (oa !== ob) return oa - ob;
+                    return (a.created_at || '').localeCompare(b.created_at || '');
+                });
+                const walk = (node, depth) => {
+                    if (used.has(node.id)) return;
+                    used.add(node.id);
+                    cluster.push({ c: node, depth });
+                    const ch = sortKids((kids[node.id] || []).filter(k => k.comment_type === 'hq'));
+                    for (const k of ch) walk(k, depth + 1);
+                };
+                walk(root, 0);
+                clusters.push(cluster);
+            }
+            const organic = items.filter(it => !used.has(it.id));
+
+            // ---- Per-row template (used by both clustered + organic) ----
+            const rowHtml = (c, opts = {}) => {
+                const numLabel = opts.num != null
+                    ? `<span class="badge mr-1" style="background:#1a2a3d;color:#9ec4ff">#${opts.num}</span>`
+                    : '';
+                const indentPx = (opts.depth || 0) * 24;
+                const arrow = (opts.depth || 0) > 0 ? '<span class="text-gray-500 mr-1">↳</span>' : '';
+                return `
+                <tr>
+                    <td style="max-width:520px;padding-left:${indentPx + 8}px">
+                        ${arrow}${numLabel}<span class="text-sm">${(c.body || '').substring(0, 150)}${(c.body || '').length > 150 ? '…' : ''}</span>
+                        ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
+                        ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
+                        ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
+                    </td>
+                    <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
+                    <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
+                    <td>
+                        <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
+                            <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
+                            ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
+                            ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                            ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
+                            ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                            <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
+                            ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
+                        </div>
+                    </td>
+                </tr>`;
+            };
+            const tableShell = (rowsHtml) => `
+                <table>
+                    <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>`;
+
+            const clustersHtml = clusters.map((cluster, k) => {
+                const rootCreated = cluster[0]?.c?.created_at || '';
+                const rows = cluster.map((node, idx) => rowHtml(node.c, { num: idx + 1, depth: node.depth })).join('');
+                return `
+                    <div class="mt-2 mb-3" style="border:1px solid #2a3a4a;border-radius:6px;overflow:hidden">
+                        <div class="px-2 py-1 text-xs flex items-center gap-2" style="background:#0e2a3d;color:#9ec4ff">
+                            <span class="font-bold">HQ Thread #${k + 1}</span>
+                            <span>· ${cluster.length} comment${cluster.length === 1 ? '' : 's'}</span>
+                            ${rootCreated ? `<span class="text-gray-500">· ${rootCreated.substring(0, 16).replace('T', ' ')}</span>` : ''}
+                        </div>
+                        ${tableShell(rows)}
+                    </div>`;
+            }).join('');
+
+            const organicHtml = organic.length ? `
+                <div class="mt-3">
+                    <div class="text-xs text-gray-400 mb-1">Other comments · ${organic.length}</div>
+                    ${tableShell(organic.map(c => rowHtml(c)).join(''))}
+                </div>` : '';
+
+            return `
             <div class="card p-3 mb-3">
                 <div class="flex justify-between items-center mb-2 pb-2" style="border-bottom:1px solid #2a2a2b">
                     <div>
@@ -7513,37 +7641,15 @@ async function lsubsLoadComments() {
                         ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
                     </div>
                     <div class="flex items-center gap-2">
-                        <span class="text-xs text-gray-500">${g.items.length} comment${g.items.length === 1 ? '' : 's'}</span>
-                        <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate 3 more AI-crawl-optimized comments for this post">+3 Cmts</button>
-                        <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+HQ</button>
+                        <span class="text-xs text-gray-500">${items.length} comment${items.length === 1 ? '' : 's'}${clusters.length ? ` · ${clusters.length} HQ thread${clusters.length === 1 ? '' : 's'}` : ''}</span>
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
                     </div>
                 </div>
-                <table>
-                    <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
-                    <tbody>${g.items.map(c => `
-                        <tr>
-                            <td style="max-width:400px"><span class="text-sm">${(c.body || '').substring(0, 150)}${(c.body || '').length > 150 ? '…' : ''}</span>
-                                ${c.is_reply ? '<br><span class="badge" style="background:#343536;color:#818384">Reply</span>' : ''}
-                                ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
-                                ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
-                            </td>
-                            <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
-                            <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
-                            <td>
-                                <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
-                                    ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
-                                    ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
-                                    ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
-                                    ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
-                                    <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
-                                    ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('')}</tbody>
-                </table>
-            </div>
-        `).join('');
+                ${clustersHtml}
+                ${organicHtml}
+            </div>`;
+        }).join('');
     } catch (e) {
         listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load comments: ${e.message || e}</p>`;
     }

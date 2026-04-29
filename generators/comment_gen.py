@@ -10,6 +10,7 @@ import json
 import re
 import requests
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
 from generators.base import (
@@ -1653,112 +1654,90 @@ Return JSON only:
         saved_bodies = {}    # index -> body text
         saved_personas = {}  # index -> persona id
 
-        print(f"    Generating HQ comment thread (1 main + {nr} replies)...")
+        # ------------------------------------------------------------------
+        # Parallel-by-level generation. HQ replies are I/O-bound on the
+        # Anthropic API; firing siblings concurrently collapses what was a
+        # 5-call sequential chain into ~3 wall-time rounds (main → level-1
+        # parallel → level-2 parallel). We never drop a comment due to
+        # validation here — the user explicitly wants every HQ slot saved
+        # — so this path uses raw generate_comments and one retry on
+        # genuine API failure (empty response).
+        # ------------------------------------------------------------------
+        print(f"    Generating HQ comment thread (1 main + {nr} replies, parallel-by-level)...")
 
-        for idx, parent_idx in shape:
-            is_main = parent_idx is None
-
-            # If a previous comment was dropped (validation failure with no
-            # successful retry), saved_bodies won't have its key and any
-            # reply that hangs off it can't be built. Re-parent to main if
-            # main is alive; otherwise abort the whole thread.
-            if not is_main and parent_idx not in saved_bodies:
-                if 0 in saved_bodies and parent_idx != 0:
-                    print(f"    HQ: parent {parent_idx} was dropped — re-parenting reply {idx} to main")
-                    parent_idx = 0
-                else:
-                    print(f"    HQ: parent {parent_idx} unavailable — skipping reply {idx}")
-                    continue
-
-            # Build context from previously generated comments
+        # Worker: one comment generation. Returns a dict (or None on API failure).
+        # Pure read of `self`; no shared state mutated. Safe to run concurrently.
+        def _gen_one(idx, parent_idx, parent_body, sibling_bodies, persona_id, structure_id):
+            is_main_local = parent_idx is None
             thread_comments = [
-                {"body": saved_bodies[i], "score": 5,
-                 "author": saved_personas.get(i, "community_member"),
+                {"body": b, "score": 5, "author": "community_member",
                  "id": "", "permalink": ""}
-                for i in sorted(saved_bodies.keys())
+                for b in sibling_bodies
             ]
-
-            reply_targets = {}
-            if not is_main:
-                parent_body = saved_bodies[parent_idx]
-                parent_target = {
+            reply_targets = None
+            if parent_body is not None:
+                reply_targets = {0: {
                     "body": parent_body, "score": 5,
-                    "author": saved_personas.get(parent_idx, "community_member"),
-                    "id": "", "permalink": "",
-                }
-                reply_targets = {0: parent_target}
-
-            # Pick this comment's persona/structure
-            persona_id = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
-            structure_id = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
-
-            # Speed: validate-and-retry only the MAIN brand-mention comment.
-            # Replies don't mention the brand, so brand_attitude / answer-shape
-            # judgments are mostly moot, and the validator is the expensive
-            # part of the loop (each call ~30s). Skipping validation for the
-            # 4-5 replies cuts HQ thread generation time roughly in half.
-            gen_fn = self._generate_with_validation if is_main else self.generate_comments
-            result = gen_fn(
-                post_title=post["title"],
-                post_body=post["body"],
-                subreddit=subreddit["name"],
-                comments=thread_comments,
-                brand_name=brand["name"],
-                brand_context=brand["context"],
-                num_comments=1,
-                tone_analysis=mock_tone,
-                comment_stats=hq_stats if is_main else reply_stats,
-                mention_brand_flags=[mention_flags[idx]],
-                reply_targets=reply_targets if reply_targets else None,
-                relevance={
-                    "best_angle": (
-                        "Give a thoughtful, detailed response showing genuine expertise "
-                        "with a specific personal experience or concrete example"
-                        if is_main
-                        else "Respond naturally to the conversation — agree, disagree, "
-                             "or add a new angle"
-                    ),
-                    "natural_fit": 3,
-                },
-                ai_crawl=ai_crawl,
-                post_intent=post.get("intent"),
-            )
-
-            bodies = result.get("generated_comments", [])
+                    "author": "community_member", "id": "", "permalink": "",
+                }}
+            try:
+                result = self.generate_comments(
+                    post_title=post["title"],
+                    post_body=post["body"],
+                    subreddit=subreddit["name"],
+                    comments=thread_comments,
+                    brand_name=brand["name"],
+                    brand_context=brand["context"],
+                    num_comments=1,
+                    tone_analysis=mock_tone,
+                    comment_stats=hq_stats if is_main_local else reply_stats,
+                    mention_brand_flags=[mention_flags[idx]],
+                    reply_targets=reply_targets,
+                    relevance={
+                        "best_angle": (
+                            "Give a thoughtful, detailed response showing genuine expertise "
+                            "with a specific personal experience or concrete example"
+                            if is_main_local
+                            else "Respond naturally to the conversation — agree, disagree, "
+                                 "or add a new angle"
+                        ),
+                        "natural_fit": 3,
+                    },
+                    ai_crawl=ai_crawl,
+                    post_intent=post.get("intent"),
+                )
+            except Exception as e:
+                print(f"    [HQ] gen exception idx={idx}: {e}")
+                return None
+            bodies = result.get("generated_comments") or []
             if not bodies:
-                print(f"    Warning: failed to generate comment at index {idx}")
-                # If MAIN fails validation+retries, the whole thread is doomed:
-                # every reply needs a parent body. Abort early so we don't
-                # KeyError on `saved_bodies[0]` and don't waste more LLM calls.
-                if is_main:
-                    print("    HQ: main brand-mention comment failed — aborting thread")
-                    break
-                continue
+                return None
+            return {
+                "idx": idx,
+                "body": bodies[0],
+                "persona_id": (result.get("_personas") or [persona_id])[0],
+                "structure_id": (result.get("_structures") or [structure_id])[0],
+            }
 
-            body = bodies[0]
+        # Helper: persist one generated comment to DB and update the
+        # in-memory bookkeeping. Called single-threaded after each level.
+        def _save_one(idx, parent_idx, gen_result):
+            body = gen_result["body"]
             mentions = mention_flags[idx] and brand["name"].lower() in body.lower()
-
-            # Scheduling
-            if is_main:
+            if parent_idx is None:
                 comment_day = post_day_offset
             elif parent_idx == 0:
                 comment_day = post_day_offset + 1
             else:
                 comment_day = post_day_offset + 2
-
-            r_personas = result.get("_personas", [])
-            r_structures = result.get("_structures", [])
-            p_id = r_personas[0] if r_personas else persona_id
-            s_id = r_structures[0] if r_structures else structure_id
-
-            comment_id = self.db.save_comment(
+            cid = self.db.save_comment(
                 post_id=post["id"],
                 brand_id=brand["id"],
                 body=body,
-                persona_id=p_id,
-                structure_id=s_id,
-                is_reply=0 if is_main else 1,
-                parent_comment_id=saved_ids.get(parent_idx),
+                persona_id=gen_result["persona_id"],
+                structure_id=gen_result["structure_id"],
+                is_reply=0 if parent_idx is None else 1,
+                parent_comment_id=saved_ids.get(parent_idx) if parent_idx is not None else None,
                 mentions_brand=1 if mentions else 0,
                 status="complete",
                 suggested_post_day=comment_day,
@@ -1766,21 +1745,101 @@ Return JSON only:
                 prompt_version=PROMPT_VERSION,
                 comment_type="hq",
             )
-            self._detect_and_store_keywords(comment_id, body, brand, mentions)
-
-            saved_ids[idx] = comment_id
+            self._detect_and_store_keywords(cid, body, brand, mentions)
+            saved_ids[idx] = cid
             saved_bodies[idx] = body
-            saved_personas[idx] = p_id
-
+            saved_personas[idx] = gen_result["persona_id"]
             saved.append({
-                "id": comment_id, "body": body,
-                "is_reply": not is_main, "mentions_brand": mentions,
+                "id": cid, "body": body,
+                "is_reply": parent_idx is not None,
+                "mentions_brand": mentions,
                 "day": comment_day,
-                "parent_id": saved_ids.get(parent_idx),
+                "parent_id": saved_ids.get(parent_idx) if parent_idx is not None else None,
             })
-
-            fp = self._extract_pattern_fingerprint(body, brand["name"], p_id, s_id)
+            fp = self._extract_pattern_fingerprint(
+                body, brand["name"], gen_result["persona_id"], gen_result["structure_id"]
+            )
             self._pattern_history.append(fp)
+
+        # ---- Step 1: generate MAIN sequentially (replies depend on it) ----
+        main_pid = all_personas[0] if all_personas else random.choice(PERSONAS)["id"]
+        main_sid = all_structures[0] if all_structures else random.choice(STRUCTURE_TEMPLATES)["id"]
+        r_main = _gen_one(0, None, None, [], main_pid, main_sid)
+        # One retry on genuine API failure (empty response). User explicitly
+        # asked for "no case where comments are not generated" — so we keep
+        # whatever main produces; we do not run the LLM validator on HQ.
+        if r_main is None:
+            print("    [HQ] main returned no body — retrying once")
+            r_main = _gen_one(0, None, None, [], main_pid, main_sid)
+        if r_main is None:
+            print("    HQ: main API failed twice — aborting thread")
+            return saved
+        _save_one(0, None, r_main)
+
+        # ---- Step 2: build dependency tree, generate level-by-level ----
+        children = {}
+        for idx, parent_idx in shape[1:]:  # skip main
+            children.setdefault(parent_idx, []).append(idx)
+
+        current_level = [0]
+        level_num = 1
+        while True:
+            next_level = []
+            for p in current_level:
+                next_level.extend(children.get(p, []))
+            if not next_level:
+                break
+
+            print(f"    [HQ] level {level_num}: generating {len(next_level)} replies in parallel")
+            # Parallel API calls for this level. Each reply only needs its
+            # parent's body; siblings at the same level don't see each other,
+            # which is fine — the prompt still has post + parent context.
+            sibling_bodies_snapshot = [saved_bodies[i] for i in sorted(saved_bodies.keys())]
+            level_results = []
+            with ThreadPoolExecutor(max_workers=min(8, len(next_level))) as ex:
+                fut_to_meta = {}
+                for idx in next_level:
+                    parent_idx = next(p for i, p in shape if i == idx)
+                    # Re-parent to main if our intended parent never made it
+                    # (only matters for level 2+ if a level-1 reply API-failed).
+                    if parent_idx not in saved_bodies:
+                        parent_idx = 0
+                    parent_body = saved_bodies[parent_idx]
+                    pid = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
+                    sid = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
+                    fut = ex.submit(_gen_one, idx, parent_idx, parent_body,
+                                    sibling_bodies_snapshot, pid, sid)
+                    fut_to_meta[fut] = (idx, parent_idx, parent_body, pid, sid)
+                for fut in as_completed(fut_to_meta):
+                    meta = fut_to_meta[fut]
+                    try:
+                        r = fut.result()
+                    except Exception as e:
+                        print(f"    [HQ] worker exception idx={meta[0]}: {e}")
+                        r = None
+                    level_results.append((meta, r))
+
+            # Retry once (sequentially, to bound load) any that returned None
+            for (idx, parent_idx, parent_body, pid, sid), r in level_results:
+                if r is not None:
+                    continue
+                print(f"    [HQ] reply {idx} returned no body — retrying once")
+                r2 = _gen_one(idx, parent_idx, parent_body, sibling_bodies_snapshot, pid, sid)
+                # Replace in level_results (yes, mutating tuple — find and replace)
+                for j, (m, rr) in enumerate(level_results):
+                    if m[0] == idx:
+                        level_results[j] = (m, r2)
+                        break
+
+            # Save (single-threaded; SQLite + bookkeeping)
+            for (idx, parent_idx, parent_body, pid, sid), r in level_results:
+                if r is None:
+                    print(f"    [HQ] reply {idx} unrecoverable — skipping")
+                    continue
+                _save_one(idx, parent_idx, r)
+
+            current_level = next_level
+            level_num += 1
 
             label = "main comment" if is_main else f"reply {idx} (to #{parent_idx})"
             print(f"    Generated {label}")

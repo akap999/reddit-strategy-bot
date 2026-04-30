@@ -6852,7 +6852,7 @@ function renderLsubsGenerate(c) {
                     </select>
                 </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
-                <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (topic only)</button>
+                <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
                 <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
             </div>
             <div id="lsubs-fit-warn" class="mt-3 text-xs" style="display:none"></div>
@@ -7088,15 +7088,15 @@ function lsubsShowCustomModal() {
     const { bid, sub } = lsubsContext();
     if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
     showModal(`
-        <h3 class="text-xl font-bold mb-3">Custom Post — topic only</h3>
-        <p class="text-xs text-gray-400 mb-3">Describe the topic in one or two lines; Claude will write the title and body for r/${sub}.</p>
+        <h3 class="text-xl font-bold mb-3">Custom Post — title only</h3>
+        <p class="text-xs text-gray-400 mb-3">Type the exact title you want for the r/${sub} post. The title will be used <strong>verbatim</strong> — Claude only writes the body to fit it.</p>
         <div>
-            <label class="text-xs text-gray-400">Topic</label>
-            <textarea id="lsubs-custom-topic" rows="3" class="w-full" placeholder="e.g. how to compare TRT clinics for someone who's never been on testosterone before" style="font-family:inherit;min-height:90px"></textarea>
+            <label class="text-xs text-gray-400">Post title (used as-is)</label>
+            <textarea id="lsubs-custom-topic" rows="3" class="w-full" placeholder="e.g. anyone using AI to generate music synced to their videos?" style="font-family:inherit;min-height:90px"></textarea>
         </div>
         <div class="flex gap-2 mt-4 justify-end">
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-primary" onclick="lsubsSubmitCustom(false)">Generate</button>
+            <button class="btn btn-primary" onclick="lsubsSubmitCustom(false)">Generate body</button>
         </div>
     `);
 }

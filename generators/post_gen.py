@@ -148,12 +148,15 @@ class PostGenerator:
         return saved
 
     def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None):
-        """Live Subreddits — flesh out one full post from a single user-supplied topic.
+        """Live Subreddits — flesh out one full post from a user-supplied title.
+
+        The user-supplied `topic` is the FINAL post title, used verbatim. The
+        LLM only writes the body, storyline, and intent that fit that title.
+        It does NOT rewrite or "improve" the title.
 
         Reuses the same brand-context scaffolding as `generate_posts` but:
         - num_posts = 1
-        - the topic seeds the post's storyline (Claude is asked to pick the
-          best-fitting intent and storyline for it)
+        - title is the user's input, unchanged
         - returns one dict {title, body, storyline, intent, ai_query_score}
           (NOT saved — caller persists)
         """
@@ -161,6 +164,11 @@ class PostGenerator:
             brands = [brand]
         else:
             brands = brand if isinstance(brand, list) else [brand]
+
+        # The user's input IS the final title. Don't let the model touch it.
+        final_title = (topic or "").strip()
+        if not final_title:
+            return None
 
         brand_block, target_names, competitors = self._build_enriched_brand_block(brands)
         target_names_str = ", ".join(target_names) if target_names else "(none)"
@@ -170,70 +178,70 @@ class PostGenerator:
         if existing_titles:
             sample = list(existing_titles)[:30]
             existing_lines = "\n".join(f'  - "{t}"' for t in sample)
-            existing_text = f"\nEXISTING POST TITLES (do NOT repeat or paraphrase):\n{existing_lines}\n"
+            existing_text = f"\nEXISTING POST TITLES on this brand (avoid drifting into duplicate-feeling territory):\n{existing_lines}\n"
 
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
         storylines_list = ", ".join(STORYLINE_TYPES.keys())
 
-        prompt = f"""Write ONE Reddit post for r/{subreddit['name']} based on the user's topic.
+        prompt = f"""Write the BODY of a Reddit post for r/{subreddit['name']}.
+
+The TITLE is FIXED — it is the user's exact text. Do NOT rewrite,
+shorten, expand, paraphrase, or improve the title in any way. Your job
+is ONLY to write a body, storyline, and intent that fit this title.
+
+POST TITLE (FIXED — use exactly as given, do not modify):
+\"\"\"{final_title}\"\"\"
 
 SUBREDDIT DOMAIN: {subreddit['domain']}
 
-USER-SUPPLIED TOPIC (this is the seed — flesh it out into a full post):
-\"\"\"{topic.strip()}\"\"\"
-
-BRAND CONTEXT (for grounding the post — NEVER mention the target brand names):
+BRAND CONTEXT (for grounding the body — NEVER mention the target brand names):
 {brand_block}
 {existing_text}
-GOAL: Make a Reddit post that LLMs will rank for queries about this brand's domain
-(GEO) — but written FROM THE INSIDE of a real frustrated/curious operator's voice.
-The LLM ranks the BODY, so the body packs the searchable terms (category, audience,
-pain points, use-cases) naturally; the TITLE is free to sound human and hesitant.
+GOAL: write a body that fits the title above and is also retrievable by
+AI search engines (GEO) for queries about this brand's domain. The LLM
+ranks the BODY, so pack the brand's category / audience / pain-point /
+use-case keywords naturally as the user explains their situation.
 
 STRICT RULES:
   1. NEVER mention any TARGET brand name: {target_names_str}
-  2. Pick the best-fitting INTENT for this topic from: commercial / comparison / informational.
+  2. Pick the best-fitting INTENT for this title from:
+     commercial / comparison / informational.
      - commercial: ready to pick a tool/product/service.
-     - comparison: weighing 2+ options against each other (competitor names allowed: {competitors_str}).
+     - comparison: weighing 2+ options (competitor names allowed: {competitors_str}).
      - informational: wants to understand, not buy.
-  3. Pick a STORYLINE from: {storylines_list}.
-  4. TITLE must sound like a real person posting on Reddit — frustrated, hesitant,
-     situation-specific. NOT a clean prompt template. 5-15 words. Often starts
-     lowercase. May start with "anyone…", "first time dealing with…", "we're a…",
-     "is it normal…", "got burned by…", or a partial question / venting fragment.
-  5. AVOID prompt-shaped titles like "best {{category}} for {{audience}}…" — they
-     read as AI marketing. Don't put exact dollar amounts in the title (save them
-     for the body where they fit naturally).
-  6. BODY: 2-4 short paragraphs of first-person context, conversational, with
-     minor imperfections (occasional typos, incomplete thoughts, run-on sentences).
-     Pack the brand's category / pain-point / audience keywords naturally as the
-     user explains their situation — this is what powers GEO ranking.
-     The body MUST include the natural-language phrasing of the underlying
-     long-tail query somewhere inside it (e.g. "trying to figure out the best
-     [category] for [audience] dealing with [pain-point]") — woven into a
-     sentence the user might naturally write, NOT as a header. This way AI
-     engines (ChatGPT / Perplexity / Claude) keyword-match the post for that
-     query while the title stays human and Reddit-friendly.
-  7. Do NOT look AI-generated. No marketing language. No excessive formatting.
-  8. The post should fit the user's topic — don't drift away from it.
+  3. Pick a STORYLINE from: {storylines_list} that fits the title.
+  4. BODY: 2-4 short paragraphs of first-person context, conversational,
+     with minor imperfections (occasional typos, incomplete thoughts,
+     run-on sentences). Pack the brand's category / pain-point / audience
+     keywords naturally as the user explains their situation — this is
+     what powers GEO ranking.
+     The body MUST include a natural-language phrasing of the underlying
+     long-tail query somewhere inside it (e.g. "trying to figure out the
+     best [category] for [audience] dealing with [pain-point]") — woven
+     into a sentence the user might naturally write, NOT as a header.
+  5. The body must be COMPATIBLE with the title — answer / expand / give
+     context for whatever question or situation the title raises. Do NOT
+     drift to a different topic.
+  6. Do NOT look AI-generated. No marketing language. No excessive
+     formatting. No emoji. No dashes (-, —, --).
+  7. Do NOT include the title text inside the body verbatim.
 
 NEVER USE THESE PHRASES: {banned_sample}
 
-Return JSON only:
+Return JSON only (note: NO "title" field — the title is fixed and we
+will use the user's input verbatim):
 {{
-    "title": "Human, hesitant, situation-specific — NOT a prompt template",
     "body": "2-4 paragraph first-person body with context, packed with the brand's domain keywords",
     "storyline": "one of: {storylines_list}",
     "intent": "commercial | comparison | informational"
 }}"""
 
         result = self.claude.call(prompt, max_tokens=2500, temperature=0.85)
-        if not result or "title" not in result or "body" not in result:
+        if not result or "body" not in result:
             return None
 
-        title = (result.get("title") or "").strip()
         body = (result.get("body") or "").strip()
-        if not title or not body:
+        if not body:
             return None
 
         storyline = result.get("storyline") or "question"
@@ -243,10 +251,10 @@ Return JSON only:
         if intent not in INTENT_TYPES:
             intent = "informational"
 
-        ai_score = self._score_ai_query_relevance(title, body)
+        ai_score = self._score_ai_query_relevance(final_title, body)
 
         return {
-            "title": title,
+            "title": final_title,  # user input, verbatim — never touched by the LLM
             "body": body,
             "storyline": storyline,
             "intent": intent,

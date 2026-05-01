@@ -2472,6 +2472,150 @@ Return JSON only:
         return {"id": cid, "body": body, "parent_id": root["id"]}
 
     # ------------------------------------------------------------------
+    # HQ thread generator for Live Search posts (no DB save).
+    # ------------------------------------------------------------------
+    # The Live Search schema saves comments to a different table
+    # (`search_comments`) than the regular `generate_hq_comment` flow.
+    # Rather than threading another save target through generate_hq_comment,
+    # this method returns a list of generated comments with the same shape
+    # the legacy CommentGeneratorBot.generate_hq_search returned, so the
+    # search endpoints can keep their own save logic. Uses the same
+    # persona pool, banned-phrase pre-filter, and intent classifier as
+    # everything else in this class — that's the whole point of
+    # consolidating away from the legacy bot.
+    def generate_hq_search_thread(self, post_title, post_body, subreddit_name,
+                                   comments, brand_name, brand_context,
+                                   tone_analysis=None, comment_stats=None,
+                                   relevance=None, num_replies=4,
+                                   ai_crawl=True, post_intent=None):
+        """Return a list of dicts (idx, parent_idx, body, is_main,
+        mentions_brand, persona_id, structure_id) describing 1 main +
+        `num_replies` replies. Caller saves to search_comments.
+        """
+        nr = max(1, int(num_replies))
+        # Same shape variety as the legacy bot — deterministic for nr=4
+        # so we don't need to dynamically build shapes for arbitrary nr.
+        if nr == 4:
+            shapes = [
+                [(0, None), (1, 0), (2, 0), (3, 0), (4, 0)],
+                [(0, None), (1, 0), (2, 0), (3, 1), (4, 2)],
+                [(0, None), (1, 0), (2, 0), (3, 0), (4, 1)],
+                [(0, None), (1, 0), (2, 0), (3, 1), (4, 1)],
+            ]
+            shape = random.choice(shapes)
+        else:
+            # Fallback dynamic shape for non-4 reply counts: ~1/3 nested.
+            shape = [(0, None)]
+            nest_count = nr // 3
+            direct_count = nr - nest_count
+            for i in range(1, direct_count + 1):
+                shape.append((i, 0))
+            for i in range(direct_count + 1, nr + 1):
+                candidates = list(range(1, i)) or [0]
+                shape.append((i, random.choice(candidates)))
+
+        hq_stats = {"avg_chars": 500, "avg_words": 100, "median_chars": 400,
+                    "min_chars": 80, "max_chars": 800}
+        reply_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
+                       "min_chars": 50, "max_chars": 600}
+
+        saved_bodies = {}
+        saved_personas = {}
+        results = []
+
+        print(f"    [HQ-LS] Generating thread (1 main + {nr} replies)")
+
+        for idx, parent_idx in shape:
+            is_main = parent_idx is None
+
+            # Re-parent to main if our intended parent was dropped earlier
+            if not is_main and parent_idx not in saved_bodies:
+                if 0 in saved_bodies and parent_idx != 0:
+                    parent_idx = 0
+                else:
+                    print(f"    [HQ-LS] parent {parent_idx} unavailable — skipping reply {idx}")
+                    continue
+
+            reply_targets = None
+            if not is_main:
+                reply_targets = {0: {
+                    "body": saved_bodies[parent_idx], "score": 5,
+                    "author": saved_personas.get(parent_idx, "community_member"),
+                    "id": "", "permalink": "",
+                }}
+
+            # The reply prompt sees ONLY parent context — siblings just add
+            # noise (same fix we applied to generate_hq_comment).
+            # Main comment sees the existing live comments for tone.
+            thread_comments = list(comments or []) if is_main else []
+
+            angle = (
+                f"Recommend {brand_name} confidently as a direct answer to "
+                "the OP's question. Open with what " + brand_name + " is "
+                "and what it does for their use-case. Tight 50-90 words, "
+                "no anecdote."
+                if is_main
+                else
+                "Reply to the TARGET COMMENT specifically. Engage with one "
+                "concrete point or claim from their comment — agree and "
+                "add a supporting detail, push back on a specific phrase, "
+                "share a contrasting experience that connects to what they "
+                "said, or ask a follow-up about something they mentioned. "
+                "Reference a specific phrase or idea from their comment so "
+                "it's clear you read it. DO NOT change the topic."
+            )
+            local_relevance = dict(relevance or {})
+            local_relevance["best_angle"] = angle
+            local_relevance.setdefault("natural_fit", 3)
+
+            result = self.generate_comments(
+                post_title=post_title,
+                post_body=post_body,
+                subreddit=subreddit_name,
+                comments=thread_comments,
+                brand_name=brand_name,
+                brand_context=brand_context,
+                num_comments=1,
+                tone_analysis=tone_analysis,
+                comment_stats=hq_stats if is_main else reply_stats,
+                mention_brand_flags=[is_main],
+                relevance=local_relevance,
+                reply_targets=reply_targets,
+                all_brand_names=[brand_name],
+                ai_crawl=ai_crawl,
+                post_intent=post_intent,
+                hq_main=is_main,
+                slim_prompt=not is_main,
+            )
+
+            bodies = result.get("generated_comments") or []
+            if not bodies:
+                print(f"    [HQ-LS] failed at idx={idx}, skipping")
+                continue
+            body = bodies[0]
+            mentions = is_main and (brand_name.lower() in body.lower())
+
+            personas_meta = result.get("_personas") or []
+            structures_meta = result.get("_structures") or []
+            p_id = personas_meta[0] if personas_meta else "lurker"
+            s_id = structures_meta[0] if structures_meta else ""
+
+            saved_bodies[idx] = body
+            saved_personas[idx] = p_id
+
+            results.append({
+                "idx": idx,
+                "parent_idx": parent_idx,
+                "body": body,
+                "is_main": is_main,
+                "mentions_brand": 1 if mentions else 0,
+                "persona_id": p_id,
+                "structure_id": s_id,
+            })
+
+        return results
+
+    # ------------------------------------------------------------------
     # OP Reply generation — post author replies to comments
     # ------------------------------------------------------------------
 

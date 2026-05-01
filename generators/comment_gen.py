@@ -204,7 +204,18 @@ class CommentGenerator:
         for attempt in range(max_retries):
             try:
                 clean_url = post_url.split("?")[0].rstrip("/")
-                json_url = f"{clean_url}.json"
+                # Route through the Reddit proxy when configured (Railway
+                # has REDDIT_PROXY_URL set to dodge Reddit's IP rate limits
+                # and 403s for cloud egress). The legacy bot did this; the
+                # refactor accidentally dropped it, which made every Live
+                # Search post return zero comments → relevance score of 0
+                # → "low relevancy" skip on every single post.
+                if self.reddit_base and self.reddit_base != "https://www.reddit.com":
+                    from urllib.parse import urlparse
+                    parsed = urlparse(clean_url)
+                    json_url = f"{self.reddit_base}{parsed.path}.json"
+                else:
+                    json_url = f"{clean_url}.json"
                 response = requests.get(json_url, headers=self.headers, timeout=30)
 
                 if response.status_code == 429:

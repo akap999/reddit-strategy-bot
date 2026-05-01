@@ -8492,7 +8492,7 @@ async function lsSaveAndGenerateAll() {
 }
 
 // --- Saved Posts Tab ---
-let _lsSavedFilter = { keyword: '', brand: '', status: '' };
+let _lsSavedFilter = { keyword: '', brand: '', status: '', subreddit: '' };
 
 async function renderLsSaved(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
@@ -8540,6 +8540,7 @@ async function renderLsSaved(c) {
                 <input id="ls-exclude-subs" placeholder="sub1, sub2, ..." class="w-full text-sm ml-1">
             </div>
         </div>
+        <div class="mb-3 flex gap-2 flex-wrap items-center" id="ls-sub-count-bar">${_lsRenderSubCountBar()}</div>
         <div id="ls-saved-table"></div>
     `;
     lsRenderSavedTable();
@@ -8554,7 +8555,51 @@ function lsGetFilteredSaved() {
     if (_lsSavedFilter.brand === 'none') posts = posts.filter(p => !p.brand_id);
     else if (_lsSavedFilter.brand) posts = posts.filter(p => p.brand_name === _lsSavedFilter.brand);
     if (_lsSavedFilter.status) posts = posts.filter(p => p.status === _lsSavedFilter.status);
+    // Subreddit filter (exact match, set by clicking a count pill)
+    if (_lsSavedFilter.subreddit) {
+        posts = posts.filter(p => (p.subreddit||'').toLowerCase() === _lsSavedFilter.subreddit.toLowerCase());
+    }
     return posts;
+}
+
+// Count saved posts per subreddit. Used for the count-pills bar and as
+// the data backing the per-subreddit cap modal.
+function _lsSubredditCounts(postsList) {
+    const counts = {};
+    for (const p of (postsList || [])) {
+        const sub = p.subreddit || '(unknown)';
+        counts[sub] = (counts[sub] || 0) + 1;
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);  // desc by count
+}
+
+// Toggle the subreddit filter — clicking the same pill again clears it.
+function lsToggleSubFilter(sub) {
+    _lsSavedFilter.subreddit = (_lsSavedFilter.subreddit === sub) ? '' : sub;
+    lsRenderSavedTable();
+    // Re-render the count bar so the active pill style updates
+    const bar = document.getElementById('ls-sub-count-bar');
+    if (bar) bar.innerHTML = _lsRenderSubCountBar();
+}
+
+// Build the count-pills bar HTML. Pills are clickable and the active
+// one (matching the subreddit filter) gets a brighter background.
+function _lsRenderSubCountBar() {
+    const entries = _lsSubredditCounts(_lsSavedPosts);
+    if (!entries.length) return '';
+    const active = (_lsSavedFilter.subreddit || '').toLowerCase();
+    const pills = entries.map(([sub, n]) => {
+        const isActive = sub.toLowerCase() === active;
+        const bg = isActive ? '#0079D3' : '#272729';
+        const fg = isActive ? '#fff' : '#D7DADC';
+        return `<button class="btn btn-sm" style="background:${bg};color:${fg};border:1px solid #343536"
+                onclick="lsToggleSubFilter('${sub.replace(/'/g, "\\'")}')"
+                title="Click to filter to r/${sub}; click again to clear">r/${sub}: ${n}</button>`;
+    }).join(' ');
+    const totalLabel = active
+        ? `<span class="text-xs text-gray-400 ml-2">filtered to r/${active}</span>`
+        : '';
+    return pills + totalLabel;
 }
 
 function lsRenderSavedTable() {
@@ -8613,17 +8658,12 @@ async function lsGenerateSelected() {
     if (!checks.length) { toast('Select at least one post', 'error'); return; }
     const excludeSubs = lsGetExcludedSubs();
     const allIds = [...checks].map(cb => parseInt(cb.dataset.id));
-    const eligible = allIds.filter(id => {
-        const p = _lsSavedPosts.find(sp => sp.id === id);
-        return !p || !excludeSubs.has((p.subreddit||'').toLowerCase());
-    });
+    const eligible = allIds
+        .map(id => _lsSavedPosts.find(sp => sp.id === id))
+        .filter(p => p && !excludeSubs.has((p.subreddit||'').toLowerCase()));
     if (!eligible.length) { toast('All selected posts are in excluded subreddits', 'error'); return; }
-    const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
-    const mode = _lsGenMode();
-    runTask(_lsGenUrl(mode),
-        { post_ids: eligible, num_comments: numComments },
-        _batchGenComplete, `${_lsGenLabel(mode)}: ${eligible.length} posts`);
-    renderLsTabContent();
+    // Open the per-subreddit cap modal instead of POSTing immediately.
+    lsShowCapModal(_lsGenMode(), eligible);
 }
 
 async function lsGenerateAll() {
@@ -8645,11 +8685,117 @@ async function lsGenerateAll() {
         !hasCommentsForBrand(p) &&
         !excludeSubs.has((p.subreddit||'').toLowerCase()));
     if (!filtered.length) { toast(`No eligible posts (must have brand; no ${mode === 'hq' ? 'HQ ' : ''}comments yet for that brand; not generating/irrelevant/excluded)`, 'error'); return; }
-    if (!confirm(`Generate ${mode === 'hq' ? 'HQ threads (1 + 4 each)' : 'comments'} for ${filtered.length} post(s)?`)) return;
+    lsShowCapModal(mode, filtered);
+}
+
+// Open the per-subreddit cap modal. `candidates` is the array of post
+// objects that would otherwise be sent to the batch endpoint. The modal
+// lets the user cap how many of each subreddit's posts to actually
+// process. Defaults to "all available" so submitting unchanged matches
+// the pre-modal behaviour.
+function lsShowCapModal(mode, candidates) {
+    if (!candidates || !candidates.length) {
+        toast('No eligible posts to generate', 'error'); return;
+    }
+    // Group by subreddit and capture each candidate post's id+score so
+    // we can do "top-N by score" picking on submit.
+    const bySub = {};
+    for (const p of candidates) {
+        const sub = p.subreddit || '(unknown)';
+        (bySub[sub] = bySub[sub] || []).push({ id: p.id, score: p.score || 0 });
+    }
+    // Sort each sub's posts by score DESC up front — top-N picking is
+    // then just `.slice(0, cap)`.
+    for (const sub of Object.keys(bySub)) {
+        bySub[sub].sort((a, b) => (b.score || 0) - (a.score || 0));
+    }
+    // Stash for the submit handler to pick up — avoids serialising the
+    // candidate set into HTML attributes.
+    window._lsCapModalState = { mode, bySub };
+    const subs = Object.keys(bySub).sort((a, b) => bySub[b].length - bySub[a].length);
+    const totalAvailable = candidates.length;
+    const rows = subs.map(sub => {
+        const n = bySub[sub].length;
+        return `<tr>
+            <td class="text-sm py-1">r/${sub}</td>
+            <td class="text-xs text-gray-400 py-1">${n}</td>
+            <td class="py-1"><input type="number" class="ls-cap-input w-20 text-sm" data-sub="${sub.replace(/"/g, '&quot;')}" value="${n}" min="0" max="${n}"></td>
+        </tr>`;
+    }).join('');
+    showModal(`
+        <h3 class="text-lg font-bold mb-2">${mode === 'hq' ? 'Batch HQ' : 'Batch Generate'} — caps per subreddit</h3>
+        <p class="text-xs text-gray-400 mb-3">${totalAvailable} eligible post${totalAvailable===1?'':'s'} across ${subs.length} subreddit${subs.length===1?'':'s'}. Cap how many of each get processed (top-N by Reddit score). Set 0 to skip a subreddit. Defaults match "all available" — submit as-is for the original behaviour.</p>
+        <div class="max-h-80 overflow-y-auto" style="border:1px solid #343536;border-radius:4px">
+            <table class="w-full">
+                <thead><tr><th class="text-xs text-left px-2 py-1">Subreddit</th><th class="text-xs text-left px-2 py-1">Available</th><th class="text-xs text-left px-2 py-1">Cap</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="text-xs text-gray-400 mt-2" id="ls-cap-summary"></div>
+        <div class="flex gap-2 mt-4 justify-between">
+            <button class="btn btn-secondary btn-sm" onclick="_lsCapResetDefaults()">Reset to all</button>
+            <div class="flex gap-2">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="_lsRunCappedGenerate()">Generate</button>
+            </div>
+        </div>
+    `);
+    // Update the running total as the user changes caps.
+    setTimeout(() => {
+        document.querySelectorAll('.ls-cap-input').forEach(inp => {
+            inp.addEventListener('input', _lsCapUpdateSummary);
+        });
+        _lsCapUpdateSummary();
+    }, 0);
+}
+
+function _lsCapUpdateSummary() {
+    const inputs = document.querySelectorAll('.ls-cap-input');
+    let total = 0;
+    let activeSubs = 0;
+    inputs.forEach(inp => {
+        const v = Math.max(0, parseInt(inp.value) || 0);
+        const max = parseInt(inp.max) || 0;
+        const capped = Math.min(v, max);
+        if (capped > 0) activeSubs++;
+        total += capped;
+    });
+    const summary = document.getElementById('ls-cap-summary');
+    if (summary) {
+        summary.textContent = `Will process ${total} post${total===1?'':'s'} across ${activeSubs} subreddit${activeSubs===1?'':'s'}.`;
+    }
+}
+
+function _lsCapResetDefaults() {
+    document.querySelectorAll('.ls-cap-input').forEach(inp => {
+        inp.value = inp.max;
+    });
+    _lsCapUpdateSummary();
+}
+
+async function _lsRunCappedGenerate() {
+    const state = window._lsCapModalState;
+    if (!state) { closeModal(); return; }
+    const { mode, bySub } = state;
+    const finalIds = [];
+    document.querySelectorAll('.ls-cap-input').forEach(inp => {
+        const sub = inp.dataset.sub;
+        const cap = Math.max(0, parseInt(inp.value) || 0);
+        if (!cap || !bySub[sub]) return;
+        // bySub[sub] is already sorted by score DESC; just take the top N.
+        const topN = bySub[sub].slice(0, cap).map(x => x.id);
+        finalIds.push(...topN);
+    });
+    if (!finalIds.length) {
+        toast('All caps set to 0 — nothing to generate', 'error');
+        return;
+    }
+    closeModal();
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     runTask(_lsGenUrl(mode),
-        { post_ids: filtered.map(p => p.id), num_comments: numComments },
-        _batchGenComplete, `${_lsGenLabel(mode)}: ${filtered.length} posts`);
+        { post_ids: finalIds, num_comments: numComments },
+        _batchGenComplete, `${_lsGenLabel(mode)}: ${finalIds.length} posts`);
+    window._lsCapModalState = null;
     renderLsTabContent();
 }
 

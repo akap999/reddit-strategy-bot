@@ -1075,6 +1075,180 @@ def api_update_comment_body(cid):
     finally:
         db.close()
 
+
+@app.route("/api/comments/<int:cid>/regenerate", methods=["POST"])
+def api_regenerate_comment(cid):
+    """Re-roll a single comment in place. Synchronous (one Claude call,
+    ~10-30s) — caller shows a spinner. Returns the new body so the
+    frontend can patch the row without a refetch.
+
+    Body: { ai_crawl?: bool, mention_brand?: bool }
+    """
+    from generators.comment_gen import CommentGenerator
+    from generators.base import ClaudeClient
+    data = request.json or {}
+    ai_crawl = bool(data.get("ai_crawl", True))
+
+    db = get_db()
+    try:
+        comment = db.get_comment(cid)
+        if not comment:
+            return jsonify({"error": "Comment not found"}), 404
+        post = db.get_post(comment["post_id"])
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+        # Default mention_brand to whatever the comment already is (preserves
+        # the comment's original role in the thread) unless caller overrides.
+        mention_brand = bool(data.get("mention_brand",
+                                      bool(comment.get("mentions_brand"))))
+        brand = None
+        if comment.get("brand_id"):
+            brand = db.get_brand(comment["brand_id"])
+        if not brand:
+            brands = db.get_brands_for_post(post["id"])
+            brand = brands[0] if brands else None
+        if not brand:
+            return jsonify({"error": "No brand found for this comment"}), 400
+        subreddit = db.get_subreddit(post["subreddit_id"])
+
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        cg = CommentGenerator(ClaudeClient(api_key), db)
+
+        # Mock tone — the original comment's tone analysis isn't stored.
+        mock_tone = {
+            "formality": "casual to semi-formal",
+            "humor_style": "occasional dry humor",
+            "technical_level": "moderate",
+            "common_phrases": [],
+            "overall_vibe": "helpful community discussion",
+            "sentence_structure": "mix of short and medium",
+            "capitalization": "mostly lowercase with normal caps",
+            "punctuation_style": "casual, minimal",
+            "emotional_tone": "generally supportive",
+        }
+        mock_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
+                      "min_chars": 50, "max_chars": 600}
+
+        # If this is a reply, pass the parent body via reply_targets so the
+        # regenerated comment still engages with the thread.
+        reply_targets = None
+        if comment.get("parent_comment_id"):
+            parent = db.get_comment(comment["parent_comment_id"])
+            if parent:
+                reply_targets = {0: {
+                    "body": parent["body"], "score": 5,
+                    "author": parent.get("account_id") or "community_member",
+                    "id": "", "permalink": "",
+                }}
+
+        result = cg.generate_comments(
+            post_title=post["title"],
+            post_body=post.get("body", ""),
+            subreddit=subreddit["name"] if subreddit else "",
+            comments=[],
+            brand_name=brand["name"],
+            brand_context=brand.get("context", ""),
+            num_comments=1,
+            tone_analysis=mock_tone,
+            comment_stats=mock_stats,
+            mention_brand_flags=[mention_brand],
+            reply_targets=reply_targets,
+            relevance={"best_angle": "regenerate this comment with a fresh take",
+                       "natural_fit": 2},
+            brand_assignments=[brand if mention_brand else None],
+            all_brand_names=[brand["name"]],
+            ai_crawl=ai_crawl,
+            post_intent=post.get("intent"),
+        )
+        bodies = result.get("generated_comments") or []
+        if not bodies:
+            return jsonify({"error": "Regeneration returned no body"}), 500
+        new_body = bodies[0]
+        db.update_comment_body(cid, new_body)
+        return jsonify({"ok": True, "body": new_body})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/<int:cid>/regenerate", methods=["POST"])
+def api_regenerate_search_comment(cid):
+    """Re-roll a single search comment in place. Synchronous.
+
+    Body: { ai_crawl?: bool }
+    """
+    from generators.comment_gen import CommentGenerator
+    from generators.base import ClaudeClient
+    data = request.json or {}
+    ai_crawl = bool(data.get("ai_crawl", True))
+
+    db = get_db()
+    try:
+        row = db.conn.execute(
+            """SELECT sc.*, sp.title as post_title, sp.reddit_url,
+                      sp.subreddit as post_subreddit, sp.brand_id as post_brand_id
+               FROM search_comments sc
+               JOIN search_posts sp ON sc.search_post_id = sp.id
+               WHERE sc.id = ?""", (cid,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Search comment not found"}), 404
+        comment = dict(row)
+        brand_id = comment.get("brand_id") or comment.get("post_brand_id")
+        brand = db.get_brand(brand_id) if brand_id else None
+        if not brand:
+            return jsonify({"error": "No brand found for this comment"}), 400
+
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+        cg = CommentGenerator(
+            ClaudeClient(api_key), db,
+            reddit_base=proxy.rstrip("/") if proxy else None,
+        )
+
+        # Re-fetch live Reddit context so the regenerated comment is grounded
+        # in the same conversation as the original generation.
+        try:
+            live_comments, post_body, _archived = cg.fetch_comments(
+                comment["reddit_url"], limit=20)
+        except Exception:
+            live_comments, post_body = [], ""
+        comment_stats = cg._compute_comment_stats(live_comments) if live_comments else {
+            "avg_chars": 300, "avg_words": 60, "median_chars": 250,
+            "min_chars": 50, "max_chars": 600,
+        }
+        # Best-effort tone — fall back to a casual default if the post has
+        # no live comments to analyse.
+        try:
+            tone_analysis = cg.analyze_tone(
+                comment["post_title"], post_body, comment["post_subreddit"],
+                live_comments, comment_stats)
+        except Exception:
+            tone_analysis = None
+
+        result = cg.generate_comments(
+            post_title=comment["post_title"],
+            post_body=post_body,
+            subreddit=comment["post_subreddit"],
+            comments=live_comments,
+            brand_name=brand["name"],
+            brand_context=brand.get("context", ""),
+            num_comments=1,
+            tone_analysis=tone_analysis,
+            comment_stats=comment_stats,
+            mention_brand_flags=[True],  # Live Search always brand-mentions
+            all_brand_names=[brand["name"]],
+            ai_crawl=ai_crawl,
+        )
+        bodies = result.get("generated_comments") or []
+        if not bodies:
+            return jsonify({"error": "Regeneration returned no body"}), 500
+        new_body = bodies[0]
+        db.update_search_comment_body(cid, new_body)
+        return jsonify({"ok": True, "body": new_body})
+    finally:
+        db.close()
+
+
 @app.route("/api/comments/<int:cid>/context")
 def api_comment_context(cid):
     """Get comment with its subreddit and brand context for the assignment modal."""

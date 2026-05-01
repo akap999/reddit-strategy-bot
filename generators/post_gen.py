@@ -6,6 +6,7 @@ import json
 import requests
 
 from generators.base import ClaudeClient, BANNED_PHRASES
+from generators.comment_gen import classify_post_intent
 from config import (
     STORYLINE_TYPES, AI_QUERY_PATTERNS, PROMPT_VERSION,
     POST_SPREAD_FACTOR, FILLER_LEAD_DAYS, REDDIT_USER_AGENT,
@@ -170,6 +171,22 @@ class PostGenerator:
         if not final_title:
             return None
 
+        # Classify the user-supplied title so the BODY can adapt:
+        # short answer-asking titles get a short focused body that gives
+        # just-enough context for someone to recommend something; longer
+        # experience-style titles get a richer narrative body. Without
+        # this, every custom post got the same "2-4 paragraphs" body
+        # regardless of whether the title was a 6-word question or a
+        # 30-word personal-story setup.
+        intent_info = classify_post_intent(final_title, post_body=None, stored_intent=None)
+        intent_label = intent_info["intent_label"]
+        if intent_info["target_length_band"] == "crisp":
+            body_target = "1-2 short paragraphs (max ~100 words). Just enough context for someone to give a useful recommendation — your situation, what you've considered, what's pushing you to ask."
+        elif intent_info["target_length_band"] == "long":
+            body_target = "3-5 paragraphs (~150-280 words). Richer first-person narrative — context, what you've tried, where you are now, what's still bugging you."
+        else:
+            body_target = "2-3 short paragraphs (~100-180 words). First-person context with some detail — situation, options you've weighed, what you're stuck on."
+
         brand_block, target_names, competitors = self._build_enriched_brand_block(brands)
         target_names_str = ", ".join(target_names) if target_names else "(none)"
         competitors_str = ", ".join(competitors) if competitors else "(none known)"
@@ -210,11 +227,12 @@ STRICT RULES:
      - comparison: weighing 2+ options (competitor names allowed: {competitors_str}).
      - informational: wants to understand, not buy.
   3. Pick a STORYLINE from: {storylines_list} that fits the title.
-  4. BODY: 2-4 short paragraphs of first-person context, conversational,
-     with minor imperfections (occasional typos, incomplete thoughts,
-     run-on sentences). Pack the brand's category / pain-point / audience
-     keywords naturally as the user explains their situation — this is
-     what powers GEO ranking.
+  4. BODY: {body_target}
+     Conversational first-person tone with minor imperfections
+     (occasional typos, incomplete thoughts, run-on sentences). Pack the
+     brand's category / pain-point / audience keywords naturally as the
+     user explains their situation — this is what powers GEO ranking.
+     The detected post intent for this title is: {intent_label}.
      The body MUST include a natural-language phrasing of the underlying
      long-tail query somewhere inside it (e.g. "trying to figure out the
      best [category] for [audience] dealing with [pain-point]") — woven

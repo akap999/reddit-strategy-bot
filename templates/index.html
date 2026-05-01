@@ -7514,6 +7514,35 @@ async function _lsubsRunBatchGenerate(mode) {
     toast(`Started ${ids.length} ${mode === 'hq' ? 'HQ' : 'comment'} generation task(s)`, 'success');
 }
 
+// Re-roll one comment in place. Synchronous Claude call (~10-30s) so the
+// button enters a "regenerating…" state while the request is open. After
+// success we patch the row via _lsubsApplyCommentPatch — no full refetch.
+async function lsubsRegenComment(cid) {
+    const tr = document.querySelector(`#lsubs-cmt-list tr[data-cid="${cid}"]`);
+    const btn = tr ? tr.querySelector('button[onclick^="lsubsRegenComment"]') : null;
+    const origLabel = btn ? btn.textContent : null;
+    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+    try {
+        const res = await api(`/api/comments/${cid}/regenerate`, {
+            method: 'POST',
+            body: { ai_crawl: true },
+        });
+        if (res && res.body) {
+            toast(`Comment #${cid} regenerated`, 'success');
+            // In-place patch — no fetch, no flicker
+            if (typeof _lsubsApplyCommentPatch === 'function') {
+                _lsubsApplyCommentPatch(cid, { body: res.body });
+            }
+        } else {
+            toast('Regenerate returned no body', 'error');
+        }
+    } catch (e) {
+        toast(`Regenerate failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.textContent = origLabel; btn.disabled = false; }
+    }
+}
+
 // Delete a single comment from the Live Subs Comments tab. Uses the existing
 // DELETE /api/comments/<id> endpoint, which now cascades to all descendants
 // — so deleting an HQ root from any row also wipes the cluster.
@@ -7660,6 +7689,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
             <td>
                 <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
                     <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
+                    <button class="btn btn-sm" style="background:#1a3d3d;color:#9efbf0" onclick="lsubsRegenComment(${c.id})" title="Re-roll this single comment with a fresh take">Regen</button>
                     ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
                     ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
                     ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
@@ -9055,6 +9085,7 @@ function lsFilterComments() {
                                 ` : ''}
                                 ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="lsUndoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                                 <button class="btn btn-secondary btn-sm" onclick="lsEditComment(${c.id})">Edit</button>
+                                <button class="btn btn-sm" style="background:#1a3d3d;color:#9efbf0" onclick="lsRegenComment(${c.id})" title="Re-roll this comment with a fresh take">Regen</button>
                                 <button class="btn btn-danger btn-sm" onclick="lsDeleteComment(${c.id})">Del</button>
                                 <button class="btn btn-secondary btn-sm" onclick="lsCopyComment(${c.id})" title="Copy">Copy</button>
                             </div>
@@ -9764,6 +9795,34 @@ async function lsSaveCommentEdit(cid) {
     closeModal();
     _lsUpdateCommentLocal(cid, { body });
     if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { body });
+}
+
+// Re-roll one Live Search comment in place. Synchronous Claude call —
+// shows a "…" on the button while open; on success patches the local
+// list via _lsUpdateCommentLocal so we don't refetch the whole tab.
+async function lsRegenComment(cid) {
+    const btn = document.querySelector(`button[onclick="lsRegenComment(${cid})"]`);
+    const orig = btn ? btn.textContent : null;
+    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+    try {
+        const res = await api(`/api/search/comments/${cid}/regenerate`, {
+            method: 'POST',
+            body: { ai_crawl: true },
+        });
+        if (res && res.body) {
+            toast(`Comment #${cid} regenerated`, 'success');
+            _lsUpdateCommentLocal(cid, { body: res.body });
+            if (currentView === 'allcomments') {
+                _acUpdateLocal(cid, 'search_comment', { body: res.body });
+            }
+        } else {
+            toast('Regenerate returned no body', 'error');
+        }
+    } catch (e) {
+        toast(`Regenerate failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.textContent = orig; btn.disabled = false; }
+    }
 }
 
 // --- Assigned Accounts Tab (Live Search) ---

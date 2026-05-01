@@ -3880,9 +3880,18 @@ class Database:
 
     # --- Search Comments (Live Search) ---
 
-    def add_search_comment(self, search_post_id, body, brand_id=None, persona_id=None,
-                           is_reply=0, reply_to_url=None, mentions_brand=0, relevance_score=None,
+    def add_search_comment(self, search_post_id, body, *,
+                           brand_id=None, persona_id=None,
+                           is_reply=0, reply_to_url=None,
+                           mentions_brand=0, relevance_score=None,
                            comment_type=None, parent_comment_id=None):
+        """Insert a search comment.
+
+        After `search_post_id` and `body`, every argument is KEYWORD-ONLY.
+        Prevents future signature drift / positional-arg confusion when
+        new optional fields are added (the table has 10 nullable columns
+        and growing — positional calls are a footgun).
+        """
         cur = self.conn.execute(
             """INSERT INTO search_comments
                (search_post_id, body, brand_id, persona_id, is_reply, reply_to_url,

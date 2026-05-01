@@ -28,12 +28,12 @@ from bs4 import BeautifulSoup
 PERSONAS = [
     {
         "id": "skeptic",
-        "voice": "Skeptical and hedging. You doubt most things and only share what worked reluctantly. Use phrases like 'idk if this works for everyone', 'take this with a grain of salt', 'not saying it's the answer but'. You temper any positive statement with doubt.",
+        "voice": "Independent thinker. Pushes back on the consensus advice with their own counter-take. States the disagreement directly and the reason behind it. NEVER opens with disclaimers — no 'take this with a grain of salt', no 'idk if this works', no 'not saying it's the answer but'. Just states what they think and why.",
         "length": "medium",
     },
     {
         "id": "newbie",
-        "voice": "You're relatively new to this and still figuring things out. Ask follow-up questions. Use phrases like 'still learning', 'not sure if this is normal', 'anyone else experience this?'. Show uncertainty and curiosity.",
+        "voice": "Recently got into this. Asks one specific concrete follow-up question or shares a fresh-eyes observation about something in the post. NEVER opens with 'still learning' / 'not sure if this is normal' / 'anyone else'. Just asks the question or makes the observation directly.",
         "length": "medium",
     },
     {
@@ -48,12 +48,12 @@ PERSONAS = [
     },
     {
         "id": "lurker",
-        "voice": "You rarely post. You're hesitant but felt compelled to share. Slightly awkward writing style. Never open with cliches like 'usually just lurk' or 'made an account to say'.",
+        "voice": "Brief, almost first-post energy — direct but a bit awkward in phrasing (occasional fragment, no smooth transitions). NEVER opens with 'usually just lurk', 'made an account to say', 'don't normally post', or any disclaimer. Just gets to the point a touch ungracefully.",
         "length": "medium",
     },
     {
         "id": "frustrated",
-        "voice": "You're frustrated with the situation/problem itself, not with specific providers. Nothing feels like a perfect answer yet. Use phrases like 'this whole thing is exhausting', 'still figuring it out', 'nothing works the way you expect'. Zero enthusiasm about anything, including whatever you currently use.",
+        "voice": "Tired/resigned tone about the SITUATION (the post's problem), not about specific brands or tools. States the frustration concretely with what specifically isn't working. NEVER uses 'still figuring it out', 'nothing works the way you expect', 'this whole thing is exhausting' — those are AI tells. Just describes the actual frustration in concrete terms.",
         "length": "medium-long",
     },
     {
@@ -93,7 +93,7 @@ PERSONAS = [
     },
     {
         "id": "switcher",
-        "voice": "You switched recently and honestly not sure it was worth the hassle. The new thing has different problems than the old thing. Grass isn't really greener. Phrases like 'switched but idk', 'old one had X problem, new one has Y problem', 'might switch back honestly'. Mention specific annoyances with your CURRENT choice.",
+        "voice": "Switched from one option to another recently. Gives a concrete before/after: what the old thing did, what the new thing does, the specific functional difference. Even-handed about both, neither rosy nor bitter. NEVER hedges with 'honestly not sure it was worth', 'might switch back honestly', or 'idk'. Just describes the switch with specifics.",
         "length": "medium-long",
     },
     {
@@ -178,6 +178,19 @@ BANNED_PHRASES = [
     "actually",
     # Dash patterns (bot punctuation fingerprint)
     " — ", " -- ",
+    # --- Hedging / disclaimer openers (AI-shilly tells) ---
+    "take this with a grain of salt", "grain of salt",
+    "your mileage may vary", "ymmv",
+    "for what it's worth", "fwiw",
+    "just my two cents", "my two cents",
+    "not sure if this helps", "not sure if this helps but",
+    "could be wrong but", "i could be wrong",
+    "feel free to ignore",
+    "take what i say with",
+    "still figuring it out", "still figuring out",
+    "still learning",
+    "not saying it's the answer", "not saying its the answer",
+    "idk if this works for everyone", "not sure if this is normal",
 ]
 
 # --- Anti-detection: System prompt rotation for generation ---
@@ -299,16 +312,119 @@ FEW_SHOT_POOL = [
 ]
 
 
+# Positive few-shot pool — mirrors the new one in generators/base.py.
+# Live Search comments need "good" exemplars too: the model was
+# inferring shape from the anti-pattern pool alone, which led to
+# overlong story-mode answers on suggestion-asking posts.
+FEW_SHOT_POOL_GOOD = [
+    {
+        "post": "What's the best AI music generator for short product videos?",
+        "good": "BrandX is built for video sync — it reads your edit timeline and generates music that hits your cuts. For under-60-second product clips that's the differentiator. What software are you cutting in?",
+        "why_good": "Crisp recommendation. Brand named confidently in sentence 1. Concrete capability tied to the post's specific use-case. Ends with a follow-up question.",
+    },
+    {
+        "post": "Looking for an alternative to BigCorpThing for small teams",
+        "good": "BrandX handles the team workflow piece BigCorpThing doesn't — the per-seat pricing scales sanely under 20 users. Trade-off is fewer integrations, but for a small team that's usually fine.",
+        "why_good": "Direct comparison. States the brand's edge concretely. Acknowledges a trade-off without trashing the brand. No marketing language.",
+    },
+    {
+        "post": "Anyone using AI to generate music synced to their videos?",
+        "good": "Yeah, the tools that actually generate to video pacing (vs just searching a library) are a small list — BrandX is the one I keep coming back to because it adapts to scene cuts. Most others just match BPM and call it sync.",
+        "why_good": "Engages the question directly. Brand named in sentence 2 with a specific functional reason. Differentiates without trashing competitors.",
+    },
+    {
+        "post": "[Reply target: 'I tried Sonilo a few months ago and the tempo matching was hit or miss.']",
+        "good": "the tempo matching has gotten a lot better since. they pushed an update around august that fixed the off-beat transitions, especially under 30s. worth another look if your edits are tight.",
+        "why_good": "Targeted reply. Engages with the specific complaint. Adds a concrete update. Casual lowercase Reddit voice. No 'I think' / 'maybe' hedges.",
+    },
+    {
+        "post": "Is [Service] worth the money?",
+        "good": "for the use-case it's built for, yeah. if you're paying for [feature you'd actually use] it's a clear value. if you only need [other thing], probably overkill — there are leaner options.",
+        "why_good": "Answers directly with a conditional. Names tradeoffs. Casual, matter-of-fact tone.",
+    },
+]
+
+
 def _select_few_shot_examples(n=3):
-    """Randomly select n anti-pattern examples from the pool."""
-    selected = random.sample(FEW_SHOT_POOL, min(n, len(FEW_SHOT_POOL)))
-    lines = ["EXAMPLES OF WHAT NOT TO DO (avoid these patterns completely):"]
-    for i, ex in enumerate(selected, 1):
-        lines.append(f"\n--- Anti-Pattern {i} ---")
+    """Build a few-shot block — 1 GOOD + 2 BAD by default.
+
+    The model was inferring "good" shape from anti-patterns alone, which
+    led to overlong story-mode comments on simple recommendation posts.
+    Mixing in positive exemplars fixes that.
+    """
+    n_good = max(1, n // 3)
+    n_bad = max(1, n - n_good)
+    good = random.sample(FEW_SHOT_POOL_GOOD, min(n_good, len(FEW_SHOT_POOL_GOOD)))
+    bad = random.sample(FEW_SHOT_POOL, min(n_bad, len(FEW_SHOT_POOL)))
+    lines = ["EXAMPLES (study both — emulate the GOOD shape, avoid the BAD patterns):"]
+    for i, ex in enumerate(good, 1):
+        lines.append(f"\n--- Good Example {i} (emulate this shape) ---")
+        lines.append(f'POST: "{ex["post"]}"')
+        lines.append(f'GOOD COMMENT: "{ex["good"]}"')
+        lines.append(f"WHY IT'S GOOD: {ex['why_good']}")
+    for i, ex in enumerate(bad, 1):
+        lines.append(f"\n--- Anti-Pattern {i} (avoid this) ---")
         lines.append(f'POST: "{ex["post"]}"')
         lines.append(f'BAD COMMENT: "{ex["bad"]}"')
         lines.append(f"WHY IT'S BAD: {ex['why_bad']}")
     return "\n".join(lines)
+
+
+# Intent → target avg_words. Used by classify_post_intent below.
+INTENT_AVG_WORDS = {"crisp": 25, "medium": 50, "long": 90}
+
+_REC_SIGNALS = [
+    "best ", "recommend", "suggest", "looking for", "any tools",
+    "any apps", "what's a good", "what is the best", "what's the best",
+    "anyone use", "anyone using", "anyone tried", "help me find",
+    "help finding", "any tips", "any advice", "how do i", "how do you",
+    "what do you use", "what would you", "which ", "alternatives to",
+    "alternative for", "tool for", "app for", "platform for",
+]
+
+
+def classify_post_intent(post_title, post_body=None, stored_intent=None):
+    """Mirror of generators/comment_gen.py:classify_post_intent.
+
+    Returns dict with is_recommendation, intent_label, target_length_band,
+    target_avg_words. Drives intent-aware length scaling so a "what's
+    the best X for Y" post gets crisp 1-2-sentence answers instead of
+    paragraph stories.
+    """
+    t = (post_title or "").lower().strip()
+    b = (post_body or "").lower()
+    stripped = t.rstrip()
+    has_rec_signal = any(s in t for s in _REC_SIGNALS) \
+                  or any(s in b[:600] for s in _REC_SIGNALS)
+    short_question = stripped.endswith("?") and len(t.split()) < 12
+    is_comparison = (" vs " in t or " versus " in t
+                     or "switching from" in t or "switched from" in t)
+    is_recommendation = has_rec_signal or short_question \
+                        or stored_intent in ("commercial", "comparison")
+    if is_recommendation and not is_comparison:
+        intent_label, band = "recommendation", "crisp"
+    elif is_comparison:
+        intent_label, band = "comparison", "medium"
+    elif b and ("i've been" in b or "ive been" in b or " for years" in b
+                or len(b.split()) > 120):
+        intent_label, band = "experience", "long"
+    else:
+        intent_label, band = "informational", "medium"
+    return {
+        "is_recommendation": is_recommendation,
+        "intent_label": intent_label,
+        "target_length_band": band,
+        "target_avg_words": INTENT_AVG_WORDS[band],
+    }
+
+
+SENTENCE_COUNT_TARGETS = {
+    "short": "1-2 sentences",
+    "short-medium": "2-3 sentences",
+    "medium": "3-4 sentences",
+    "medium-long": "4-6 sentences",
+    "long": "5-8 sentences",
+}
 
 
 class CommentGeneratorBot:
@@ -967,6 +1083,26 @@ Return JSON only:
         selected_personas, selected_structures, per_comment_angles = \
             self._select_comment_config(tone_analysis, comment_stats, relevance, num_comments)
 
+        # --- INTENT-DRIVEN LENGTH (mirrored from refactored generator) ---
+        # Recommendation-seeking posts → scale comment_stats.avg_words DOWN
+        # so the LENGTH math produces 1-3-sentence crisp answers instead of
+        # paragraph stories. This is THE fix for "always making up stories".
+        intent_info = classify_post_intent(post_title, post_body, None)
+        if comment_stats is None:
+            comment_stats = {}
+        comment_stats = dict(comment_stats)
+        comment_stats["avg_words"] = intent_info["target_avg_words"]
+        is_recommendation = intent_info["is_recommendation"]
+
+        # Crisp-batch rule: on recommendation post with N≥3, force slot 0
+        # to a short-length persona. Guarantees a 1-liner in the mix.
+        if is_recommendation and num_comments >= 3:
+            short_personas = [p for p in PERSONAS
+                              if p["length"] in ("short", "short-medium")
+                              and p["id"] not in ("skeptic", "frustrated", "newbie")]
+            if short_personas and selected_personas[0]["length"] not in ("short", "short-medium"):
+                selected_personas[0] = random.choice(short_personas)
+
         # --- Anti-detection: Select random few-shot examples ---
         few_shot_text = _select_few_shot_examples(n=3)
 
@@ -988,11 +1124,13 @@ Return JSON only:
                     f"\n    Write as if you clicked 'reply' on their comment. Respond to what THEY said specifically. Do NOT address the OP directly."
                 )
 
+            sent_target = SENTENCE_COUNT_TARGETS.get(persona['length'], "3-4 sentences")
             comment_instructions.append(
                 f"  Comment {idx+1}:\n"
                 f"    PERSONA: {persona['voice']}\n"
                 f"    STRUCTURE: {structure['instruction']}\n"
-                f"    LENGTH: {persona['length']}{angle_line}{reply_line}"
+                f"    LENGTH: {sent_target} ({persona['length']}). Stay in this range — do not write a long story when the post calls for a short answer."
+                f"{angle_line}{reply_line}"
             )
         per_comment_section = "\n".join(comment_instructions)
 

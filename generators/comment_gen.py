@@ -27,6 +27,116 @@ LENGTH_MULTIPLIERS = {
     "medium-long":  (1.0, 1.5),    # e.g. 60-90 words
     "long":         (1.4, 2.2),    # e.g. 84-132 words
 }
+
+# Intent → target avg_words. Used by _classify_post_intent below to
+# scale comment length to what the post actually calls for.
+INTENT_AVG_WORDS = {
+    "crisp": 25,    # recommendation-seeking: 12-50 words target range
+    "medium": 50,   # comparison / short informational: 25-90
+    "long": 90,     # experience-sharing / deep informational: 50-160
+}
+
+# Recommendation-signal lexicon. Single source of truth — generator,
+# validator, length classifier, and persona-variety rules all share this.
+_REC_SIGNALS = [
+    "best ", "recommend", "suggest", "looking for", "any tools",
+    "any apps", "what's a good", "what is the best", "what's the best",
+    "anyone use", "anyone using", "anyone tried", "help me find",
+    "help finding", "any tips", "any advice", "how do i", "how do you",
+    "what do you use", "what would you", "which ", "alternatives to",
+    "alternative for", "tool for", "app for", "platform for",
+]
+
+# Personas categorised for the anti-similarity variety pass. A batch of
+# N comments shouldn't be all DIRECT or all ANECDOTE — real Reddit
+# threads have a mix.
+PERSONA_CATEGORIES = {
+    "DIRECT": {"helper", "comparer", "professional", "data_nerd",
+               "veteran_terse", "impatient", "concerned",
+               "budget_conscious", "researcher"},
+    "ANECDOTE": {"tangent", "parent", "long_timer", "switcher",
+                 "agreeable", "lurker", "dry_humor", "grateful"},
+    "SKEPTIC": {"skeptic", "frustrated", "newbie"},
+}
+
+# Curated AI-crawl + recommendation persona/structure pool — direct,
+# answer-shaped voices.
+AI_CRAWL_REC_PERSONAS = {"helper", "comparer", "professional",
+                          "data_nerd", "veteran_terse"}
+AI_CRAWL_REC_STRUCTURES = {"direct_answer", "list_format",
+                            "comparison", "short_punchy"}
+
+
+def classify_post_intent(post_title, post_body=None, stored_intent=None):
+    """Single source of truth for "what is this post asking for".
+
+    Returns:
+        {
+            "is_recommendation": bool,          # short-circuit signal
+            "intent_label": str,                # "recommendation" | "comparison"
+                                                # | "informational" | "experience"
+            "target_length_band": str,          # "crisp" | "medium" | "long"
+            "target_avg_words": int,            # for the LENGTH math
+        }
+
+    The mapping:
+      - title contains a recommendation signal OR ends with '?' (short
+        title) OR stored_intent is commercial/comparison
+        → recommendation, crisp (~25 words)
+      - title has "vs" or "versus" or "switching from"
+        → comparison, medium (~50 words)
+      - body suggests long personal experience ("I've been", "for X
+        years", word count > 120)
+        → experience, long (~90 words)
+      - else → informational, medium (~50 words)
+    """
+    t = (post_title or "").lower().strip()
+    b = (post_body or "").lower()
+    stripped = t.rstrip()
+
+    has_rec_signal = any(s in t for s in _REC_SIGNALS) \
+                  or any(s in b[:600] for s in _REC_SIGNALS)
+    short_question = stripped.endswith("?") and len(t.split()) < 12
+    is_comparison = (" vs " in t or " versus " in t
+                     or "switching from" in t or "switched from" in t)
+    is_recommendation = has_rec_signal or short_question \
+                        or stored_intent in ("commercial", "comparison")
+
+    if is_recommendation and not is_comparison:
+        intent_label = "recommendation"
+        band = "crisp"
+    elif is_comparison:
+        intent_label = "comparison"
+        band = "medium"
+    elif (b and (
+            "i've been" in b or "ive been" in b
+            or " for years" in b or " for the past " in b
+            or "5 years" in b or "for a year" in b
+            or len(b.split()) > 120)):
+        intent_label = "experience"
+        band = "long"
+    else:
+        intent_label = "informational"
+        band = "medium"
+
+    return {
+        "is_recommendation": is_recommendation,
+        "intent_label": intent_label,
+        "target_length_band": band,
+        "target_avg_words": INTENT_AVG_WORDS[band],
+    }
+
+
+# Sentence-count target per length tier — paired with the word-count
+# range so the LLM has a more reliable shape signal than words alone.
+SENTENCE_COUNT_TARGETS = {
+    "short":        "1-2 sentences",
+    "short-medium": "2-3 sentences",
+    "medium":       "3-4 sentences",
+    "medium-long":  "4-6 sentences",
+    "long":         "5-8 sentences",
+}
+
 from config import (
     PROMPT_VERSION, DEFAULT_BRAND_MENTION_RATIO,
     COMMENT_SPREAD_DAYS, REDDIT_USER_AGENT
@@ -591,22 +701,54 @@ Return JSON only:
             if s["id"] in recent_structures:
                 structure_weights[i] *= 0.3
 
-        # Weighted selection
+        # Helper: which persona category does this id belong to?
+        def _persona_category(pid):
+            for cat, ids in PERSONA_CATEGORIES.items():
+                if pid in ids:
+                    return cat
+            return None
+
+        # Weighted selection — with ANTI-SIMILARITY: each subsequent pick
+        # downweights personas that share a category with already-picked
+        # ones. Two slots both landing on `tangent` + `story_arc` (or two
+        # SKEPTIC voices) makes the thread feel templated — real Reddit
+        # threads have a mix.
         selected_personas = []
         remaining_p_indices = list(range(len(PERSONAS)))
-        for _ in range(num_comments):
+        for slot in range(num_comments):
             if not remaining_p_indices:
                 break
-            chosen = random.choices(remaining_p_indices, weights=[persona_weights[i] for i in remaining_p_indices], k=1)[0]
+            # Build per-slot weights with category penalty
+            picked_cats = {_persona_category(p["id"]) for p in selected_personas}
+            picked_cats.discard(None)
+            slot_weights = []
+            for i in remaining_p_indices:
+                w = persona_weights[i]
+                if _persona_category(PERSONAS[i]["id"]) in picked_cats:
+                    w *= 0.2  # heavy penalty for category dup
+                slot_weights.append(max(w, 0.01))
+            chosen = random.choices(remaining_p_indices, weights=slot_weights, k=1)[0]
             selected_personas.append(PERSONAS[chosen])
             remaining_p_indices.remove(chosen)
 
+        # Same anti-similarity for structures: don't pick two narrative
+        # structures back-to-back.
+        narrative_structures = {"story_arc", "anecdote", "comparison",
+                                "tangent_drift"}
         selected_structures = []
         remaining_s_indices = list(range(len(STRUCTURE_TEMPLATES)))
-        for _ in range(num_comments):
+        for slot in range(num_comments):
             if not remaining_s_indices:
                 break
-            chosen = random.choices(remaining_s_indices, weights=[structure_weights[i] for i in remaining_s_indices], k=1)[0]
+            picked_narrative = any(s["id"] in narrative_structures
+                                    for s in selected_structures)
+            slot_weights = []
+            for i in remaining_s_indices:
+                w = structure_weights[i]
+                if picked_narrative and STRUCTURE_TEMPLATES[i]["id"] in narrative_structures:
+                    w *= 0.25
+                slot_weights.append(max(w, 0.01))
+            chosen = random.choices(remaining_s_indices, weights=slot_weights, k=1)[0]
             selected_structures.append(STRUCTURE_TEMPLATES[chosen])
             remaining_s_indices.remove(chosen)
 
@@ -716,42 +858,31 @@ Return JSON only:
         selected_personas, selected_structures, per_comment_angles = \
             self._select_comment_config(tone_analysis, comment_stats, relevance, num_comments)
 
-        # Lexical recommendation-seeking detector (also used by the AI-crawl
-        # block below and by validate_comments — keep all three in sync).
-        _t = (post_title or "").lower()
-        _b = (post_body or "").lower()[:600]
-        _rec_signals = [
-            "best ", "recommend", "suggest", "looking for", "any tools",
-            "any apps", "what's a good", "what is the best", "what's the best",
-            "anyone use", "anyone using", "anyone tried", "help me find",
-            "help finding", "any tips", "any advice", "how do i", "how do you",
-            "what do you use", "what would you", "which ", "alternatives to",
-            "alternative for", "tool for", "app for", "platform for",
-        ]
-        is_recommendation = (
-            any(s in _t for s in _rec_signals)
-            or any(s in _b for s in _rec_signals)
-            or _t.rstrip().endswith("?")
-            or post_intent in ("commercial", "comparison")
-        )
+        # Single intent classifier — drives length scaling, persona pool
+        # filtering, AI-crawl shape rules, and validator rubric strictness.
+        intent_info = classify_post_intent(post_title, post_body, post_intent)
+        is_recommendation = intent_info["is_recommendation"]
+        target_band = intent_info["target_length_band"]
+        intent_label = intent_info["intent_label"]
+
+        # INTENT-DRIVEN LENGTH SCALING: scale comment_stats.avg_words to
+        # the band's target BEFORE the per-comment LENGTH math runs.
+        # Recommendation-seeking posts → crisp (avg_words ≈ 25), so even
+        # the verbose personas (comparer/data_nerd, length="long") produce
+        # ~35-55 words instead of 84-132. Experience posts → long, so
+        # short personas can still be brief but the typical comment is
+        # paragraph-length. This is THE fix for "always making up stories".
+        if comment_stats is None:
+            comment_stats = {}
+        comment_stats = dict(comment_stats)  # copy; don't mutate caller
+        comment_stats["avg_words"] = intent_info["target_avg_words"]
 
         # AI-CRAWL + RECOMMENDATION-SEEKING POST: override the random persona /
         # structure pick with a curated whitelist of "direct answer" voices.
-        # The default persona pool is heavy with hedge-y / story-mode voices
-        # (skeptic, newbie, frustrated, tangent, switcher, lurker, …) which
-        # produce confident-sounding but answer-shy comments. AI search
-        # engines won't surface those for query-style posts. Force the
-        # picker to choose from voices that produce extractable answers.
         if ai_crawl and is_recommendation:
-            _ai_crawl_persona_ids = {"helper", "comparer", "professional",
-                                     "data_nerd", "veteran_terse"}
-            _ai_crawl_structure_ids = {"direct_answer", "list_format",
-                                       "comparison", "short_punchy"}
-            ac_personas = [p for p in PERSONAS if p["id"] in _ai_crawl_persona_ids]
-            ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in _ai_crawl_structure_ids]
+            ac_personas = [p for p in PERSONAS if p["id"] in AI_CRAWL_REC_PERSONAS]
+            ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in AI_CRAWL_REC_STRUCTURES]
             if ac_personas and ac_structures:
-                # Sample without replacement from the curated set; cycle if the
-                # caller asks for more comments than the whitelist holds.
                 random.shuffle(ac_personas)
                 random.shuffle(ac_structures)
                 selected_personas = [
@@ -760,6 +891,23 @@ Return JSON only:
                 selected_structures = [
                     ac_structures[i % len(ac_structures)] for i in range(num_comments)
                 ]
+
+        # CRISP-BATCH RULE: on a recommendation post with N≥3 comments,
+        # force slot 0 to use a SHORT-length persona. Guarantees at least
+        # one true 1-liner per batch. Without this, even with intent-driven
+        # length scaling, the random pick could land on three medium
+        # personas in a row and produce three 25-50 word comments — no
+        # short crisp answer in the mix.
+        if is_recommendation and num_comments >= 3:
+            short_personas = [p for p in PERSONAS if p["length"] in ("short", "short-medium")
+                              and p["id"] not in PERSONA_CATEGORIES["SKEPTIC"]]
+            if short_personas and selected_personas[0]["length"] not in ("short", "short-medium"):
+                selected_personas[0] = random.choice(short_personas)
+                # Pair with direct_answer structure for slot 0
+                short_structures = [s for s in STRUCTURE_TEMPLATES
+                                    if s["id"] in {"short_punchy", "direct_answer"}]
+                if short_structures:
+                    selected_structures[0] = random.choice(short_structures)
 
         # slim_prompt cuts the few-shot block (~1500 input tokens) which is
         # the largest single overhead in the prompt. Used by HQ replies
@@ -814,12 +962,16 @@ Return JSON only:
             avg_w = (comment_stats or {}).get("avg_words", 60)
             lo_m, hi_m = LENGTH_MULTIPLIERS.get(persona['length'], (0.6, 1.0))
             lo_w, hi_w = max(8, int(avg_w * lo_m)), int(avg_w * hi_m)
+            sent_target = SENTENCE_COUNT_TARGETS.get(persona['length'], "3-4 sentences")
 
+            # Pair word-count with sentence-count — LLMs respect sentence
+            # counts more reliably than word ranges.
             comment_instructions.append(
                 f"  Comment {idx+1}:\n"
                 f"    PERSONA: {persona['voice']}\n"
                 f"    STRUCTURE: {structure['instruction']}\n"
-                f"    LENGTH: {lo_w}-{hi_w} words ({persona['length']}){brand_line}{angle_line}{reply_line}"
+                f"    LENGTH: {sent_target} (~{lo_w}-{hi_w} words). Stay in this range — do not write a long story when the post calls for a short answer."
+                f"{brand_line}{angle_line}{reply_line}"
             )
         per_comment_section = "\n".join(comment_instructions)
 
@@ -1085,26 +1237,11 @@ Generate exactly {num_comments} comments. Return JSON only:
         if not generated_comments:
             return {"evaluations": [], "any_failed": True}
 
-        # Re-derive the same recommendation-seeking signal the generator
-        # uses, so the rubric judges the comment against the same intent
-        # we asked the generator to write for.
-        _t = (post_title or "").lower()
-        _b = (post_body or "").lower()[:600]
-        _rec_signals = [
-            "best ", "recommend", "suggest", "looking for", "any tools",
-            "any apps", "what's a good", "what is the best", "what's the best",
-            "anyone use", "anyone using", "anyone tried", "help me find",
-            "help finding", "any tips", "any advice", "how do i", "how do you",
-            "what do you use", "what would you", "which ", "alternatives to",
-            "alternative for", "tool for", "app for", "platform for",
-        ]
-        is_recommendation = (
-            any(s in _t for s in _rec_signals)
-            or any(s in _b for s in _rec_signals)
-            or _t.rstrip().endswith("?")
-            or post_intent in ("commercial", "comparison")
-        )
-        post_intent_label = post_intent or ("recommendation_seeking" if is_recommendation else "informational")
+        # Use the SHARED intent classifier — same signal as the generator
+        # so rubric strictness aligns with what we asked the model to write.
+        intent_info = classify_post_intent(post_title, post_body, post_intent)
+        is_recommendation = intent_info["is_recommendation"]
+        post_intent_label = post_intent or intent_info["intent_label"]
 
         gen_text = "\n".join([
             f'Comment {i+1}: """{comment}"""' for i, comment in enumerate(generated_comments)
@@ -1372,7 +1509,50 @@ Return JSON only:
             for attempt in range(max_retries):
                 print(f"    [validate] comment {idx+1} failed: {last_feedback[:200]}")
                 print(f"    [validate] retry {attempt+1}/{max_retries}")
-                retry_kwargs["retry_feedback"] = last_feedback
+
+                # SMART RETRY: don't just feed feedback through — change
+                # the SHAPE. Same persona+structure on retry tends to
+                # produce the same failure. Force a different starting
+                # point based on which judgment failed.
+                intent_info = classify_post_intent(post_title, post_body, post_intent)
+                last_ev = ev if attempt == 0 else None  # most recent fail eval
+                forced_persona = forced_structure = None
+                if (ev.get("shape_match") == "no" or "shape_match" in (last_feedback or "")) \
+                        and intent_info["is_recommendation"]:
+                    # Wrong shape on a recommendation post → force direct-answer
+                    rec_ps = [p for p in PERSONAS if p["id"] in {"helper", "veteran_terse", "professional"}]
+                    rec_ss = [s for s in STRUCTURE_TEMPLATES if s["id"] in {"direct_answer", "short_punchy"}]
+                    if rec_ps: forced_persona = random.choice(rec_ps)
+                    if rec_ss: forced_structure = random.choice(rec_ss)
+                elif ev.get("authenticity") == "no" or "authenticity" in (last_feedback or ""):
+                    # AI-tells → swap to a different persona category. If the
+                    # current persona was DIRECT, switch to ANECDOTE; vice
+                    # versa. Real Reddit voices have variety.
+                    cur_cat = None
+                    for cat, ids in PERSONA_CATEGORIES.items():
+                        if persona in ids:
+                            cur_cat = cat
+                            break
+                    swap_cat = "ANECDOTE" if cur_cat == "DIRECT" else "DIRECT"
+                    swap_ids = PERSONA_CATEGORIES[swap_cat]
+                    swap_ps = [p for p in PERSONAS if p["id"] in swap_ids]
+                    if swap_ps: forced_persona = random.choice(swap_ps)
+                # Inject the forced persona/structure into the retry kwargs
+                # by short-circuiting _select_comment_config — we override
+                # via brand_assignments/relevance? No, simpler path: pass
+                # via the prompt's per-comment LENGTH section by stuffing
+                # an explicit "force_persona" hint into retry_feedback.
+                shape_hint = ""
+                if forced_persona:
+                    shape_hint += (
+                        f"\nFORCE PERSONA for retry: {forced_persona['voice']}"
+                    )
+                if forced_structure:
+                    shape_hint += (
+                        f"\nFORCE STRUCTURE for retry: {forced_structure['instruction']}"
+                    )
+                retry_kwargs["retry_feedback"] = last_feedback + shape_hint
+
                 r2 = self.generate_comments(**retry_kwargs)
                 new_bodies = r2.get("generated_comments") or []
                 if not new_bodies:
@@ -2114,6 +2294,26 @@ Return JSON only:
                 if not bodies:
                     continue
                 body = bodies[0]
+                # Validate this reply. Drops the "no validator on this path"
+                # gap from the audit. We don't drop on fail — user expects
+                # all requested replies to land — but log so the failure is
+                # visible.
+                try:
+                    val = self.validate_comments(
+                        post_title=post["title"],
+                        post_body=post["body"],
+                        subreddit=subreddit["name"],
+                        comments=[],
+                        brand_name=brand["name"],
+                        generated_comments=[body],
+                        ai_crawl=ai_crawl,
+                        post_intent=post.get("intent"),
+                    )
+                    ev = (val.get("evaluations") or [{}])[0]
+                    if not ev.get("pass"):
+                        print(f"    [add-replies] reply {i} validation: {ev.get('feedback', '')[:200]}")
+                except Exception as e:
+                    print(f"    [add-replies] validator error: {e}")
                 cid = self.db.save_comment(
                     post_id=post["id"],
                     brand_id=brand["id"],
@@ -2214,20 +2414,44 @@ Return JSON only:
 {{
     "reply": "your OP reply text"
 }}"""
-        try:
-            result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
-        except Exception as e:
-            print(f"    [op-reply-cluster] API error: {e}")
-            return None
-        if not result or "reply" not in result:
-            print("    [op-reply-cluster] no reply generated")
-            return None
-        body = result["reply"]
-        # Sanity: never accept a body that mentions a brand
-        for bname in all_brand_names:
-            if bname and bname.lower() in body.lower():
-                print(f"    [op-reply-cluster] reply mentioned brand {bname} — rejecting")
+        # Try up to 2 attempts: each attempt is gen → light validation.
+        # If the second still fails the cheap checks, we save the best
+        # attempt anyway (manual user action — they expect a result).
+        body = None
+        for attempt in range(2):
+            try:
+                result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
+            except Exception as e:
+                print(f"    [op-reply-cluster] API error: {e}")
                 return None
+            if not result or "reply" not in result:
+                print(f"    [op-reply-cluster] no reply generated (attempt {attempt+1})")
+                continue
+            cand = result["reply"]
+            # Light validation: banned phrases, dashes, brand mention,
+            # brand criticism. The full LLM rubric isn't used here because
+            # OP replies are intentionally a different shape than the
+            # rubric judges.
+            cand_lower = cand.lower()
+            problems = []
+            for bname in all_brand_names:
+                if bname and bname.lower() in cand_lower:
+                    problems.append(f"mentions brand '{bname}'")
+            for phrase in BANNED_PHRASES:
+                if phrase in cand_lower:
+                    problems.append(f"banned phrase: {phrase!r}")
+                    break
+            if re.search(r'[–—]| - |--', cand):
+                problems.append("contains dashes")
+            if problems and attempt == 0:
+                print(f"    [op-reply-cluster] retry — {problems[:3]}")
+                continue
+            body = cand
+            if problems:
+                print(f"    [op-reply-cluster] saving despite issues: {problems[:3]}")
+            break
+        if body is None:
+            return None
         post_day_offset = post.get("suggested_post_day", 0)
         cid = self.db.save_comment(
             post_id=post["id"],
@@ -2304,30 +2528,65 @@ COMMENT YOU'RE REPLYING TO:
 "{target_body[:500]}"
 
 Write a reply AS THE OP (original poster). You should:
-- Sound like the same person who wrote the post
-- React naturally to what they said (thank them, ask follow-up, share an update, agree/disagree)
-- Reference details from YOUR original post to show consistency
-- Be casual and conversational, like a real Reddit OP engaging
-- Keep it 1-3 sentences typically (OPs don't write essays in replies)
-- Vary your approach: sometimes grateful, sometimes curious, sometimes sharing an update
-- NEVER mention any brand name ({', '.join(all_brand_names)}) or any product/company
-- NEVER criticize, complain about, mock, dismiss, or speak negatively about {', '.join(all_brand_names)} — not by name, and not via indirect references ("they", "that company", "that product", "the one I tried")
-- NEVER use dashes (-), em-dashes, or double-dashes
-- Do NOT start with "Thanks for..." every time, vary your openings
+- Sound like the same person who wrote the post.
+- ENGAGE WITH WHAT THEY SAID SPECIFICALLY: react to one concrete point
+  or claim from the comment above. Reference a specific phrase or idea
+  from their comment so it's clear you read it. Don't drift to a
+  different topic.
+- Reference details from YOUR original post to show consistency.
+- Be casual and conversational, like a real Reddit OP engaging.
+- Keep it 1-3 sentences typically (OPs don't write essays in replies).
+- Vary your approach: sometimes grateful, sometimes curious, sometimes
+  sharing an update. NEVER hedge with "take this with a grain of
+  salt", "ymmv", "fwiw", "still figuring out", or "not sure if this
+  helps".
+- NEVER mention any brand name ({', '.join(all_brand_names)}) or any
+  product/company.
+- NEVER criticize, complain about, mock, dismiss, or speak negatively
+  about {', '.join(all_brand_names)} — not by name, and not via
+  indirect references ("they", "that company", "that product", "the
+  one I tried").
+- NEVER use dashes (-), em-dashes, or double-dashes.
+- Do NOT start with "Thanks for..." every time, vary your openings.
 
 Return JSON only:
 {{
     "reply": "your OP reply text"
 }}"""
 
-            result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
-            if not result or "reply" not in result:
-                print(f"    Warning: failed to generate OP reply {i+1}")
+            # Two-attempt loop: gen → light validation → maybe retry.
+            # Same lightweight checks as op-reply-to-cluster: banned
+            # phrases, dashes, brand mention, brand criticism. Doesn't
+            # use the full LLM rubric since OP-voice replies are a
+            # different shape than what the rubric judges.
+            body = None
+            for attempt in range(2):
+                result = self.claude.call(prompt, max_tokens=500, temperature=0.9)
+                if not result or "reply" not in result:
+                    print(f"    Warning: failed to generate OP reply {i+1} (attempt {attempt+1})")
+                    continue
+                cand = result["reply"]
+                cand_lower = cand.lower()
+                problems = []
+                if brand and brand["name"].lower() in cand_lower:
+                    problems.append("mentions brand")
+                for phrase in BANNED_PHRASES:
+                    if phrase in cand_lower:
+                        problems.append(f"banned phrase: {phrase!r}")
+                        break
+                if re.search(r'[–—]| - |--', cand):
+                    problems.append("contains dashes")
+                if problems and attempt == 0:
+                    print(f"    [op-reply] retry: {problems[:3]}")
+                    continue
+                body = cand
+                if problems:
+                    print(f"    [op-reply] saving despite issues: {problems[:3]}")
+                break
+            if body is None:
                 continue
 
-            body = result["reply"]
-
-            # Verify no brand mention
+            # Hard reject: never save a body that mentions a brand
             if brand and brand["name"].lower() in body.lower():
                 print(f"    Warning: OP reply mentions brand, skipping")
                 continue

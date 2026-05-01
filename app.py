@@ -4432,6 +4432,41 @@ def api_mark_search_comment_paid(cid):
     finally:
         db.close()
 
+
+@app.route("/api/search/comments/bulk-mark-paid", methods=["POST"])
+def api_bulk_mark_paid_search_comments():
+    """Mark multiple search comments as paid in one query.
+
+    Body: { comment_ids: [int, ...] }
+
+    Only comments currently in 'deployed' status are updated — same gate
+    as `mark_search_comment_paid` for a single comment. Filtering by
+    other criteria (brand / subreddit / post / date) is the caller's job:
+    the Live Search Comments tab applies its current filters client-side
+    and passes only the matching IDs here.
+    """
+    data = request.json or {}
+    ids = data.get("comment_ids") or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "comment_ids must be a non-empty list"}), 400
+    db = get_db()
+    try:
+        # Defensive: cast to int + dedupe
+        ids = list({int(i) for i in ids})
+        placeholders = ",".join("?" * len(ids))
+        cur = db.conn.execute(
+            f"""UPDATE search_comments
+                SET status = 'paid', paid_at = datetime('now'), prev_status = status
+                WHERE id IN ({placeholders}) AND status = 'deployed'""",
+            ids
+        )
+        updated = cur.rowcount
+        db.conn.commit()
+        return jsonify({"updated": updated, "requested": len(ids)})
+    finally:
+        db.close()
+
+
 @app.route("/api/search/comments/<int:cid>/mark-removed", methods=["POST"])
 def api_mark_search_comment_removed(cid):
     db = get_db()

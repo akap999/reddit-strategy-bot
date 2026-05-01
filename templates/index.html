@@ -8939,6 +8939,7 @@ async function renderLsComments(c) {
                 </div>
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()">Check Live Logs</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
+                <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
@@ -9250,6 +9251,36 @@ async function lsMarkPaid(cid) {
         _lsUpdateCommentLocal(cid, { status: 'paid', paid_at: new Date().toISOString() });
         if (currentView === 'allcomments') _acUpdateLocal(cid, 'search_comment', { status: 'paid', paid_at: new Date().toISOString() });
     } catch(e) { toast('Failed to mark paid', 'error'); }
+}
+
+// Mark every DEPLOYED comment in the current filtered view as paid.
+// Respects all the active filters (brand / subreddit multi-select /
+// post / status / sort) because we read straight from
+// _lsFilteredComments — that's exactly what the user is currently
+// looking at.
+async function lsMarkPaidAll() {
+    const pool = (_lsFilteredComments || []).filter(c => c.status === 'deployed');
+    if (!pool.length) {
+        toast('No deployed comments in the current filter', 'error');
+        return;
+    }
+    if (!confirm(`Mark all ${pool.length} deployed comment(s) in the current filter as paid?`)) return;
+    const ids = pool.map(c => c.id);
+    try {
+        const result = await api('/api/search/comments/bulk-mark-paid', {
+            method: 'POST',
+            body: { comment_ids: ids },
+        });
+        const n = (result && result.updated) || 0;
+        toast(`Marked ${n} comment(s) as paid`, 'success');
+        // Patch the local cache so the table refreshes without a full refetch.
+        const now = new Date().toISOString();
+        for (const cid of ids) {
+            _lsUpdateCommentLocal(cid, { status: 'paid', paid_at: now });
+        }
+    } catch(e) {
+        toast(`Failed to mark paid: ${e.message || e}`, 'error');
+    }
 }
 
 async function lsMarkRemoved(cid) {

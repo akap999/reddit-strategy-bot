@@ -497,19 +497,46 @@ BRAND: {brand_name}
 WHAT BRAND DOES: {brand_context}{keywords_text}
 
 Score 0-10 on these criteria:
-1. TOPIC MATCH (0-3)
-2. PROBLEM-SOLUTION FIT (0-3)
-3. NATURAL FIT (0-2)
-4. CONVERSATION OPENING (0-2)
 
-DISQUALIFIERS: Meme/joke post, hostile to brands, brand already mentioned, completely off-topic.
+1. TOPIC MATCH (0-3): Is the post about something the brand offers/solves?
+   3 = Direct match (post is about exactly what brand does)
+   2 = Related topic (brand could naturally fit)
+   1 = Tangentially related
+   0 = Completely unrelated
+
+2. PROBLEM-SOLUTION FIT (0-3): Is someone describing a problem the brand solves?
+   3 = Explicit problem brand solves ("where can I find...", "struggling with...")
+   2 = Implicit problem (describing symptoms/issues brand addresses)
+   1 = General discussion
+   0 = No problem or brand can't help
+
+3. NATURAL FIT (0-2): Would a brand mention feel organic?
+   2 = People are asking for recommendations or sharing solutions
+   1 = Experience sharing is happening (can add yours)
+   0 = Would feel forced, off-topic, or spammy
+
+4. CONVERSATION OPENING (0-2): Is there a natural way to enter this conversation?
+   2 = Clear opening (question asked, advice sought, experiences shared)
+   1 = Possible but requires care
+   0 = Closed discussion, argument, or meme thread
+
+DISQUALIFIERS (auto-fail):
+- Meme/joke post
+- Hostile to brands/advertising
+- Brand already mentioned
+- Completely off-topic
 
 Return JSON only:
 {{
-    "topic_match": 0-3, "problem_fit": 0-3, "natural_fit": 0-2, "conversation_opening": 0-2,
-    "total_score": 0-10, "disqualified": true/false, "disqualify_reason": "",
+    "topic_match": 0-3,
+    "problem_fit": 0-3,
+    "natural_fit": 0-2,
+    "conversation_opening": 0-2,
+    "total_score": 0-10,
+    "disqualified": true/false,
+    "disqualify_reason": "",
     "recommendation": "GENERATE" or "SKIP",
-    "best_angle": "Brief description of how brand could naturally fit",
+    "best_angle": "Brief description of how brand could naturally fit (if relevant)",
     "summary": "One sentence explanation"
 }}"""
 

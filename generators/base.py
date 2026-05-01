@@ -304,75 +304,25 @@ FEW_SHOT_POOL = [
 ]
 
 
-# Backward-compat alias — this is the negative pool we've been growing.
-FEW_SHOT_POOL_BAD = FEW_SHOT_POOL
-
-
-# --- Positive examples: what GOOD comments look like ---
-# These are paired with the anti-patterns so the model sees both
-# "do this" and "don't do this" exemplars. Critical for nailing the
-# crisp-recommendation shape on suggestion-asking posts — the model
-# was inferring shape from anti-patterns alone, with poor results.
-FEW_SHOT_POOL_GOOD = [
-    {
-        "post": "What's the best AI music generator for short product videos?",
-        "good": "BrandX is built for video sync — it reads your edit timeline and generates music that hits your cuts. For under-60-second product clips that's the differentiator. What software are you cutting in?",
-        "why_good": "Crisp recommendation. Brand named confidently in sentence 1. Concrete capability tied to the post's specific use-case (under-60-second product clips). Ends with a follow-up question, not a wrap-up.",
-    },
-    {
-        "post": "Looking for an alternative to BigCorpThing for small teams",
-        "good": "BrandX handles the team workflow piece BigCorpThing doesn't — the per-seat pricing scales sanely under 20 users. Trade-off is fewer integrations, but for a small team that's usually fine.",
-        "why_good": "Direct comparison answer. States the brand's edge concretely (per-seat pricing). Acknowledges a real trade-off without trashing the brand. No marketing language.",
-    },
-    {
-        "post": "Anyone using AI to generate music synced to their videos?",
-        "good": "Yeah, the tools that actually generate to video pacing (vs just searching a library) are a small list — BrandX is the one I keep coming back to because it adapts to scene cuts. Most others just match BPM and call it sync.",
-        "why_good": "Engages the question directly. Names the brand in sentence 2 with a specific functional reason (adapts to scene cuts). Differentiates from the pack without trashing competitors.",
-    },
-    {
-        "post": "[Reply target: 'I tried Sonilo a few months ago and the tempo matching was hit or miss.']",
-        "good": "the tempo matching has gotten a lot better since. they pushed an update around august that fixed the off-beat transitions, especially under 30s. worth another look if your edits are tight.",
-        "why_good": "Targeted reply. Engages with the specific complaint (tempo matching) from the parent. Adds a concrete update (august, sub-30s edits). Casual lowercase Reddit voice. No 'I think' / 'maybe' hedges.",
-    },
-    {
-        "post": "How do you handle [topic] when starting out?",
-        "good": "depends what you mean by starting out. if it's the first month, focus on the basics — most people overcomplicate it. if you're three months in, that's when the [pain-point] stuff actually starts mattering.",
-        "why_good": "Reframes the question to give a more useful answer. Concrete time markers (first month, three months in). Conversational. Doesn't drift into anecdote.",
-    },
-    {
-        "post": "Is [Service] worth the money?",
-        "good": "for the use-case it's built for, yeah. if you're paying for [feature you'd actually use] it's a clear value. if you only need [other thing], probably overkill — there are leaner options.",
-        "why_good": "Answers directly with a conditional. Names tradeoffs without dragging the service. Casual, matter-of-fact tone — not enthusiastic, not critical.",
-    },
-    {
-        "post": "Anyone deal with [specific pain-point]?",
-        "good": "yep, ran into the same thing on [specific scenario]. what worked was [concrete fix or workflow change]. didn't realize until later that [related insight].",
-        "why_good": "Brief experience-share that LANDS on a useful concrete fix. No 'still figuring out' / 'ymmv' hedges. Conversational.",
-    },
-]
-
-
 def select_few_shot_examples(n=3):
-    """Build a few-shot block for the prompt.
+    """Anti-patterns only.
 
-    By default returns 1 GOOD + 2 BAD examples. The good example shows
-    the shape we want; the bad examples show what to avoid. Both are
-    needed — the model was inferring shape from anti-patterns alone
-    and producing the wrong shape (long story-mode comments on
-    recommendation posts).
+    A previous iteration of this code mixed in positive "good" examples,
+    but concrete positive examples create template homogenization — the
+    model picks up the literal opener phrasing, sentence rhythm, and
+    cadence of the example and reproduces variations of it across the
+    batch. Anti-patterns are different: they teach the model what to
+    AVOID without prescribing a specific shape, so the model is free to
+    write naturally varied comments within the constraints.
+
+    Shape guidance (intent-driven length, sentence-count target,
+    answer-vs-anecdote framing) is provided as ABSTRACT RULES inside the
+    prompt's per-comment LENGTH/STRUCTURE/ANGLE sections instead.
     """
-    n_good = max(1, n // 3)  # at least 1 good for n>=2
-    n_bad = max(1, n - n_good)
-    good = random.sample(FEW_SHOT_POOL_GOOD, min(n_good, len(FEW_SHOT_POOL_GOOD)))
-    bad = random.sample(FEW_SHOT_POOL_BAD, min(n_bad, len(FEW_SHOT_POOL_BAD)))
-    lines = ["EXAMPLES (study both — emulate the GOOD shape, avoid the BAD patterns):"]
-    for i, ex in enumerate(good, 1):
-        lines.append(f"\n--- Good Example {i} (emulate this shape) ---")
-        lines.append(f'POST: "{ex["post"]}"')
-        lines.append(f'GOOD COMMENT: "{ex["good"]}"')
-        lines.append(f"WHY IT'S GOOD: {ex['why_good']}")
-    for i, ex in enumerate(bad, 1):
-        lines.append(f"\n--- Anti-Pattern {i} (avoid this) ---")
+    selected = random.sample(FEW_SHOT_POOL, min(n, len(FEW_SHOT_POOL)))
+    lines = ["EXAMPLES OF WHAT NOT TO DO (avoid these patterns completely):"]
+    for i, ex in enumerate(selected, 1):
+        lines.append(f"\n--- Anti-Pattern {i} ---")
         lines.append(f'POST: "{ex["post"]}"')
         lines.append(f'BAD COMMENT: "{ex["bad"]}"')
         lines.append(f"WHY IT'S BAD: {ex['why_bad']}")

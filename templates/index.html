@@ -9686,6 +9686,30 @@ async function lsExportCsv() {
             return true;
         });
     }
+
+    // Honour the Sort dropdown — _lsFilteredComments is in API order, the
+    // renderer only sorts groups visually, so without this the CSV ignored
+    // the user's sort choice. Mirrors the renderer's logic but flattened
+    // to per-comment: primary key is post_date (asc/desc per dropdown),
+    // tiebreak is created_at ASC so HQ threads stay contiguous.
+    const sortOpt = document.getElementById('ls-cf-sort')?.value || '';
+    if (sortOpt === 'post_date_desc') {
+        comments.sort((a, b) => {
+            const pa = a.post_date || '', pb = b.post_date || '';
+            if (pa !== pb) return pb.localeCompare(pa);
+            return (a.created_at || '').localeCompare(b.created_at || '');
+        });
+    } else if (sortOpt === 'post_date_asc') {
+        comments.sort((a, b) => {
+            const pa = a.post_date || '', pb = b.post_date || '';
+            if (pa !== pb) return pa.localeCompare(pb);
+            return (a.created_at || '').localeCompare(b.created_at || '');
+        });
+    } else {
+        // Default ('Newest Comment'): most recently created comment first.
+        comments.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    }
+
     if (!comments.length) { toast('No comments to export', 'info'); return; }
 
     // Fetch live engagement (upvotes + reply count) for any deployed comments

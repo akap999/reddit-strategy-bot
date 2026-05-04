@@ -8492,7 +8492,7 @@ async function lsSaveAndGenerateAll() {
 }
 
 // --- Saved Posts Tab ---
-let _lsSavedFilter = { keyword: '', brand: '', status: '', subreddit: '' };
+let _lsSavedFilter = { keyword: '', brand: '', status: '' };
 
 async function renderLsSaved(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
@@ -8540,7 +8540,6 @@ async function renderLsSaved(c) {
                 <input id="ls-exclude-subs" placeholder="sub1, sub2, ..." class="w-full text-sm ml-1">
             </div>
         </div>
-        <div class="mb-3 flex gap-2 flex-wrap items-center" id="ls-sub-count-bar">${_lsRenderSubCountBar()}</div>
         <div id="ls-saved-table"></div>
     `;
     lsRenderSavedTable();
@@ -8555,10 +8554,6 @@ function lsGetFilteredSaved() {
     if (_lsSavedFilter.brand === 'none') posts = posts.filter(p => !p.brand_id);
     else if (_lsSavedFilter.brand) posts = posts.filter(p => p.brand_name === _lsSavedFilter.brand);
     if (_lsSavedFilter.status) posts = posts.filter(p => p.status === _lsSavedFilter.status);
-    // Subreddit filter (exact match, set by clicking a count pill)
-    if (_lsSavedFilter.subreddit) {
-        posts = posts.filter(p => (p.subreddit||'').toLowerCase() === _lsSavedFilter.subreddit.toLowerCase());
-    }
     return posts;
 }
 
@@ -8573,37 +8568,6 @@ function _lsSubredditCounts(postsList) {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]);  // desc by count
 }
 
-// Toggle the SAVED-POSTS subreddit filter when a count pill is clicked.
-// Renamed from `lsToggleSubFilter` because that name was already taken
-// by the Live Search Comments tab's subreddit-multi-select panel toggler
-// — having two functions with the same name silently broke both this
-// pill click AND in some edge cases the comments-tab panel.
-function lsToggleSavedSubFilter(sub) {
-    _lsSavedFilter.subreddit = (_lsSavedFilter.subreddit === sub) ? '' : sub;
-    lsRenderSavedTable();
-    const bar = document.getElementById('ls-sub-count-bar');
-    if (bar) bar.innerHTML = _lsRenderSubCountBar();
-}
-
-// Build the count-pills bar HTML. Pills are clickable and the active
-// one (matching the subreddit filter) gets a brighter background.
-function _lsRenderSubCountBar() {
-    const entries = _lsSubredditCounts(_lsSavedPosts);
-    if (!entries.length) return '';
-    const active = (_lsSavedFilter.subreddit || '').toLowerCase();
-    const pills = entries.map(([sub, n]) => {
-        const isActive = sub.toLowerCase() === active;
-        const bg = isActive ? '#0079D3' : '#272729';
-        const fg = isActive ? '#fff' : '#D7DADC';
-        return `<button class="btn btn-sm" style="background:${bg};color:${fg};border:1px solid #343536"
-                onclick="lsToggleSavedSubFilter('${sub.replace(/'/g, "\\'")}')"
-                title="Click to filter to r/${sub}; click again to clear">r/${sub}: ${n}</button>`;
-    }).join(' ');
-    const totalLabel = active
-        ? `<span class="text-xs text-gray-400 ml-2">filtered to r/${active}</span>`
-        : '';
-    return pills + totalLabel;
-}
 
 function lsRenderSavedTable() {
     const el = document.getElementById('ls-saved-table');

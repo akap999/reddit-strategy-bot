@@ -150,7 +150,15 @@ class CommentGenerator:
         self.db = db
         self.pullpush_url = "https://api.pullpush.io/reddit/search/comment"
         self.reddit_base = reddit_base or "https://www.reddit.com"
-        self.headers = {"User-Agent": REDDIT_USER_AGENT}
+        # Match the legacy CommentGeneratorBot UA exactly. Reddit returns
+        # 403 / empty comment trees for cloud-egress IPs sending the bot
+        # UA from REDDIT_USER_AGENT, which manifested as every Live
+        # Search post scoring relevance=0 ("No comments to analyze") →
+        # "low relevancy" skip on every single post. Browser UA is what
+        # actually works against Reddit's .json endpoint from Railway.
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
         self._pattern_history = []
 
     def _detect_and_store_keywords(self, comment_id, body, brand, mentions):

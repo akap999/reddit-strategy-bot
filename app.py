@@ -1179,7 +1179,8 @@ def api_regenerate_search_comment(cid):
     from generators.comment_gen import CommentGenerator
     from generators.base import ClaudeClient
     data = request.json or {}
-    ai_crawl = bool(data.get("ai_crawl", True))
+    # Pre-consolidation parity: default ai_crawl off for Live Search.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     db = get_db()
     try:
@@ -3744,7 +3745,10 @@ def api_generate_search_comments(pid):
     brand_context = brand["context"]
     brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
     num_comments = data.get("num_comments", 2)
-    ai_crawl = bool(data.get("ai_crawl", True))  # default-on for Live Search
+    # Pre-consolidation parity: Live Search did not have an ai_crawl mode.
+    # Default to False so behaviour matches the legacy bot. Callers can
+    # still opt in by passing ai_crawl=True explicitly.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -3995,7 +3999,8 @@ def api_generate_search_hq(pid):
     brand_context = brand["context"]
     brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
     threshold = data.get("relevance_threshold", 6)
-    ai_crawl = bool(data.get("ai_crawl", True))
+    # Pre-consolidation parity for Live Search HQ — default ai_crawl off.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -4029,7 +4034,8 @@ def api_generate_search_hq_batch():
     data = request.json or {}
     post_ids = data.get("post_ids", [])
     threshold = data.get("relevance_threshold", 6)
-    ai_crawl = bool(data.get("ai_crawl", True))
+    # Pre-consolidation parity for Live Search HQ batch — default ai_crawl off.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     if not post_ids:
         return jsonify({"error": "No post_ids provided"}), 400
@@ -4115,7 +4121,8 @@ def api_generate_search_comments_batch():
     data = request.json or {}
     post_ids = data.get("post_ids", [])
     num_comments = data.get("num_comments", 2)
-    ai_crawl = bool(data.get("ai_crawl", True))
+    # Pre-consolidation parity for Live Search batch — default ai_crawl off.
+    ai_crawl = bool(data.get("ai_crawl", False))
 
     if not post_ids:
         return jsonify({"error": "No post_ids provided"}), 400

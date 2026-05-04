@@ -8573,11 +8573,14 @@ function _lsSubredditCounts(postsList) {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]);  // desc by count
 }
 
-// Toggle the subreddit filter — clicking the same pill again clears it.
-function lsToggleSubFilter(sub) {
+// Toggle the SAVED-POSTS subreddit filter when a count pill is clicked.
+// Renamed from `lsToggleSubFilter` because that name was already taken
+// by the Live Search Comments tab's subreddit-multi-select panel toggler
+// — having two functions with the same name silently broke both this
+// pill click AND in some edge cases the comments-tab panel.
+function lsToggleSavedSubFilter(sub) {
     _lsSavedFilter.subreddit = (_lsSavedFilter.subreddit === sub) ? '' : sub;
     lsRenderSavedTable();
-    // Re-render the count bar so the active pill style updates
     const bar = document.getElementById('ls-sub-count-bar');
     if (bar) bar.innerHTML = _lsRenderSubCountBar();
 }
@@ -8593,7 +8596,7 @@ function _lsRenderSubCountBar() {
         const bg = isActive ? '#0079D3' : '#272729';
         const fg = isActive ? '#fff' : '#D7DADC';
         return `<button class="btn btn-sm" style="background:${bg};color:${fg};border:1px solid #343536"
-                onclick="lsToggleSubFilter('${sub.replace(/'/g, "\\'")}')"
+                onclick="lsToggleSavedSubFilter('${sub.replace(/'/g, "\\'")}')"
                 title="Click to filter to r/${sub}; click again to clear">r/${sub}: ${n}</button>`;
     }).join(' ');
     const totalLabel = active

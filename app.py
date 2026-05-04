@@ -523,7 +523,10 @@ def _extract_brand_enrichment_fields(data):
         if scalar in data:
             val = data.get(scalar)
             out[scalar] = val.strip() if isinstance(val, str) else val
-    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits"):
+    # `focus` joins the JSON-list pattern alongside use_cases / pain_points /
+    # etc. — same shape, same parsing. Soft editorial direction the comment
+    # generator weaves in where applicable; see comment_gen.py:_extract_brand_focus.
+    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits", "focus"):
         if listf in data:
             v = data.get(listf)
             if v is None:
@@ -1159,6 +1162,7 @@ def api_regenerate_comment(cid):
             all_brand_names=[brand["name"]],
             ai_crawl=ai_crawl,
             post_intent=post.get("intent"),
+            brand_focus=cg._extract_brand_focus(brand),
         )
         bodies = result.get("generated_comments") or []
         if not bodies:
@@ -1239,6 +1243,7 @@ def api_regenerate_search_comment(cid):
             mention_brand_flags=[True],  # Live Search always brand-mentions
             all_brand_names=[brand["name"]],
             ai_crawl=ai_crawl,
+            brand_focus=cg._extract_brand_focus(brand),
         )
         bodies = result.get("generated_comments") or []
         if not bodies:
@@ -3808,6 +3813,7 @@ def api_generate_search_comments(pid):
 
             # Live Search wants every comment to mention the brand
             mention_flags = [True] * num_comments
+            brand_focus = cg._extract_brand_focus(brand)
 
             generation = cg.generate_comments(
                 post_title=post["title"],
@@ -3824,6 +3830,7 @@ def api_generate_search_comments(pid):
                 mention_brand_flags=mention_flags,
                 all_brand_names=[brand_name],
                 ai_crawl=ai_crawl,
+                brand_focus=brand_focus,
             )
 
             generated = generation.get("generated_comments", []) or []
@@ -3852,6 +3859,7 @@ def api_generate_search_comments(pid):
                     mention_brand_flags=mention_flags,
                     all_brand_names=[brand_name],
                     ai_crawl=ai_crawl,
+                    brand_focus=brand_focus,
                 )
                 retry_comments = retry_gen.get("generated_comments", []) or []
                 if retry_comments:
@@ -3937,6 +3945,7 @@ def _generate_hq_for_search_post(cg, db2, pid, post, brand, brand_name, brand_co
         tone_analysis=tone_analysis, comment_stats=comment_stats,
         relevance=relevance, num_replies=4,
         ai_crawl=ai_crawl,
+        brand_focus=cg._extract_brand_focus(brand),
     )
     if not hq_results:
         db2.update_search_post_status(pid, "saved")
@@ -4139,8 +4148,10 @@ def api_generate_search_comments_batch():
         brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
         if not brand:
             continue
+        # Stash the full brand dict so the worker can extract focus / any
+        # other future field via cg._extract_brand_focus(vp["brand"]).
         valid_posts.append({
-            "pid": pid, "post": post,
+            "pid": pid, "post": post, "brand": brand,
             "brand_name": brand["name"],
             "brand_context": brand["context"],
             "brand_keywords": json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
@@ -4224,6 +4235,7 @@ def api_generate_search_comments_batch():
                             reply_targets[2] = reply_target
 
                     mention_flags = [True] * num_comments
+                    brand_focus = cg._extract_brand_focus(vp.get("brand"))
                     generation = cg.generate_comments(
                         post_title=post["title"],
                         post_body=post_body,
@@ -4239,6 +4251,7 @@ def api_generate_search_comments_batch():
                         mention_brand_flags=mention_flags,
                         all_brand_names=[brand_name],
                         ai_crawl=ai_crawl,
+                        brand_focus=brand_focus,
                     )
 
                     generated = generation.get("generated_comments", []) or []
@@ -4268,6 +4281,7 @@ def api_generate_search_comments_batch():
                             mention_brand_flags=mention_flags,
                             all_brand_names=[brand_name],
                             ai_crawl=ai_crawl,
+                            brand_focus=brand_focus,
                         )
                         retry_comments = retry_gen.get("generated_comments", []) or []
                         if retry_comments:

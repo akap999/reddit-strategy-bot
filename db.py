@@ -205,15 +205,17 @@ class Database:
     def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]",
                   category=None, audience=None, use_cases=None, pain_points=None,
                   features=None, competitors=None, enriched_at=None,
-                  search_subreddits=None):
+                  search_subreddits=None, focus=None):
         cur = self.conn.execute(
             """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
                                    category, audience, use_cases, pain_points,
-                                   features, competitors, enriched_at, search_subreddits)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   features, competitors, enriched_at, search_subreddits,
+                                   focus)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, name, domain_url, context, keywords,
              category, audience, use_cases, pain_points,
-             features, competitors, enriched_at, search_subreddits)
+             features, competitors, enriched_at, search_subreddits,
+             focus)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -221,7 +223,7 @@ class Database:
     def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
                      category=None, audience=None, use_cases=None, pain_points=None,
                      features=None, competitors=None, enriched_at=None,
-                     search_subreddits=None):
+                     search_subreddits=None, focus=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -231,6 +233,7 @@ class Database:
             "pain_points": pain_points, "features": features,
             "competitors": competitors, "enriched_at": enriched_at,
             "search_subreddits": search_subreddits,
+            "focus": focus,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1227,6 +1230,11 @@ class Database:
             "competitors":       "ALTER TABLE brands ADD COLUMN competitors TEXT",
             "enriched_at":       "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
             "search_subreddits": "ALTER TABLE brands ADD COLUMN search_subreddits TEXT",
+            # User-supplied editorial direction for the comment voice —
+            # phrases the generator should weave in where they naturally
+            # fit. JSON-serialised array of strings. NULL/empty = no
+            # focus, generator behaviour unchanged.
+            "focus":             "ALTER TABLE brands ADD COLUMN focus TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

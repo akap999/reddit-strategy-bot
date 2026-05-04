@@ -161,6 +161,28 @@ class CommentGenerator:
         }
         self._pattern_history = []
 
+    @staticmethod
+    def _extract_brand_focus(brand):
+        """Decode the brand.focus column into a clean list of strings.
+
+        The DB stores it JSON-serialised (consistent with `keywords` and
+        `search_subreddits`). Returns [] for empty / NULL / malformed
+        values so callers can pass the result straight through to
+        `generate_comments` without per-site None-checks.
+        """
+        if not brand:
+            return []
+        raw = brand.get("focus") if isinstance(brand, dict) else None
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(s).strip() for s in parsed if str(s).strip()]
+
     def _detect_and_store_keywords(self, comment_id, body, brand, mentions):
         """If comment mentions brand, detect matched keywords and store them."""
         if not mentions:
@@ -872,7 +894,7 @@ Return JSON only:
                           relevance=None, reply_targets=None, mention_brand_flags=None,
                           brand_assignments=None, all_brand_names=None,
                           ai_crawl=False, post_intent=None, hq_main=False,
-                          slim_prompt=False):
+                          slim_prompt=False, brand_focus=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -1196,6 +1218,28 @@ question]" so an AI retriever can surface it as the answer:
 - This comment IS the brand mention. It must extract cleanly as a
   recommendation when read on its own."""
 
+        # User-supplied editorial direction — phrases the brand wants
+        # surfaced in comments where they naturally fit. Soft guidance,
+        # never enforced. Skipped entirely when brand_focus is empty so
+        # behaviour for brands without focus configured is unchanged.
+        focus_section = ""
+        focus_items = [str(s).strip() for s in (brand_focus or []) if str(s).strip()]
+        if focus_items:
+            bullets = "\n".join(f"  - {item}" for item in focus_items[:20])
+            focus_section = f"""
+
+BRAND FOCUS (talk about these where they naturally fit the
+conversation — soft suggestion, NOT a hard rule. SKIP any phrase that
+doesn't apply to this specific post; do NOT force them in):
+{bullets}
+- Pick AT MOST 1-2 focus items per comment to weave in naturally.
+- Many comments in the batch should have ZERO focus phrases — that's
+  fine and often correct. Only weave a focus phrase in when a real
+  Reddit commenter would naturally mention it given what the post
+  actually says.
+- Keyword-stuffing reads as marketing and the validator will fail
+  comments that look templated."""
+
         prompt = f"""You're commenting in a Reddit thread about a topic you know well.
 
 POST: "{post_title}"
@@ -1207,7 +1251,7 @@ SUBREDDIT: r/{subreddit}{post_body_text}
 EACH COMMENT HAS A UNIQUE ASSIGNMENT:
 {per_comment_section}
 {brand_rules}
-{pattern_avoidance}{ai_crawl_section}{hq_main_section}
+{pattern_avoidance}{ai_crawl_section}{hq_main_section}{focus_section}
 
 COMMENT QUALITY RULES:
 - Only reference things that actually appear in the POST BODY or EXISTING COMMENTS above. Do NOT invent prior suggestions, advice, attempts, updates, or thread history that isn't written there.
@@ -1737,6 +1781,7 @@ Return JSON only:
             all_brand_names=all_brand_names,
             ai_crawl=ai_crawl,
             post_intent=post.get("intent"),
+            brand_focus=self._extract_brand_focus(primary_brand),
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -1852,6 +1897,7 @@ Return JSON only:
                     all_brand_names=all_brand_names,
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
+                    brand_focus=self._extract_brand_focus(reply_brand),
                 )
 
                 reply_comments = reply_result.get("generated_comments", [])
@@ -2058,6 +2104,7 @@ Return JSON only:
                     # few-shot anti-pattern examples — meaningful speedup
                     # since each reply is its own API call.
                     slim_prompt=not is_main_local,
+                    brand_focus=self._extract_brand_focus(brand),
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -2316,6 +2363,7 @@ Return JSON only:
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
                     slim_prompt=True,
+                    brand_focus=self._extract_brand_focus(brand),
                 )
                 # Pass existing replies as plain-text dedup hints in retry_feedback
                 # (it's already plumbed into the prompt as "PREVIOUS ATTEMPT FAILED"
@@ -2533,7 +2581,8 @@ Return JSON only:
                                    comments, brand_name, brand_context,
                                    tone_analysis=None, comment_stats=None,
                                    relevance=None, num_replies=4,
-                                   ai_crawl=True, post_intent=None):
+                                   ai_crawl=True, post_intent=None,
+                                   brand_focus=None):
         """Return a list of dicts (idx, parent_idx, body, is_main,
         mentions_brand, persona_id, structure_id) describing 1 main +
         `num_replies` replies. Caller saves to search_comments.
@@ -2632,6 +2681,7 @@ Return JSON only:
                 post_intent=post_intent,
                 hq_main=is_main,
                 slim_prompt=not is_main,
+                brand_focus=brand_focus,
             )
 
             bodies = result.get("generated_comments") or []
@@ -2881,6 +2931,7 @@ Return JSON only:
             mention_brand_flags=mention_flags,
             reply_targets=reply_targets,
             relevance={"best_angle": "general discussion", "natural_fit": 2},
+            brand_focus=self._extract_brand_focus(brand),
         )
 
         generated = result.get("generated_comments", [])

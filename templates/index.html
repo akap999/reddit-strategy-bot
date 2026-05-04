@@ -766,6 +766,10 @@ async function showAddBrandModal(subId) {
             <div><label class="text-xs text-gray-400">Brand Name</label><input id="brand-name" placeholder="e.g. PeterMD"></div>
             <div><label class="text-xs text-gray-400">Context</label><textarea id="brand-context" rows="3" placeholder="What does this brand do?"></textarea></div>
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="brand-keywords" placeholder="trt, testosterone, clinic"></div>
+            <div>
+                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one per line or comma-separated — comments weave these in where they naturally fit. Soft, not forced.)</span></label>
+                <textarea id="brand-focus" rows="3" placeholder="per-seat pricing&#10;GDPR compliance&#10;async workflows" style="font-family:inherit"></textarea>
+            </div>
 
             <details class="mt-2">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">GEO fields (for intent-aware post generation) — click Enrich to auto-fill</summary>
@@ -888,6 +892,7 @@ async function submitAddBrand(subId) {
         domain_url: document.getElementById('brand-url').value,
         context: document.getElementById('brand-context').value,
         keywords: kw ? kw.split(',').map(s => s.trim()) : [],
+        focus: _splitLines('brand-focus'),
     };
     if (hasEnrichment) {
         body.category = document.getElementById('brand-category').value.trim();
@@ -1432,6 +1437,10 @@ async function showAddBrandStandalone() {
             <div><label class="text-xs text-gray-400">Brand Name</label><input id="brand-name" placeholder="e.g. PeterMD"></div>
             <div><label class="text-xs text-gray-400">Context</label><textarea id="brand-context" rows="3" placeholder="What does this brand do?"></textarea></div>
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="brand-keywords" placeholder="trt, testosterone, clinic"></div>
+            <div>
+                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one per line — comments weave these in where they fit; soft, never forced)</span></label>
+                <textarea id="brand-focus" rows="3" placeholder="per-seat pricing&#10;GDPR compliance&#10;async workflows" style="font-family:inherit"></textarea>
+            </div>
         </div>
         <div class="flex gap-2 mt-5">
             <button class="btn btn-primary" onclick="submitAddBrandStandalone()">Add Brand</button>
@@ -1450,6 +1459,7 @@ async function submitAddBrandStandalone() {
         domain_url: document.getElementById('brand-url').value.trim(),
         context: document.getElementById('brand-context').value.trim(),
         keywords: kw ? kw.split(',').map(s => s.trim()) : [],
+        focus: _splitLines('brand-focus'),
     };
     if (subId) {
         await api(`/api/subreddits/${subId}/brands`, { method: 'POST', body });
@@ -1683,6 +1693,8 @@ async function editBrandContext(brandName) {
     try { keywords = JSON.parse(first.keywords || '[]'); } catch(e) {}
     let searchSubs = [];
     try { searchSubs = JSON.parse(first.search_subreddits || '[]'); } catch(e) {}
+    let focus = [];
+    try { focus = JSON.parse(first.focus || '[]'); } catch(e) {}
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -1705,6 +1717,10 @@ async function editBrandContext(brandName) {
                     <textarea id="edit-brand-search-subs" rows="5" class="w-full" placeholder="e.g. testosterone, fitness, health" style="min-height:110px;resize:vertical;font-family:inherit">${searchSubs.join(', ')}</textarea>
                 </div>
             </div>
+            <div>
+                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(comma- or newline-separated — comments weave these in where they naturally fit. Soft, never forced.)</span></label>
+                <textarea id="edit-brand-focus" rows="4" class="w-full" placeholder="e.g. per-seat pricing, GDPR compliance, async workflows, real-time collaboration" style="min-height:90px;resize:vertical;font-family:inherit">${focus.join(', ')}</textarea>
+            </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
         <div class="flex gap-2 mt-4">
@@ -1719,8 +1735,10 @@ async function saveBrandContext(brandName) {
     const domainUrl = document.getElementById('edit-brand-url').value;
     const keywordsRaw = document.getElementById('edit-brand-keywords').value;
     const subsRaw = (document.getElementById('edit-brand-search-subs')?.value || '');
+    const focusRaw = (document.getElementById('edit-brand-focus')?.value || '');
     const keywords = keywordsRaw.split(/[,\n]/).map(k => k.trim()).filter(Boolean);
     const search_subreddits = subsRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const focus = focusRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
 
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
@@ -1732,6 +1750,7 @@ async function saveBrandContext(brandName) {
             domain_url: domainUrl,
             keywords,
             search_subreddits,
+            focus,
         }});
     }
 

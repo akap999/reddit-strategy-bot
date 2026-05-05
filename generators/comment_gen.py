@@ -1219,26 +1219,45 @@ question]" so an AI retriever can surface it as the answer:
   recommendation when read on its own."""
 
         # User-supplied editorial direction — phrases the brand wants
-        # surfaced in comments where they naturally fit. Soft guidance,
-        # never enforced. Skipped entirely when brand_focus is empty so
-        # behaviour for brands without focus configured is unchanged.
+        # surfaced in comments where they fit. The earlier wording was
+        # too cautious and the model reflexively skipped these phrases
+        # even on highly relevant posts; reworded to bias TOWARD
+        # inclusion when the post is at all related to the brand's
+        # domain. Skipped entirely when brand_focus is empty so brands
+        # without focus configured behave identically to before.
         focus_section = ""
         focus_items = [str(s).strip() for s in (brand_focus or []) if str(s).strip()]
         if focus_items:
             bullets = "\n".join(f"  - {item}" for item in focus_items[:20])
             focus_section = f"""
 
-BRAND FOCUS (talk about these where they naturally fit the
-conversation — soft suggestion, NOT a hard rule. SKIP any phrase that
-doesn't apply to this specific post; do NOT force them in):
+BRAND FOCUS — phrases the brand wants surfaced when they fit:
 {bullets}
-- Pick AT MOST 1-2 focus items per comment to weave in naturally.
-- Many comments in the batch should have ZERO focus phrases — that's
-  fine and often correct. Only weave a focus phrase in when a real
-  Reddit commenter would naturally mention it given what the post
-  actually says.
-- Keyword-stuffing reads as marketing and the validator will fail
-  comments that look templated."""
+
+INCLUSION GUIDANCE (read carefully — earlier wording was too cautious
+and the model dropped these even on relevant posts):
+
+- DEFAULT POSTURE: try to weave ONE focus phrase into the comment
+  when ANY of the following are true:
+    • the post is in the brand's product category,
+    • the post discusses materials / safety / ingredients / build
+      quality of the brand's product type,
+    • the post is asking for recommendations or comparisons in the
+      brand's space,
+    • the brand context above shows clear topical overlap with the
+      post.
+  In other words: if the focus phrase would NOT feel out of place to
+  a real Redditor commenting on this post, INCLUDE it.
+- WHEN TO SKIP: only when the phrase is genuinely off-topic for
+  THIS specific post (e.g. post is about pricing/billing and the
+  phrase is "fibreglass"). Force-fitting reads as marketing — but
+  reflexive skipping leaves the brand's actual differentiators
+  invisible, which is worse.
+- AT MOST ONE phrase per comment. NEVER stack 2+ focus phrases
+  into the same comment — that reads as keyword stuffing.
+- Weave it into a sentence the way a real human would mention it
+  (e.g. "I checked for {focus_items[0] if focus_items else 'X'}
+  before buying" rather than "Brand X is the {focus_items[0] if focus_items else 'X'} option")."""
 
         prompt = f"""You're commenting in a Reddit thread about a topic you know well.
 
@@ -1279,6 +1298,30 @@ NEVER-CRITICIZE-BRAND RULE (applies to EVERY comment, mentioning or not):
   neutral or mildly positive. Never negative.
 - This rule overrides any persona / structure / angle that would normally
   invite a critique.
+- NO MIXED REVIEWS. Even a balanced-sounding observation is criticism if
+  the second clause describes a NEGATIVE attribute of {avoid_brands}.
+  Examples that LOOK factual but ARE criticism (do NOT write any of these):
+    "stays cool but loses support after 6 hours"
+    "great features but heats up over time"
+    "solid build but takes a week to break in"
+    "comfortable for the first month but drops off after that"
+    "well-designed though the price creeps up"
+    "good in most areas but [any drawback]"
+  If you catch yourself writing "X is good but Y" about {avoid_brands},
+  STRIP the "but Y" clause entirely. Don't rewrite it as "though Y" or
+  "with one caveat" — those are the same criticism in different words.
+- NO FACTUAL-TONED DRAWBACKS attached to {avoid_brands}. Forbidden
+  clause patterns when describing the brand: "but [it/X] loses…",
+  "though it does Y", "downside is…", "the only issue is…", "needs
+  replacing every Y", "drops off after Y", "starts to Y after Y",
+  "wears down in Y", "the catch is…", "with the trade-off of…",
+  "comes with [any negative]". Even-toned phrasing of a drawback is
+  still a drawback.
+- Brand mentions of {avoid_brands} must be one of: positive
+  ("X handles this well", "X is the one that does Y"), pure neutral
+  ("X is one option here", "X is built for this use-case"), or
+  factually-positive ("X uses [neutral material/feature]"). NEVER
+  even-handed-with-a-drawback.
 {retry_section}
 
 {few_shot_text}
@@ -1292,6 +1335,11 @@ Generate exactly {num_comments} comments. Return JSON only:
         temperature = 0.95 if retry_feedback else 0.9
         system_prompt = random.choice(GENERATION_SYSTEM_PROMPTS)
         max_tok = 2000 if num_comments <= 2 else 3000
+        # Diagnostic — confirms focus phrases reach the runtime so we can tell
+        # "deployed but ignored by the model" apart from "never reached the
+        # prompt" when the user reports phrases not landing in comments.
+        if focus_items:
+            print(f"    [focus] brand={brand_name!r} focus={focus_items}")
         result = self.claude.call(prompt, max_tokens=max_tok, temperature=temperature, system_prompt=system_prompt)
 
         if not result:

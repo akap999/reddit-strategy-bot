@@ -67,6 +67,172 @@ AI_CRAWL_REC_STRUCTURES = {"direct_answer", "list_format",
                             "comparison", "short_punchy"}
 
 
+# ---------------------------------------------------------------------------
+# HQ reply shapes — short, dynamic, conversational replies.
+#
+# Replies in HQ clusters were coming back as 90-word paragraphs because they
+# (a) inherited the post's intent-driven length scaling, (b) drew personas
+# from the full top-level pool (including data_nerd, comparer, professional —
+# all long-form), and (c) got a composite "agree AND add detail AND reference
+# AND don't change topic" angle prompt that nudged the model to do all of it
+# at once.
+#
+# The fix is shape-driven: each reply slot picks ONE conversational shape
+# (one-liner agree, short pushback, follow-up Q, short add, dry one-liner,
+# rare medium add). The shape constrains persona pool, sentence/word target,
+# and angle to a single move executed briefly.
+# ---------------------------------------------------------------------------
+
+HQ_REPLY_PERSONAS = {
+    "veteran_terse", "agreeable", "dry_humor", "impatient", "grateful",
+    "lurker", "long_timer", "skeptic", "newbie", "concerned",
+}
+
+HQ_REPLY_STRUCTURES = {
+    "reply_to_commenter", "short_punchy",
+    "question_plus_experience", "direct_answer",
+}
+
+# Each shape: tuple of (id, weight, persona-pool, structure-pool,
+# sent_target, lo_words, hi_words, angle).
+HQ_REPLY_SHAPES = [
+    (
+        "oneliner_agree", 25,
+        {"agreeable", "grateful", "long_timer"},
+        {"short_punchy", "reply_to_commenter"},
+        "1 sentence", 8, 18,
+        "ONE LINE. Cosign or agree with the TARGET COMMENT and add ONE small "
+        "personal touch (a phrase, a reference, a tiny detail). No second "
+        "clause, no 'but', no new argument. End at one period.",
+    ),
+    (
+        "short_pushback", 20,
+        {"skeptic", "dry_humor", "veteran_terse"},
+        {"short_punchy", "reply_to_commenter", "direct_answer"},
+        "1-2 sentences", 15, 30,
+        "Push back briefly on ONE specific claim or phrase from the TARGET "
+        "COMMENT. State what you disagree with and why, in 1-2 sentences. "
+        "No throat-clearing, no 'I respectfully disagree', just the "
+        "counter-take. Stay short — under 30 words.",
+    ),
+    (
+        "followup_question", 20,
+        {"newbie", "concerned", "impatient"},
+        {"reply_to_commenter", "question_plus_experience", "short_punchy"},
+        "1-2 sentences", 10, 25,
+        "Ask ONE concrete follow-up question about something specific the "
+        "TARGET COMMENT mentioned. No preamble, no 'just curious', just the "
+        "question. 1-2 sentences max. End with a question mark.",
+    ),
+    (
+        "short_add", 20,
+        {"veteran_terse", "lurker", "long_timer"},
+        {"reply_to_commenter", "direct_answer", "short_punchy"},
+        "2-3 sentences", 25, 45,
+        "Add ONE concrete detail or anecdote that builds on the TARGET "
+        "COMMENT's point. 2-3 sentences. One specific number, name, or "
+        "scenario — not a general principle. No 'in my experience' "
+        "throat-clearing.",
+    ),
+    (
+        "dry_oneliner", 10,
+        {"dry_humor", "veteran_terse"},
+        {"short_punchy", "reply_to_commenter"},
+        "1 sentence", 8, 18,
+        "Deadpan one-liner. A wry observation about what the TARGET "
+        "COMMENT said, or about the situation. No lol, no emojis, no "
+        "exclamation. Dry sarcasm only. 8-18 words.",
+    ),
+    (
+        "medium_add", 5,
+        {"agreeable", "lurker"},
+        {"reply_to_commenter", "direct_answer"},
+        "3 sentences", 40, 55,
+        "Build on the TARGET COMMENT with ONE concrete personal detail "
+        "and ONE small follow-up thought. 3 sentences max, ~40-55 words. "
+        "No bullet points, no 'firstly/secondly', conversational only.",
+    ),
+]
+
+
+def _pick_reply_shape(rng=None):
+    """Pick one HQ reply shape weighted by HQ_REPLY_SHAPES weights.
+
+    Returns a dict with persona_id (chosen from the shape's persona pool),
+    structure_id (from its structure pool), sent_target, lo_words, hi_words,
+    angle, and shape_id. Caller passes this through generate_comments via
+    slot_overrides so the per-slot prompt fragment is built from the shape
+    instead of the random persona/structure picker.
+    """
+    rng = rng or random
+    weights = [s[1] for s in HQ_REPLY_SHAPES]
+    chosen = rng.choices(HQ_REPLY_SHAPES, weights=weights, k=1)[0]
+    shape_id, _w, persona_pool, struct_pool, sent_target, lo_w, hi_w, angle = chosen
+    return {
+        "shape_id": shape_id,
+        "persona_id": rng.choice(sorted(persona_pool)),
+        "structure_id": rng.choice(sorted(struct_pool)),
+        "sent_target": sent_target,
+        "lo_words": lo_w,
+        "hi_words": hi_w,
+        "angle": angle,
+    }
+
+
+def _allocate_reply_shapes(n, rng=None):
+    """Pre-allocate a balanced mix of N reply shapes for one cluster.
+
+    Independent rolls clump (4 oneliners, no questions). Forcing diversity:
+      - Always include at least one "followup_question" if N >= 2.
+      - At most one "medium_add" per cluster.
+      - Cap "oneliner_agree" + "dry_oneliner" at ceil(N/2) combined so we
+        don't get a pile of one-liners with no substance.
+      - Remainder filled by weighted random from the full table.
+    """
+    rng = rng or random
+    n = max(1, int(n))
+    shapes = []
+
+    # Slot 1: force a follow-up question if we have at least 2 slots.
+    if n >= 2:
+        q = next(s for s in HQ_REPLY_SHAPES if s[0] == "followup_question")
+        shapes.append(_shape_to_dict(q, rng))
+
+    # Fill remaining slots with weighted random, applying caps.
+    oneliner_ids = {"oneliner_agree", "dry_oneliner"}
+    oneliner_cap = (n + 1) // 2
+    medium_used = False
+    while len(shapes) < n:
+        cand = _pick_reply_shape(rng)
+        # Cap medium_add at one per cluster.
+        if cand["shape_id"] == "medium_add" and medium_used:
+            continue
+        # Cap combined one-liners.
+        if cand["shape_id"] in oneliner_ids:
+            existing = sum(1 for s in shapes if s["shape_id"] in oneliner_ids)
+            if existing >= oneliner_cap:
+                continue
+        if cand["shape_id"] == "medium_add":
+            medium_used = True
+        shapes.append(cand)
+
+    rng.shuffle(shapes)
+    return shapes
+
+
+def _shape_to_dict(shape_tuple, rng):
+    sid, _w, persona_pool, struct_pool, sent_target, lo, hi, angle = shape_tuple
+    return {
+        "shape_id": sid,
+        "persona_id": rng.choice(sorted(persona_pool)),
+        "structure_id": rng.choice(sorted(struct_pool)),
+        "sent_target": sent_target,
+        "lo_words": lo,
+        "hi_words": hi,
+        "angle": angle,
+    }
+
+
 def classify_post_intent(post_title, post_body=None, stored_intent=None):
     """Single source of truth for "what is this post asking for".
 
@@ -895,7 +1061,8 @@ Return JSON only:
                           brand_assignments=None, all_brand_names=None,
                           ai_crawl=False, post_intent=None, hq_main=False,
                           slim_prompt=False, brand_focus=None,
-                          in_thread_siblings=False):
+                          in_thread_siblings=False,
+                          is_hq_reply=False, slot_overrides=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -941,10 +1108,18 @@ Return JSON only:
         # ~35-55 words instead of 84-132. Experience posts → long, so
         # short personas can still be brief but the typical comment is
         # paragraph-length. This is THE fix for "always making up stories".
+        #
+        # is_hq_reply=True bypasses this. HQ replies are conversation, not
+        # post-answers — they should NOT inherit the post's length band.
+        # The caller passes per-slot tight word ranges via slot_overrides
+        # (see _pick_reply_shape) instead. Without this skip, replies on
+        # an "experience" post inherit avg_words=90 and turn into
+        # paragraphs even with the curated reply persona pool.
         if comment_stats is None:
             comment_stats = {}
         comment_stats = dict(comment_stats)  # copy; don't mutate caller
-        comment_stats["avg_words"] = intent_info["target_avg_words"]
+        if not is_hq_reply:
+            comment_stats["avg_words"] = intent_info["target_avg_words"]
 
         # AI-CRAWL + RECOMMENDATION-SEEKING POST: override the random persona /
         # structure pick with a curated whitelist of "direct answer" voices.
@@ -992,11 +1167,42 @@ Return JSON only:
         avoid_brands = ", ".join(all_brand_names) if all_brand_names else brand_name
 
         reply_targets = reply_targets or {}
+        # slot_overrides: optional per-slot override dicts (e.g. from
+        # _pick_reply_shape) that pin persona / structure / angle / word
+        # range / sentence target — bypassing the random pick + LENGTH math
+        # for that slot. Keyed by slot index. When set, the slot's
+        # comment_instructions entry uses the override values verbatim.
+        slot_overrides = slot_overrides or {}
+        # Persona/structure ID → object lookups for override resolution.
+        _persona_by_id = {p["id"]: p for p in PERSONAS}
+        _structure_by_id = {s["id"]: s for s in STRUCTURE_TEMPLATES}
         comment_instructions = []
         for idx in range(num_comments):
-            persona = selected_personas[idx] if idx < len(selected_personas) else random.choice(PERSONAS)
-            structure = selected_structures[idx] if idx < len(selected_structures) else random.choice(STRUCTURE_TEMPLATES)
-            angle = per_comment_angles[idx] if idx < len(per_comment_angles) else ""
+            override = slot_overrides.get(idx) if isinstance(slot_overrides, dict) else None
+            if override is None and isinstance(slot_overrides, list) and idx < len(slot_overrides):
+                override = slot_overrides[idx]
+
+            # Pick persona/structure: override takes precedence; otherwise
+            # use the slot's pre-selected value, falling back to a random
+            # PERSONAS / STRUCTURE_TEMPLATES entry for over-long batches.
+            persona = (selected_personas[idx] if idx < len(selected_personas)
+                       else random.choice(PERSONAS))
+            structure = (selected_structures[idx] if idx < len(selected_structures)
+                         else random.choice(STRUCTURE_TEMPLATES))
+            if override:
+                p_override = _persona_by_id.get(override.get("persona_id"))
+                s_override = _structure_by_id.get(override.get("structure_id"))
+                if p_override:
+                    persona = p_override
+                    if idx < len(selected_personas):
+                        selected_personas[idx] = persona
+                if s_override:
+                    structure = s_override
+                    if idx < len(selected_structures):
+                        selected_structures[idx] = structure
+
+            angle = (override.get("angle") if override else None) \
+                    or (per_comment_angles[idx] if idx < len(per_comment_angles) else "")
             should_mention = mention_brand_flags[idx] if idx < len(mention_brand_flags) else False
             angle_line = f"\n    ANGLE: {angle}" if angle else ""
 
@@ -1028,10 +1234,15 @@ Return JSON only:
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 
-            avg_w = (comment_stats or {}).get("avg_words", 60)
-            lo_m, hi_m = LENGTH_MULTIPLIERS.get(persona['length'], (0.6, 1.0))
-            lo_w, hi_w = max(8, int(avg_w * lo_m)), int(avg_w * hi_m)
-            sent_target = SENTENCE_COUNT_TARGETS.get(persona['length'], "3-4 sentences")
+            if override:
+                lo_w = int(override.get("lo_words", 8))
+                hi_w = int(override.get("hi_words", 30))
+                sent_target = override.get("sent_target", SENTENCE_COUNT_TARGETS.get(persona['length'], "1-2 sentences"))
+            else:
+                avg_w = (comment_stats or {}).get("avg_words", 60)
+                lo_m, hi_m = LENGTH_MULTIPLIERS.get(persona['length'], (0.6, 1.0))
+                lo_w, hi_w = max(8, int(avg_w * lo_m)), int(avg_w * hi_m)
+                sent_target = SENTENCE_COUNT_TARGETS.get(persona['length'], "3-4 sentences")
 
             # Pair word-count with sentence-count — LLMs respect sentence
             # counts more reliably than word ranges.
@@ -2083,6 +2294,13 @@ Return JSON only:
             len(shape),
         )
 
+        # Pre-allocate a balanced mix of REPLY shapes for this cluster.
+        # Forces variety across slots (at least one follow-up question,
+        # at most one medium_add, oneliner cap) and pins per-slot persona
+        # / structure / angle / word range. Indexed 0..nr-1; used at
+        # idx-1 inside _gen_one (idx 0 is main, replies start at idx 1).
+        reply_shapes = _allocate_reply_shapes(nr) if nr > 0 else []
+
         saved = []          # list of dicts with id, body, etc.
         saved_ids = {}       # index -> DB comment id
         saved_bodies = {}    # index -> body text
@@ -2127,6 +2345,30 @@ Return JSON only:
                         {"body": sb, "score": 5, "author": "community_member"}
                         for sb in sibling_bodies if sb
                     ]
+            # REPLY SHAPE OVERRIDE: replies use the pre-allocated shape
+            # (one-liner agree / short pushback / follow-up Q / short add /
+            # dry one-liner / rare medium add) instead of the random
+            # persona+composite-angle path. The shape pins persona,
+            # structure, sentence/word target, and a single-move angle —
+            # which fixes the "long meaningless paragraph" pattern at the
+            # source. Main is unchanged: it still gets the brand-mention
+            # decisive framing and intent-driven length scaling.
+            shape = None
+            best_angle = ""
+            slot_overrides = None
+            if is_main_local:
+                best_angle = (
+                    f"Recommend {brand['name']} confidently as a direct "
+                    "answer to the OP's question. Open with what "
+                    f"{brand['name']} is and what it does for their "
+                    "use-case. Tight 50-90 words, no anecdote."
+                )
+            else:
+                # idx 0 is main; replies are 1..nr — map to 0-indexed shape array.
+                shape = reply_shapes[idx - 1] if 0 <= idx - 1 < len(reply_shapes) else _pick_reply_shape()
+                best_angle = shape["angle"]
+                slot_overrides = {0: shape}
+
             t0 = time.time()
             try:
                 result = self.generate_comments(
@@ -2142,32 +2384,7 @@ Return JSON only:
                     mention_brand_flags=[mention_flags[idx]],
                     reply_targets=reply_targets,
                     relevance={
-                        "best_angle": (
-                            f"Recommend {brand['name']} confidently as a direct "
-                            "answer to the OP's question. Open with what "
-                            f"{brand['name']} is and what it does for their "
-                            "use-case. Tight 50-90 words, no anecdote."
-                            if is_main_local
-                            # Replies were coming back off-topic because the
-                            # angle was too vague. Force engagement with a
-                            # SPECIFIC point or claim from the parent body
-                            # so the reply reads like a real follow-up, not
-                            # a fresh comment dropped into the thread.
-                            else (
-                                "Reply to the TARGET COMMENT specifically. Read "
-                                "what they said carefully, then engage with one "
-                                "concrete point or claim from their comment — "
-                                "agree and add a supporting detail, push back "
-                                "on a specific phrase, share a contrasting "
-                                "experience that connects to what they said, "
-                                "or ask a follow-up about something they "
-                                "mentioned. Reference a specific phrase or "
-                                "idea from their comment so it's clear you "
-                                "read it. DO NOT change the topic, restart "
-                                "the conversation, or write a generic 'this "
-                                "is a complex space' aside."
-                            )
-                        ),
+                        "best_angle": best_angle,
                         "natural_fit": 3,
                     },
                     ai_crawl=ai_crawl,
@@ -2181,6 +2398,8 @@ Return JSON only:
                     slim_prompt=not is_main_local,
                     brand_focus=self._extract_brand_focus(brand),
                     in_thread_siblings=bool(thread_comments),
+                    is_hq_reply=not is_main_local,
+                    slot_overrides=slot_overrides,
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -2434,6 +2653,12 @@ Return JSON only:
             nr,
         )
 
+        # Pre-allocate balanced reply shapes for this batch (one per new
+        # reply). Each shape pins persona / structure / sentence-word
+        # range / single-move angle, replacing the random pick + composite
+        # angle that produced 90-word paragraphs.
+        reply_shapes = _allocate_reply_shapes(nr)
+
         # Decide parents: 70% direct to root, 30% nest under a random existing reply
         parent_choices = []
         for _i in range(nr):
@@ -2452,7 +2677,8 @@ Return JSON only:
         # in_thread_siblings=True so the prompt renders the explicit "OTHER
         # REPLIES IN THIS HQ THREAD — do not echo their opener / repeat
         # their angle" block. Replaces the prior retry_feedback hack.
-        def _build_kwargs(parent_c, sibling_bodies):
+        # `shape` is the per-slot reply shape from _allocate_reply_shapes.
+        def _build_kwargs(parent_c, sibling_bodies, shape):
             sib_comments = [
                 {"body": b, "score": 5, "author": "community_member"}
                 for b in (sibling_bodies or []) if b
@@ -2474,18 +2700,7 @@ Return JSON only:
                     "id": "", "permalink": "",
                 }},
                 relevance={
-                    "best_angle": (
-                        "Reply to the TARGET COMMENT specifically. Engage "
-                        "with one concrete point or claim from their "
-                        "comment — agree and add a supporting detail, "
-                        "push back on a specific phrase, share a "
-                        "contrasting experience that connects to what "
-                        "they said, or ask a follow-up about something "
-                        "they mentioned. Reference a specific phrase or "
-                        "idea from their comment so it's clear you read "
-                        "it. DO NOT change the topic or rehash points "
-                        "made in OTHER existing replies in the thread."
-                    ),
+                    "best_angle": shape["angle"],
                     "natural_fit": 3,
                 },
                 ai_crawl=ai_crawl,
@@ -2493,6 +2708,8 @@ Return JSON only:
                 slim_prompt=True,
                 brand_focus=self._extract_brand_focus(brand),
                 in_thread_siblings=bool(sib_comments),
+                is_hq_reply=True,
+                slot_overrides={0: shape},
             )
 
         def _save_reply(i, parent_c, pid, sid, result):
@@ -2547,10 +2764,11 @@ Return JSON only:
         anchor_idx = 0  # i=0 is the anchor
         if nr >= 1:
             parent_c = parent_choices[0]
-            pid = all_personas[0]["id"] if all_personas else random.choice(PERSONAS)["id"]
-            sid = all_structures[0]["id"] if all_structures else random.choice(STRUCTURE_TEMPLATES)["id"]
+            shape0 = reply_shapes[0]
+            pid = shape0["persona_id"]
+            sid = shape0["structure_id"]
             try:
-                result = self.generate_comments(**_build_kwargs(parent_c, list(existing_reply_bodies)))
+                result = self.generate_comments(**_build_kwargs(parent_c, list(existing_reply_bodies), shape0))
                 anchor_body = _save_reply(0, parent_c, pid, sid, result)
             except Exception as e:
                 print(f"    [add-replies] anchor exception: {e}")
@@ -2565,9 +2783,10 @@ Return JSON only:
                 fut_meta = {}
                 for i in range(1, nr):
                     parent_c = parent_choices[i]
-                    pid = all_personas[i]["id"] if i < len(all_personas) else random.choice(PERSONAS)["id"]
-                    sid = all_structures[i]["id"] if i < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
-                    fut = ex.submit(self.generate_comments, **_build_kwargs(parent_c, parallel_siblings))
+                    shape_i = reply_shapes[i] if i < len(reply_shapes) else _pick_reply_shape()
+                    pid = shape_i["persona_id"]
+                    sid = shape_i["structure_id"]
+                    fut = ex.submit(self.generate_comments, **_build_kwargs(parent_c, parallel_siblings, shape_i))
                     fut_meta[fut] = (i, parent_c, pid, sid)
 
                 for fut in as_completed(fut_meta):
@@ -2767,6 +2986,12 @@ Return JSON only:
         reply_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
                        "min_chars": 50, "max_chars": 600}
 
+        # Pre-allocate balanced reply shapes for the cluster's nr replies.
+        # Indexed 0..nr-1; the main (shape idx 0) does not use a shape —
+        # it keeps the brand-mention decisive framing. Reply at thread
+        # index N uses reply_shapes[N-1].
+        reply_shapes = _allocate_reply_shapes(nr) if nr > 0 else []
+
         saved_bodies = {}
         saved_personas = {}
         results = []
@@ -2815,21 +3040,23 @@ Return JSON only:
                 ]
                 in_thread_flag = bool(thread_comments)
 
-            angle = (
-                f"Recommend {brand_name} confidently as a direct answer to "
-                "the OP's question. Open with what " + brand_name + " is "
-                "and what it does for their use-case. Tight 50-90 words, "
-                "no anecdote."
-                if is_main
-                else
-                "Reply to the TARGET COMMENT specifically. Engage with one "
-                "concrete point or claim from their comment — agree and "
-                "add a supporting detail, push back on a specific phrase, "
-                "share a contrasting experience that connects to what they "
-                "said, or ask a follow-up about something they mentioned. "
-                "Reference a specific phrase or idea from their comment so "
-                "it's clear you read it. DO NOT change the topic."
-            )
+            # Reply shape (per-slot). Main keeps the decisive recommendation
+            # framing; replies pull a single-move angle + persona + word
+            # range from the pre-allocated shape array.
+            shape_for_slot = None
+            if is_main:
+                angle = (
+                    f"Recommend {brand_name} confidently as a direct answer to "
+                    "the OP's question. Open with what " + brand_name + " is "
+                    "and what it does for their use-case. Tight 50-90 words, "
+                    "no anecdote."
+                )
+            else:
+                shape_for_slot = (
+                    reply_shapes[idx - 1] if 0 <= idx - 1 < len(reply_shapes)
+                    else _pick_reply_shape()
+                )
+                angle = shape_for_slot["angle"]
             local_relevance = dict(relevance or {})
             local_relevance["best_angle"] = angle
             local_relevance.setdefault("natural_fit", 3)
@@ -2854,6 +3081,8 @@ Return JSON only:
                 slim_prompt=not is_main,
                 brand_focus=brand_focus,
                 in_thread_siblings=in_thread_flag,
+                is_hq_reply=not is_main,
+                slot_overrides={0: shape_for_slot} if shape_for_slot else None,
             )
 
             bodies = result.get("generated_comments") or []

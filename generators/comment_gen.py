@@ -894,7 +894,8 @@ Return JSON only:
                           relevance=None, reply_targets=None, mention_brand_flags=None,
                           brand_assignments=None, all_brand_names=None,
                           ai_crawl=False, post_intent=None, hq_main=False,
-                          slim_prompt=False, brand_focus=None):
+                          slim_prompt=False, brand_focus=None,
+                          in_thread_siblings=False):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -1096,7 +1097,24 @@ NEVER USE THESE PHRASES: {banned_text}"""
 
         existing_comments_section = ""
         if comments_text:
-            existing_comments_section = f"\nEXISTING COMMENTS:\n{comments_text}"
+            if in_thread_siblings:
+                # HQ-thread sibling awareness — when this single reply is being
+                # generated alongside other replies that share the same parent,
+                # the model needs to (a) see the other reply bodies and (b) be
+                # explicitly told NOT to echo them. Without the don't-echo
+                # directive the model treats sibling context as background and
+                # still produces the same opener / same key-phrase echo of the
+                # parent that the prior sibling already used.
+                existing_comments_section = (
+                    "\nOTHER REPLIES IN THIS HQ THREAD (already written — your "
+                    "reply must read like it knows about these; do NOT echo "
+                    "their opener, do NOT repeat their angle, do NOT use the "
+                    "same key phrase from the parent that they already used; "
+                    "instead build on or contrast with what they said):\n"
+                    f"{comments_text}"
+                )
+            else:
+                existing_comments_section = f"\nEXISTING COMMENTS:\n{comments_text}"
 
         # When ai_crawl=True, inject an extra rule block telling the LLM to
         # produce comments that AI search engines will keyword/embedding-match
@@ -2087,12 +2105,16 @@ Return JSON only:
         def _gen_one(idx, parent_idx, parent_body, sibling_bodies, persona_id, structure_id):
             is_main_local = parent_idx is None
             # CONTEXT: for HQ MAIN, pass no thread context — main is the
-            # first comment. For HQ REPLIES, pass ONLY the parent body, not
-            # all siblings. Sibling bodies in `EXISTING COMMENTS:` were
-            # confusing the model into responding to siblings instead of the
-            # actual parent — replies came out off-topic. Strict parent-only
-            # context plus the explicit `reply_targets` keeps the model
-            # focused on what it's actually replying to.
+            # first comment. For HQ REPLIES, the parent body flows in via
+            # `reply_targets` (so the model knows what it's replying to) AND
+            # already-generated SIBLING replies (other replies under the same
+            # parent, e.g. the anchor reply produced in the first phase of
+            # this level) flow in via `comments` with the in_thread_siblings
+            # flag — that flag swaps the standard `EXISTING COMMENTS:` block
+            # for an explicit "OTHER REPLIES IN THIS HQ THREAD" instruction
+            # telling the model not to echo their opener / their angle / the
+            # parent key-phrase they already used. Without this the parallel
+            # siblings reliably both opened with the same echo of the parent.
             thread_comments = []
             reply_targets = None
             if parent_body is not None:
@@ -2100,6 +2122,11 @@ Return JSON only:
                     "body": parent_body, "score": 5,
                     "author": "community_member", "id": "", "permalink": "",
                 }}
+                if sibling_bodies:
+                    thread_comments = [
+                        {"body": sb, "score": 5, "author": "community_member"}
+                        for sb in sibling_bodies if sb
+                    ]
             t0 = time.time()
             try:
                 result = self.generate_comments(
@@ -2153,6 +2180,7 @@ Return JSON only:
                     # since each reply is its own API call.
                     slim_prompt=not is_main_local,
                     brand_focus=self._extract_brand_focus(brand),
+                    in_thread_siblings=bool(thread_comments),
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -2241,53 +2269,99 @@ Return JSON only:
             if not next_level:
                 break
 
-            print(f"    [HQ] level {level_num}: generating {len(next_level)} replies in parallel")
-            # Parallel API calls for this level. Each reply only needs its
-            # parent's body; siblings at the same level don't see each other,
-            # which is fine — the prompt still has post + parent context.
-            sibling_bodies_snapshot = [saved_bodies[i] for i in sorted(saved_bodies.keys())]
-            level_results = []
-            with ThreadPoolExecutor(max_workers=min(8, len(next_level))) as ex:
-                fut_to_meta = {}
-                for idx in next_level:
-                    parent_idx = next(p for i, p in shape if i == idx)
-                    # Re-parent to main if our intended parent never made it
-                    # (only matters for level 2+ if a level-1 reply API-failed).
-                    if parent_idx not in saved_bodies:
-                        parent_idx = 0
-                    parent_body = saved_bodies[parent_idx]
-                    pid = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
-                    sid = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
-                    fut = ex.submit(_gen_one, idx, parent_idx, parent_body,
-                                    sibling_bodies_snapshot, pid, sid)
-                    fut_to_meta[fut] = (idx, parent_idx, parent_body, pid, sid)
-                for fut in as_completed(fut_to_meta):
-                    meta = fut_to_meta[fut]
-                    try:
-                        r = fut.result()
-                    except Exception as e:
-                        print(f"    [HQ] worker exception idx={meta[0]}: {e}")
-                        r = None
-                    level_results.append((meta, r))
+            # ANCHOR-FIRST PATTERN: at each level, replies sharing the SAME
+            # parent are the ones most likely to echo each other (same parent
+            # key-phrase, same angle). For each such parent-group with >1
+            # reply we generate the FIRST reply sequentially as the anchor,
+            # then submit the rest in parallel with the anchor's body
+            # included in their `EXISTING COMMENTS` context (rendered as
+            # "OTHER REPLIES IN THIS HQ THREAD" via in_thread_siblings).
+            # Replies that have no siblings at this level just go straight
+            # into the parallel pool. Wall time stays at one round per level
+            # because the anchor phase only adds one extra sequential call
+            # for groups that would have been fully parallel before — and
+            # for the typical nr=4 shape this collapses cleanly.
+            by_parent = {}
+            for idx in next_level:
+                p_idx = next(p for i, p in shape if i == idx)
+                if p_idx not in saved_bodies:
+                    p_idx = 0  # re-parent to main if intended parent failed
+                by_parent.setdefault(p_idx, []).append(idx)
 
-            # Retry once (sequentially, to bound load) any that returned None
-            for (idx, parent_idx, parent_body, pid, sid), r in level_results:
-                if r is not None:
-                    continue
-                print(f"    [HQ] reply {idx} returned no body — retrying once")
-                r2 = _gen_one(idx, parent_idx, parent_body, sibling_bodies_snapshot, pid, sid)
-                # Replace in level_results (yes, mutating tuple — find and replace)
-                for j, (m, rr) in enumerate(level_results):
-                    if m[0] == idx:
-                        level_results[j] = (m, r2)
-                        break
+            anchor_idxs = set()
+            anchors = {}  # parent_idx -> anchor body
+            for p_idx, idxs in by_parent.items():
+                if len(idxs) > 1:
+                    a_idx = idxs[0]
+                    anchor_idxs.add(a_idx)
+                    parent_body = saved_bodies[p_idx]
+                    pid = all_personas[a_idx] if a_idx < len(all_personas) else random.choice(PERSONAS)["id"]
+                    sid = all_structures[a_idx] if a_idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
+                    print(f"    [HQ] level {level_num}: anchor reply {a_idx} (parent {p_idx})")
+                    r_anchor = _gen_one(a_idx, p_idx, parent_body, [], pid, sid)
+                    if r_anchor is None:
+                        print(f"    [HQ] anchor reply {a_idx} returned no body — retrying once")
+                        r_anchor = _gen_one(a_idx, p_idx, parent_body, [], pid, sid)
+                    if r_anchor is None:
+                        print(f"    [HQ] anchor reply {a_idx} unrecoverable — falling back, group will be parallel")
+                        anchor_idxs.discard(a_idx)
+                        continue
+                    _save_one(a_idx, p_idx, r_anchor)
+                    anchors[p_idx] = r_anchor["body"]
 
-            # Save (single-threaded; SQLite + bookkeeping)
-            for (idx, parent_idx, parent_body, pid, sid), r in level_results:
-                if r is None:
-                    print(f"    [HQ] reply {idx} unrecoverable — skipping")
-                    continue
-                _save_one(idx, parent_idx, r)
+            # Remaining replies (non-anchors and singletons) go in parallel.
+            rest_meta = []
+            for idx in next_level:
+                if idx in anchor_idxs and idx in saved_bodies:
+                    continue  # anchor already saved
+                p_idx = next(p for i, p in shape if i == idx)
+                if p_idx not in saved_bodies:
+                    p_idx = 0
+                parent_body = saved_bodies[p_idx]
+                pid = all_personas[idx] if idx < len(all_personas) else random.choice(PERSONAS)["id"]
+                sid = all_structures[idx] if idx < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
+                anchor_body = anchors.get(p_idx)
+                sibling_bodies = [anchor_body] if anchor_body else []
+                rest_meta.append((idx, p_idx, parent_body, sibling_bodies, pid, sid))
+
+            if rest_meta:
+                print(f"    [HQ] level {level_num}: generating {len(rest_meta)} non-anchor replies in parallel")
+                level_results = []
+                with ThreadPoolExecutor(max_workers=min(8, len(rest_meta))) as ex:
+                    fut_to_meta = {}
+                    for meta in rest_meta:
+                        idx, p_idx, parent_body, sibling_bodies, pid, sid = meta
+                        fut = ex.submit(_gen_one, idx, p_idx, parent_body,
+                                        sibling_bodies, pid, sid)
+                        fut_to_meta[fut] = meta
+                    for fut in as_completed(fut_to_meta):
+                        meta = fut_to_meta[fut]
+                        try:
+                            r = fut.result()
+                        except Exception as e:
+                            print(f"    [HQ] worker exception idx={meta[0]}: {e}")
+                            r = None
+                        level_results.append((meta, r))
+
+                # Retry once (sequentially, to bound load) any that returned None
+                for meta, r in level_results:
+                    if r is not None:
+                        continue
+                    idx, p_idx, parent_body, sibling_bodies, pid, sid = meta
+                    print(f"    [HQ] reply {idx} returned no body — retrying once")
+                    r2 = _gen_one(idx, p_idx, parent_body, sibling_bodies, pid, sid)
+                    for j, (m, rr) in enumerate(level_results):
+                        if m[0] == idx:
+                            level_results[j] = (m, r2)
+                            break
+
+                # Save (single-threaded; SQLite + bookkeeping)
+                for meta, r in level_results:
+                    idx, p_idx, parent_body, sibling_bodies, pid, sid = meta
+                    if r is None:
+                        print(f"    [HQ] reply {idx} unrecoverable — skipping")
+                        continue
+                    _save_one(idx, p_idx, r)
 
             current_level = next_level
             level_num += 1
@@ -2370,109 +2444,140 @@ Return JSON only:
 
         saved = []
         next_order = max([c.get("suggested_order", 0) for c in cluster.values()] or [0]) + 1
-        with ThreadPoolExecutor(max_workers=min(8, nr)) as ex:
-            fut_meta = {}
-            for i in range(nr):
-                parent_c = parent_choices[i]
-                pid = all_personas[i]["id"] if i < len(all_personas) else random.choice(PERSONAS)["id"]
-                sid = all_structures[i]["id"] if i < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
-                # Build a single-comment generate_comments call targeted at this parent.
-                kwargs = dict(
+
+        # Build a single generate_comments call for one new reply. Factored
+        # out so the anchor (sequential) and the rest (parallel) share one
+        # path. `sibling_bodies` is the list of already-written reply bodies
+        # this new reply should be aware of — flows through `comments` with
+        # in_thread_siblings=True so the prompt renders the explicit "OTHER
+        # REPLIES IN THIS HQ THREAD — do not echo their opener / repeat
+        # their angle" block. Replaces the prior retry_feedback hack.
+        def _build_kwargs(parent_c, sibling_bodies):
+            sib_comments = [
+                {"body": b, "score": 5, "author": "community_member"}
+                for b in (sibling_bodies or []) if b
+            ]
+            return dict(
+                post_title=post["title"],
+                post_body=post["body"],
+                subreddit=subreddit["name"],
+                comments=sib_comments,
+                brand_name=brand["name"],
+                brand_context=brand.get("context", ""),
+                num_comments=1,
+                tone_analysis=mock_tone,
+                comment_stats=reply_stats,
+                mention_brand_flags=[False],
+                reply_targets={0: {
+                    "body": parent_c["body"], "score": 5,
+                    "author": parent_c.get("account_id") or "community_member",
+                    "id": "", "permalink": "",
+                }},
+                relevance={
+                    "best_angle": (
+                        "Reply to the TARGET COMMENT specifically. Engage "
+                        "with one concrete point or claim from their "
+                        "comment — agree and add a supporting detail, "
+                        "push back on a specific phrase, share a "
+                        "contrasting experience that connects to what "
+                        "they said, or ask a follow-up about something "
+                        "they mentioned. Reference a specific phrase or "
+                        "idea from their comment so it's clear you read "
+                        "it. DO NOT change the topic or rehash points "
+                        "made in OTHER existing replies in the thread."
+                    ),
+                    "natural_fit": 3,
+                },
+                ai_crawl=ai_crawl,
+                post_intent=post.get("intent"),
+                slim_prompt=True,
+                brand_focus=self._extract_brand_focus(brand),
+                in_thread_siblings=bool(sib_comments),
+            )
+
+        def _save_reply(i, parent_c, pid, sid, result):
+            bodies = result.get("generated_comments") or []
+            if not bodies:
+                return None
+            body = bodies[0]
+            # Validate this reply. Drops the "no validator on this path"
+            # gap from the audit. We don't drop on fail — user expects
+            # all requested replies to land — but log so the failure is
+            # visible.
+            try:
+                val = self.validate_comments(
                     post_title=post["title"],
                     post_body=post["body"],
                     subreddit=subreddit["name"],
-                    comments=[],  # parent goes via reply_targets only — keeps focus
+                    comments=[],
                     brand_name=brand["name"],
-                    brand_context=brand.get("context", ""),
-                    num_comments=1,
-                    tone_analysis=mock_tone,
-                    comment_stats=reply_stats,
-                    mention_brand_flags=[False],
-                    reply_targets={0: {
-                        "body": parent_c["body"], "score": 5,
-                        "author": parent_c.get("account_id") or "community_member",
-                        "id": "", "permalink": "",
-                    }},
-                    relevance={
-                        "best_angle": (
-                            "Reply to the TARGET COMMENT specifically. Engage "
-                            "with one concrete point or claim from their "
-                            "comment — agree and add a supporting detail, "
-                            "push back on a specific phrase, share a "
-                            "contrasting experience that connects to what "
-                            "they said, or ask a follow-up about something "
-                            "they mentioned. Reference a specific phrase or "
-                            "idea from their comment so it's clear you read "
-                            "it. DO NOT change the topic or rehash points "
-                            "made in OTHER existing replies in the thread."
-                        ),
-                        "natural_fit": 3,
-                    },
+                    generated_comments=[body],
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
-                    slim_prompt=True,
-                    brand_focus=self._extract_brand_focus(brand),
                 )
-                # Pass existing replies as plain-text dedup hints in retry_feedback
-                # (it's already plumbed into the prompt as "PREVIOUS ATTEMPT FAILED"
-                # — a small abuse, but keeps the prompt simple).
-                if existing_reply_bodies:
-                    dedup = "\n".join(f"  - {b[:120]}..." for b in existing_reply_bodies[:6])
-                    kwargs["retry_feedback"] = (
-                        "DO NOT repeat or rehash the substance of these existing "
-                        "replies in the same thread:\n" + dedup
-                    )
-                fut = ex.submit(self.generate_comments, **kwargs)
-                fut_meta[fut] = (i, parent_c, pid, sid)
+                ev = (val.get("evaluations") or [{}])[0]
+                if not ev.get("pass"):
+                    print(f"    [add-replies] reply {i} validation: {ev.get('feedback', '')[:200]}")
+            except Exception as e:
+                print(f"    [add-replies] validator error: {e}")
+            cid = self.db.save_comment(
+                post_id=post["id"],
+                brand_id=brand["id"],
+                body=body,
+                persona_id=(result.get("_personas") or [pid])[0],
+                structure_id=(result.get("_structures") or [sid])[0],
+                is_reply=1,
+                parent_comment_id=parent_c["id"],
+                mentions_brand=0,
+                status="complete",
+                suggested_post_day=post_day_offset + (1 if parent_c["id"] == root["id"] else 2),
+                suggested_order=next_order + i,
+                prompt_version=PROMPT_VERSION,
+                comment_type="hq",
+            )
+            saved.append({"id": cid, "body": body, "parent_id": parent_c["id"]})
+            print(f"    [add-replies] saved reply #{cid} → parent #{parent_c['id']}")
+            return body
 
-            for fut in as_completed(fut_meta):
-                i, parent_c, pid, sid = fut_meta[fut]
-                try:
-                    result = fut.result()
-                except Exception as e:
-                    print(f"    [add-replies] worker exception i={i}: {e}")
-                    continue
-                bodies = result.get("generated_comments") or []
-                if not bodies:
-                    continue
-                body = bodies[0]
-                # Validate this reply. Drops the "no validator on this path"
-                # gap from the audit. We don't drop on fail — user expects
-                # all requested replies to land — but log so the failure is
-                # visible.
-                try:
-                    val = self.validate_comments(
-                        post_title=post["title"],
-                        post_body=post["body"],
-                        subreddit=subreddit["name"],
-                        comments=[],
-                        brand_name=brand["name"],
-                        generated_comments=[body],
-                        ai_crawl=ai_crawl,
-                        post_intent=post.get("intent"),
-                    )
-                    ev = (val.get("evaluations") or [{}])[0]
-                    if not ev.get("pass"):
-                        print(f"    [add-replies] reply {i} validation: {ev.get('feedback', '')[:200]}")
-                except Exception as e:
-                    print(f"    [add-replies] validator error: {e}")
-                cid = self.db.save_comment(
-                    post_id=post["id"],
-                    brand_id=brand["id"],
-                    body=body,
-                    persona_id=(result.get("_personas") or [pid])[0],
-                    structure_id=(result.get("_structures") or [sid])[0],
-                    is_reply=1,
-                    parent_comment_id=parent_c["id"],
-                    mentions_brand=0,
-                    status="complete",
-                    suggested_post_day=post_day_offset + (1 if parent_c["id"] == root["id"] else 2),
-                    suggested_order=next_order + i,
-                    prompt_version=PROMPT_VERSION,
-                    comment_type="hq",
-                )
-                saved.append({"id": cid, "body": body, "parent_id": parent_c["id"]})
-                print(f"    [add-replies] saved reply #{cid} → parent #{parent_c['id']}")
+        # ANCHOR-FIRST: generate the first new reply sequentially so the
+        # remaining parallel workers can see its body and avoid echoing it.
+        # Existing cluster reply bodies always flow into every new reply via
+        # the same in_thread_siblings channel.
+        anchor_body = None
+        anchor_idx = 0  # i=0 is the anchor
+        if nr >= 1:
+            parent_c = parent_choices[0]
+            pid = all_personas[0]["id"] if all_personas else random.choice(PERSONAS)["id"]
+            sid = all_structures[0]["id"] if all_structures else random.choice(STRUCTURE_TEMPLATES)["id"]
+            try:
+                result = self.generate_comments(**_build_kwargs(parent_c, list(existing_reply_bodies)))
+                anchor_body = _save_reply(0, parent_c, pid, sid, result)
+            except Exception as e:
+                print(f"    [add-replies] anchor exception: {e}")
+                anchor_body = None
+
+        # Rest in parallel; each sees existing_reply_bodies + anchor_body.
+        if nr >= 2:
+            parallel_siblings = list(existing_reply_bodies)
+            if anchor_body:
+                parallel_siblings.append(anchor_body)
+            with ThreadPoolExecutor(max_workers=min(8, nr - 1)) as ex:
+                fut_meta = {}
+                for i in range(1, nr):
+                    parent_c = parent_choices[i]
+                    pid = all_personas[i]["id"] if i < len(all_personas) else random.choice(PERSONAS)["id"]
+                    sid = all_structures[i]["id"] if i < len(all_structures) else random.choice(STRUCTURE_TEMPLATES)["id"]
+                    fut = ex.submit(self.generate_comments, **_build_kwargs(parent_c, parallel_siblings))
+                    fut_meta[fut] = (i, parent_c, pid, sid)
+
+                for fut in as_completed(fut_meta):
+                    i, parent_c, pid, sid = fut_meta[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        print(f"    [add-replies] worker exception i={i}: {e}")
+                        continue
+                    _save_reply(i, parent_c, pid, sid, result)
 
         return saved
 
@@ -2687,10 +2792,28 @@ Return JSON only:
                     "id": "", "permalink": "",
                 }}
 
-            # The reply prompt sees ONLY parent context — siblings just add
-            # noise (same fix we applied to generate_hq_comment).
             # Main comment sees the existing live comments for tone.
-            thread_comments = list(comments or []) if is_main else []
+            # Replies see all prior REPLY bodies in this cluster (not the
+            # main — its body flows via reply_targets when the reply targets
+            # main; including main as a sibling would confuse the no-brand
+            # rule for replies). This path is already sequential, so by the
+            # time we generate reply N every reply 1..N-1 is in saved_bodies.
+            # Bodies render under "OTHER REPLIES IN THIS HQ THREAD" via the
+            # in_thread_siblings flag, with the explicit don't-echo
+            # directive — closes the level-1/level-2 echo loophole.
+            in_thread_flag = False
+            if is_main:
+                thread_comments = list(comments or [])
+            else:
+                prior_reply_bodies = [
+                    saved_bodies[i] for i in sorted(saved_bodies.keys())
+                    if i != 0 and i != idx
+                ]
+                thread_comments = [
+                    {"body": b, "score": 5, "author": "community_member"}
+                    for b in prior_reply_bodies
+                ]
+                in_thread_flag = bool(thread_comments)
 
             angle = (
                 f"Recommend {brand_name} confidently as a direct answer to "
@@ -2730,6 +2853,7 @@ Return JSON only:
                 hq_main=is_main,
                 slim_prompt=not is_main,
                 brand_focus=brand_focus,
+                in_thread_siblings=in_thread_flag,
             )
 
             bodies = result.get("generated_comments") or []

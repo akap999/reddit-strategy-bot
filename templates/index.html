@@ -7653,6 +7653,12 @@ async function lsubsDeleteHqCluster(rootId, count) {
 // =========================================================================
 async function renderLsubsComments(c) {
     const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    // Status / Date filters scope to the CLUSTER HEAD (parent comment) and
+    // are applied client-side. A status=deployed filter at the API layer
+    // would drop "draft" replies under a deployed parent and break the
+    // cluster view; instead we fetch the full comment set (filtered only by
+    // brand at the API since brand is consistent within a cluster) and let
+    // _lsubsRenderComments drop whole clusters whose head fails the filter.
     c.innerHTML = `
         <div class="flex flex-wrap gap-3 items-center mb-4">
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -7664,7 +7670,7 @@ async function renderLsubsComments(c) {
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
                 Status
-                <select id="lsubs-cmt-status" onchange="lsubsLoadComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                <select id="lsubs-cmt-status" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
                     <option value="">All status</option>
                     <option value="draft">Draft</option>
                     <option value="assigned">Assigned</option>
@@ -7674,10 +7680,26 @@ async function renderLsubsComments(c) {
                     <option value="removed">Removed</option>
                 </select>
             </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                From
+                <input type="date" id="lsubs-cmt-date-from" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+            </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1">
+                To
+                <input type="date" id="lsubs-cmt-date-to" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+            </label>
+            <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
         </div>
         <div id="lsubs-cmt-list"></div>
     `;
     lsubsLoadComments();
+}
+
+function lsubsClearCmtFilters() {
+    const s = document.getElementById('lsubs-cmt-status'); if (s) s.value = '';
+    const f = document.getElementById('lsubs-cmt-date-from'); if (f) f.value = '';
+    const t = document.getElementById('lsubs-cmt-date-to'); if (t) t.value = '';
+    _lsubsRenderComments();
 }
 
 // Cache for in-place updates. Editing or status-changing a comment patches
@@ -7727,9 +7749,10 @@ async function lsubsLoadComments(silent = false) {
     if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1', source: 'comment' });
     const bid = document.getElementById('lsubs-cmt-brand')?.value;
-    const status = document.getElementById('lsubs-cmt-status')?.value;
     if (bid) params.set('brand_id', bid);
-    if (status) params.set('status', status);
+    // Status/date filters intentionally NOT sent to API — they're applied
+    // client-side at the cluster head so a cluster doesn't get partially
+    // hidden when a child reply has a different status than its parent.
     try {
         const res = await api('/api/all-comments?' + params.toString());
         const comments = (res && Array.isArray(res.items)) ? res.items
@@ -7753,6 +7776,23 @@ function _lsubsRenderComments() {
         listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
         return;
     }
+    // Read filters once; matchHead is reused for both clusters and organic.
+    // Date inputs return ISO YYYY-MM-DD strings; created_at is a full ISO
+    // timestamp — comparing the leading 10 chars lexicographically is
+    // equivalent to comparing dates and avoids a Date() roundtrip per row.
+    const statusFilter = document.getElementById('lsubs-cmt-status')?.value || '';
+    const dateFrom = document.getElementById('lsubs-cmt-date-from')?.value || '';
+    const dateTo = document.getElementById('lsubs-cmt-date-to')?.value || '';
+    const hasAnyFilter = !!(statusFilter || dateFrom || dateTo);
+    const matchHead = (c) => {
+        if (statusFilter && c.status !== statusFilter) return false;
+        if (dateFrom || dateTo) {
+            const d = (c.created_at || '').substring(0, 10);
+            if (dateFrom && d < dateFrom) return false;
+            if (dateTo && d > dateTo) return false;
+        }
+        return true;
+    };
     const groups = {};
     for (const c of comments) {
         const key = c.p_id;
@@ -7767,6 +7807,7 @@ function _lsubsRenderComments() {
         }
         groups[key].items.push(c);
     }
+    let visiblePostGroups = 0;
     listEl.innerHTML = Object.entries(groups).map(([pid, g]) => {
         const items = g.items || [];
         const kids = {};
@@ -7802,13 +7843,28 @@ function _lsubsRenderComments() {
         }
         const organic = items.filter(it => !used.has(it.id));
 
+        // HEAD-LEVEL FILTER: a cluster is kept iff its root (cluster[0].c)
+        // matches the head filter. Organic comments have no parent, so the
+        // comment itself is the head. After filtering, if a post group has
+        // nothing left to show, we omit its entire card (return '').
+        const filteredClusters = hasAnyFilter
+            ? clusters.filter(cluster => matchHead(cluster[0].c))
+            : clusters;
+        const filteredOrganic = hasAnyFilter
+            ? organic.filter(matchHead)
+            : organic;
+        if (hasAnyFilter && !filteredClusters.length && !filteredOrganic.length) {
+            return '';
+        }
+        visiblePostGroups += 1;
+
         const tableShell = (rowsHtml) => `
             <table>
                 <thead><tr><th>Comment</th><th>Account</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>${rowsHtml}</tbody>
             </table>`;
 
-        const clustersHtml = clusters.map((cluster, k) => {
+        const clustersHtml = filteredClusters.map((cluster, k) => {
             const rootCreated = cluster[0]?.c?.created_at || '';
             const rootId = cluster[0]?.c?.id;
             const rows = cluster.map((node, idx) =>
@@ -7838,11 +7894,21 @@ function _lsubsRenderComments() {
                 </div>`;
         }).join('');
 
-        const organicHtml = organic.length ? `
+        const organicHtml = filteredOrganic.length ? `
             <div class="mt-3">
-                <div class="text-xs text-gray-400 mb-1">Other comments · ${organic.length}</div>
-                ${tableShell(organic.map(c => _lsubsBuildCommentRowHtml(c)).join(''))}
+                <div class="text-xs text-gray-400 mb-1">Other comments · ${filteredOrganic.length}</div>
+                ${tableShell(filteredOrganic.map(c => _lsubsBuildCommentRowHtml(c)).join(''))}
             </div>` : '';
+
+        // Header counts reflect what's visible after filtering — the raw
+        // `items.length` total would be misleading once filters are active.
+        const visibleCount = filteredClusters.reduce((n, cl) => n + cl.length, 0) + filteredOrganic.length;
+        const headerCount = hasAnyFilter
+            ? `${visibleCount} of ${items.length} comment${items.length === 1 ? '' : 's'} match`
+            : `${items.length} comment${items.length === 1 ? '' : 's'}`;
+        const clustersSummary = filteredClusters.length
+            ? ` · ${filteredClusters.length} HQ thread${filteredClusters.length === 1 ? '' : 's'}`
+            : '';
 
         return `
         <div class="card p-3 mb-3">
@@ -7853,7 +7919,7 @@ function _lsubsRenderComments() {
                     ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-xs text-gray-500">${items.length} comment${items.length === 1 ? '' : 's'}${clusters.length ? ` · ${clusters.length} HQ thread${clusters.length === 1 ? '' : 's'}` : ''}</span>
+                    <span class="text-xs text-gray-500">${headerCount}${clustersSummary}</span>
                     <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
                     <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
                 </div>
@@ -7862,6 +7928,10 @@ function _lsubsRenderComments() {
             ${organicHtml}
         </div>`;
     }).join('');
+
+    if (hasAnyFilter && !visiblePostGroups) {
+        listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No clusters match the current filters. The status / date filters scope to the parent comment (cluster head). Clear filters to see all.</p>';
+    }
 }
 
 // In-place patch: update one comment in cache and swap its <tr> only.

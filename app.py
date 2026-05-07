@@ -523,10 +523,9 @@ def _extract_brand_enrichment_fields(data):
         if scalar in data:
             val = data.get(scalar)
             out[scalar] = val.strip() if isinstance(val, str) else val
-    # `focus` joins the JSON-list pattern alongside use_cases / pain_points /
-    # etc. — same shape, same parsing. Soft editorial direction the comment
-    # generator weaves in where applicable; see comment_gen.py:_extract_brand_focus.
-    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits", "focus"):
+    # `use_cases` / `pain_points` / `features` / `competitors` /
+    # `search_subreddits` are plain JSON list-of-strings.
+    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits"):
         if listf in data:
             v = data.get(listf)
             if v is None:
@@ -537,9 +536,83 @@ def _extract_brand_enrichment_fields(data):
                 # Accept newline- or comma-separated free text from the form
                 items = [s.strip() for s in v.replace("\n", ",").split(",") if s.strip()]
                 out[listf] = json.dumps(items)
+    # `focus` is a JSON list of {phrase, applies_when} dicts. Two input
+    # syntaxes are accepted from the textarea:
+    #   1. plain phrase per line:        `fiberglass-free`
+    #      → {phrase: "fiberglass-free", applies_when: []}  (auto-detect)
+    #   2. phrase + manual scope keywords:
+    #      `fiberglass-free | mattress, foam`
+    #      → {phrase: "fiberglass-free", applies_when: ["mattress","foam"]}
+    # API callers can also pass an explicit JSON list of dicts, which is
+    # forwarded as-is after normalisation. Plain string entries inside a
+    # list are coerced to {phrase: s, applies_when: []} for backwards
+    # compatibility with the old `[str]` shape.
+    if "focus" in data:
+        v = data.get("focus")
+        if v is None:
+            out["focus"] = None
+        else:
+            entries = []
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        phrase = str(item.get("phrase", "")).strip()
+                        if not phrase:
+                            continue
+                        aw = item.get("applies_when") or []
+                        if not isinstance(aw, list):
+                            aw = []
+                        aw = [str(x).strip() for x in aw if str(x).strip()]
+                        entries.append({"phrase": phrase, "applies_when": aw})
+                    elif isinstance(item, str) and item.strip():
+                        e = _parse_focus_line(item)
+                        if e:
+                            entries.append(e)
+            elif isinstance(v, str):
+                # Split on newlines only — commas are now part of the
+                # applies_when keyword list (e.g. "X | a, b"). Each line
+                # becomes one phrase entry.
+                for line in v.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    e = _parse_focus_line(line)
+                    if e:
+                        entries.append(e)
+            # De-duplicate by phrase (case-insensitive), keep last.
+            dedup = {}
+            for e in entries:
+                if e and e.get("phrase"):
+                    dedup[e["phrase"].lower()] = e
+            out["focus"] = json.dumps(list(dedup.values()))
     if "enriched_at" in data:
         out["enriched_at"] = data.get("enriched_at")
     return out
+
+
+def _parse_focus_line(line):
+    """Parse one focus textarea line into a {phrase, applies_when} dict.
+
+    Accepts:
+      "fiberglass-free"                  → applies_when=[]
+      "fiberglass-free | mattress, foam" → applies_when=["mattress","foam"]
+      "fiberglass-free|mattress|foam"    → applies_when=["mattress","foam"]
+    Returns None if the phrase part is empty.
+    """
+    if not isinstance(line, str):
+        return None
+    parts = [p.strip() for p in line.split("|")]
+    phrase = parts[0] if parts else ""
+    if not phrase:
+        return None
+    applies_when = []
+    if len(parts) > 1:
+        # Anything after the first `|` is treated as keyword scope.
+        # Join the remaining segments with commas so both
+        # `phrase | a, b` and `phrase | a | b` shapes work.
+        tail = ",".join(parts[1:])
+        applies_when = [s.strip() for s in tail.split(",") if s.strip()]
+    return {"phrase": phrase, "applies_when": applies_when}
 
 @app.route("/api/subreddits/<int:sid>/brands")
 def api_list_brands(sid):
@@ -647,6 +720,54 @@ def api_enrich_existing_brand(bid):
                      "Check the brand's domain URL and try again."
         }), 502
     return jsonify(draft)
+
+
+@app.route("/api/brands/<int:bid>/focus-coverage")
+def api_brand_focus_coverage(bid):
+    """Aggregate focus-pairing hit/miss counts for a brand.
+
+    Reads `comments.focus_phrase` and `comments.focus_hit` (set on save by
+    the comment generator when a focus-phrase pairing was attempted) and
+    returns a per-phrase breakdown:
+
+        {
+          "fiberglass-free": {"assigned": 18, "hit": 16, "miss": 2},
+          "toxic-free":      {"assigned": 6,  "hit": 4,  "miss": 2}
+        }
+
+    Surfaces the focus strategy's reliability per phrase so the user can
+    spot phrases that are systematically missing the brand-pairing target.
+    """
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        rows = db.conn.execute(
+            """SELECT focus_phrase, focus_hit, COUNT(*) AS n
+               FROM comments
+               WHERE brand_id = ? AND focus_phrase IS NOT NULL
+               GROUP BY focus_phrase, focus_hit""",
+            (bid,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    coverage = {}
+    for r in rows:
+        phrase = r["focus_phrase"]
+        hit = r["focus_hit"]
+        n = r["n"] or 0
+        bucket = coverage.setdefault(phrase, {"assigned": 0, "hit": 0, "miss": 0})
+        bucket["assigned"] += n
+        if hit == 1:
+            bucket["hit"] += n
+        else:
+            # focus_hit = 0 (assigned-but-missed) or NULL on this row
+            # (shouldn't happen given the WHERE clause, but treat as miss
+            # for safety).
+            bucket["miss"] += n
+    return jsonify(coverage)
 
 # ---------------------------------------------------------------------------
 # API: Posts

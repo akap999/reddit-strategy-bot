@@ -233,6 +233,206 @@ def _shape_to_dict(shape_tuple, rng):
     }
 
 
+# ---------------------------------------------------------------------------
+# Brand-focus pairing — Layer 5 of the focus strategy.
+#
+# A focus phrase only counts as a "hit" when it appears in the same comment
+# AS THE BRAND NAME and within ~120 chars of it (≈ same sentence or the one
+# next to it). That proximity is what an AI retriever needs to embed the
+# "{brand} ↔ {phrase}" association. Phrase-without-brand doesn't form the
+# association; brand-without-phrase doesn't form it either.
+#
+# Matching is case-insensitive with separator/spelling-variant tolerance:
+#   fibreglass ↔ fiberglass         (BR ↔ AM, "fibre" ↔ "fiber")
+#   fiber-glass ↔ fiber glass ↔ fiberglass   (separator-insensitive)
+#   colour-safe ↔ color safe ↔ colorsafe     (BR ↔ AM, separator)
+# ---------------------------------------------------------------------------
+
+_FOCUS_BRAM_VARIANTS = [
+    ("fibre", "fiber"),
+    ("colour", "color"),
+    ("centre", "center"),
+    ("flavour", "flavor"),
+]
+
+
+def _focus_phrase_variants(phrase):
+    """Return the set of normalised string variants of a focus phrase that
+    we accept as a match. The base normalisation collapses dashes /
+    underscores / multi-space into a single space + lowercases. Then we
+    also emit a no-separator variant ("fiberglass-free" → "fiberglassfree")
+    and BR↔AM spelling swaps.
+
+    Returns a list of unique lowercase strings, longest first (so longer
+    matches are tried before short ones in substring searches).
+    """
+    if not phrase:
+        return []
+    base = phrase.strip().lower()
+    # Replace dashes / underscores with spaces, collapse runs of whitespace.
+    spaced = re.sub(r"[-_]+", " ", base)
+    spaced = re.sub(r"\s+", " ", spaced).strip()
+    no_sep = re.sub(r"[-_\s]+", "", base)
+    cands = {base, spaced, no_sep}
+    # Spelling swaps. Cheap; only fires when the variant root is present.
+    for br, am in _FOCUS_BRAM_VARIANTS:
+        for s in list(cands):
+            if br in s:
+                cands.add(s.replace(br, am))
+            if am in s:
+                cands.add(s.replace(am, br))
+    return sorted(cands, key=lambda s: -len(s))
+
+
+def _find_phrase_indices(body_lower, phrase):
+    """Return all start indices where any variant of `phrase` occurs in
+    `body_lower` (already lowercased). Order is irrelevant; the caller
+    only cares about min-distance.
+
+    Uses flexible-separator regex: each variant is split on dash/space/
+    underscore into word parts; the words must occur in order in the
+    body but any separator (dash, space, underscore, or none) between
+    them is accepted. So "fiber glass free" matches "fiberglass-free",
+    "fiber glass free", "fiber-glass-free", etc. — the spelling/separator
+    differences that broke the substring matcher are absorbed here.
+    """
+    out = set()
+    seen_patterns = set()
+    for variant in _focus_phrase_variants(phrase):
+        if not variant:
+            continue
+        words = [re.escape(w) for w in re.split(r"[-_\s]+", variant) if w]
+        if not words:
+            continue
+        pattern = r"[-_\s]*".join(words)
+        if pattern in seen_patterns:
+            continue
+        seen_patterns.add(pattern)
+        for m in re.finditer(pattern, body_lower):
+            out.add(m.start())
+    return sorted(out)
+
+
+def _focus_pair_in_body(brand_name, phrase, body, max_distance=120):
+    """Return (hit, distance) where hit is True iff `phrase` and
+    `brand_name` co-occur in `body` within `max_distance` characters of
+    each other (closest pair).
+
+    `distance` is the smallest character distance between any phrase
+    occurrence and any brand occurrence, or None if either side is
+    missing entirely.
+
+    Brand matching is case-insensitive substring (no fuzzy) — brand
+    names are short and stable. Phrase matching tolerates BR↔AM and
+    separator variants via _focus_phrase_variants.
+    """
+    if not body or not phrase or not brand_name:
+        return False, None
+    body_l = body.lower()
+    brand_l = brand_name.lower()
+    brand_idxs = []
+    i = 0
+    while True:
+        j = body_l.find(brand_l, i)
+        if j < 0:
+            break
+        brand_idxs.append(j)
+        i = j + 1
+    phrase_idxs = _find_phrase_indices(body_l, phrase)
+    if not brand_idxs or not phrase_idxs:
+        return False, None
+    best = min(abs(b - p) for b in brand_idxs for p in phrase_idxs)
+    return (best <= max_distance), best
+
+
+def _post_topic_text(post):
+    """Build the lowercased text we scan for relevance gate keyword hits."""
+    title = (post or {}).get("title", "") or ""
+    body = ((post or {}).get("body", "") or "")[:600]
+    return (title + "\n" + body).lower()
+
+
+def _phrase_applies_to_post(focus_item, post, applicable_phrases=None):
+    """Decide whether a configured focus phrase applies to a given post.
+
+    `focus_item` is `{phrase, applies_when}`.
+
+    Decision precedence:
+      1. If `applies_when` is non-empty → manual override path. The phrase
+         applies iff at least one of those keywords appears in the post
+         (substring, case-insensitive).
+      2. If `applicable_phrases` is provided → it's the LLM classifier's
+         allowlist of phrases that fit this post. Use it.
+      3. Heuristic fallback (free): split the phrase on dashes / spaces,
+         keep words of length ≥ 4, and check if any appears in the post
+         text. Conservative — if none match, the phrase is skipped for
+         this post.
+    """
+    phrase = (focus_item or {}).get("phrase", "").strip()
+    if not phrase:
+        return False
+    applies_when = (focus_item or {}).get("applies_when") or []
+    haystack = _post_topic_text(post)
+    if applies_when:
+        return any(kw.strip().lower() in haystack for kw in applies_when if kw.strip())
+    if applicable_phrases is not None:
+        # The classifier already decided; exact-match by phrase string
+        # (lowercased + trimmed for safety).
+        return phrase.strip().lower() in {
+            str(p).strip().lower() for p in applicable_phrases
+        }
+    # Heuristic fallback.
+    parts = re.split(r"[-_\s]+", phrase.lower())
+    words = [w for w in parts if len(w) >= 4]
+    if not words:
+        # Phrase is too short to heuristically match — be permissive
+        # (treat as applies). The user can scope it manually if needed.
+        return True
+    return any(w in haystack for w in words)
+
+
+def _assign_focus_phrases(focus_items, post, mention_brand_flags,
+                           applicable_phrases=None, rng=None):
+    """Build a per-slot focus assignment list parallel to mention_brand_flags.
+
+    Rules:
+      - Only brand-mention slots are eligible (mention_brand_flags[i] truthy).
+      - For each eligible slot, walk the configured focus phrases (in user
+        order) and pick the first whose relevance gate passes. Round-robin
+        the starting offset across slots so when multiple phrases pass we
+        spread assignments across them instead of always landing the same
+        one in slot 0.
+      - Slots without a brand mention get None.
+      - Returns a list[str|None] of length == len(mention_brand_flags).
+
+    `applicable_phrases` is the (optional) LLM-classifier allowlist. When
+    None, _phrase_applies_to_post falls back to manual / heuristic gates.
+    """
+    rng = rng or random
+    n = len(mention_brand_flags)
+    out = [None] * n
+    if not focus_items:
+        return out
+    # Pre-compute which phrases apply to this post once — same answer for
+    # every slot in the batch, so we don't recompute per-slot.
+    applies = []
+    for fi in focus_items:
+        if _phrase_applies_to_post(fi, post, applicable_phrases):
+            applies.append(fi.get("phrase", "").strip())
+    applies = [p for p in applies if p]
+    if not applies:
+        return out
+    # Round-robin starting offset so phrase 0 isn't always assigned to
+    # slot 0 across consecutive batches.
+    start = rng.randint(0, len(applies) - 1) if len(applies) > 1 else 0
+    cursor = 0
+    for i, mb in enumerate(mention_brand_flags):
+        if mb:
+            out[i] = applies[(start + cursor) % len(applies)]
+            cursor += 1
+    return out
+
+
 def classify_post_intent(post_title, post_body=None, stored_intent=None):
     """Single source of truth for "what is this post asking for".
 
@@ -329,12 +529,22 @@ class CommentGenerator:
 
     @staticmethod
     def _extract_brand_focus(brand):
-        """Decode the brand.focus column into a clean list of strings.
+        """Decode the brand.focus column into a clean list of focus dicts.
 
-        The DB stores it JSON-serialised (consistent with `keywords` and
-        `search_subreddits`). Returns [] for empty / NULL / malformed
-        values so callers can pass the result straight through to
-        `generate_comments` without per-site None-checks.
+        Returns a list of `{phrase: str, applies_when: list[str]}` dicts.
+        Empty `applies_when` means "auto-detect" (the default).
+
+        Two storage shapes are accepted, in order of priority:
+          1. List of dicts (new): `[{"phrase": "fiberglass-free",
+             "applies_when": ["mattress", "foam"]}]`
+          2. List of strings (legacy): `["fiberglass-free", ...]` —
+             each string becomes `{phrase: s, applies_when: []}` so old
+             brands keep working without re-saving.
+
+        Plain strings inside the list-of-dicts shape (e.g. mixed
+        `[{"phrase": "X"}, "Y"]`) are also coerced into the dict shape.
+
+        Returns [] for empty / NULL / malformed values.
         """
         if not brand:
             return []
@@ -347,7 +557,24 @@ class CommentGenerator:
             return []
         if not isinstance(parsed, list):
             return []
-        return [str(s).strip() for s in parsed if str(s).strip()]
+        out = []
+        for item in parsed:
+            if isinstance(item, dict):
+                phrase = str(item.get("phrase", "")).strip()
+                if not phrase:
+                    continue
+                applies_when = item.get("applies_when") or []
+                if not isinstance(applies_when, list):
+                    applies_when = []
+                applies_when = [str(s).strip() for s in applies_when if str(s).strip()]
+                out.append({"phrase": phrase, "applies_when": applies_when})
+            elif isinstance(item, str):
+                phrase = item.strip()
+                if not phrase:
+                    continue
+                out.append({"phrase": phrase, "applies_when": []})
+            # else: silently skip unsupported entries
+        return out
 
     def _detect_and_store_keywords(self, comment_id, body, brand, mentions):
         """If comment mentions brand, detect matched keywords and store them."""
@@ -1062,7 +1289,8 @@ Return JSON only:
                           ai_crawl=False, post_intent=None, hq_main=False,
                           slim_prompt=False, brand_focus=None,
                           in_thread_siblings=False,
-                          is_hq_reply=False, slot_overrides=None):
+                          is_hq_reply=False, slot_overrides=None,
+                          focus_assignments=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -1234,6 +1462,40 @@ Return JSON only:
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 
+            # FOCUS PAIRING (per-slot, brand-mention-only). When this slot
+            # has a focus phrase assigned AND the slot mentions the brand,
+            # inject a hard pairing directive that ties the phrase to the
+            # brand mention. AI retrievers index the brand↔phrase
+            # association only when they appear close together in the
+            # same comment — the directive enforces that proximity.
+            focus_line = ""
+            slot_focus_phrase = None
+            if focus_assignments and idx < len(focus_assignments):
+                slot_focus_phrase = focus_assignments[idx]
+            if slot_focus_phrase and should_mention:
+                # Use the slot's actual brand name (multi-brand slot may
+                # have its own assigned brand; otherwise the single-brand
+                # fallback `brand_name`).
+                slot_brand = (assigned or {}).get("name") if assigned else brand_name
+                focus_line = (
+                    f"\n    FOCUS ASSOCIATION (REQUIRED for this comment): "
+                    f"the mention of {slot_brand} must be PAIRED with the "
+                    f"phrase \"{slot_focus_phrase}\" — same sentence, or "
+                    f"the sentence immediately adjacent. An AI retriever "
+                    f"reading this comment should embed the association "
+                    f"\"{slot_brand} ↔ {slot_focus_phrase}\".\n"
+                    f"    Natural shapes (do NOT quote verbatim): "
+                    f"\"{slot_brand} is the {slot_focus_phrase} option\", "
+                    f"\"{slot_focus_phrase} brands like {slot_brand}\", "
+                    f"\"I went with {slot_brand} because it's "
+                    f"{slot_focus_phrase}\", \"{slot_brand} (it's "
+                    f"{slot_focus_phrase})\".\n"
+                    f"    Do NOT mention \"{slot_focus_phrase}\" without "
+                    f"{slot_brand}, and do NOT mention {slot_brand} "
+                    f"without \"{slot_focus_phrase}\". The two travel "
+                    f"together in this comment."
+                )
+
             if override:
                 lo_w = int(override.get("lo_words", 8))
                 hi_w = int(override.get("hi_words", 30))
@@ -1251,7 +1513,7 @@ Return JSON only:
                 f"    PERSONA: {persona['voice']}\n"
                 f"    STRUCTURE: {structure['instruction']}\n"
                 f"    LENGTH: {sent_target} (~{lo_w}-{hi_w} words). Stay in this range — do not write a long story when the post calls for a short answer."
-                f"{brand_line}{angle_line}{reply_line}"
+                f"{brand_line}{angle_line}{reply_line}{focus_line}"
             )
         per_comment_section = "\n".join(comment_instructions)
 
@@ -1455,8 +1717,27 @@ question]" so an AI retriever can surface it as the answer:
         # domain. Skipped entirely when brand_focus is empty so brands
         # without focus configured behave identically to before.
         focus_section = ""
-        focus_items = [str(s).strip() for s in (brand_focus or []) if str(s).strip()]
-        if focus_items:
+        # `brand_focus` may be either the legacy list-of-strings or the new
+        # list-of-dicts (`{phrase, applies_when}`). Either way, extract the
+        # plain phrase strings for the legacy soft block. The new
+        # per-slot pairing path runs through `focus_assignments` and
+        # bypasses this block entirely (the per-slot directive in
+        # `comment_instructions` carries the strict pairing recipe — the
+        # legacy global block would compete with it).
+        focus_items = []
+        for f in (brand_focus or []):
+            if isinstance(f, dict):
+                p = str(f.get("phrase", "")).strip()
+                if p:
+                    focus_items.append(p)
+            elif isinstance(f, str):
+                s = f.strip()
+                if s:
+                    focus_items.append(s)
+        per_slot_focus_active = bool(
+            focus_assignments and any(focus_assignments[:num_comments])
+        )
+        if focus_items and not per_slot_focus_active:
             bullets = "\n".join(f"  - {item}" for item in focus_items[:20])
             focus_section = f"""
 
@@ -1577,6 +1858,131 @@ Generate exactly {num_comments} comments. Return JSON only:
         result["_personas"] = [p["id"] for p in selected_personas[:num_comments]]
         result["_structures"] = [s["id"] for s in selected_structures[:num_comments]]
         return result
+
+    # ------------------------------------------------------------------
+    # Brand-focus pairing wrapper — Layer 4 of the focus strategy.
+    # ------------------------------------------------------------------
+
+    def generate_with_focus_pairing(self, gen_kwargs, focus_assignments,
+                                     mention_brand_flags, brand_name,
+                                     brand_assignments=None):
+        """Run generate_comments + per-slot pairing check + one retry.
+
+        For every slot where `focus_assignments[i]` is non-None and
+        `mention_brand_flags[i]` is truthy, after the initial generate
+        we check whether the body contains both the brand and the phrase
+        within ~120 chars (`_focus_pair_in_body`). On a miss we retry
+        that single slot once via a `num_comments=1` follow-up call with
+        a strict `retry_feedback`. The retry's body replaces the missed
+        slot in the result. If the retry still misses, we keep the
+        latest body and record `focus_hit=0`.
+
+        Args:
+          gen_kwargs: dict — kwargs to pass to self.generate_comments.
+                     Must contain `num_comments`, `focus_assignments`,
+                     `mention_brand_flags` consistent with the args
+                     below.
+          focus_assignments: list[str|None] — per-slot phrase assignment.
+                     Same length as num_comments.
+          mention_brand_flags: list[bool] — same length as num_comments.
+          brand_name: str — single-brand fallback for proximity check.
+          brand_assignments: list[dict|None] — per-slot brand dict
+                     (multi-brand). When set, slot i's brand for the
+                     proximity check is brand_assignments[i]['name'].
+
+        Returns:
+          (result_dict, focus_hits) where result_dict is the same shape
+          generate_comments returns and focus_hits is a list[int|None]
+          parallel to num_comments — 1 hit, 0 miss, None if no phrase
+          was assigned.
+        """
+        n = int(gen_kwargs.get("num_comments", 0) or 0)
+        result = self.generate_comments(**gen_kwargs)
+        bodies = result.get("generated_comments") or []
+        focus_hits = [None] * n
+
+        # Helper: which brand applies to slot i for proximity check?
+        def _slot_brand(i):
+            if brand_assignments and i < len(brand_assignments) and brand_assignments[i]:
+                return (brand_assignments[i].get("name") or brand_name)
+            return brand_name
+
+        # First pass: check each slot.
+        misses = []
+        for i in range(min(n, len(bodies))):
+            phrase = focus_assignments[i] if i < len(focus_assignments) else None
+            if not phrase:
+                continue
+            if not (i < len(mention_brand_flags) and mention_brand_flags[i]):
+                continue
+            hit, _dist = _focus_pair_in_body(_slot_brand(i), phrase, bodies[i])
+            if hit:
+                focus_hits[i] = 1
+            else:
+                focus_hits[i] = 0
+                misses.append(i)
+
+        # Single-shot retry for each miss. The retry only generates ONE
+        # comment, with strict retry_feedback explaining the pairing.
+        for i in misses:
+            phrase = focus_assignments[i]
+            slot_brand = _slot_brand(i)
+            retry_kwargs = dict(gen_kwargs)
+            retry_kwargs["num_comments"] = 1
+            retry_kwargs["focus_assignments"] = [phrase]
+            retry_kwargs["mention_brand_flags"] = [mention_brand_flags[i]]
+            if brand_assignments:
+                retry_kwargs["brand_assignments"] = [
+                    brand_assignments[i] if i < len(brand_assignments) else None
+                ]
+            # Slot-overrides may have been set per-slot — narrow to slot i.
+            so = gen_kwargs.get("slot_overrides")
+            if isinstance(so, dict) and i in so:
+                retry_kwargs["slot_overrides"] = {0: so[i]}
+            elif isinstance(so, list) and i < len(so):
+                retry_kwargs["slot_overrides"] = [so[i]]
+            else:
+                retry_kwargs["slot_overrides"] = None
+            # Reply targets are also per-slot keyed.
+            rt = gen_kwargs.get("reply_targets")
+            if isinstance(rt, dict) and i in rt:
+                retry_kwargs["reply_targets"] = {0: rt[i]}
+            else:
+                retry_kwargs["reply_targets"] = None
+            # Stronger directive for the retry.
+            retry_kwargs["retry_feedback"] = (
+                "Your previous attempt did NOT pair "
+                f"{slot_brand} with the phrase \"{phrase}\" in the same "
+                "or adjacent sentence. The two MUST travel together — "
+                "not on opposite ends of the comment, not phrase without "
+                "brand, not brand without phrase. Place them within ~10 "
+                "words of each other. Try again."
+            )
+            try:
+                retry_result = self.generate_comments(**retry_kwargs)
+            except Exception as e:
+                print(f"    [focus] retry exception slot={i}: {e}")
+                continue
+            new_bodies = (retry_result or {}).get("generated_comments") or []
+            if not new_bodies:
+                continue
+            # Replace the missed body with the retry's body.
+            bodies[i] = new_bodies[0]
+            hit, _dist = _focus_pair_in_body(slot_brand, phrase, bodies[i])
+            focus_hits[i] = 1 if hit else 0
+
+        # Mutate result in place so the caller's view stays consistent.
+        result["generated_comments"] = bodies
+
+        # Telemetry — single line per batch summarising hits/misses.
+        assigned_n = sum(1 for h in focus_hits if h is not None)
+        if assigned_n:
+            hits_n = sum(1 for h in focus_hits if h == 1)
+            miss_n = assigned_n - hits_n
+            print(f"    [focus] brand={brand_name!r} assigned={assigned_n} "
+                  f"hit={hits_n} miss={miss_n}")
+
+        return result, focus_hits
 
     # ------------------------------------------------------------------
     # Validation (preserved from original)
@@ -2042,6 +2448,17 @@ Return JSON only:
         # Generate top-level comments
         print(f"    Generating {num_top} top-level comments...")
         top_assignments = mention_assignments[:num_top]
+        top_mention_flags = mention_flags[:num_top]
+        # Per-slot focus phrase assignment. The slot-i brand for the
+        # relevance gate is the per-slot assigned brand if multi-brand,
+        # else the primary brand. We compute one assignment list across
+        # the batch — _assign_focus_phrases returns None for non-brand
+        # slots automatically, so reply-only and no-brand slots are
+        # untouched.
+        primary_focus_items = self._extract_brand_focus(primary_brand)
+        top_focus_assignments = _assign_focus_phrases(
+            primary_focus_items, post, top_mention_flags
+        )
         top_level_result = self._generate_with_validation(
             post_title=post["title"],
             post_body=post["body"],
@@ -2052,13 +2469,14 @@ Return JSON only:
             num_comments=num_top,
             tone_analysis=mock_tone,
             comment_stats=mock_stats,
-            mention_brand_flags=mention_flags[:num_top],
+            mention_brand_flags=top_mention_flags,
             relevance={"best_angle": "general discussion", "natural_fit": 2},
             brand_assignments=top_assignments,
             all_brand_names=all_brand_names,
             ai_crawl=ai_crawl,
             post_intent=post.get("intent"),
-            brand_focus=self._extract_brand_focus(primary_brand),
+            brand_focus=primary_focus_items,
+            focus_assignments=top_focus_assignments,
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -2090,6 +2508,21 @@ Return JSON only:
             if mentions and comment_day == post_day_offset and i >= 2:
                 comment_day = post_day_offset + 2
 
+            # Focus pairing check: did the assigned phrase land within
+            # ~120 chars of the brand mention? Persist the result so the
+            # UI can show a green/amber chip per row and the coverage
+            # endpoint can aggregate hit/miss counts per phrase.
+            slot_focus = top_focus_assignments[i] if i < len(top_focus_assignments) else None
+            slot_focus_hit = None
+            if slot_focus and mentions:
+                slot_brand_name = (assigned or primary_brand)["name"]
+                hit, _dist = _focus_pair_in_body(slot_brand_name, slot_focus, body)
+                slot_focus_hit = 1 if hit else 0
+            elif slot_focus and not mentions:
+                # Phrase was assigned but the model didn't end up
+                # mentioning the brand — pairing impossible.
+                slot_focus_hit = 0
+
             comment_id = self.db.save_comment(
                 post_id=post["id"],
                 brand_id=comment_brand_id,
@@ -2103,6 +2536,8 @@ Return JSON only:
                 suggested_post_day=comment_day,
                 suggested_order=i,
                 prompt_version=PROMPT_VERSION,
+                focus_phrase=slot_focus,
+                focus_hit=slot_focus_hit,
             )
             if assigned:
                 self._detect_and_store_keywords(comment_id, body, assigned, mentions)
@@ -2369,6 +2804,20 @@ Return JSON only:
                 best_angle = shape["angle"]
                 slot_overrides = {0: shape}
 
+            # Focus pairing — only the HQ MAIN slot is brand-mention,
+            # so it's the only slot eligible for a focus phrase. Replies
+            # never carry one (no brand to associate with).
+            slot_focus_phrase = None
+            focus_assignments_arg = None
+            if is_main_local:
+                focus_items = self._extract_brand_focus(brand)
+                main_focus_list = _assign_focus_phrases(
+                    focus_items, post, [True]
+                )
+                slot_focus_phrase = main_focus_list[0] if main_focus_list else None
+                if slot_focus_phrase:
+                    focus_assignments_arg = [slot_focus_phrase]
+
             t0 = time.time()
             try:
                 result = self.generate_comments(
@@ -2400,6 +2849,7 @@ Return JSON only:
                     in_thread_siblings=bool(thread_comments),
                     is_hq_reply=not is_main_local,
                     slot_overrides=slot_overrides,
+                    focus_assignments=focus_assignments_arg,
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -2410,11 +2860,21 @@ Return JSON only:
             bodies = result.get("generated_comments") or []
             if not bodies:
                 return None
+            # Run pairing check on main if a phrase was assigned. We
+            # don't do an inline retry here — the stricter per-slot
+            # directive in the prompt does the heavy lifting; a miss
+            # is recorded for telemetry / coverage stats.
+            focus_hit = None
+            if slot_focus_phrase:
+                hit, _dist = _focus_pair_in_body(brand["name"], slot_focus_phrase, bodies[0])
+                focus_hit = 1 if hit else 0
             return {
                 "idx": idx,
                 "body": bodies[0],
                 "persona_id": (result.get("_personas") or [persona_id])[0],
                 "structure_id": (result.get("_structures") or [structure_id])[0],
+                "focus_phrase": slot_focus_phrase,
+                "focus_hit": focus_hit,
             }
 
         # Helper: persist one generated comment to DB and update the
@@ -2442,6 +2902,8 @@ Return JSON only:
                 suggested_order=idx,
                 prompt_version=PROMPT_VERSION,
                 comment_type="hq",
+                focus_phrase=gen_result.get("focus_phrase"),
+                focus_hit=gen_result.get("focus_hit"),
             )
             self._detect_and_store_keywords(cid, body, brand, mentions)
             saved_ids[idx] = cid
@@ -3061,6 +3523,29 @@ Return JSON only:
             local_relevance["best_angle"] = angle
             local_relevance.setdefault("natural_fit", 3)
 
+            # Focus phrase assignment — only the brand-mention main slot
+            # is eligible. brand_focus is already in the new dict shape
+            # (caller decoded with _extract_brand_focus before passing in)
+            # OR the legacy list-of-strings shape; _assign_focus_phrases
+            # tolerates a list-of-strings via _phrase_applies_to_post's
+            # dict normalization.
+            slot_focus_phrase = None
+            focus_assignments_arg = None
+            if is_main and brand_focus:
+                _focus_items_normed = []
+                for f in brand_focus:
+                    if isinstance(f, dict):
+                        _focus_items_normed.append(f)
+                    elif isinstance(f, str) and f.strip():
+                        _focus_items_normed.append({"phrase": f.strip(), "applies_when": []})
+                fake_post = {"title": post_title, "body": post_body or ""}
+                main_focus_list = _assign_focus_phrases(
+                    _focus_items_normed, fake_post, [True]
+                )
+                slot_focus_phrase = main_focus_list[0] if main_focus_list else None
+                if slot_focus_phrase:
+                    focus_assignments_arg = [slot_focus_phrase]
+
             result = self.generate_comments(
                 post_title=post_title,
                 post_body=post_body,
@@ -3083,6 +3568,7 @@ Return JSON only:
                 in_thread_siblings=in_thread_flag,
                 is_hq_reply=not is_main,
                 slot_overrides={0: shape_for_slot} if shape_for_slot else None,
+                focus_assignments=focus_assignments_arg,
             )
 
             bodies = result.get("generated_comments") or []
@@ -3091,6 +3577,12 @@ Return JSON only:
                 continue
             body = bodies[0]
             mentions = is_main and (brand_name.lower() in body.lower())
+
+            # Pairing check on main if a phrase was assigned.
+            focus_hit = None
+            if slot_focus_phrase:
+                hit, _dist = _focus_pair_in_body(brand_name, slot_focus_phrase, body)
+                focus_hit = 1 if hit else 0
 
             personas_meta = result.get("_personas") or []
             structures_meta = result.get("_structures") or []
@@ -3108,6 +3600,8 @@ Return JSON only:
                 "mentions_brand": 1 if mentions else 0,
                 "persona_id": p_id,
                 "structure_id": s_id,
+                "focus_phrase": slot_focus_phrase,
+                "focus_hit": focus_hit,
             })
 
         return results

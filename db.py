@@ -652,15 +652,18 @@ class Database:
                      structure_id=None, is_reply=0, parent_comment_id=None,
                      mentions_brand=0, validation_score=None, account_id=None,
                      status="draft", suggested_post_day=0, suggested_order=0,
-                     prompt_version=None, comment_type=""):
+                     prompt_version=None, comment_type="",
+                     focus_phrase=None, focus_hit=None):
         cur = self.conn.execute(
             """INSERT INTO comments (post_id, brand_id, body, persona_id, structure_id,
                is_reply, parent_comment_id, mentions_brand, validation_score, account_id,
-               status, suggested_post_day, suggested_order, prompt_version, comment_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               status, suggested_post_day, suggested_order, prompt_version, comment_type,
+               focus_phrase, focus_hit)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (post_id, brand_id, body, persona_id, structure_id,
              is_reply, parent_comment_id, mentions_brand, validation_score, account_id,
-             status, suggested_post_day, suggested_order, prompt_version, comment_type)
+             status, suggested_post_day, suggested_order, prompt_version, comment_type,
+             focus_phrase, focus_hit)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -998,6 +1001,15 @@ class Database:
             "informed_at": "ALTER TABLE comments ADD COLUMN informed_at TEXT",
             "last_live_check": "ALTER TABLE comments ADD COLUMN last_live_check TEXT",
             "prev_status": "ALTER TABLE comments ADD COLUMN prev_status TEXT",
+            # Brand-focus pairing tracking. focus_phrase is the phrase
+            # assigned to this slot (NULL if no focus phrase was assigned).
+            # focus_hit is 1 when the body contains both the brand and the
+            # phrase within ~120 chars of each other (i.e. the AI-retriever
+            # association formed); 0 when assigned-but-missed; NULL when
+            # no phrase was assigned. See generators/comment_gen.py
+            # _focus_pair_in_body for the matcher.
+            "focus_phrase": "ALTER TABLE comments ADD COLUMN focus_phrase TEXT",
+            "focus_hit": "ALTER TABLE comments ADD COLUMN focus_hit INTEGER",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -1747,6 +1759,7 @@ class Database:
                         c.suggested_post_day, c.suggested_order,
                         c.is_ours, c.matched_keywords, c.assigned_at, c.informed_at,
                         c.last_live_check, c.prev_status,
+                        c.focus_phrase, c.focus_hit,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name, b.name as brand_name,
@@ -1764,6 +1777,7 @@ class Database:
                         0 as suggested_post_day, 0 as suggested_order,
                         1 as is_ours, NULL as matched_keywords, sc.assigned_at, sc.informed_at,
                         sc.last_live_check, sc.prev_status,
+                        NULL as focus_phrase, NULL as focus_hit,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,

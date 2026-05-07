@@ -767,8 +767,8 @@ async function showAddBrandModal(subId) {
             <div><label class="text-xs text-gray-400">Context</label><textarea id="brand-context" rows="3" placeholder="What does this brand do?"></textarea></div>
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="brand-keywords" placeholder="trt, testosterone, clinic"></div>
             <div>
-                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one per line or comma-separated — comments weave these in where they naturally fit. Soft, not forced.)</span></label>
-                <textarea id="brand-focus" rows="3" placeholder="per-seat pricing&#10;GDPR compliance&#10;async workflows" style="font-family:inherit"></textarea>
+                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one phrase per line. Each phrase is paired with the brand mention so AI search engines index the association — e.g. "Amerisleep ↔ fiberglass-free". Optional: append <code>| keyword, keyword</code> to scope a phrase to posts mentioning those keywords. Otherwise relevance is auto-detected.)</span></label>
+                <textarea id="brand-focus" rows="3" placeholder="fiberglass-free&#10;toxic-free | mattress, foam&#10;made in USA" style="font-family:inherit"></textarea>
             </div>
 
             <details class="mt-2">
@@ -884,6 +884,15 @@ function _splitLines(id) {
     return v.replace(/\n/g, ',').split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// Like _splitLines, but only splits on newlines (commas are part of the
+// content). Used for the Focus textarea where each line may have the
+// shape `phrase | keyword1, keyword2` and the inner comma is meaningful.
+function _splitFocusLines(id) {
+    const v = (document.getElementById(id)?.value || '').trim();
+    if (!v) return [];
+    return v.split(/\n+/).map(s => s.trim()).filter(Boolean);
+}
+
 async function submitAddBrand(subId) {
     const kw = document.getElementById('brand-keywords').value;
     const hasEnrichment = document.getElementById('brand-category') !== null;
@@ -892,7 +901,7 @@ async function submitAddBrand(subId) {
         domain_url: document.getElementById('brand-url').value,
         context: document.getElementById('brand-context').value,
         keywords: kw ? kw.split(',').map(s => s.trim()) : [],
-        focus: _splitLines('brand-focus'),
+        focus: _splitFocusLines('brand-focus'),
     };
     if (hasEnrichment) {
         body.category = document.getElementById('brand-category').value.trim();
@@ -1459,7 +1468,7 @@ async function submitAddBrandStandalone() {
         domain_url: document.getElementById('brand-url').value.trim(),
         context: document.getElementById('brand-context').value.trim(),
         keywords: kw ? kw.split(',').map(s => s.trim()) : [],
-        focus: _splitLines('brand-focus'),
+        focus: _splitFocusLines('brand-focus'),
     };
     if (subId) {
         await api(`/api/subreddits/${subId}/brands`, { method: 'POST', body });
@@ -1693,8 +1702,21 @@ async function editBrandContext(brandName) {
     try { keywords = JSON.parse(first.keywords || '[]'); } catch(e) {}
     let searchSubs = [];
     try { searchSubs = JSON.parse(first.search_subreddits || '[]'); } catch(e) {}
+    // `focus` is now stored as a list of {phrase, applies_when} dicts.
+    // Render it back to the textarea as one phrase per line, with the
+    // optional `| keyword, keyword` suffix when applies_when is non-empty.
+    // Backwards compat: legacy plain-string entries are coerced to dicts
+    // by the parser; here we just defensively handle either shape.
     let focus = [];
     try { focus = JSON.parse(first.focus || '[]'); } catch(e) {}
+    const _focusToText = (arr) => (arr || []).map(f => {
+        if (typeof f === 'string') return f;
+        if (f && typeof f === 'object' && f.phrase) {
+            const aw = Array.isArray(f.applies_when) ? f.applies_when : [];
+            return aw.length ? `${f.phrase} | ${aw.join(', ')}` : f.phrase;
+        }
+        return '';
+    }).filter(Boolean).join('\n');
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -1718,8 +1740,8 @@ async function editBrandContext(brandName) {
                 </div>
             </div>
             <div>
-                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(comma- or newline-separated — comments weave these in where they naturally fit. Soft, never forced.)</span></label>
-                <textarea id="edit-brand-focus" rows="4" class="w-full" placeholder="e.g. per-seat pricing, GDPR compliance, async workflows, real-time collaboration" style="min-height:90px;resize:vertical;font-family:inherit">${focus.join(', ')}</textarea>
+                <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one phrase per line. Each phrase is paired with the brand mention so AI search engines index the association — e.g. "Amerisleep ↔ fiberglass-free". Optional: append <code>| keyword, keyword</code> to scope a phrase to posts mentioning those keywords. Otherwise relevance is auto-detected.)</span></label>
+                <textarea id="edit-brand-focus" rows="4" class="w-full" placeholder="fiberglass-free&#10;toxic-free | mattress, foam&#10;made in USA" style="min-height:90px;resize:vertical;font-family:inherit">${_focusToText(focus)}</textarea>
             </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
@@ -1738,7 +1760,10 @@ async function saveBrandContext(brandName) {
     const focusRaw = (document.getElementById('edit-brand-focus')?.value || '');
     const keywords = keywordsRaw.split(/[,\n]/).map(k => k.trim()).filter(Boolean);
     const search_subreddits = subsRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
-    const focus = focusRaw.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    // Focus splits ONLY on newlines — commas are part of the per-line
+    // applies_when list (e.g. `fiberglass-free | mattress, foam`). The
+    // backend `_parse_focus_line` parses each line into the dict shape.
+    const focus = focusRaw.split(/\n+/).map(s => s.trim()).filter(Boolean);
 
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
@@ -7724,6 +7749,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                 ${c.mentions_brand ? '<span class="badge ml-1" style="background:#3a1a00;color:#FF8b60">Brand</span>' : ''}
                 ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
                 ${c.comment_type === 'op_reply' ? '<span class="badge ml-1" style="background:#3d2a0e;color:#ffb347">OP</span>' : ''}
+                ${c.focus_phrase ? `<span class="badge ml-1" style="background:${c.focus_hit === 1 ? '#0e3d1c;color:#9efbb4' : '#3d2e0e;color:#ffd166'}" title="${c.focus_hit === 1 ? 'Focus phrase paired with brand' : 'Focus phrase assigned but not paired with brand'}">↔ ${c.focus_phrase}</span>` : ''}
             </td>
             <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
             <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>

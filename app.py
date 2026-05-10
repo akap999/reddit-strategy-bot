@@ -1859,6 +1859,44 @@ def api_mark_paid_all_comments():
         db.close()
 
 
+@app.route("/api/bulk-deploy/from-sheet", methods=["POST"])
+def api_bulk_deploy_from_sheet():
+    """Bulk-deploy a sheet's worth of Reddit URLs.
+
+    Body: {"sheet_url": "https://docs.google.com/spreadsheets/d/..../edit"}
+    The sheet must be set to "Anyone with the link → Viewer".
+
+    Returns {"task_id": "..."} immediately. The client polls
+    `GET /api/tasks/<task_id>` for progress + final report. See
+    bulk_deploy.run_bulk_deploy for the per-URL matching strategy.
+    """
+    from bulk_deploy import run_bulk_deploy
+
+    data = request.get_json() or {}
+    sheet_url = (data.get("sheet_url") or "").strip()
+    if not sheet_url:
+        return jsonify({"error": "sheet_url is required"}), 400
+
+    # Open a fresh DB on the background thread (request-thread DB
+    # connections are not shareable across threads).
+    def _db_factory():
+        d = Database(DB_PATH)
+        d.connect()
+        d.initialize()
+        return d
+
+    def _task(_task_id=None):
+        return run_bulk_deploy(
+            sheet_url,
+            db_factory=_db_factory,
+            reddit_get=_reddit_get,
+            _task_id=_task_id,
+        )
+
+    tid = start_task("bulk-deploy", _task, pass_task_id=True)
+    return jsonify({"task_id": tid})
+
+
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
 def api_check_live(sid):
     def task():

@@ -7714,6 +7714,7 @@ async function renderLsubsComments(c) {
                 <input type="date" id="lsubs-cmt-date-to" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
             </label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
+            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
         </div>
         <div id="lsubs-cmt-list"></div>
     `;
@@ -9022,6 +9023,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()">Check Live Logs</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
+                <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
@@ -9364,6 +9366,162 @@ async function lsMarkPaidAll() {
         toast(`Failed to mark paid: ${e.message || e}`, 'error');
     }
 }
+
+// =========================================================================
+// Bulk Deploy from Google Sheet
+// =========================================================================
+
+function showBulkDeployModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Bulk Deploy from Google Sheet</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            Paste a Google Sheet link with Reddit URLs (post or comment links, mixed across brands).
+            The bot will walk each URL, find the matching DB row, and mark it deployed with the URL stored.
+            <br><span class="text-gray-500">The sheet must be set to "Anyone with the link → Viewer".</span>
+        </p>
+        <input id="bulk-deploy-sheet-url" class="w-full mb-3"
+            placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+            style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
+        <div id="bulk-deploy-status" class="text-xs text-gray-400 mb-2"></div>
+        <div id="bulk-deploy-progress-bar"
+             style="display:none;height:6px;background:#272729;border-radius:3px;overflow:hidden;margin-bottom:8px">
+            <div id="bulk-deploy-progress-fill" style="height:100%;width:0%;background:#9efbb4;transition:width 0.3s"></div>
+        </div>
+        <div id="bulk-deploy-summary" class="text-xs mb-2"></div>
+        <div id="bulk-deploy-results"
+             style="max-height:280px;overflow:auto;border:1px solid #343536;border-radius:4px;padding:4px;font-size:11px;display:none"></div>
+        <div class="flex gap-2 mt-3">
+            <button id="bulk-deploy-run-btn" class="btn btn-primary btn-sm" onclick="runBulkDeploy()">Run</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+        </div>
+    `);
+}
+
+let _bulkDeployPollHandle = null;
+
+async function runBulkDeploy() {
+    const sheetUrl = (document.getElementById('bulk-deploy-sheet-url')?.value || '').trim();
+    if (!sheetUrl) {
+        toast('Sheet URL is required', 'error');
+        return;
+    }
+    const runBtn = document.getElementById('bulk-deploy-run-btn');
+    const statusEl = document.getElementById('bulk-deploy-status');
+    const barWrap = document.getElementById('bulk-deploy-progress-bar');
+    const barFill = document.getElementById('bulk-deploy-progress-fill');
+    const resultsEl = document.getElementById('bulk-deploy-results');
+    const summaryEl = document.getElementById('bulk-deploy-summary');
+    if (runBtn) runBtn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Starting task...';
+    if (resultsEl) resultsEl.style.display = 'none';
+    if (summaryEl) summaryEl.textContent = '';
+
+    let taskId;
+    try {
+        const r = await api('/api/bulk-deploy/from-sheet', {
+            method: 'POST',
+            body: { sheet_url: sheetUrl },
+        });
+        taskId = r && r.task_id;
+        if (!taskId) throw new Error('no task_id returned');
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `Failed to start: ${e.message || e}`;
+        if (runBtn) runBtn.disabled = false;
+        return;
+    }
+    if (statusEl) statusEl.textContent = `Task ${taskId} running…`;
+    if (barWrap) barWrap.style.display = 'block';
+    if (_bulkDeployPollHandle) clearInterval(_bulkDeployPollHandle);
+    _bulkDeployPollHandle = setInterval(() => _bulkDeployPoll(taskId), 1500);
+}
+
+async function _bulkDeployPoll(taskId) {
+    try {
+        const t = await api(`/api/tasks/${taskId}`);
+        const statusEl = document.getElementById('bulk-deploy-status');
+        const barFill = document.getElementById('bulk-deploy-progress-fill');
+        const resultsEl = document.getElementById('bulk-deploy-results');
+        const summaryEl = document.getElementById('bulk-deploy-summary');
+        // tasks.progress is stored as a JSON string by run_bulk_deploy.
+        let prog = null;
+        if (t && t.progress) {
+            try { prog = typeof t.progress === 'string' ? JSON.parse(t.progress) : t.progress; }
+            catch (_) { prog = null; }
+        }
+        if (prog) {
+            const pct = prog.total > 0 ? Math.round((prog.processed / prog.total) * 100) : 0;
+            if (barFill) barFill.style.width = pct + '%';
+            if (statusEl) statusEl.textContent = `Processed ${prog.processed} / ${prog.total} (${pct}%)`;
+            _bulkDeployRenderResults(prog.results || []);
+            if (resultsEl) resultsEl.style.display = 'block';
+        }
+        if (t && (t.status === 'complete' || t.status === 'error')) {
+            clearInterval(_bulkDeployPollHandle);
+            _bulkDeployPollHandle = null;
+            const runBtn = document.getElementById('bulk-deploy-run-btn');
+            if (runBtn) runBtn.disabled = false;
+            if (t.status === 'error') {
+                if (statusEl) statusEl.textContent = `Task failed: ${t.error || 'unknown error'}`;
+                return;
+            }
+            // Final report — tasks.result is the same JSON shape as
+            // tasks.progress but with summary + finished_at filled in.
+            let result = null;
+            if (t.result) {
+                try { result = typeof t.result === 'string' ? JSON.parse(t.result) : t.result; }
+                catch (_) { result = null; }
+            }
+            if (result) {
+                _bulkDeployRenderResults(result.results || []);
+                const s = result.summary || {};
+                if (summaryEl) {
+                    summaryEl.innerHTML = `
+                        <span class="text-green-400">Deployed: ${s.deployed || 0}</span> ·
+                        <span class="text-gray-400">Already: ${s.already_deployed || 0}</span> ·
+                        <span class="text-yellow-400">No match: ${s.no_match || 0}</span> ·
+                        <span class="text-red-400">Error: ${s.error || 0}</span>
+                        ${(s.by_tier) ? ` <span class="text-gray-500">(URL match: ${s.by_tier.url_match || 0}, body match: ${s.by_tier.body_match || 0})</span>` : ''}
+                    `;
+                }
+                if (statusEl) statusEl.textContent = `Task complete · ${result.processed || 0} URLs processed`;
+            }
+            // Refresh the comment list so newly-deployed rows show up
+            // in the current tab.
+            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') {
+                lsubsLoadComments(true);
+            }
+            if (typeof lsLoadComments === 'function' && currentView === 'allcomments') {
+                try { lsLoadComments(); } catch(_) {}
+            }
+        }
+    } catch (e) {
+        // Transient poll failure — just try again next tick.
+        console.warn('bulk-deploy poll failed:', e);
+    }
+}
+
+function _bulkDeployRenderResults(results) {
+    const el = document.getElementById('bulk-deploy-results');
+    if (!el) return;
+    const rows = results.map(r => {
+        const colour = r.action === 'deployed' ? '#9efbb4'
+                     : r.action === 'already_deployed' ? '#9ec4ff'
+                     : r.action === 'no_match' ? '#ffd166'
+                     : '#ff8b8b';
+        const tier = r.tier ? ` <span style="color:#818384">[${r.tier}]</span>` : '';
+        const ident = r.id ? ` #${r.id}` : '';
+        const sim = r.similarity != null ? ` sim=${r.similarity}` : '';
+        const reason = r.reason ? ` <span style="color:#818384">(${r.reason})</span>` : '';
+        const truncUrl = (r.url || '').length > 60 ? (r.url || '').substring(0, 57) + '…' : (r.url || '');
+        return `<div style="padding:2px 4px;border-bottom:1px solid #2a2a2b">
+            <span style="color:${colour}">${r.action || '?'}</span>${tier}
+            <span style="color:#818384">${r.kind || '?'}${ident}${sim}</span>
+            <span style="color:#d7dadc">${truncUrl}</span>${reason}
+        </div>`;
+    }).join('');
+    el.innerHTML = rows || '<div class="text-gray-500" style="padding:4px">No rows yet…</div>';
+}
+
 
 async function lsMarkRemoved(cid) {
     if (!confirm('Mark this comment as removed/deleted on Reddit?')) return;

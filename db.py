@@ -1445,6 +1445,137 @@ class Database:
         )
         self.conn.commit()
 
+    # ------------------------------------------------------------------
+    # Bulk-deploy URL → row matching helpers.
+    # The Bulk Deploy feature walks a list of Reddit URLs from a sheet
+    # and needs to map each URL back to its `comments` / `search_comments`
+    # / `posts` / `search_posts` row. Tier-1 in the bulk-deploy matcher
+    # is a direct `reddit_comment_url` lookup; Tier-2 falls back to body
+    # fuzzy matching scoped to the same post.
+    # ------------------------------------------------------------------
+
+    def find_comment_by_url(self, reddit_url):
+        """Return the legacy `comments` row whose reddit_comment_url is the
+        given URL, or None. Used by bulk deploy's Tier-1 matcher.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM comments WHERE reddit_comment_url = ? LIMIT 1",
+            (reddit_url,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def find_search_comment_by_url(self, reddit_url):
+        """Return the `search_comments` row whose reddit_comment_url is the
+        given URL, or None.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM search_comments WHERE reddit_comment_url = ? LIMIT 1",
+            (reddit_url,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def find_post_by_url(self, reddit_url):
+        """Return (kind, post_dict) for a Reddit post URL.
+
+        Looks in `post_urls` first (legacy posts) then `search_posts`.
+        `kind` is "post" for legacy or "search_post" for Live Search.
+        Returns (None, None) on no match.
+        """
+        row = self.conn.execute(
+            """SELECT p.*, pu.reddit_url
+               FROM post_urls pu JOIN posts p ON pu.post_id = p.id
+               WHERE pu.reddit_url = ? LIMIT 1""",
+            (reddit_url,)
+        ).fetchone()
+        if row:
+            return "post", dict(row)
+        row = self.conn.execute(
+            "SELECT * FROM search_posts WHERE reddit_url = ? LIMIT 1",
+            (reddit_url,)
+        ).fetchone()
+        if row:
+            return "search_post", dict(row)
+        return None, None
+
+    def find_undeployed_comments_for_post(self, post_id, kind):
+        """Return all rows for the given post that are NOT yet deployed —
+        the candidate pool for Tier-2 body fuzzy matching in bulk deploy.
+
+        `kind` is "comment" (queries `comments`/post_id) or
+        "search_comment" (queries `search_comments`/search_post_id).
+        We deliberately include 'removed' and 'deleted' rows: a row may
+        have been auto-marked dead by the live-check job before the user
+        ran bulk-deploy, but the user is now telling us "no, it was
+        actually deployed here". Letting bulk-deploy match those rows
+        and restore them mirrors the existing restore_to_deployed path.
+        """
+        if kind == "comment":
+            rows = self.conn.execute(
+                """SELECT id, body, status, reddit_comment_url, brand_id
+                   FROM comments
+                   WHERE post_id = ?
+                     AND status NOT IN ('deployed', 'paid', 'archived')""",
+                (post_id,)
+            ).fetchall()
+        elif kind == "search_comment":
+            rows = self.conn.execute(
+                """SELECT id, body, status, reddit_comment_url, brand_id
+                   FROM search_comments
+                   WHERE search_post_id = ?
+                     AND status NOT IN ('deployed', 'paid', 'archived')""",
+                (post_id,)
+            ).fetchall()
+        else:
+            return []
+        return [dict(r) for r in rows]
+
+    def deploy_post(self, post_id, kind, reddit_url, subreddit_id=None,
+                    deployed_at=None):
+        """Mark a post row deployed and ensure its Reddit URL is on file.
+
+        `kind` is "post" (legacy → updates posts.status, ensures
+        post_urls row) or "search_post" (updates search_posts.status;
+        URL is already on the row by definition).
+
+        Idempotent: deploying an already-deployed post is a no-op.
+        """
+        if not deployed_at:
+            deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if kind == "post":
+            row = self.conn.execute(
+                "SELECT status, subreddit_id FROM posts WHERE id = ?",
+                (post_id,)
+            ).fetchone()
+            if not row:
+                return False
+            if row["status"] == "deployed":
+                return False  # idempotent skip
+            sid = subreddit_id or row["subreddit_id"]
+            # Ensure the URL is linked. link_url_to_post handles
+            # replace-existing semantics.
+            self.link_url_to_post(post_id, reddit_url, sid)
+            self.conn.execute(
+                "UPDATE posts SET status = 'deployed' WHERE id = ?",
+                (post_id,)
+            )
+            self.conn.commit()
+            return True
+        if kind == "search_post":
+            row = self.conn.execute(
+                "SELECT status FROM search_posts WHERE id = ?", (post_id,)
+            ).fetchone()
+            if not row:
+                return False
+            if row["status"] == "deployed":
+                return False
+            self.conn.execute(
+                "UPDATE search_posts SET status = 'deployed' WHERE id = ?",
+                (post_id,)
+            )
+            self.conn.commit()
+            return True
+        return False
+
     def update_comment_url(self, comment_id, url):
         self.conn.execute("UPDATE comments SET reddit_comment_url = ? WHERE id = ?", (url, comment_id))
         self.conn.commit()

@@ -10033,15 +10033,30 @@ async function lsExportCsv() {
         }
         return s;
     };
-    const dateOnly = (d) => d ? d.slice(0, 10) : '';
-    const header = ['Deploy Date', 'Post Link', 'Comment Link', 'Comment Content', 'Upvotes', 'Comments'];
+    // Format a timestamp ("YYYY-MM-DD ..." or "YYYY-MM-DDTHH:MM:SS...") as
+    // mm/dd/yyyy. Empty/missing → empty string. Anything that doesn't start
+    // with a YYYY-MM-DD prefix is returned as-is so we don't silently drop
+    // non-standard values.
+    const formatMDY = (d) => {
+        if (!d) return '';
+        const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (!m) return d;
+        return `${m[2]}/${m[3]}/${m[1]}`;
+    };
+    // Column order requested by the user:
+    //   subreddit | published date (mm/dd/yyyy) | comment url | comment
+    //   content | upvotes | conversations (replies)
+    // Published date = comment's deploy date (when it went live on Reddit).
+    const header = ['Subreddit', 'Published Date', 'Comment URL',
+                    'Comment Content', 'Upvotes', 'Conversations'];
     const rows = comments.map(c => {
         const stats = liveStats[String(c.id)] || {};
         const upvotes = stats.score != null ? stats.score : '';
         const replies = stats.num_replies != null ? stats.num_replies : '';
+        const sub = c.subreddit_name ? `r/${c.subreddit_name}` : '';
         return [
-            csvEscape(dateOnly(c.deployed_at)),
-            csvEscape(c.post_url || ''),
+            csvEscape(sub),
+            csvEscape(formatMDY(c.deployed_at)),
             csvEscape(c.reddit_comment_url || ''),
             csvEscape(c.body || ''),
             csvEscape(upvotes),

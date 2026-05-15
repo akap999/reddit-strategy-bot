@@ -365,19 +365,23 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
           "posted_at": "YYYY-MM-DD HH:MM:SS" | None,
           "is_removed": bool,
           "found": bool,
+          "author": str | None,
         }
 
     `is_removed` is True when the body is `"[removed]"` / `"[deleted]"`
     (mod removal or user deletion). `found` is True when the target
     comment ID was located in the JSON response at all; False on
-    fetch error, URL-parse failure, or 404. The two flags let the
-    caller distinguish "live" / "removed" / "missing" without
-    re-walking the body.
+    fetch error, URL-parse failure, or 404. `author` is Reddit's
+    `data.author` field — used by the matcher to narrow candidates
+    by account before falling back to body similarity (much higher
+    confidence than body match alone when the user posts the same
+    bot-account that the row was assigned to).
 
     `reddit_get` is the app's `_reddit_get` (proxy + retry).
     """
     from urllib.parse import urlparse
-    out = {"body": None, "posted_at": None, "is_removed": False, "found": False}
+    out = {"body": None, "posted_at": None, "is_removed": False,
+           "found": False, "author": None}
     try:
         parsed = urlparse(comment_url)
         path = parsed.path.rstrip("/") + ".json"
@@ -397,7 +401,7 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
         return out
 
     def _walk(node):
-        """Yield (id, body, created_utc) for every comment in the tree."""
+        """Yield (id, body, created_utc, author) for every comment in the tree."""
         if isinstance(node, dict):
             kind = node.get("kind")
             if kind == "Listing":
@@ -409,6 +413,7 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
                     d.get("id", "").lower(),
                     d.get("body", ""),
                     d.get("created_utc", 0),
+                    d.get("author", "") or "",
                 )
                 replies = d.get("replies")
                 if isinstance(replies, dict):
@@ -417,11 +422,12 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
             for el in node:
                 yield from _walk(el)
 
-    for cid, body, created_utc in _walk(data):
+    for cid, body, created_utc, author in _walk(data):
         if cid == target_cid:
             out["body"] = body
             out["posted_at"] = _utc_seconds_to_iso(created_utc)
             out["found"] = True
+            out["author"] = (author or "").strip() or None
             stripped = (body or "").strip().lower()
             out["is_removed"] = stripped in ("[removed]", "[deleted]")
             return out
@@ -673,15 +679,37 @@ def match_and_deploy_comment(db, classified: dict, *,
     want_search = source_filter in (None, "search_comment")
 
     # --- Tier 1: direct URL match (filtered by scope) ---------------------
+    # Two passes: first an EXACT match on the stored URL, then a
+    # comment-ID substring match. The substring pass catches rows where
+    # the stored URL has a different slug, trailing slash, or query
+    # string than the sheet URL — Reddit comment IDs are globally
+    # unique, so substring-matching them is safe and high-confidence.
     tier1_matches = []  # list of (source, row)
+    seen_ids = set()    # (source, id) — dedupe across the two passes
     if want_legacy:
         legacy_row = db.find_comment_by_url(url)
         if legacy_row:
             tier1_matches.append(("comment", legacy_row))
+            seen_ids.add(("comment", legacy_row["id"]))
     if want_search:
         search_row = db.find_search_comment_by_url(url)
         if search_row:
             tier1_matches.append(("search_comment", search_row))
+            seen_ids.add(("search_comment", search_row["id"]))
+    # Tier 1.5 — by comment_id. Only fires when we have one (full URL
+    # or resolved /s/ link both yield one).
+    comment_id = classified.get("comment_id")
+    if comment_id:
+        if want_legacy:
+            r = db.find_comment_by_reddit_comment_id(comment_id)
+            if r and ("comment", r["id"]) not in seen_ids:
+                tier1_matches.append(("comment", r))
+                seen_ids.add(("comment", r["id"]))
+        if want_search:
+            r = db.find_search_comment_by_reddit_comment_id(comment_id)
+            if r and ("search_comment", r["id"]) not in seen_ids:
+                tier1_matches.append(("search_comment", r))
+                seen_ids.add(("search_comment", r["id"]))
 
     # Shared state across Tiers 1 + 2 — both tiers may need the Reddit
     # JSON, and Tier-2 needs to know which DB rows Tier-1 already
@@ -838,24 +866,60 @@ def match_and_deploy_comment(db, classified: dict, *,
     # `comments` and `search_comments`; we pick the single best by
     # Jaccard regardless of source, then use the candidate's `__kind`
     # to route to the correct deploy_* call.
-    scored = sorted(
-        ((jaccard(body, c["body"]), c) for c in candidates),
-        key=lambda p: -p[0],
-    )
-    best_score, best = scored[0]
-    if best_score < similarity_threshold:
+    #
+    # AUTHOR NARROWING: Reddit's JSON tells us who actually posted the
+    # comment. Each search_comments row has an account_id (the Reddit
+    # username it was assigned to). When they match, body similarity
+    # gets a much lower bar — same Reddit post AND same author is a
+    # very high-confidence signal that this IS the right row, even if
+    # the user edited the body when posting. Without author narrowing,
+    # users who edit their drafts before posting lose body similarity
+    # and the row gets reported as no_match.
+    reddit_author = (meta.get("author") or "").strip().lower()
+    by_author = []
+    if reddit_author:
+        by_author = [
+            c for c in candidates
+            if ((c.get("account_id") or "").strip().lower() == reddit_author)
+        ]
+    # If exactly one candidate has the right author, claim it
+    # immediately — far more reliable than body similarity.
+    if len(by_author) == 1:
+        best = by_author[0]
+        best_score = jaccard(body, best["body"])
+        scored = [(best_score, best)]
+        runner_up = 0.0
+        ambiguous = False
+        effective_threshold = 0.0  # author-singleton is gated by author, not body
+    else:
+        # Either no author info, or multiple candidates share the
+        # author. In the multi-author case we narrow body match to
+        # those candidates first; otherwise fall back to all candidates.
+        pool = by_author if by_author else candidates
+        scored = sorted(
+            ((jaccard(body, c["body"]), c) for c in pool),
+            key=lambda p: -p[0],
+        )
+        best_score, best = scored[0]
+        # Threshold relaxed from 0.5 → 0.3. Bot-generated drafts often
+        # get lightly edited before the user posts on Reddit; a 0.5 cut
+        # was rejecting too many rows that were clearly the same
+        # comment with minor edits. 0.3 still excludes random matches.
+        effective_threshold = similarity_threshold if similarity_threshold < 0.5 else 0.3
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        ambiguous = runner_up >= effective_threshold and (best_score - runner_up) < 0.1
+    if best_score < effective_threshold:
         # Below threshold — surface Tier-1 terminal results if we had
         # any, otherwise report the body-match miss.
         if tier1_results:
             return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
-            "reason": f"best body similarity {best_score:.2f} below threshold {similarity_threshold:.2f}",
+            "reason": f"best body similarity {best_score:.2f} below threshold {effective_threshold:.2f}"
+                      + (f" (author={reddit_author} but no candidate matched)" if reddit_author and not by_author else ""),
             "best_id": best["id"], "best_score": round(best_score, 3),
             "liveness": liveness,
         }
-    runner_up = scored[1][0] if len(scored) > 1 else 0.0
-    ambiguous = runner_up >= similarity_threshold and (best_score - runner_up) < 0.1
     prev_status = best.get("status") if isinstance(best, dict) else None
     best_kind = best.get("__kind", "comment")
     try:
@@ -877,12 +941,19 @@ def match_and_deploy_comment(db, classified: dict, *,
         db, best["id"], best_kind, url,
         "bulk_deployed", prev_status or "", "deployed",
     )
+    # Tier label: author_singleton when the row was claimed purely
+    # because Reddit's author matched a single candidate's account_id
+    # (the body similarity didn't gate the decision). Helps the user
+    # spot author-driven matches in the report vs body-driven ones.
+    tier_label = "author_singleton" if (reddit_author and len(by_author) == 1) else "body_match"
     out = {
-        "url": url, "kind": "comment", "tier": "body_match",
+        "url": url, "kind": "comment", "tier": tier_label,
         "source": best_kind, "id": best["id"], "action": "deployed",
         "similarity": round(best_score, 3),
         "posted_at": posted_at, "liveness": liveness,
     }
+    if reddit_author:
+        out["author"] = reddit_author
     if tier1_results:
         out["extras"] = _tier1_as_extras()
     if ambiguous:
@@ -1114,7 +1185,7 @@ def _summarise(results: list[dict]) -> dict:
         "already_removed": 0,
         "no_match": 0,
         "error": 0,
-        "by_tier": {"url_match": 0, "body_match": 0, "removed_singleton": 0},
+        "by_tier": {"url_match": 0, "body_match": 0, "author_singleton": 0, "removed_singleton": 0},
         "by_liveness": {"live": 0, "removed": 0, "missing": 0},
         "comments": 0,
         "posts": 0,

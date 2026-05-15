@@ -1608,6 +1608,47 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    def find_comment_by_reddit_comment_id(self, comment_id):
+        """Locate a legacy `comments` row whose stored URL contains the
+        given Reddit comment ID anywhere in its path.
+
+        Reddit comment IDs are globally unique (6-7 alphanumeric chars),
+        so substring-matching on the stored `reddit_comment_url` is
+        safe and catches stored URL variants that exact-match would
+        miss (different slug, trailing slash, query string, etc.).
+        """
+        if not comment_id:
+            return None
+        like_a = f"%/{comment_id}"
+        like_b = f"%/{comment_id}/%"
+        like_c = f"%/{comment_id}?%"
+        row = self.conn.execute(
+            """SELECT * FROM comments
+               WHERE reddit_comment_url LIKE ? OR reddit_comment_url LIKE ?
+                  OR reddit_comment_url LIKE ?
+               LIMIT 1""",
+            (like_a, like_b, like_c)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def find_search_comment_by_reddit_comment_id(self, comment_id):
+        """Same as `find_comment_by_reddit_comment_id` but on the
+        `search_comments` table.
+        """
+        if not comment_id:
+            return None
+        like_a = f"%/{comment_id}"
+        like_b = f"%/{comment_id}/%"
+        like_c = f"%/{comment_id}?%"
+        row = self.conn.execute(
+            """SELECT * FROM search_comments
+               WHERE reddit_comment_url LIKE ? OR reddit_comment_url LIKE ?
+                  OR reddit_comment_url LIKE ?
+               LIMIT 1""",
+            (like_a, like_b, like_c)
+        ).fetchone()
+        return dict(row) if row else None
+
     def find_post_by_url(self, reddit_url):
         """Return (kind, post_dict) for a Reddit post URL.
 
@@ -1700,7 +1741,8 @@ class Database:
         """
         if kind == "comment":
             rows = self.conn.execute(
-                """SELECT id, body, status, reddit_comment_url, brand_id
+                """SELECT id, body, status, reddit_comment_url, brand_id,
+                          account_id
                    FROM comments
                    WHERE post_id = ?
                      AND status NOT IN ('deployed', 'paid', 'archived')""",
@@ -1708,7 +1750,8 @@ class Database:
             ).fetchall()
         elif kind == "search_comment":
             rows = self.conn.execute(
-                """SELECT id, body, status, reddit_comment_url, brand_id
+                """SELECT id, body, status, reddit_comment_url, brand_id,
+                          account_id
                    FROM search_comments
                    WHERE search_post_id = ?
                      AND status NOT IN ('deployed', 'paid', 'archived')""",

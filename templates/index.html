@@ -9452,8 +9452,12 @@ function showBulkDeployModal() {
     showModal(`
         <h3 class="text-xl font-bold mb-3">Bulk Deploy from Google Sheet</h3>
         <p class="text-xs text-gray-400 mb-3">
-            Paste a Google Sheet link with Reddit URLs (post or comment links, mixed across brands).
-            The bot will walk each URL, find the matching DB row, and mark it deployed with the URL stored.
+            Paste a Google Sheet link. URLs are read from a column named
+            <code style="background:#272729;padding:1px 4px;border-radius:3px">Comment Link</code>
+            (and optionally <code style="background:#272729;padding:1px 4px;border-radius:3px">Post Link</code>).
+            Other columns are ignored.
+            The bot walks each URL, matches it to the DB row, and marks it deployed (or
+            <span style="color:#ff8b60">removed</span> if Reddit shows it as deleted).
             <br><span class="text-gray-500">The sheet must be set to "Anyone with the link → Viewer".</span>
         </p>
         <input id="bulk-deploy-sheet-url" class="w-full mb-3"

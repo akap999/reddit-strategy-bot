@@ -105,24 +105,106 @@ _REDDIT_URL_RE = re.compile(
 )
 
 
-def extract_reddit_urls(csv_text: str) -> list[str]:
-    """Scan a CSV/raw-text blob for Reddit URLs.
+# Canonical header names the bot looks for, in priority order. We only
+# accept the sheet when at least one of these columns exists — that
+# rules out accidentally picking up Reddit URLs from notes / pasted
+# screenshots / template instructions elsewhere in the sheet.
+_COMMENT_HEADER_NAMES = {"comment link", "comment url"}
+_POST_HEADER_NAMES = {"post link", "post url"}
 
-    Returns a deduped list preserving first-seen order. We don't bother
-    with proper CSV parsing because the user may have URLs in any
-    column or mixed in with prose — a regex scan is more robust.
+
+def _normalize_header(h):
+    """Lowercase + collapse whitespace/dashes/underscores so 'Comment Link',
+    'comment-link', 'Comment_Link', and 'comment  link' all compare equal.
+    """
+    if not h:
+        return ""
+    return re.sub(r"[\s_\-]+", " ", str(h).strip().lower())
+
+
+def _find_url_columns(headers):
+    """Locate the comment-link (and optional post-link) columns in the
+    first row of the sheet. Returns
+        {"comment": idx | None, "post": idx | None}
+
+    The sheet must have at least one of these columns or
+    `extract_reddit_urls` raises ValueError — better than silently
+    pulling URLs from the wrong column.
+    """
+    out = {"comment": None, "post": None}
+    for i, h in enumerate(headers or []):
+        norm = _normalize_header(h)
+        if out["comment"] is None and norm in _COMMENT_HEADER_NAMES:
+            out["comment"] = i
+        elif out["post"] is None and norm in _POST_HEADER_NAMES:
+            out["post"] = i
+    return out
+
+
+def _extract_url_from_cell(cell):
+    """Pull the first Reddit URL out of a single CSV cell.
+
+    The cell may be a bare URL, a Google-Sheets `=HYPERLINK(...)` formula,
+    a URL wrapped in quotes, or have surrounding whitespace. Returns the
+    normalised URL (query string stripped, trailing slash removed) or
+    None if no Reddit URL is present.
+    """
+    if not cell:
+        return None
+    m = _REDDIT_URL_RE.search(str(cell))
+    if not m:
+        return None
+    url = m.group(0).rstrip(".,;)")
+    return url.split("?")[0].rstrip("/")
+
+
+def extract_reddit_urls(csv_text: str) -> list[str]:
+    """Pull Reddit URLs out of a Google-Sheets CSV export.
+
+    The sheet must have a header row with a column named "Comment Link"
+    (case-insensitive; "comment url" / "comment-link" / "comment_link"
+    are also accepted). An optional "Post Link" column is also read.
+    URLs anywhere else in the sheet are ignored.
+
+    Returns a deduped list of URLs preserving first-seen order. The
+    order respects sheet order: row-by-row, comment column before post
+    column.
+
+    Raises ValueError when neither column is found — better than
+    silently scanning the whole sheet and picking up unrelated URLs.
     """
     if not csv_text:
         return []
+    import csv as _csv
+    import io as _io
+    reader = _csv.reader(_io.StringIO(csv_text))
+    try:
+        headers = next(reader)
+    except StopIteration:
+        return []
+    cols = _find_url_columns(headers)
+    if cols["comment"] is None and cols["post"] is None:
+        raise ValueError(
+            "Sheet must have a column named 'Comment Link' (or 'Post Link'). "
+            "Header row read: " + ", ".join(repr(h) for h in headers[:8])
+            + ("..." if len(headers) > 8 else "")
+        )
     found = []
     seen = set()
-    for m in _REDDIT_URL_RE.finditer(csv_text):
-        url = m.group(0).rstrip(".,;)")
-        # Drop trailing query strings; we treat the path as the identity.
-        url = url.split("?")[0].rstrip("/")
-        if url and url not in seen:
-            seen.add(url)
-            found.append(url)
+    for row in reader:
+        if not row:
+            continue
+        # For each row we look at the comment-link column first, then
+        # the post-link column. This keeps the output order intuitive
+        # when both columns are populated on the same row.
+        for kind in ("comment", "post"):
+            idx = cols[kind]
+            if idx is None or idx >= len(row):
+                continue
+            url = _extract_url_from_cell(row[idx])
+            if url and url not in seen:
+                seen.add(url)
+                found.append(url)
     return found
 
 

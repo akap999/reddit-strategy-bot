@@ -667,16 +667,34 @@ def match_and_deploy_comment(db, classified: dict, *,
     if search_row:
         tier1_matches.append(("search_comment", search_row))
 
+    # Shared state across Tiers 1 + 2 — both tiers may need the Reddit
+    # JSON, and Tier-2 needs to know which DB rows Tier-1 already
+    # touched so it doesn't process the same row twice.
+    meta = None
+    posted_at = None
+    liveness = "missing"
+    tier1_results = []
     if tier1_matches:
-        # One Reddit fetch shared across rows.
         meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
         posted_at = meta.get("posted_at")
         liveness = classify_liveness(meta)
-        per_row = [
+        tier1_results = [
             _process_tier1_row(db, src, row, url, meta, posted_at, liveness)
             for src, row in tier1_matches
         ]
-        return _rollup_tier1(url, per_row, liveness, posted_at)
+        # Short-circuit ONLY when Tier-1 produced an actionable update.
+        # If every Tier-1 match was terminal (already_deployed /
+        # already_removed), the user's *intended* row is most likely
+        # the one in the OTHER table that we haven't touched yet —
+        # e.g. they had a legacy `comments` row that previously got
+        # deployed, but their actual `search_comments` row (which they
+        # see in Live Search) is still 'assigned' / 'informed' with no
+        # URL attached. Falling through to Tier-2 lets the body matcher
+        # find it. Errors also short-circuit so we don't double-process.
+        _ACTIONABLE = {"deployed", "marked_removed", "error"}
+        if any(r["action"] in _ACTIONABLE for r in tier1_results):
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
+        # Else: all Tier-1 matches were terminal. Continue to Tier-2.
 
     # --- Tier 2: post + body fuzzy match ----------------------------------
     # Match the parent post by its Reddit post ID (the immutable
@@ -693,6 +711,10 @@ def match_and_deploy_comment(db, classified: dict, *,
     # legacy `posts` shadow existed.
     matching_posts = db.find_posts_by_reddit_post_id(classified["post_id"])
     if not matching_posts:
+        # Tier-1 may have produced terminal results — surface them
+        # rather than reporting a misleading "post not found".
+        if tier1_results:
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": (
@@ -702,28 +724,46 @@ def match_and_deploy_comment(db, classified: dict, *,
         }
     # Gather candidate (undeployed) comments across every matching post.
     # Each entry is augmented with its `kind` so the deploy step picks
-    # the right table to update.
+    # the right table to update. Exclude rows Tier-1 already touched so
+    # we don't re-process the same legacy already-deployed row.
+    already_touched = {(r["source"], r["id"]) for r in tier1_results}
     candidates = []
     for post_kind, post_row in matching_posts:
         cand_kind = "comment" if post_kind == "post" else "search_comment"
         for c in db.find_undeployed_comments_for_post(post_row["id"], cand_kind):
+            if (cand_kind, c["id"]) in already_touched:
+                continue
             d = dict(c)
             d["__kind"] = cand_kind
             candidates.append(d)
     if not candidates:
+        if tier1_results:
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": "no undeployed comments under that post",
         }
 
     # One JSON fetch gives us body (for matching), posted_at (for the
-    # column) AND liveness — no extra round trip.
-    meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+    # column) AND liveness — no extra round trip. Reuse Tier-1's fetch
+    # if we already did it.
+    if meta is None:
+        meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+        posted_at = meta.get("posted_at")
+        liveness = classify_liveness(meta)
     body = meta.get("body")
-    posted_at = meta.get("posted_at")
-    liveness = classify_liveness(meta)
+
+    # Helper: turn Tier-1 results into the `extras` list format the
+    # modal renders inline next to the Tier-2 primary action.
+    def _tier1_as_extras():
+        return [
+            {"source": r["source"], "id": r["id"], "action": r["action"]}
+            for r in tier1_results
+        ]
 
     if liveness == "missing" or body is None:
+        if tier1_results:
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": "reddit_fetch_failed_or_comment_unreachable",
@@ -754,12 +794,17 @@ def match_and_deploy_comment(db, classified: dict, *,
                 db, cand["id"], cand_kind, url,
                 "bulk_marked_removed", prev, "removed",
             )
-            return {
+            out = {
                 "url": url, "kind": "comment", "tier": "removed_singleton",
                 "source": cand_kind, "id": cand["id"],
                 "action": "marked_removed",
                 "liveness": liveness, "posted_at": posted_at,
             }
+            if tier1_results:
+                out["extras"] = _tier1_as_extras()
+            return out
+        if tier1_results:
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": f"comment_removed_on_reddit_and_{len(candidates)}_candidates",
@@ -776,6 +821,10 @@ def match_and_deploy_comment(db, classified: dict, *,
     )
     best_score, best = scored[0]
     if best_score < similarity_threshold:
+        # Below threshold — surface Tier-1 terminal results if we had
+        # any, otherwise report the body-match miss.
+        if tier1_results:
+            return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": f"best body similarity {best_score:.2f} below threshold {similarity_threshold:.2f}",
@@ -811,6 +860,8 @@ def match_and_deploy_comment(db, classified: dict, *,
         "similarity": round(best_score, 3),
         "posted_at": posted_at, "liveness": liveness,
     }
+    if tier1_results:
+        out["extras"] = _tier1_as_extras()
     if ambiguous:
         out["ambiguous"] = True
         out["runner_up_similarity"] = round(runner_up, 3)

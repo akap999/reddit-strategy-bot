@@ -1631,6 +1631,42 @@ class Database:
             return "search_post", dict(row)
         return None, None
 
+    def find_post_by_reddit_post_id(self, reddit_post_id):
+        """Return (kind, post_dict) for a Reddit post by its short post ID
+        (the alphanumeric segment between `/comments/` and the slug).
+
+        URLs in `post_urls.reddit_url` and `search_posts.reddit_url` may
+        be stored with the post's actual slug, while incoming URLs from
+        the user's sheet may use Reddit's `/comment/` placeholder slug
+        (or no slug at all). The post ID itself is immutable — Reddit
+        URLs always contain `/comments/<post_id>/`. Matching on that
+        substring is robust to every slug variant.
+        """
+        if not reddit_post_id:
+            return None, None
+        # Lowercase / case-insensitive match — Reddit IDs are always
+        # lowercase alphanumeric but URLs in older sheets sometimes vary.
+        like_a = f"%/comments/{reddit_post_id}/%"
+        like_b = f"%/comments/{reddit_post_id}"  # no trailing segment
+        row = self.conn.execute(
+            """SELECT p.*, pu.reddit_url
+               FROM post_urls pu JOIN posts p ON pu.post_id = p.id
+               WHERE pu.reddit_url LIKE ? OR pu.reddit_url LIKE ?
+               LIMIT 1""",
+            (like_a, like_b)
+        ).fetchone()
+        if row:
+            return "post", dict(row)
+        row = self.conn.execute(
+            """SELECT * FROM search_posts
+               WHERE reddit_url LIKE ? OR reddit_url LIKE ?
+               LIMIT 1""",
+            (like_a, like_b)
+        ).fetchone()
+        if row:
+            return "search_post", dict(row)
+        return None, None
+
     def find_undeployed_comments_for_post(self, post_id, kind):
         """Return all rows for the given post that are NOT yet deployed —
         the candidate pool for Tier-2 body fuzzy matching in bulk deploy.

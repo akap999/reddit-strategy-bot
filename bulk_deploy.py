@@ -595,11 +595,20 @@ def match_and_deploy_comment(db, classified: dict, *,
             }
 
     # --- Tier 2: post + body fuzzy match ----------------------------------
-    post_kind, post_row = db.find_post_by_url(classified["post_url"])
+    # Match the parent post by its Reddit post ID (the immutable
+    # `/comments/<id>/` segment) rather than by the full URL. URLs in
+    # the user's sheet often use Reddit's `/comment/` placeholder slug
+    # (e.g. `/r/sub/comments/POSTID/comment/CMTID/`) while our DB stores
+    # the actual title slug. Matching on the post-ID substring lets us
+    # bridge that without forcing the user to massage their URLs.
+    post_kind, post_row = db.find_post_by_reddit_post_id(classified["post_id"])
     if not post_row:
         return {
             "url": url, "kind": "comment", "action": "no_match",
-            "reason": "parent post URL not found in posts or search_posts",
+            "reason": (
+                "parent post (post_id=" + str(classified["post_id"])
+                + ") not found in posts or search_posts"
+            ),
         }
     candidate_kind = "comment" if post_kind == "post" else "search_comment"
     candidates = db.find_undeployed_comments_for_post(
@@ -700,9 +709,12 @@ def match_and_deploy_comment(db, classified: dict, *,
 
 
 def match_and_deploy_post(db, classified: dict) -> dict:
-    """Process a single post URL — direct lookup in posts / search_posts."""
+    """Process a single post URL — match by Reddit post id so slug
+    differences (e.g. user copied the URL with a different title slug
+    than the one we have stored) don't cause a miss.
+    """
     url = classified["url"]
-    post_kind, post_row = db.find_post_by_url(url)
+    post_kind, post_row = db.find_post_by_reddit_post_id(classified["post_id"])
     if not post_row:
         return {
             "url": url, "kind": "post", "action": "no_match",

@@ -36,6 +36,10 @@ from typing import Any, Callable, Optional
 # ---------------------------------------------------------------------------
 
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]{20,})")
+# `gid` (the tab ID) can appear in the query string OR the URL fragment.
+# Google's export endpoint accepts it as a query param, so we extract it
+# from either location.
+_SHEET_GID_RE = re.compile(r"[?&#]gid=([0-9]+)")
 
 
 def extract_sheet_id(sheet_url: str) -> Optional[str]:
@@ -50,8 +54,26 @@ def extract_sheet_id(sheet_url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def extract_sheet_gid(sheet_url: str) -> Optional[str]:
+    """Return the `gid` (tab ID) from a Google Sheets URL, or None.
+
+    Google encodes the active tab as `?gid=<n>` or in the URL fragment
+    `#gid=<n>`. Both forms are accepted. Without a gid the first tab
+    is fetched — same as Google's UI when you open a sheet for the
+    first time.
+    """
+    if not sheet_url or not isinstance(sheet_url, str):
+        return None
+    m = _SHEET_GID_RE.search(sheet_url)
+    return m.group(1) if m else None
+
+
 def fetch_sheet_csv(sheet_url: str, *, timeout: int = 20) -> str:
-    """Download a Google Sheet's first tab as CSV.
+    """Download the specified tab of a Google Sheet as CSV.
+
+    If the URL includes a `gid` (e.g. `?gid=12345` or `#gid=12345` —
+    Google adds one whenever you click a tab in the UI), that tab is
+    fetched. Otherwise we get the first tab.
 
     Requires the sheet to be set to 'Anyone with the link → Viewer'.
     Raises ValueError with an actionable message if the sheet ID can't
@@ -65,9 +87,12 @@ def fetch_sheet_csv(sheet_url: str, *, timeout: int = 20) -> str:
             "Sheet URL is not a recognised Google Sheets link. "
             "Use the full URL that contains /spreadsheets/d/<ID>/..."
         )
+    gid = extract_sheet_gid(sheet_url)
     export_url = (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
     )
+    if gid is not None:
+        export_url += f"&gid={gid}"
     try:
         resp = requests.get(export_url, timeout=timeout, allow_redirects=True)
     except requests.RequestException as e:

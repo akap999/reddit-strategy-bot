@@ -9024,6 +9024,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
                 <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+                <button class="btn btn-sm" style="background:#2a3d1a;color:#cef79e" onclick="showBackfillPostedAtModal()" title="Fetch Reddit's actual posted timestamp (created_utc) for deployed comments that don't have one yet">Backfill posted dates</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteAllComments()">Delete All</button>
@@ -9517,6 +9518,144 @@ function _bulkDeployRenderResults(results) {
             <span style="color:${colour}">${r.action || '?'}</span>${tier}
             <span style="color:#818384">${r.kind || '?'}${ident}${sim}</span>
             <span style="color:#d7dadc">${truncUrl}</span>${reason}
+        </div>`;
+    }).join('');
+    el.innerHTML = rows || '<div class="text-gray-500" style="padding:4px">No rows yet…</div>';
+}
+
+
+// =========================================================================
+// Backfill posted_at — fetch the real Reddit created_utc for deployed
+// comments that don't have one yet. Same poll/render pattern as Bulk Deploy.
+// =========================================================================
+
+function showBackfillPostedAtModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Backfill Reddit Posted Dates</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            Walks deployed comments that don't yet have a real Reddit posted timestamp
+            and fetches Reddit's <code>created_utc</code> for each. Idempotent — only
+            touches rows that still need it.
+            <br>
+            <span class="text-gray-500">Pacing ~1–2s per Reddit fetch; safe to run on a few hundred rows.</span>
+        </p>
+        <div id="backfill-posted-status" class="text-xs text-gray-400 mb-2"></div>
+        <div id="backfill-posted-progress-bar"
+             style="display:none;height:6px;background:#272729;border-radius:3px;overflow:hidden;margin-bottom:8px">
+            <div id="backfill-posted-progress-fill" style="height:100%;width:0%;background:#cef79e;transition:width 0.3s"></div>
+        </div>
+        <div id="backfill-posted-summary" class="text-xs mb-2"></div>
+        <div id="backfill-posted-results"
+             style="max-height:280px;overflow:auto;border:1px solid #343536;border-radius:4px;padding:4px;font-size:11px;display:none"></div>
+        <div class="flex gap-2 mt-3">
+            <button id="backfill-posted-run-btn" class="btn btn-primary btn-sm" onclick="runBackfillPostedAt()">Run</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+        </div>
+    `);
+}
+
+let _backfillPostedPollHandle = null;
+
+async function runBackfillPostedAt() {
+    const runBtn = document.getElementById('backfill-posted-run-btn');
+    const statusEl = document.getElementById('backfill-posted-status');
+    const barWrap = document.getElementById('backfill-posted-progress-bar');
+    const resultsEl = document.getElementById('backfill-posted-results');
+    const summaryEl = document.getElementById('backfill-posted-summary');
+    if (runBtn) runBtn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Starting task…';
+    if (resultsEl) resultsEl.style.display = 'none';
+    if (summaryEl) summaryEl.textContent = '';
+
+    let taskId;
+    try {
+        const r = await api('/api/comments/backfill-posted-at', {
+            method: 'POST',
+            body: {},  // future: brand_id / subreddit_id filters
+        });
+        taskId = r && r.task_id;
+        if (!taskId) throw new Error('no task_id returned');
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `Failed to start: ${e.message || e}`;
+        if (runBtn) runBtn.disabled = false;
+        return;
+    }
+    if (statusEl) statusEl.textContent = `Task ${taskId} running…`;
+    if (barWrap) barWrap.style.display = 'block';
+    if (_backfillPostedPollHandle) clearInterval(_backfillPostedPollHandle);
+    _backfillPostedPollHandle = setInterval(() => _backfillPostedPoll(taskId), 1500);
+}
+
+async function _backfillPostedPoll(taskId) {
+    try {
+        const t = await api(`/api/tasks/${taskId}`);
+        const statusEl = document.getElementById('backfill-posted-status');
+        const barFill = document.getElementById('backfill-posted-progress-fill');
+        const resultsEl = document.getElementById('backfill-posted-results');
+        const summaryEl = document.getElementById('backfill-posted-summary');
+        let prog = null;
+        if (t && t.progress) {
+            try { prog = typeof t.progress === 'string' ? JSON.parse(t.progress) : t.progress; }
+            catch (_) { prog = null; }
+        }
+        if (prog) {
+            const pct = prog.total > 0 ? Math.round((prog.processed / prog.total) * 100) : 0;
+            if (barFill) barFill.style.width = pct + '%';
+            if (statusEl) statusEl.textContent = `Processed ${prog.processed} / ${prog.total} (${pct}%)`;
+            _backfillPostedRenderResults(prog.results || []);
+            if (resultsEl) resultsEl.style.display = 'block';
+        }
+        if (t && (t.status === 'complete' || t.status === 'error')) {
+            clearInterval(_backfillPostedPollHandle);
+            _backfillPostedPollHandle = null;
+            const runBtn = document.getElementById('backfill-posted-run-btn');
+            if (runBtn) runBtn.disabled = false;
+            if (t.status === 'error') {
+                if (statusEl) statusEl.textContent = `Task failed: ${t.error || 'unknown error'}`;
+                return;
+            }
+            let result = null;
+            if (t.result) {
+                try { result = typeof t.result === 'string' ? JSON.parse(t.result) : t.result; }
+                catch (_) { result = null; }
+            }
+            if (result) {
+                _backfillPostedRenderResults(result.results || []);
+                if (summaryEl) {
+                    summaryEl.innerHTML = `
+                        <span class="text-green-400">Updated: ${result.updated || 0}</span> ·
+                        <span class="text-yellow-400">No posted_at returned: ${result.failed || 0}</span>
+                    `;
+                }
+                if (statusEl) statusEl.textContent = `Task complete · ${result.processed || 0} rows processed`;
+            }
+            // Refresh whichever list is open so the CSV now uses posted_at.
+            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') {
+                lsubsLoadComments(true);
+            }
+            if (typeof lsLoadComments === 'function' && currentView === 'allcomments') {
+                try { lsLoadComments(); } catch(_) {}
+            }
+        }
+    } catch (e) {
+        console.warn('backfill-posted poll failed:', e);
+    }
+}
+
+function _backfillPostedRenderResults(results) {
+    const el = document.getElementById('backfill-posted-results');
+    if (!el) return;
+    // Show only the last 50 rows to keep the DOM small on big runs.
+    const tail = results.slice(-50);
+    const rows = tail.map(r => {
+        const colour = r.action === 'updated' ? '#9efbb4'
+                     : r.action === 'no_match' ? '#ffd166'
+                     : '#ff8b8b';
+        const reason = r.reason ? ` <span style="color:#818384">(${r.reason})</span>` : '';
+        const when = r.posted_at ? ` <span style="color:#818384">→ ${r.posted_at}</span>` : '';
+        return `<div style="padding:2px 4px;border-bottom:1px solid #2a2a2b">
+            <span style="color:${colour}">${r.action}</span>
+            <span style="color:#818384">${r.kind} #${r.id}</span>${when}${reason}
         </div>`;
     }).join('');
     el.innerHTML = rows || '<div class="text-gray-500" style="padding:4px">No rows yet…</div>';
@@ -10046,7 +10185,14 @@ async function lsExportCsv() {
     // Column order requested by the user:
     //   subreddit | published date (mm/dd/yyyy) | comment url | comment
     //   content | upvotes | conversations (replies)
-    // Published date = comment's deploy date (when it went live on Reddit).
+    //
+    // Published Date prefers `posted_at` (Reddit's created_utc — the
+    // real publish time on Reddit) over `deployed_at` (the bot's
+    // bookkeeping time). Live-stats also fills in posted_at as a side
+    // effect of this very export, so subsequent exports get more
+    // accurate dates without any extra user action. Rows that don't
+    // have posted_at yet (legacy or fetch-failed) fall back to
+    // deployed_at so the column never goes blank.
     const header = ['Subreddit', 'Published Date', 'Comment URL',
                     'Comment Content', 'Upvotes', 'Conversations'];
     const rows = comments.map(c => {
@@ -10054,9 +10200,18 @@ async function lsExportCsv() {
         const upvotes = stats.score != null ? stats.score : '';
         const replies = stats.num_replies != null ? stats.num_replies : '';
         const sub = c.subreddit_name ? `r/${c.subreddit_name}` : '';
+        // Prefer posted_at; fall back to deployed_at. liveStats may
+        // also include a fresh created_utc the row hasn't been
+        // patched with yet — use it as a tertiary fallback so this
+        // export shows the right date even if the piggy-back UPDATE
+        // hasn't landed yet (e.g. write contention).
+        const liveCreated = stats.created_utc
+            ? new Date(stats.created_utc * 1000).toISOString().slice(0, 19).replace('T', ' ')
+            : '';
+        const publishedRaw = c.posted_at || liveCreated || c.deployed_at;
         return [
             csvEscape(sub),
-            csvEscape(formatMDY(c.deployed_at)),
+            csvEscape(formatMDY(publishedRaw)),
             csvEscape(c.reddit_comment_url || ''),
             csvEscape(c.body || ''),
             csvEscape(upvotes),

@@ -220,42 +220,54 @@ def jaccard(a: str, b: str) -> float:
 # Reddit comment body fetcher
 # ---------------------------------------------------------------------------
 
-def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
-                              timeout: int = 15) -> Optional[str]:
-    """Fetch the body of a Reddit comment given its full URL.
+def _utc_seconds_to_iso(secs) -> Optional[str]:
+    """Convert a Reddit `created_utc` Unix-seconds float into the
+    "YYYY-MM-DD HH:MM:SS" UTC string we store everywhere else.
+    Returns None for 0 / missing / non-numeric inputs (Reddit
+    occasionally omits the field on deleted comments).
+    """
+    try:
+        secs = float(secs)
+    except (TypeError, ValueError):
+        return None
+    if secs <= 0:
+        return None
+    return datetime.utcfromtimestamp(secs).strftime("%Y-%m-%d %H:%M:%S")
 
-    `reddit_get` is a callable that takes a path (e.g. `/r/sub/comments/.../id/.json`)
-    and returns the parsed JSON list/dict the Reddit endpoint produces.
-    We inject it so app.py's `_reddit_get` (proxy-aware, retry-aware)
-    can be plugged in without re-implementing it here.
 
-    Returns the comment body text, or None if the URL can't be parsed,
-    the fetch fails, or the comment can't be located in the response.
+def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
+                               timeout: int = 15) -> dict:
+    """Fetch the target comment's metadata from Reddit.
+
+    Returns `{"body": str | None, "posted_at": "YYYY-MM-DD HH:MM:SS" | None}`.
+    Both keys are always present; either may be None if the URL can't be
+    parsed, the fetch fails, or the comment isn't in the response (e.g.
+    deleted, removed, share-link, etc.).
+
+    `reddit_get` is the app's `_reddit_get` (proxy + retry).
     """
     from urllib.parse import urlparse
+    out = {"body": None, "posted_at": None}
     try:
         parsed = urlparse(comment_url)
         path = parsed.path.rstrip("/") + ".json"
     except Exception:
-        return None
+        return out
     try:
         data = reddit_get(path)
     except Exception:
-        return None
+        return out
     if not data:
-        return None
-    # Reddit's comment endpoint returns a 2-element list: [post_listing,
-    # comments_listing]. Walk the comments listing for the target body.
-    # The target comment ID is the last path segment (before .json).
+        return out
     parsed_info = classify_reddit_url(comment_url)
     if not parsed_info:
-        return None
+        return out
     target_cid = (parsed_info.get("comment_id") or "").lower()
     if not target_cid:
-        return None
+        return out
 
     def _walk(node):
-        """Recursively yield (id, body) for every comment in the tree."""
+        """Yield (id, body, created_utc) for every comment in the tree."""
         if isinstance(node, dict):
             kind = node.get("kind")
             if kind == "Listing":
@@ -263,7 +275,11 @@ def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
                     yield from _walk(child)
             elif kind == "t1":
                 d = node.get("data") or {}
-                yield (d.get("id", "").lower(), d.get("body", ""))
+                yield (
+                    d.get("id", "").lower(),
+                    d.get("body", ""),
+                    d.get("created_utc", 0),
+                )
                 replies = d.get("replies")
                 if isinstance(replies, dict):
                     yield from _walk(replies)
@@ -271,12 +287,23 @@ def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
             for el in node:
                 yield from _walk(el)
 
-    # Prefer the comment listing (index 1) but walk the whole response
-    # defensively — some Reddit responses interleave.
-    for cid, body in _walk(data):
+    for cid, body, created_utc in _walk(data):
         if cid == target_cid:
-            return body
-    return None
+            out["body"] = body
+            out["posted_at"] = _utc_seconds_to_iso(created_utc)
+            return out
+    return out
+
+
+def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
+                              timeout: int = 15) -> Optional[str]:
+    """Backwards-compat wrapper. New callers should use
+    `fetch_reddit_comment_meta` which returns body + posted_at in one
+    call (same network cost — one JSON fetch).
+    """
+    return fetch_reddit_comment_meta(
+        comment_url, reddit_get=reddit_get, timeout=timeout
+    ).get("body")
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +342,21 @@ def match_and_deploy_comment(db, classified: dict, *,
                 "source": source, "id": row["id"],
                 "action": "already_deployed",
             }
+        # Pull the Reddit-posted timestamp in one extra call. Cheap —
+        # this is the only place in the URL-match path that does a
+        # network fetch, and it lets us populate posted_at consistently
+        # with Tier-2.
+        meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+        posted_at = meta.get("posted_at")
         try:
             if source == "comment":
-                db.deploy_comment(row["id"], url)
+                db.deploy_comment(row["id"], url, posted_at=posted_at)
             else:
-                db.deploy_search_comment(row["id"], url)
+                db.deploy_search_comment(row["id"], url, posted_at=posted_at)
             return {
                 "url": url, "kind": "comment", "tier": "url_match",
                 "source": source, "id": row["id"], "action": "deployed",
+                "posted_at": posted_at,
             }
         except Exception as e:
             return {
@@ -348,7 +382,12 @@ def match_and_deploy_comment(db, classified: dict, *,
             "reason": "no undeployed comments under that post",
         }
 
-    body = fetch_reddit_comment_body(url, reddit_get=reddit_get)
+    # One JSON fetch gives us both body (for matching) AND posted_at
+    # (for the `posted_at` column). No extra round trip — the metadata
+    # helper walks the same response.
+    meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+    body = meta.get("body")
+    posted_at = meta.get("posted_at")
     if not body:
         return {
             "url": url, "kind": "comment", "action": "no_match",
@@ -375,9 +414,9 @@ def match_and_deploy_comment(db, classified: dict, *,
     ambiguous = runner_up >= similarity_threshold and (best_score - runner_up) < 0.1
     try:
         if candidate_kind == "comment":
-            db.deploy_comment(best["id"], url)
+            db.deploy_comment(best["id"], url, posted_at=posted_at)
         else:
-            db.deploy_search_comment(best["id"], url)
+            db.deploy_search_comment(best["id"], url, posted_at=posted_at)
     except Exception as e:
         return {
             "url": url, "kind": "comment", "tier": "body_match",
@@ -388,6 +427,7 @@ def match_and_deploy_comment(db, classified: dict, *,
         "url": url, "kind": "comment", "tier": "body_match",
         "source": candidate_kind, "id": best["id"], "action": "deployed",
         "similarity": round(best_score, 3),
+        "posted_at": posted_at,
     }
     if ambiguous:
         out["ambiguous"] = True

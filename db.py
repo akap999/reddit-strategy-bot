@@ -1010,6 +1010,13 @@ class Database:
             # _focus_pair_in_body for the matcher.
             "focus_phrase": "ALTER TABLE comments ADD COLUMN focus_phrase TEXT",
             "focus_hit": "ALTER TABLE comments ADD COLUMN focus_hit INTEGER",
+            # Real Reddit-posted timestamp (Reddit's `created_utc`,
+            # stored as "YYYY-MM-DD HH:MM:SS" UTC). NULL until the
+            # bot has had a chance to fetch it. Distinct from
+            # `deployed_at` (when the user clicked Deploy in this
+            # bot) so we can show the actual publish time on Reddit
+            # in the CSV export and any analytics.
+            "posted_at": "ALTER TABLE comments ADD COLUMN posted_at TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -1122,6 +1129,9 @@ class Database:
             # + N replies (comment_type='hq', parent_comment_id = parent's row id).
             "comment_type": "ALTER TABLE search_comments ADD COLUMN comment_type TEXT",
             "parent_comment_id": "ALTER TABLE search_comments ADD COLUMN parent_comment_id INTEGER REFERENCES search_comments(id)",
+            # Real Reddit-posted timestamp — see the `comments` table
+            # migration for the rationale. Same shape, separate table.
+            "posted_at": "ALTER TABLE search_comments ADD COLUMN posted_at TEXT",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -1434,16 +1444,140 @@ class Database:
             self._increment_lifetime(new_account_id)
         self.conn.commit()
 
-    def deploy_comment(self, comment_id, reddit_comment_url, deployed_at=None):
+    def deploy_comment(self, comment_id, reddit_comment_url, deployed_at=None,
+                       posted_at=None):
+        """Mark a comment deployed.
+
+        `deployed_at` is the bot's bookkeeping time (when the user
+        clicked Deploy). `posted_at` is the actual Reddit publish
+        timestamp (Reddit's `created_utc`) — passed in when the
+        caller already has the comment JSON (bulk deploy, single-
+        deploy async patch, backfill). It's never overwritten with
+        NULL: if the caller doesn't have it yet, any previous value
+        is preserved.
+        """
         if not deployed_at:
             deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
+        if posted_at:
+            self.conn.execute(
+                """UPDATE comments
+                   SET reddit_comment_url = ?, deployed_at = ?, posted_at = ?,
+                       status = 'deployed', prev_status = ?
+                   WHERE id = ?""",
+                (reddit_comment_url, deployed_at, posted_at, old_status, comment_id)
+            )
+        else:
+            self.conn.execute(
+                """UPDATE comments
+                   SET reddit_comment_url = ?, deployed_at = ?,
+                       status = 'deployed', prev_status = ?
+                   WHERE id = ?""",
+                (reddit_comment_url, deployed_at, old_status, comment_id)
+            )
+        self.conn.commit()
+
+    def update_posted_at(self, comment_id, kind, posted_at):
+        """Patch the real Reddit-posted timestamp on a comment row.
+
+        `kind` is "comment" (→ `comments` table) or "search_comment"
+        (→ `search_comments` table). NULL-safe: a NULL `posted_at`
+        is a no-op (we don't overwrite an existing value with NULL).
+        A non-NULL value REPLACES whatever is there.
+        """
+        if not posted_at or not comment_id:
+            return
+        if kind == "comment":
+            self.conn.execute(
+                "UPDATE comments SET posted_at = ? WHERE id = ?",
+                (posted_at, comment_id)
+            )
+        elif kind == "search_comment":
+            self.conn.execute(
+                "UPDATE search_comments SET posted_at = ? WHERE id = ?",
+                (posted_at, comment_id)
+            )
+        else:
+            return
+        self.conn.commit()
+
+    def update_posted_at_by_id_url(self, comment_id, reddit_url, posted_at):
+        """Side-channel patch used by the live-stats / piggy-back path
+        where we have a row id and the URL but don't know which table
+        the id belongs to.
+
+        Updates `comments` or `search_comments` only where BOTH the id
+        AND the URL match — so a coincidental id collision across the
+        two tables can't write to the wrong row. Only fills in
+        `posted_at` when it's currently NULL (we don't overwrite an
+        existing value here; that's reserved for the explicit deploy
+        path).
+        """
+        if not posted_at or not comment_id or not reddit_url:
+            return
         self.conn.execute(
-            "UPDATE comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed', prev_status = ? WHERE id = ?",
-            (reddit_comment_url, deployed_at, old_status, comment_id)
+            """UPDATE comments SET posted_at = ?
+               WHERE id = ? AND reddit_comment_url = ? AND posted_at IS NULL""",
+            (posted_at, comment_id, reddit_url)
+        )
+        self.conn.execute(
+            """UPDATE search_comments SET posted_at = ?
+               WHERE id = ? AND reddit_comment_url = ? AND posted_at IS NULL""",
+            (posted_at, comment_id, reddit_url)
         )
         self.conn.commit()
+
+    def list_deployed_missing_posted_at(self, brand_id=None, subreddit_id=None,
+                                        limit=500):
+        """Return rows that are deployed AND missing `posted_at` AND have
+        a `reddit_comment_url`. Used by the backfill task.
+
+        Returns a list of dicts with keys: id, kind ('comment' or
+        'search_comment'), reddit_comment_url. Caps at `limit` rows per
+        call so the backfill task can stream in pages.
+        """
+        rows = []
+        q1 = """SELECT c.id, c.reddit_comment_url, b.id AS brand_id, p.subreddit_id
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                WHERE c.status = 'deployed'
+                  AND c.posted_at IS NULL
+                  AND c.reddit_comment_url IS NOT NULL
+                  AND c.reddit_comment_url != ''"""
+        p1 = []
+        if brand_id:
+            q1 += " AND c.brand_id = ?"
+            p1.append(brand_id)
+        if subreddit_id:
+            q1 += " AND p.subreddit_id = ?"
+            p1.append(subreddit_id)
+        q1 += " LIMIT ?"
+        p1.append(limit)
+        for r in self.conn.execute(q1, p1).fetchall():
+            rows.append({
+                "id": r["id"], "kind": "comment",
+                "reddit_comment_url": r["reddit_comment_url"],
+            })
+        q2 = """SELECT sc.id, sc.reddit_comment_url
+                FROM search_comments sc
+                WHERE sc.status = 'deployed'
+                  AND sc.posted_at IS NULL
+                  AND sc.reddit_comment_url IS NOT NULL
+                  AND sc.reddit_comment_url != ''"""
+        p2 = []
+        if brand_id:
+            q2 += " AND sc.brand_id = ?"
+            p2.append(brand_id)
+        q2 += " LIMIT ?"
+        p2.append(limit)
+        for r in self.conn.execute(q2, p2).fetchall():
+            rows.append({
+                "id": r["id"], "kind": "search_comment",
+                "reddit_comment_url": r["reddit_comment_url"],
+            })
+        return rows
 
     # ------------------------------------------------------------------
     # Bulk-deploy URL → row matching helpers.
@@ -1885,6 +2019,7 @@ class Database:
 
         q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                         c.is_reply, c.mentions_brand, c.created_at, c.deployed_at,
+                        c.posted_at,
                         c.paid_at, c.reddit_comment_url, c.comment_type,
                         c.parent_comment_id,
                         c.suggested_post_day, c.suggested_order,
@@ -1903,6 +2038,7 @@ class Database:
 
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.is_reply, sc.mentions_brand, sc.created_at, sc.deployed_at,
+                        sc.posted_at,
                         sc.paid_at, sc.reddit_comment_url, NULL as comment_type,
                         NULL as parent_comment_id,
                         0 as suggested_post_day, 0 as suggested_order,
@@ -4120,13 +4256,29 @@ class Database:
             self._increment_lifetime(new_account_id)
         self.conn.commit()
 
-    def deploy_search_comment(self, comment_id, reddit_url):
-        deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def deploy_search_comment(self, comment_id, reddit_url, deployed_at=None,
+                              posted_at=None):
+        """Mark a search-comment deployed. See `deploy_comment` for the
+        meaning of `deployed_at` vs `posted_at`.
+        """
+        if not deployed_at:
+            deployed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
-        self.conn.execute(
-            "UPDATE search_comments SET reddit_comment_url = ?, deployed_at = ?, status = 'deployed', prev_status = ? WHERE id = ?",
-            (reddit_url, deployed_at, old_status, comment_id))
+        if posted_at:
+            self.conn.execute(
+                """UPDATE search_comments
+                   SET reddit_comment_url = ?, deployed_at = ?, posted_at = ?,
+                       status = 'deployed', prev_status = ?
+                   WHERE id = ?""",
+                (reddit_url, deployed_at, posted_at, old_status, comment_id))
+        else:
+            self.conn.execute(
+                """UPDATE search_comments
+                   SET reddit_comment_url = ?, deployed_at = ?,
+                       status = 'deployed', prev_status = ?
+                   WHERE id = ?""",
+                (reddit_url, deployed_at, old_status, comment_id))
         self.conn.commit()
 
     def undeploy_search_comment(self, comment_id):

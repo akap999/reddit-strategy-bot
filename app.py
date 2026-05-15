@@ -1401,14 +1401,67 @@ def api_deploy_comment(cid):
     db = get_db()
     try:
         data = request.json
+        url = data.get("reddit_comment_url", "")
         db.deploy_comment(
             cid,
-            data.get("reddit_comment_url", ""),
+            url,
             data.get("deployed_at"),
         )
-        return jsonify({"ok": True})
     finally:
         db.close()
+    # Kick off an async fetch to back-patch the real Reddit-posted
+    # timestamp (Reddit's created_utc). The deploy already returned;
+    # the user doesn't wait on Reddit availability. If the fetch fails
+    # we leave posted_at NULL — the backfill button can pick it up later.
+    if url:
+        threading.Thread(
+            target=_async_backpatch_posted_at,
+            args=(cid, "comment", url),
+            daemon=True,
+        ).start()
+    return jsonify({"ok": True})
+
+
+def _async_backpatch_posted_at(comment_id, kind, comment_url):
+    """Worker thread: fetch the Reddit comment's created_utc and store
+    it on the row. Best-effort; failures are swallowed (a separate
+    backfill job picks up missing rows on demand).
+    """
+    try:
+        from bulk_deploy import fetch_reddit_comment_meta
+    except Exception:
+        return
+    try:
+        meta = fetch_reddit_comment_meta(comment_url, reddit_get=_reddit_get_json)
+        posted_at = meta.get("posted_at")
+        if not posted_at:
+            return
+        db = Database(DB_PATH)
+        db.connect()
+        try:
+            db.update_posted_at(comment_id, kind, posted_at)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[posted_at backpatch] cid={comment_id} kind={kind}: {e}", flush=True)
+
+
+def _reddit_get_json(path, timeout=15, max_retries=3):
+    """Thin wrapper around `_reddit_get` that decodes JSON. `_reddit_get`
+    returns a raw Response object — every existing caller calls `.json()`
+    on it. The bulk-deploy / backfill modules want the parsed JSON
+    directly, so we centralise the decode here.
+    """
+    try:
+        resp = _reddit_get(path, timeout=timeout, max_retries=max_retries)
+    except Exception:
+        return None
+    if resp is None:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
 
 @app.route("/api/comments/<int:cid>/url", methods=["PATCH"])
 def api_update_comment_url(cid):
@@ -1889,7 +1942,7 @@ def api_bulk_deploy_from_sheet():
         return run_bulk_deploy(
             sheet_url,
             db_factory=_db_factory,
-            reddit_get=_reddit_get,
+            reddit_get=_reddit_get_json,
             _task_id=_task_id,
         )
 
@@ -2145,58 +2198,168 @@ def api_comments_live_stats():
     def task():
         results = {}
         total = len(urls)
-        for i, item in enumerate(urls):
-            cid = item.get("id")
-            url = (item.get("reddit_comment_url") or "").strip()
-            key = str(cid)
-            if not url:
-                results[key] = {"liveness": "no_url"}
-                continue
-
-            clean = url.split("?")[0].rstrip("/")
-            if "/s/" in clean:
-                resolved = _resolve_share(clean)
-                if not resolved:
-                    results[key] = {"liveness": "share_unresolved"}
-                    _time.sleep(1)
+        # Piggy-back: every time we successfully resolve a comment's
+        # created_utc, we also patch posted_at on the DB row. Cheap
+        # — same JSON we already parsed, one extra UPDATE per row.
+        # Opened once per task; closed in `finally`.
+        bg_db = Database(DB_PATH)
+        try:
+            bg_db.connect()
+            bg_db.initialize()
+        except Exception as e:
+            print(f"[LIVE-STATS] bg db open failed: {e}", flush=True)
+            bg_db = None
+        try:
+            for i, item in enumerate(urls):
+                cid = item.get("id")
+                url = (item.get("reddit_comment_url") or "").strip()
+                key = str(cid)
+                if not url:
+                    results[key] = {"liveness": "no_url"}
                     continue
-                clean = resolved
 
-            if "/comment/" not in clean and "/comments/" not in clean:
-                results[key] = {"liveness": "bad_url"}
-                continue
+                clean = url.split("?")[0].rstrip("/")
+                if "/s/" in clean:
+                    resolved = _resolve_share(clean)
+                    if not resolved:
+                        results[key] = {"liveness": "share_unresolved"}
+                        _time.sleep(1)
+                        continue
+                    clean = resolved
 
-            # Strip every common Reddit subdomain (was hardcoded www only)
-            path = _re.sub(r'^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com', '', clean)
-            if not path.startswith('/'):
-                results[key] = {"liveness": "bad_url"}
-                continue
-            json_path = path + ".json"
+                if "/comment/" not in clean and "/comments/" not in clean:
+                    results[key] = {"liveness": "bad_url"}
+                    continue
 
-            res = _fetch_one(json_path)
-            if "removed" in res:
-                results[key] = {
-                    "score": 0, "author": "", "num_replies": 0,
-                    "permalink": "", "created_utc": 0,
-                    "liveness": "removed",
-                }
-            elif "data" in res:
-                parsed = _parse_comment_body(res["data"])
-                if parsed:
-                    results[key] = parsed
+                # Strip every common Reddit subdomain (was hardcoded www only)
+                path = _re.sub(r'^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com', '', clean)
+                if not path.startswith('/'):
+                    results[key] = {"liveness": "bad_url"}
+                    continue
+                json_path = path + ".json"
+
+                res = _fetch_one(json_path)
+                if "removed" in res:
+                    results[key] = {
+                        "score": 0, "author": "", "num_replies": 0,
+                        "permalink": "", "created_utc": 0,
+                        "liveness": "removed",
+                    }
+                elif "data" in res:
+                    parsed = _parse_comment_body(res["data"])
+                    if parsed:
+                        results[key] = parsed
+                        # Piggy-back the posted_at backfill — only when
+                        # the parsed `created_utc` is a real value and
+                        # the row in the DB still has NULL posted_at.
+                        try:
+                            from bulk_deploy import _utc_seconds_to_iso
+                            posted_at = _utc_seconds_to_iso(parsed.get("created_utc"))
+                            if posted_at and bg_db and cid:
+                                bg_db.update_posted_at_by_id_url(cid, url, posted_at)
+                        except Exception as bg_err:
+                            print(f"[LIVE-STATS] posted_at piggy-back error cid={cid}: {bg_err}", flush=True)
+                    else:
+                        results[key] = {"liveness": "no_comment_in_response"}
                 else:
-                    results[key] = {"liveness": "no_comment_in_response"}
-            else:
-                # error case — record it so the caller knows why this row is empty
-                results[key] = {"liveness": res.get("error") or "fetch_failed"}
+                    # error case — record it so the caller knows why this row is empty
+                    results[key] = {"liveness": res.get("error") or "fetch_failed"}
 
-            # Modest pacing — _reddit_get is already proxied; 1s/req is safe.
-            # Bump to 3s after a transient error to be polite.
-            _time.sleep(3 if "error" in res else 1)
-        print(f"[LIVE-STATS] processed {total} url(s); successes={sum(1 for v in results.values() if v.get('liveness') == 'live')}", flush=True)
-        return results
+                # Modest pacing — _reddit_get is already proxied; 1s/req is safe.
+                # Bump to 3s after a transient error to be polite.
+                _time.sleep(3 if "error" in res else 1)
+            print(f"[LIVE-STATS] processed {total} url(s); successes={sum(1 for v in results.values() if v.get('liveness') == 'live')}", flush=True)
+            return results
+        finally:
+            if bg_db:
+                try:
+                    bg_db.close()
+                except Exception:
+                    pass
 
     tid = start_task("live-stats", task)
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/comments/backfill-posted-at", methods=["POST"])
+def api_backfill_posted_at():
+    """Walk deployed comments missing `posted_at` and fetch Reddit's
+    `created_utc` for each, writing it into the row.
+
+    Body: {"brand_id"?: int, "subreddit_id"?: int}. Optional filters.
+    Returns {"task_id": "..."} immediately; client polls
+    GET /api/tasks/<task_id>.
+
+    Idempotent — only touches rows that still have NULL `posted_at`.
+    Re-running after a partial network blip picks up where it left off.
+    """
+    import time as _time
+    data = request.get_json() or {}
+    brand_id = data.get("brand_id")
+    subreddit_id = data.get("subreddit_id")
+
+    def task(_task_id=None):
+        from bulk_deploy import fetch_reddit_comment_meta
+        bg_db = Database(DB_PATH)
+        bg_db.connect()
+        bg_db.initialize()
+        try:
+            rows = bg_db.list_deployed_missing_posted_at(
+                brand_id=brand_id, subreddit_id=subreddit_id, limit=2000,
+            )
+            total = len(rows)
+            progress = {"total": total, "processed": 0,
+                        "updated": 0, "failed": 0, "results": []}
+            print(f"[BACKFILL-POSTED-AT] {total} rows to process "
+                  f"(brand_id={brand_id}, subreddit_id={subreddit_id})", flush=True)
+            for row in rows:
+                cid = row["id"]
+                kind = row["kind"]
+                url = row["reddit_comment_url"]
+                try:
+                    meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+                    posted_at = meta.get("posted_at")
+                except Exception as e:
+                    posted_at = None
+                    print(f"[BACKFILL-POSTED-AT] cid={cid} fetch error: {e}", flush=True)
+                if posted_at:
+                    try:
+                        bg_db.update_posted_at(cid, kind, posted_at)
+                        progress["updated"] += 1
+                        progress["results"].append({
+                            "id": cid, "kind": kind, "posted_at": posted_at,
+                            "action": "updated",
+                        })
+                    except Exception as e:
+                        progress["failed"] += 1
+                        progress["results"].append({
+                            "id": cid, "kind": kind,
+                            "action": "error", "reason": str(e),
+                        })
+                else:
+                    progress["failed"] += 1
+                    progress["results"].append({
+                        "id": cid, "kind": kind,
+                        "action": "no_match",
+                        "reason": "no created_utc in reddit response",
+                    })
+                progress["processed"] += 1
+                if _task_id:
+                    try:
+                        bg_db.update_task_progress(_task_id, json.dumps(progress))
+                    except Exception:
+                        pass
+                # Pacing — same shape as live-stats / check-live: 1s
+                # per call, longer after a miss.
+                _time.sleep(1 if posted_at else 2)
+            return progress
+        finally:
+            try:
+                bg_db.close()
+            except Exception:
+                pass
+
+    tid = start_task("backfill-posted-at", task, pass_task_id=True)
     return jsonify({"task_id": tid})
 
 @app.route("/api/comments/<int:cid>")

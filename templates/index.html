@@ -9474,6 +9474,7 @@ function showBulkDeployModal() {
         <div class="flex gap-2 mt-3">
             <button id="bulk-deploy-run-btn" class="btn btn-primary btn-sm" onclick="runBulkDeploy()">Run</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+            <button id="bulk-deploy-refresh-btn" class="btn btn-sm" style="display:none;background:#2a3d4a;color:#9ec4ff" onclick="window.location.reload()" title="Reload the page so the comment list reflects the new statuses">Refresh page</button>
         </div>
     `);
 }
@@ -9567,19 +9568,72 @@ async function _bulkDeployPoll(taskId) {
                 }
                 if (statusEl) statusEl.textContent = `Task complete · ${result.processed || 0} URLs processed`;
             }
-            // Refresh the comment list so newly-deployed rows show up
-            // in the current tab.
-            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') {
-                lsubsLoadComments(true);
-            }
-            if (typeof lsLoadComments === 'function' && currentView === 'allcomments') {
-                try { lsLoadComments(); } catch(_) {}
-            }
+            // Reveal the "Refresh page" button so the user has a
+            // bulletproof escape hatch if the auto-refresh below
+            // missed their specific view.
+            const refreshBtn = document.getElementById('bulk-deploy-refresh-btn');
+            if (refreshBtn) refreshBtn.style.display = '';
+            // Refresh whichever comments view is currently active so the
+            // newly-deployed rows render with their new status without
+            // requiring a page reload. Also invalidate the caches of
+            // views the user isn't currently looking at, so navigating
+            // to them later re-fetches from the API instead of showing
+            // pre-deploy data.
+            _bulkDeployRefreshActiveView();
         }
     } catch (e) {
         // Transient poll failure — just try again next tick.
         console.warn('bulk-deploy poll failed:', e);
     }
+}
+
+// On Bulk Deploy completion, re-render whichever comments view is
+// active. Each branch is best-effort — a missing function or a
+// view we haven't wired never breaks the success path.
+function _bulkDeployRefreshActiveView() {
+    const view = (typeof currentView === 'string') ? currentView : '';
+    try {
+        if (view === 'livesubs' && typeof lsubsLoadComments === 'function') {
+            lsubsLoadComments(true);
+        } else if (view === 'livesearch') {
+            // Live Search keeps its comments in the `_lsComments`
+            // module-level cache. `lsFilterComments()` only re-filters
+            // that cache, so we have to refetch first before the
+            // re-render reflects the deploy.
+            (async () => {
+                try {
+                    if (typeof api === 'function' && typeof _lsComments !== 'undefined') {
+                        _lsComments = await api('/api/search/comments');
+                        if (typeof lsFilterComments === 'function') lsFilterComments();
+                    }
+                } catch (e) { console.warn('ls refetch failed', e); }
+            })();
+        } else if (view === 'allcomments' || view === 'comments') {
+            // Best-effort: a few different functions own this view
+            // depending on the user's path. Try them in order.
+            if (typeof _acReload === 'function') { _acReload(); }
+            else if (typeof loadAllComments === 'function') { loadAllComments(); }
+            else if (typeof renderAllComments === 'function') {
+                const c = document.querySelector('[data-view="comments"]')
+                       || document.querySelector('#main-content');
+                if (c) renderAllComments(c);
+            }
+        }
+    } catch (e) {
+        console.warn('bulk-deploy active-view refresh failed:', e);
+    }
+    // Invalidate caches for the OTHER views so a later view-switch
+    // refetches. Costs nothing — both caches are populated lazily.
+    try {
+        if (typeof _lsComments !== 'undefined' && view !== 'livesearch') {
+            _lsComments = [];
+        }
+    } catch (_) {}
+    try {
+        if (typeof _lsubsCommentsCache !== 'undefined' && view !== 'livesubs') {
+            _lsubsCommentsCache = [];
+        }
+    } catch (_) {}
 }
 
 function _bulkDeployRenderResults(results) {

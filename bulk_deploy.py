@@ -601,11 +601,16 @@ def match_and_deploy_comment(db, classified: dict, *,
         # confirm it right now (rate limit / proxy hiccup). The
         # backfill / live-check will pick the row up later if it turns
         # out the comment was actually removed.
+        prev_status = (row.get("status") or "") if isinstance(row, dict) else ""
         try:
             if source == "comment":
                 db.deploy_comment(row["id"], url, posted_at=posted_at)
             else:
                 db.deploy_search_comment(row["id"], url, posted_at=posted_at)
+            _log_bulk_event(
+                db, row["id"], source, url,
+                "bulk_deployed", prev_status, "deployed",
+            )
             return {
                 "url": url, "kind": "comment", "tier": "url_match",
                 "source": source, "id": row["id"], "action": "deployed",
@@ -709,6 +714,7 @@ def match_and_deploy_comment(db, classified: dict, *,
         }
     runner_up = scored[1][0] if len(scored) > 1 else 0.0
     ambiguous = runner_up >= similarity_threshold and (best_score - runner_up) < 0.1
+    prev_status = best.get("status") if isinstance(best, dict) else None
     try:
         if candidate_kind == "comment":
             db.deploy_comment(best["id"], url, posted_at=posted_at)
@@ -721,6 +727,13 @@ def match_and_deploy_comment(db, classified: dict, *,
             "action": "error", "reason": str(e),
             "liveness": liveness,
         }
+    # Audit trail — one row per bulk-deploy event. Lets the user verify
+    # via Activity Log that the write actually happened, independent of
+    # any UI cache.
+    _log_bulk_event(
+        db, best["id"], candidate_kind, url,
+        "bulk_deployed", prev_status or "", "deployed",
+    )
     out = {
         "url": url, "kind": "comment", "tier": "body_match",
         "source": candidate_kind, "id": best["id"], "action": "deployed",

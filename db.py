@@ -1755,6 +1755,82 @@ class Database:
         )
         self.conn.commit()
 
+    def mark_removed_with_url(self, comment_id, kind, reddit_url, posted_at=None):
+        """Attach a Reddit URL to a comment row AND mark it removed.
+
+        Used by Bulk Deploy when the URL points at a comment that
+        Reddit has since removed/deleted — the user still wants the
+        URL recorded against the row, but the bot should reflect the
+        actual Reddit state. Idempotent: returns the *previous* status
+        (for logging) and is a no-op if the row is already removed.
+
+        `kind` is "comment" or "search_comment".
+        Returns the previous status string, or None if the row wasn't
+        found.
+        """
+        if not comment_id or not reddit_url:
+            return None
+        if kind == "comment":
+            row = self.conn.execute(
+                "SELECT status FROM comments WHERE id = ?", (comment_id,)
+            ).fetchone()
+            if not row:
+                return None
+            old_status = row["status"]
+            if old_status == "removed":
+                # Still patch the URL if the row didn't have one,
+                # but no status flip needed.
+                self.conn.execute(
+                    """UPDATE comments
+                       SET reddit_comment_url = COALESCE(?, reddit_comment_url),
+                           posted_at = COALESCE(posted_at, ?)
+                       WHERE id = ?""",
+                    (reddit_url, posted_at, comment_id)
+                )
+                self.conn.commit()
+                return old_status
+            self.conn.execute(
+                """UPDATE comments
+                   SET reddit_comment_url = ?,
+                       posted_at = COALESCE(?, posted_at),
+                       status = 'removed', prev_status = ?,
+                       paid_at = NULL
+                   WHERE id = ?""",
+                (reddit_url, posted_at, old_status, comment_id)
+            )
+            self.conn.commit()
+            return old_status
+        if kind == "search_comment":
+            row = self.conn.execute(
+                "SELECT status FROM search_comments WHERE id = ?", (comment_id,)
+            ).fetchone()
+            if not row:
+                return None
+            old_status = row["status"]
+            if old_status == "removed":
+                self.conn.execute(
+                    """UPDATE search_comments
+                       SET reddit_comment_url = COALESCE(?, reddit_comment_url),
+                           posted_at = COALESCE(posted_at, ?)
+                       WHERE id = ?""",
+                    (reddit_url, posted_at, comment_id)
+                )
+                self.conn.commit()
+                return old_status
+            self.conn.execute(
+                """UPDATE search_comments
+                   SET reddit_comment_url = ?,
+                       posted_at = COALESCE(?, posted_at),
+                       status = 'removed', prev_status = ?,
+                       deleted_at = datetime('now'),
+                       paid_at = NULL
+                   WHERE id = ?""",
+                (reddit_url, posted_at, old_status, comment_id)
+            )
+            self.conn.commit()
+            return old_status
+        return None
+
     def unremove_comment(self, comment_id):
         """Revert a removed comment back to its previous status (fallback to deployed)."""
         row = self.conn.execute(

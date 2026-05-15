@@ -41,6 +41,16 @@
         .toast-success { background: #1a3320; color: #46d160; }
         .toast-error { background: #4a1a1a; color: #ff6b6b; }
         .toast-info { background: #0045AC; color: #7AAFFF; }
+        /* Persistent toasts (background-task completions) stay on screen
+           until the user clicks ×. They share base styling with .toast
+           and add a flex layout for the message + close button. */
+        .toast.persistent { display: flex; align-items: flex-start; gap: 10px; padding-right: 14px; max-width: 420px; }
+        .toast.persistent .toast-msg { flex: 1; white-space: pre-line; }
+        .toast.persistent .toast-actions { display: flex; gap: 6px; align-items: center; }
+        .toast.persistent .toast-action { background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; }
+        .toast.persistent .toast-action:hover { background: rgba(255,255,255,0.15); }
+        .toast.persistent .toast-close { background: none; border: none; color: inherit; opacity: 0.7; cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 0 2px; margin-left: 4px; }
+        .toast.persistent .toast-close:hover { opacity: 1; }
         .task-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 200; background: #1A1A1B; border-bottom: 1px solid #343536; padding: 6px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 0.8rem; }
         .task-bar.minimized { flex-wrap: nowrap; overflow: hidden; max-height: 32px; }
         .task-bar.minimized .task-pill:not(:first-of-type) { display: none; }
@@ -192,6 +202,51 @@ function toast(msg, type = 'info', duration = 3500) {
     setTimeout(() => el.remove(), duration);
 }
 
+// Sticky toast — stays visible until the user clicks ×. Used for
+// background-task completions where the user might be on a different
+// tab when the task finishes; we don't want to silently drop the
+// "complete" / "failed" signal after a few seconds.
+//
+// `actions` (optional): list of {label, onClick} for buttons that
+// render alongside the close button. Each onClick is invoked with
+// the toast element; return falsy to dismiss after click, truthy to
+// keep open.
+function persistentToast(msg, type = 'info', actions = null) {
+    const container = document.getElementById('toasts');
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = `toast toast-${type} persistent`;
+    const msgEl = document.createElement('div');
+    msgEl.className = 'toast-msg';
+    msgEl.textContent = msg;
+    el.appendChild(msgEl);
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'toast-actions';
+    if (Array.isArray(actions)) {
+        for (const a of actions) {
+            if (!a || !a.label) continue;
+            const btn = document.createElement('button');
+            btn.className = 'toast-action';
+            btn.textContent = a.label;
+            btn.onclick = () => {
+                let keep = false;
+                try { keep = !!(a.onClick && a.onClick(el)); } catch (e) { console.warn(e); }
+                if (!keep) el.remove();
+            };
+            actionsEl.appendChild(btn);
+        }
+    }
+    const close = document.createElement('button');
+    close.className = 'toast-close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    close.onclick = () => el.remove();
+    actionsEl.appendChild(close);
+    el.appendChild(actionsEl);
+    container.appendChild(el);
+    return el;
+}
+
 // =========================================================================
 // Modal
 // =========================================================================
@@ -286,19 +341,22 @@ function _pollTask(taskId, label, onComplete) {
             if (t.status === 'complete') {
                 clearInterval(poll);
                 _removeBgTask(taskId);
-                toast(`${label} complete!`, 'success');
+                // Persistent toast — task completions must NOT vanish
+                // after a few seconds; the user may have been on a
+                // different tab. They dismiss it explicitly with ×.
+                persistentToast(`${label} complete`, 'success');
                 if (onComplete) onComplete(t.result);
             } else if (t.status === 'error') {
                 clearInterval(poll);
                 _removeBgTask(taskId);
-                toast(`${label} failed: ${t.error}`, 'error');
+                persistentToast(`${label} failed: ${t.error}`, 'error');
             }
         } catch (e) {
             retries++;
             if (retries > 5) {
                 clearInterval(poll);
                 _removeBgTask(taskId);
-                toast(`${label} lost — please try again`, 'error');
+                persistentToast(`${label} lost — please try again`, 'error');
             }
         }
     }, 2000);
@@ -5014,7 +5072,7 @@ async function renderAllComments(el) {
                         <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#d7dadc" onclick="checkLiveAc('');this.closest('div').classList.add('hidden')">All (use filters)</a>
                     </div>
                 </div>
-                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()">Check Live Logs</button>
+                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
             </div>
         </div>
         <div id="ac-counts" class="flex gap-1 flex-wrap mb-3"></div>
@@ -5201,14 +5259,21 @@ async function showCheckLiveLogs(append = false) {
         modal.innerHTML = `
             <div style="background:#1a1a1b;border:1px solid #343536;border-radius:8px;max-width:900px;width:95%;max-height:85vh;overflow-y:auto;padding:20px">
                 <div class="flex justify-between items-center mb-4">
-                    <h3 style="color:#d7dadc;font-size:1.1rem;font-weight:bold">Check-Live Logs</h3>
+                    <h3 style="color:#d7dadc;font-size:1.1rem;font-weight:bold">Activity Log</h3>
                     <button onclick="this.closest('#cl-logs-modal').remove()" style="color:#818384;font-size:1.3rem;background:none;border:none;cursor:pointer">&times;</button>
                 </div>
-                <div class="flex gap-2 mb-3">
+                <div class="flex gap-2 mb-3 flex-wrap">
                     <select id="cl-log-action" onchange="_clLogsAction=this.value;showCheckLiveLogs()" style="background:#2a2a2b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:4px 8px;font-size:0.8rem">
                         <option value="">All Actions</option>
-                        <option value="marked_dead" ${_clLogsAction==='marked_dead'?'selected':''}>Marked Dead</option>
-                        <option value="restored" ${_clLogsAction==='restored'?'selected':''}>Restored</option>
+                        <optgroup label="Live Checker">
+                            <option value="marked_dead" ${_clLogsAction==='marked_dead'?'selected':''}>Marked Dead</option>
+                            <option value="restored" ${_clLogsAction==='restored'?'selected':''}>Restored</option>
+                        </optgroup>
+                        <optgroup label="Bulk Deploy">
+                            <option value="bulk_marked_removed" ${_clLogsAction==='bulk_marked_removed'?'selected':''}>Bulk: marked removed</option>
+                            <option value="bulk_restored" ${_clLogsAction==='bulk_restored'?'selected':''}>Bulk: restored</option>
+                            <option value="bulk_deployed" ${_clLogsAction==='bulk_deployed'?'selected':''}>Bulk: deployed</option>
+                        </optgroup>
                     </select>
                     <select id="cl-log-source" onchange="_clLogsSource=this.value;showCheckLiveLogs()" style="background:#2a2a2b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:4px 8px;font-size:0.8rem">
                         <option value="">All Sources</option>
@@ -5237,8 +5302,18 @@ async function showCheckLiveLogs(append = false) {
 
     const tbody = document.getElementById('cl-logs-tbody');
     if (!append) tbody.innerHTML = '';
+    // Action vocabulary now spans live-checker + bulk-deploy events;
+    // share one labelling table so colours stay consistent across the
+    // log and any future stats panels.
+    const actionMeta = {
+        marked_dead:         { label: 'Removed',         color: '#ff6b6b', source: 'Live Checker' },
+        restored:            { label: 'Restored',        color: '#46d160', source: 'Live Checker' },
+        bulk_marked_removed: { label: 'Bulk · removed',  color: '#ff8b60', source: 'Bulk Deploy' },
+        bulk_restored:       { label: 'Bulk · restored', color: '#9efbb4', source: 'Bulk Deploy' },
+        bulk_deployed:       { label: 'Bulk · deployed', color: '#7AAFFF', source: 'Bulk Deploy' },
+    };
     const rows = logs.map(l => {
-        const actionColor = l.action === 'marked_dead' ? '#ff6b6b' : '#46d160';
+        const meta = actionMeta[l.action] || { label: l.action || '-', color: '#d7dadc', source: '' };
         const srcLabel = l.source === 'search_comment' ? 'LS' : 'REG';
         const time = l.created_at ? l.created_at.replace('T', ' ').slice(0, 16) : '';
         return `<tr style="border-bottom:1px solid #2a2a2b">
@@ -5248,7 +5323,7 @@ async function showCheckLiveLogs(append = false) {
             <td style="padding:4px 6px">${l.account_id ? `<span style="color:#FFD635">u/${l.account_id}</span>` : '-'}</td>
             <td style="padding:4px 6px">${l.subreddit ? `<span style="color:#0079D3">r/${l.subreddit}</span>` : '-'}</td>
             <td style="padding:4px 6px">${l.brand_name || '-'}</td>
-            <td style="padding:4px 6px"><span style="color:${actionColor};font-weight:bold">${l.action === 'marked_dead' ? 'Removed' : 'Restored'}</span></td>
+            <td style="padding:4px 6px"><span style="color:${meta.color};font-weight:bold" title="${meta.source}">${meta.label}</span></td>
             <td style="padding:4px 6px">${l.prev_status} → ${l.new_status}</td>
             <td style="padding:4px 6px">${l.reddit_url ? `<a href="${l.reddit_url}" target="_blank" style="color:#4fc3f7">view</a>` : '-'}</td>
         </tr>`;
@@ -7715,6 +7790,7 @@ async function renderLsubsComments(c) {
             </label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
             <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+            <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
         </div>
         <div id="lsubs-cmt-list"></div>
     `;
@@ -9020,7 +9096,7 @@ async function renderLsComments(c) {
                         <a class="block px-3 py-2 text-sm cursor-pointer hover:bg-gray-700" style="color:#d7dadc" onclick="checkLiveLs('');this.closest('div').classList.add('hidden')">All Filtered</a>
                     </div>
                 </div>
-                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()">Check Live Logs</button>
+                <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
                 <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
@@ -9478,10 +9554,11 @@ async function _bulkDeployPoll(taskId) {
                 if (summaryEl) {
                     summaryEl.innerHTML = `
                         <span class="text-green-400">Deployed: ${s.deployed || 0}</span> ·
-                        <span class="text-gray-400">Already: ${s.already_deployed || 0}</span> ·
+                        <span style="color:#ff8b60">Marked removed: ${s.marked_removed || 0}</span> ·
+                        <span class="text-gray-400">Already: ${(s.already_deployed || 0) + (s.already_removed || 0)}</span> ·
                         <span class="text-yellow-400">No match: ${s.no_match || 0}</span> ·
                         <span class="text-red-400">Error: ${s.error || 0}</span>
-                        ${(s.by_tier) ? ` <span class="text-gray-500">(URL match: ${s.by_tier.url_match || 0}, body match: ${s.by_tier.body_match || 0})</span>` : ''}
+                        ${(s.by_tier) ? ` <span class="text-gray-500">(URL match: ${s.by_tier.url_match || 0}, body match: ${s.by_tier.body_match || 0}${s.by_tier.removed_singleton ? `, removed singleton: ${s.by_tier.removed_singleton}` : ''})</span>` : ''}
                     `;
                 }
                 if (statusEl) statusEl.textContent = `Task complete · ${result.processed || 0} URLs processed`;
@@ -9504,18 +9581,29 @@ async function _bulkDeployPoll(taskId) {
 function _bulkDeployRenderResults(results) {
     const el = document.getElementById('bulk-deploy-results');
     if (!el) return;
+    // Action colour palette — green for new deploys, blue for idempotent
+    // skips, amber for removed (still a successful match, just a
+    // different terminal status), yellow for no_match, red for errors.
+    const actionColour = {
+        deployed:           '#9efbb4',
+        already_deployed:   '#9ec4ff',
+        marked_removed:     '#ff8b60',
+        already_removed:    '#ffb088',
+        no_match:           '#ffd166',
+        error:              '#ff8b8b',
+    };
     const rows = results.map(r => {
-        const colour = r.action === 'deployed' ? '#9efbb4'
-                     : r.action === 'already_deployed' ? '#9ec4ff'
-                     : r.action === 'no_match' ? '#ffd166'
-                     : '#ff8b8b';
+        const colour = actionColour[r.action] || '#ff8b8b';
         const tier = r.tier ? ` <span style="color:#818384">[${r.tier}]</span>` : '';
+        const liveness = r.liveness && r.liveness !== 'live'
+            ? ` <span style="color:#ff8b60" title="Reddit liveness">[${r.liveness}]</span>`
+            : '';
         const ident = r.id ? ` #${r.id}` : '';
         const sim = r.similarity != null ? ` sim=${r.similarity}` : '';
         const reason = r.reason ? ` <span style="color:#818384">(${r.reason})</span>` : '';
         const truncUrl = (r.url || '').length > 60 ? (r.url || '').substring(0, 57) + '…' : (r.url || '');
         return `<div style="padding:2px 4px;border-bottom:1px solid #2a2a2b">
-            <span style="color:${colour}">${r.action || '?'}</span>${tier}
+            <span style="color:${colour}">${r.action || '?'}</span>${tier}${liveness}
             <span style="color:#818384">${r.kind || '?'}${ident}${sim}</span>
             <span style="color:#d7dadc">${truncUrl}</span>${reason}
         </div>`;

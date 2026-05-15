@@ -239,15 +239,25 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
                                timeout: int = 15) -> dict:
     """Fetch the target comment's metadata from Reddit.
 
-    Returns `{"body": str | None, "posted_at": "YYYY-MM-DD HH:MM:SS" | None}`.
-    Both keys are always present; either may be None if the URL can't be
-    parsed, the fetch fails, or the comment isn't in the response (e.g.
-    deleted, removed, share-link, etc.).
+    Returns:
+        {
+          "body": str | None,
+          "posted_at": "YYYY-MM-DD HH:MM:SS" | None,
+          "is_removed": bool,
+          "found": bool,
+        }
+
+    `is_removed` is True when the body is `"[removed]"` / `"[deleted]"`
+    (mod removal or user deletion). `found` is True when the target
+    comment ID was located in the JSON response at all; False on
+    fetch error, URL-parse failure, or 404. The two flags let the
+    caller distinguish "live" / "removed" / "missing" without
+    re-walking the body.
 
     `reddit_get` is the app's `_reddit_get` (proxy + retry).
     """
     from urllib.parse import urlparse
-    out = {"body": None, "posted_at": None}
+    out = {"body": None, "posted_at": None, "is_removed": False, "found": False}
     try:
         parsed = urlparse(comment_url)
         path = parsed.path.rstrip("/") + ".json"
@@ -291,8 +301,29 @@ def fetch_reddit_comment_meta(comment_url: str, *, reddit_get: Callable,
         if cid == target_cid:
             out["body"] = body
             out["posted_at"] = _utc_seconds_to_iso(created_utc)
+            out["found"] = True
+            stripped = (body or "").strip().lower()
+            out["is_removed"] = stripped in ("[removed]", "[deleted]")
             return out
     return out
+
+
+def classify_liveness(meta: dict) -> str:
+    """Map a fetch_reddit_comment_meta result to a coarse liveness string.
+
+    Returns one of:
+      - "live"    — body present, not a sentinel
+      - "removed" — comment exists on Reddit but was removed/deleted
+      - "missing" — the comment couldn't be located (fetch failed,
+                    404, URL malformed, etc.)
+    """
+    if not meta:
+        return "missing"
+    if not meta.get("found"):
+        return "missing"
+    if meta.get("is_removed"):
+        return "removed"
+    return "live"
 
 
 def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
@@ -314,6 +345,69 @@ def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
 _DONE_STATUSES = {"deployed", "paid", "archived"}
 
 
+def _row_context(db, comment_id, kind):
+    """Look up subreddit + brand + account for a row so log entries
+    populate the Activity Log columns. Best-effort; returns (None,
+    None, None) on any failure — the log row still writes, just with
+    less context.
+    """
+    try:
+        if kind == "comment":
+            row = db.conn.execute(
+                """SELECT s.name AS subreddit, b.name AS brand, c.account_id
+                   FROM comments c
+                   JOIN posts p ON c.post_id = p.id
+                   LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                   LEFT JOIN brands b ON c.brand_id = b.id
+                   WHERE c.id = ?""",
+                (comment_id,)
+            ).fetchone()
+        elif kind == "search_comment":
+            row = db.conn.execute(
+                """SELECT sp.subreddit AS subreddit, b.name AS brand, sc.account_id
+                   FROM search_comments sc
+                   JOIN search_posts sp ON sc.search_post_id = sp.id
+                   LEFT JOIN brands b ON sc.brand_id = b.id
+                   WHERE sc.id = ?""",
+                (comment_id,)
+            ).fetchone()
+        else:
+            row = None
+        if row:
+            # SQLite Row → indexable by column name when row_factory is set,
+            # but defensively coerce via try/except.
+            try:
+                return row["subreddit"], row["brand"], row["account_id"]
+            except Exception:
+                return None, None, None
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _log_bulk_event(db, comment_id, kind, reddit_url, action,
+                     prev_status, new_status):
+    """Best-effort write to check_live_log. We swallow failures because
+    a logging hiccup must NEVER undo the user's actual deploy/remove
+    action. The Activity Log is informational, not transactional.
+    """
+    subreddit, brand_name, account_id = _row_context(db, comment_id, kind)
+    try:
+        db.log_live_check(
+            comment_id=comment_id,
+            source=kind,
+            reddit_url=reddit_url,
+            action=action,
+            prev_status=prev_status or "",
+            new_status=new_status or "",
+            account_id=account_id,
+            subreddit=subreddit,
+            brand_name=brand_name,
+        )
+    except Exception as e:
+        print(f"[bulk-deploy] log_live_check failed: {e}", flush=True)
+
+
 def match_and_deploy_comment(db, classified: dict, *,
                               reddit_get: Callable,
                               similarity_threshold: float = 0.5) -> dict:
@@ -321,10 +415,15 @@ def match_and_deploy_comment(db, classified: dict, *,
 
     Returns a result dict the orchestrator records in tasks.progress.
     Possible action values:
-      - "deployed"            (tier_url / tier_body — flipped to deployed)
+      - "deployed"            (URL/body match — flipped to deployed)
+      - "marked_removed"      (URL matched but Reddit shows removed/deleted)
       - "already_deployed"    (idempotent — was already deployed)
+      - "already_removed"     (idempotent — was already removed)
       - "no_match"            (URL didn't map to any DB row)
       - "error"               (transient failure — see "reason")
+
+    Adds `liveness` ("live" | "removed" | "missing") whenever we did
+    fetch the Reddit JSON.
     """
     url = classified["url"]
 
@@ -336,18 +435,65 @@ def match_and_deploy_comment(db, classified: dict, *,
         if row:
             source = "search_comment"
     if row:
-        if row.get("status") in _DONE_STATUSES:
+        current_status = row.get("status")
+        # Already done in our DB.
+        if current_status in _DONE_STATUSES:
             return {
                 "url": url, "kind": "comment", "tier": "url_match",
                 "source": source, "id": row["id"],
                 "action": "already_deployed",
             }
-        # Pull the Reddit-posted timestamp in one extra call. Cheap —
-        # this is the only place in the URL-match path that does a
-        # network fetch, and it lets us populate posted_at consistently
-        # with Tier-2.
+        if current_status == "removed":
+            # Patch URL / posted_at in case they were missing, but don't
+            # flip status or write a log row.
+            meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+            try:
+                db.mark_removed_with_url(
+                    row["id"], source, url, posted_at=meta.get("posted_at"),
+                )
+            except Exception:
+                pass
+            return {
+                "url": url, "kind": "comment", "tier": "url_match",
+                "source": source, "id": row["id"],
+                "action": "already_removed",
+                "liveness": classify_liveness(meta),
+            }
+        # One Reddit fetch buys us liveness + posted_at simultaneously.
         meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
         posted_at = meta.get("posted_at")
+        liveness = classify_liveness(meta)
+        if liveness == "removed":
+            # Comment was posted on Reddit, but is no longer live.
+            # Attach URL + flip the DB row to 'removed' (instead of
+            # 'deployed') and log the activity.
+            try:
+                prev = db.mark_removed_with_url(
+                    row["id"], source, url, posted_at=posted_at,
+                )
+            except Exception as e:
+                return {
+                    "url": url, "kind": "comment", "tier": "url_match",
+                    "source": source, "id": row["id"],
+                    "action": "error", "reason": str(e),
+                    "liveness": liveness,
+                }
+            _log_bulk_event(
+                db, row["id"], source, url,
+                "bulk_marked_removed", prev, "removed",
+            )
+            return {
+                "url": url, "kind": "comment", "tier": "url_match",
+                "source": source, "id": row["id"],
+                "action": "marked_removed",
+                "liveness": liveness, "posted_at": posted_at,
+            }
+        # liveness in {"live", "missing"} — keep existing deploy path.
+        # "missing" still flips to deployed: the user explicitly told us
+        # via the sheet that this URL is correct; Reddit just couldn't
+        # confirm it right now (rate limit / proxy hiccup). The
+        # backfill / live-check will pick the row up later if it turns
+        # out the comment was actually removed.
         try:
             if source == "comment":
                 db.deploy_comment(row["id"], url, posted_at=posted_at)
@@ -356,13 +502,14 @@ def match_and_deploy_comment(db, classified: dict, *,
             return {
                 "url": url, "kind": "comment", "tier": "url_match",
                 "source": source, "id": row["id"], "action": "deployed",
-                "posted_at": posted_at,
+                "posted_at": posted_at, "liveness": liveness,
             }
         except Exception as e:
             return {
                 "url": url, "kind": "comment", "tier": "url_match",
                 "source": source, "id": row["id"],
                 "action": "error", "reason": str(e),
+                "liveness": liveness,
             }
 
     # --- Tier 2: post + body fuzzy match ----------------------------------
@@ -382,23 +529,56 @@ def match_and_deploy_comment(db, classified: dict, *,
             "reason": "no undeployed comments under that post",
         }
 
-    # One JSON fetch gives us both body (for matching) AND posted_at
-    # (for the `posted_at` column). No extra round trip — the metadata
-    # helper walks the same response.
+    # One JSON fetch gives us body (for matching), posted_at (for the
+    # column) AND liveness — no extra round trip.
     meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
     body = meta.get("body")
     posted_at = meta.get("posted_at")
-    if not body:
+    liveness = classify_liveness(meta)
+
+    if liveness == "missing" or body is None:
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": "reddit_fetch_failed_or_comment_unreachable",
-        }
-    if body.strip().lower() in ("[deleted]", "[removed]"):
-        return {
-            "url": url, "kind": "comment", "action": "no_match",
-            "reason": "comment_body_deleted_or_removed_on_reddit",
+            "liveness": liveness,
         }
 
+    if liveness == "removed":
+        # Comment was removed/deleted on Reddit. We can't body-match
+        # against a `[removed]` sentinel, so we fall back to a
+        # singleton rule: if exactly ONE undeployed comment sits under
+        # this post, claim the URL goes to it, attach URL, mark removed.
+        # Otherwise we report no_match — never guess between candidates.
+        if len(candidates) == 1:
+            cand = candidates[0]
+            try:
+                prev = db.mark_removed_with_url(
+                    cand["id"], candidate_kind, url, posted_at=posted_at,
+                )
+            except Exception as e:
+                return {
+                    "url": url, "kind": "comment", "tier": "removed_singleton",
+                    "source": candidate_kind, "id": cand["id"],
+                    "action": "error", "reason": str(e),
+                    "liveness": liveness,
+                }
+            _log_bulk_event(
+                db, cand["id"], candidate_kind, url,
+                "bulk_marked_removed", prev, "removed",
+            )
+            return {
+                "url": url, "kind": "comment", "tier": "removed_singleton",
+                "source": candidate_kind, "id": cand["id"],
+                "action": "marked_removed",
+                "liveness": liveness, "posted_at": posted_at,
+            }
+        return {
+            "url": url, "kind": "comment", "action": "no_match",
+            "reason": f"comment_removed_on_reddit_and_{len(candidates)}_candidates",
+            "liveness": liveness,
+        }
+
+    # liveness == "live" — body fuzzy match as before.
     scored = sorted(
         ((jaccard(body, c["body"]), c) for c in candidates),
         key=lambda p: -p[0],
@@ -409,6 +589,7 @@ def match_and_deploy_comment(db, classified: dict, *,
             "url": url, "kind": "comment", "action": "no_match",
             "reason": f"best body similarity {best_score:.2f} below threshold {similarity_threshold:.2f}",
             "best_id": best["id"], "best_score": round(best_score, 3),
+            "liveness": liveness,
         }
     runner_up = scored[1][0] if len(scored) > 1 else 0.0
     ambiguous = runner_up >= similarity_threshold and (best_score - runner_up) < 0.1
@@ -422,12 +603,13 @@ def match_and_deploy_comment(db, classified: dict, *,
             "url": url, "kind": "comment", "tier": "body_match",
             "source": candidate_kind, "id": best["id"],
             "action": "error", "reason": str(e),
+            "liveness": liveness,
         }
     out = {
         "url": url, "kind": "comment", "tier": "body_match",
         "source": candidate_kind, "id": best["id"], "action": "deployed",
         "similarity": round(best_score, 3),
-        "posted_at": posted_at,
+        "posted_at": posted_at, "liveness": liveness,
     }
     if ambiguous:
         out["ambiguous"] = True
@@ -537,10 +719,13 @@ def _summarise(results: list[dict]) -> dict:
     """Roll the per-row results into top-line counts."""
     counts = {
         "deployed": 0,
+        "marked_removed": 0,
         "already_deployed": 0,
+        "already_removed": 0,
         "no_match": 0,
         "error": 0,
-        "by_tier": {"url_match": 0, "body_match": 0},
+        "by_tier": {"url_match": 0, "body_match": 0, "removed_singleton": 0},
+        "by_liveness": {"live": 0, "removed": 0, "missing": 0},
         "comments": 0,
         "posts": 0,
     }
@@ -555,4 +740,7 @@ def _summarise(results: list[dict]) -> dict:
         tier = r.get("tier")
         if tier in counts["by_tier"]:
             counts["by_tier"][tier] += 1
+        liveness = r.get("liveness")
+        if liveness in counts["by_liveness"]:
+            counts["by_liveness"][liveness] += 1
     return counts

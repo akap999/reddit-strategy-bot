@@ -9656,14 +9656,33 @@ function _bulkDeployRenderResults(results) {
         const liveness = r.liveness && r.liveness !== 'live'
             ? ` <span style="color:#ff8b60" title="Reddit liveness">[${r.liveness}]</span>`
             : '';
+        // Show source (which DB table the row sits in) — the user often
+        // looks at one view (Live Search → search_comments) but the
+        // matcher updated the other (Live Subs → comments). Visible
+        // source removes that ambiguity from the modal.
+        const sourceBadge = r.source
+            ? ` <span style="color:${r.source === 'search_comment' ? '#0079D3' : '#9ec4ff'};font-size:0.7rem" title="DB table">[${r.source === 'search_comment' ? 'LS' : 'REG'}]</span>`
+            : '';
         const ident = r.id ? ` #${r.id}` : '';
         const sim = r.similarity != null ? ` sim=${r.similarity}` : '';
         const reason = r.reason ? ` <span style="color:#818384">(${r.reason})</span>` : '';
+        // When a single URL touched multiple rows (e.g. duplicate in
+        // comments + search_comments), the rollup carries the others
+        // in `extras`. Render them as a tiny inline list so the user
+        // sees the full picture.
+        let extrasHtml = '';
+        if (Array.isArray(r.extras) && r.extras.length) {
+            extrasHtml = r.extras.map(e => {
+                const ec = actionColour[e.action] || '#9ec4ff';
+                const eSrc = e.source === 'search_comment' ? 'LS' : 'REG';
+                return `<span style="color:${ec};margin-left:8px;font-size:0.75rem">+ ${e.action} ${eSrc}#${e.id}</span>`;
+            }).join('');
+        }
         const truncUrl = (r.url || '').length > 60 ? (r.url || '').substring(0, 57) + '…' : (r.url || '');
         return `<div style="padding:2px 4px;border-bottom:1px solid #2a2a2b">
-            <span style="color:${colour}">${r.action || '?'}</span>${tier}${liveness}
+            <span style="color:${colour}">${r.action || '?'}</span>${tier}${liveness}${sourceBadge}
             <span style="color:#818384">${r.kind || '?'}${ident}${sim}</span>
-            <span style="color:#d7dadc">${truncUrl}</span>${reason}
+            <span style="color:#d7dadc">${truncUrl}</span>${reason}${extrasHtml}
         </div>`;
     }).join('');
     el.innerHTML = rows || '<div class="text-gray-500" style="padding:4px">No rows yet…</div>';

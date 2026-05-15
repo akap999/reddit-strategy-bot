@@ -515,6 +515,122 @@ def _log_bulk_event(db, comment_id, kind, reddit_url, action,
         print(f"[bulk-deploy] log_live_check failed: {e}", flush=True)
 
 
+def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
+    """Decide what to do with a single matched row (from `comments` or
+    `search_comments`). Returns a per-row result dict carrying source,
+    id, action, and (when applicable) reason / posted_at.
+
+    Branches mirror the original Tier-1 logic, but on a SINGLE row so
+    the caller can apply it independently to legacy + search matches.
+    """
+    current_status = (row.get("status") if isinstance(row, dict) else None) or ""
+    rid = row["id"]
+
+    # Already terminal in our DB — no-op.
+    if current_status in _DONE_STATUSES:
+        return {
+            "source": source, "id": rid,
+            "action": "already_deployed",
+            "current_status": current_status,
+        }
+
+    # Row already 'removed' in DB. Patch URL/posted_at silently and
+    # report `already_removed` so the user knows nothing changed.
+    if current_status == "removed":
+        try:
+            db.mark_removed_with_url(rid, source, url, posted_at=posted_at)
+        except Exception:
+            pass
+        return {
+            "source": source, "id": rid,
+            "action": "already_removed",
+        }
+
+    # Reddit says the comment is gone — attach URL, flip to 'removed',
+    # log the event.
+    if liveness == "removed":
+        try:
+            prev = db.mark_removed_with_url(rid, source, url, posted_at=posted_at)
+        except Exception as e:
+            return {
+                "source": source, "id": rid,
+                "action": "error", "reason": str(e),
+            }
+        _log_bulk_event(db, rid, source, url,
+                        "bulk_marked_removed", prev, "removed")
+        return {
+            "source": source, "id": rid,
+            "action": "marked_removed",
+        }
+
+    # liveness in {"live", "missing"} — deploy.
+    try:
+        if source == "comment":
+            db.deploy_comment(rid, url, posted_at=posted_at)
+        else:
+            db.deploy_search_comment(rid, url, posted_at=posted_at)
+    except Exception as e:
+        return {
+            "source": source, "id": rid,
+            "action": "error", "reason": str(e),
+        }
+    _log_bulk_event(db, rid, source, url,
+                    "bulk_deployed", current_status, "deployed")
+    return {
+        "source": source, "id": rid,
+        "action": "deployed",
+    }
+
+
+# Rollup priority — when a URL touched rows in both tables with
+# different outcomes, this picks the most informative action to
+# surface as the "primary" report row. The other rows are listed
+# under `extras` so the user still sees the full picture.
+_TIER1_PRIORITY = [
+    "error",
+    "deployed",
+    "marked_removed",
+    "already_removed",
+    "already_deployed",
+]
+
+
+def _rollup_tier1(url, per_row, liveness, posted_at):
+    """Roll N per-row results (1 or 2 — one per matching DB table) into
+    a single report dict for the bulk-deploy modal. The primary action
+    is the most-informative one (deploy > mark_removed > already_*);
+    additional rows are included as `extras` so the user can see if
+    multiple DB rows were updated for the same URL.
+    """
+    if not per_row:
+        return {
+            "url": url, "kind": "comment", "action": "no_match",
+            "reason": "tier1_internal_error",
+        }
+    ranked = sorted(
+        per_row,
+        key=lambda r: _TIER1_PRIORITY.index(r["action"]) if r["action"] in _TIER1_PRIORITY else 99,
+    )
+    primary = ranked[0]
+    extras = ranked[1:] if len(ranked) > 1 else []
+    out = {
+        "url": url, "kind": "comment", "tier": "url_match",
+        "source": primary["source"], "id": primary["id"],
+        "action": primary["action"],
+        "liveness": liveness,
+    }
+    if posted_at:
+        out["posted_at"] = posted_at
+    if primary.get("reason"):
+        out["reason"] = primary["reason"]
+    if extras:
+        out["extras"] = [
+            {"source": r["source"], "id": r["id"], "action": r["action"]}
+            for r in extras
+        ]
+    return out
+
+
 def match_and_deploy_comment(db, classified: dict, *,
                               reddit_get: Callable,
                               similarity_threshold: float = 0.5) -> dict:
@@ -534,105 +650,49 @@ def match_and_deploy_comment(db, classified: dict, *,
     """
     url = classified["url"]
 
-    # --- Tier 1: direct URL match -----------------------------------------
-    row = db.find_comment_by_url(url)
-    source = "comment"
-    if not row:
-        row = db.find_search_comment_by_url(url)
-        if row:
-            source = "search_comment"
-    if row:
-        current_status = row.get("status")
-        # Already done in our DB.
-        if current_status in _DONE_STATUSES:
-            return {
-                "url": url, "kind": "comment", "tier": "url_match",
-                "source": source, "id": row["id"],
-                "action": "already_deployed",
-            }
-        if current_status == "removed":
-            # Patch URL / posted_at in case they were missing, but don't
-            # flip status or write a log row.
-            meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
-            try:
-                db.mark_removed_with_url(
-                    row["id"], source, url, posted_at=meta.get("posted_at"),
-                )
-            except Exception:
-                pass
-            return {
-                "url": url, "kind": "comment", "tier": "url_match",
-                "source": source, "id": row["id"],
-                "action": "already_removed",
-                "liveness": classify_liveness(meta),
-            }
-        # One Reddit fetch buys us liveness + posted_at simultaneously.
+    # --- Tier 1: direct URL match (both tables) ---------------------------
+    # A Reddit URL may map to BOTH a `comments` row (legacy Live Subs
+    # pipeline) AND a `search_comments` row (Live Search pipeline) for
+    # the same underlying comment — if the post got imported into both
+    # pipelines, each generated its own copy. Previously we short-
+    # circuited on the first match and reported "already_deployed",
+    # leaving the OTHER table's row stuck on `assigned`/`draft`. Now
+    # we process every matching row independently and roll the results
+    # into one report entry.
+    tier1_matches = []  # list of (source, row)
+    legacy_row = db.find_comment_by_url(url)
+    if legacy_row:
+        tier1_matches.append(("comment", legacy_row))
+    search_row = db.find_search_comment_by_url(url)
+    if search_row:
+        tier1_matches.append(("search_comment", search_row))
+
+    if tier1_matches:
+        # One Reddit fetch shared across rows.
         meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
         posted_at = meta.get("posted_at")
         liveness = classify_liveness(meta)
-        if liveness == "removed":
-            # Comment was posted on Reddit, but is no longer live.
-            # Attach URL + flip the DB row to 'removed' (instead of
-            # 'deployed') and log the activity.
-            try:
-                prev = db.mark_removed_with_url(
-                    row["id"], source, url, posted_at=posted_at,
-                )
-            except Exception as e:
-                return {
-                    "url": url, "kind": "comment", "tier": "url_match",
-                    "source": source, "id": row["id"],
-                    "action": "error", "reason": str(e),
-                    "liveness": liveness,
-                }
-            _log_bulk_event(
-                db, row["id"], source, url,
-                "bulk_marked_removed", prev, "removed",
-            )
-            return {
-                "url": url, "kind": "comment", "tier": "url_match",
-                "source": source, "id": row["id"],
-                "action": "marked_removed",
-                "liveness": liveness, "posted_at": posted_at,
-            }
-        # liveness in {"live", "missing"} — keep existing deploy path.
-        # "missing" still flips to deployed: the user explicitly told us
-        # via the sheet that this URL is correct; Reddit just couldn't
-        # confirm it right now (rate limit / proxy hiccup). The
-        # backfill / live-check will pick the row up later if it turns
-        # out the comment was actually removed.
-        prev_status = (row.get("status") or "") if isinstance(row, dict) else ""
-        try:
-            if source == "comment":
-                db.deploy_comment(row["id"], url, posted_at=posted_at)
-            else:
-                db.deploy_search_comment(row["id"], url, posted_at=posted_at)
-            _log_bulk_event(
-                db, row["id"], source, url,
-                "bulk_deployed", prev_status, "deployed",
-            )
-            return {
-                "url": url, "kind": "comment", "tier": "url_match",
-                "source": source, "id": row["id"], "action": "deployed",
-                "posted_at": posted_at, "liveness": liveness,
-            }
-        except Exception as e:
-            return {
-                "url": url, "kind": "comment", "tier": "url_match",
-                "source": source, "id": row["id"],
-                "action": "error", "reason": str(e),
-                "liveness": liveness,
-            }
+        per_row = [
+            _process_tier1_row(db, src, row, url, meta, posted_at, liveness)
+            for src, row in tier1_matches
+        ]
+        return _rollup_tier1(url, per_row, liveness, posted_at)
 
     # --- Tier 2: post + body fuzzy match ----------------------------------
     # Match the parent post by its Reddit post ID (the immutable
     # `/comments/<id>/` segment) rather than by the full URL. URLs in
     # the user's sheet often use Reddit's `/comment/` placeholder slug
-    # (e.g. `/r/sub/comments/POSTID/comment/CMTID/`) while our DB stores
-    # the actual title slug. Matching on the post-ID substring lets us
-    # bridge that without forcing the user to massage their URLs.
-    post_kind, post_row = db.find_post_by_reddit_post_id(classified["post_id"])
-    if not post_row:
+    # while our DB stores the actual title slug. Match by post-ID
+    # substring.
+    #
+    # We now also consider posts in BOTH the legacy `posts` table AND
+    # `search_posts` — a Reddit post may have been picked up by both
+    # pipelines, in which case its comments live in both
+    # `comments` and `search_comments`. The previous "first table
+    # wins" behaviour silently hid the user's actual rows whenever a
+    # legacy `posts` shadow existed.
+    matching_posts = db.find_posts_by_reddit_post_id(classified["post_id"])
+    if not matching_posts:
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": (
@@ -640,10 +700,16 @@ def match_and_deploy_comment(db, classified: dict, *,
                 + ") not found in posts or search_posts"
             ),
         }
-    candidate_kind = "comment" if post_kind == "post" else "search_comment"
-    candidates = db.find_undeployed_comments_for_post(
-        post_row["id"], candidate_kind
-    )
+    # Gather candidate (undeployed) comments across every matching post.
+    # Each entry is augmented with its `kind` so the deploy step picks
+    # the right table to update.
+    candidates = []
+    for post_kind, post_row in matching_posts:
+        cand_kind = "comment" if post_kind == "post" else "search_comment"
+        for c in db.find_undeployed_comments_for_post(post_row["id"], cand_kind):
+            d = dict(c)
+            d["__kind"] = cand_kind
+            candidates.append(d)
     if not candidates:
         return {
             "url": url, "kind": "comment", "action": "no_match",
@@ -672,24 +738,25 @@ def match_and_deploy_comment(db, classified: dict, *,
         # Otherwise we report no_match — never guess between candidates.
         if len(candidates) == 1:
             cand = candidates[0]
+            cand_kind = cand.get("__kind", "comment")
             try:
                 prev = db.mark_removed_with_url(
-                    cand["id"], candidate_kind, url, posted_at=posted_at,
+                    cand["id"], cand_kind, url, posted_at=posted_at,
                 )
             except Exception as e:
                 return {
                     "url": url, "kind": "comment", "tier": "removed_singleton",
-                    "source": candidate_kind, "id": cand["id"],
+                    "source": cand_kind, "id": cand["id"],
                     "action": "error", "reason": str(e),
                     "liveness": liveness,
                 }
             _log_bulk_event(
-                db, cand["id"], candidate_kind, url,
+                db, cand["id"], cand_kind, url,
                 "bulk_marked_removed", prev, "removed",
             )
             return {
                 "url": url, "kind": "comment", "tier": "removed_singleton",
-                "source": candidate_kind, "id": cand["id"],
+                "source": cand_kind, "id": cand["id"],
                 "action": "marked_removed",
                 "liveness": liveness, "posted_at": posted_at,
             }
@@ -699,7 +766,10 @@ def match_and_deploy_comment(db, classified: dict, *,
             "liveness": liveness,
         }
 
-    # liveness == "live" — body fuzzy match as before.
+    # liveness == "live" — body fuzzy match. Candidates may span both
+    # `comments` and `search_comments`; we pick the single best by
+    # Jaccard regardless of source, then use the candidate's `__kind`
+    # to route to the correct deploy_* call.
     scored = sorted(
         ((jaccard(body, c["body"]), c) for c in candidates),
         key=lambda p: -p[0],
@@ -715,15 +785,16 @@ def match_and_deploy_comment(db, classified: dict, *,
     runner_up = scored[1][0] if len(scored) > 1 else 0.0
     ambiguous = runner_up >= similarity_threshold and (best_score - runner_up) < 0.1
     prev_status = best.get("status") if isinstance(best, dict) else None
+    best_kind = best.get("__kind", "comment")
     try:
-        if candidate_kind == "comment":
+        if best_kind == "comment":
             db.deploy_comment(best["id"], url, posted_at=posted_at)
         else:
             db.deploy_search_comment(best["id"], url, posted_at=posted_at)
     except Exception as e:
         return {
             "url": url, "kind": "comment", "tier": "body_match",
-            "source": candidate_kind, "id": best["id"],
+            "source": best_kind, "id": best["id"],
             "action": "error", "reason": str(e),
             "liveness": liveness,
         }
@@ -731,12 +802,12 @@ def match_and_deploy_comment(db, classified: dict, *,
     # via Activity Log that the write actually happened, independent of
     # any UI cache.
     _log_bulk_event(
-        db, best["id"], candidate_kind, url,
+        db, best["id"], best_kind, url,
         "bulk_deployed", prev_status or "", "deployed",
     )
     out = {
         "url": url, "kind": "comment", "tier": "body_match",
-        "source": candidate_kind, "id": best["id"], "action": "deployed",
+        "source": best_kind, "id": best["id"], "action": "deployed",
         "similarity": round(best_score, 3),
         "posted_at": posted_at, "liveness": liveness,
     }

@@ -1641,13 +1641,32 @@ class Database:
         (or no slug at all). The post ID itself is immutable — Reddit
         URLs always contain `/comments/<post_id>/`. Matching on that
         substring is robust to every slug variant.
+
+        Legacy single-table caller. New code should prefer
+        `find_posts_by_reddit_post_id` (plural), which surfaces matches
+        in BOTH the legacy `posts` and `search_posts` tables — needed
+        for bulk deploy when a Reddit post has been imported into
+        both pipelines.
+        """
+        rows = self.find_posts_by_reddit_post_id(reddit_post_id)
+        return rows[0] if rows else (None, None)
+
+    def find_posts_by_reddit_post_id(self, reddit_post_id):
+        """Return EVERY (kind, post_dict) matching the given Reddit post
+        ID — both `posts` (kind="post") and `search_posts`
+        (kind="search_post"). Empty list if neither table has it.
+
+        Used by bulk deploy to consider candidate comments from BOTH
+        pipelines when a Reddit post appears in both. Without this,
+        the user's `search_comments` rows are invisible whenever a
+        legacy `posts` row happens to also exist for the same Reddit
+        post.
         """
         if not reddit_post_id:
-            return None, None
-        # Lowercase / case-insensitive match — Reddit IDs are always
-        # lowercase alphanumeric but URLs in older sheets sometimes vary.
+            return []
         like_a = f"%/comments/{reddit_post_id}/%"
-        like_b = f"%/comments/{reddit_post_id}"  # no trailing segment
+        like_b = f"%/comments/{reddit_post_id}"
+        out = []
         row = self.conn.execute(
             """SELECT p.*, pu.reddit_url
                FROM post_urls pu JOIN posts p ON pu.post_id = p.id
@@ -1656,7 +1675,7 @@ class Database:
             (like_a, like_b)
         ).fetchone()
         if row:
-            return "post", dict(row)
+            out.append(("post", dict(row)))
         row = self.conn.execute(
             """SELECT * FROM search_posts
                WHERE reddit_url LIKE ? OR reddit_url LIKE ?
@@ -1664,8 +1683,8 @@ class Database:
             (like_a, like_b)
         ).fetchone()
         if row:
-            return "search_post", dict(row)
-        return None, None
+            out.append(("search_post", dict(row)))
+        return out
 
     def find_undeployed_comments_for_post(self, post_id, kind):
         """Return all rows for the given post that are NOT yet deployed —

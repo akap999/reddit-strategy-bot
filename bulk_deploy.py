@@ -119,23 +119,37 @@ def fetch_sheet_csv(sheet_url: str, *, timeout: int = 20) -> str:
 # Reddit URL extraction + classification
 # ---------------------------------------------------------------------------
 
-# Permissive Reddit URL matcher: accepts http/https, any reddit.com
-# subdomain, and the /r/<sub>/comments/<post_id>(/<slug>(/<comment_id>)?)? form.
+# Two Reddit comment URL formats we accept from the sheet:
+#
+# 1. Full /comments/<post_id>/<slug>/<comment_id> form — preserved as-is.
+# 2. Short share form /r/<sub>/s/<token> — Reddit's "Share" dialog spits
+#    these out. They redirect to the canonical form when followed. We
+#    pick them up here so the orchestrator can resolve them before
+#    matching, instead of silently dropping them.
 _REDDIT_URL_RE = re.compile(
     r"https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com"
-    r"/r/[A-Za-z0-9_]+/comments/[A-Za-z0-9]+"
-    r"(?:/[^/\s,;\"'<>]*)?"
-    r"(?:/[A-Za-z0-9]{4,12})?",
+    r"/r/[A-Za-z0-9_]+"
+    r"(?:"
+    r"/comments/[A-Za-z0-9]+(?:/[^/\s,;\"'<>]*)?(?:/[A-Za-z0-9]{4,12})?"
+    r"|"
+    r"/s/[A-Za-z0-9_-]+"
+    r")",
+    re.IGNORECASE,
+)
+
+_REDDIT_SHARE_RE = re.compile(
+    r"^https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com/r/[A-Za-z0-9_]+/s/[A-Za-z0-9_-]+/?$",
     re.IGNORECASE,
 )
 
 
-# Canonical header names the bot looks for, in priority order. We only
-# accept the sheet when at least one of these columns exists — that
-# rules out accidentally picking up Reddit URLs from notes / pasted
-# screenshots / template instructions elsewhere in the sheet.
+# Canonical header names. Only "Comment Link" (or its case/separator
+# variants) is read. "Post Link" / other columns are deliberately
+# IGNORED — those URLs are usually for human readability, not for
+# deployment. Reading them caused the modal to report dozens of false
+# "already_deployed" entries (the search_posts rows were already in a
+# terminal state, so the post matcher kept saying "already_deployed").
 _COMMENT_HEADER_NAMES = {"comment link", "comment url"}
-_POST_HEADER_NAMES = {"post link", "post url"}
 
 
 def _normalize_header(h):
@@ -147,32 +161,25 @@ def _normalize_header(h):
     return re.sub(r"[\s_\-]+", " ", str(h).strip().lower())
 
 
-def _find_url_columns(headers):
-    """Locate the comment-link (and optional post-link) columns in the
-    first row of the sheet. Returns
-        {"comment": idx | None, "post": idx | None}
-
-    The sheet must have at least one of these columns or
-    `extract_reddit_urls` raises ValueError — better than silently
-    pulling URLs from the wrong column.
+def _find_comment_column(headers):
+    """Return the 0-indexed column matching a Comment-Link header,
+    or None. Only `comment link` (and its case/separator variants) is
+    accepted — post-link / other columns are intentionally ignored.
     """
-    out = {"comment": None, "post": None}
     for i, h in enumerate(headers or []):
-        norm = _normalize_header(h)
-        if out["comment"] is None and norm in _COMMENT_HEADER_NAMES:
-            out["comment"] = i
-        elif out["post"] is None and norm in _POST_HEADER_NAMES:
-            out["post"] = i
-    return out
+        if _normalize_header(h) in _COMMENT_HEADER_NAMES:
+            return i
+    return None
 
 
 def _extract_url_from_cell(cell):
     """Pull the first Reddit URL out of a single CSV cell.
 
-    The cell may be a bare URL, a Google-Sheets `=HYPERLINK(...)` formula,
+    Accepts /comments/<post_id>... URLs AND /s/<token> share links.
+    Cells may be a bare URL, a Google-Sheets `=HYPERLINK(...)` formula,
     a URL wrapped in quotes, or have surrounding whitespace. Returns the
-    normalised URL (query string stripped, trailing slash removed) or
-    None if no Reddit URL is present.
+    URL with its query string stripped and trailing slash removed, or
+    None if nothing matches.
     """
     if not cell:
         return None
@@ -183,20 +190,31 @@ def _extract_url_from_cell(cell):
     return url.split("?")[0].rstrip("/")
 
 
+def is_share_url(url):
+    """True iff the URL is a Reddit `/r/<sub>/s/<token>` share link
+    that needs resolving before we can classify it. Share links don't
+    contain a post_id or comment_id directly — Reddit redirects them
+    to the canonical /comments/... URL.
+    """
+    return bool(url and _REDDIT_SHARE_RE.match(url))
+
+
 def extract_reddit_urls(csv_text: str) -> list[str]:
     """Pull Reddit URLs out of a Google-Sheets CSV export.
 
     The sheet must have a header row with a column named "Comment Link"
     (case-insensitive; "comment url" / "comment-link" / "comment_link"
-    are also accepted). An optional "Post Link" column is also read.
-    URLs anywhere else in the sheet are ignored.
+    are also accepted). Other columns — including any "Post Link" —
+    are deliberately ignored: the user's intent for bulk deploy is to
+    flip the COMMENT rows, not the posts.
 
-    Returns a deduped list of URLs preserving first-seen order. The
-    order respects sheet order: row-by-row, comment column before post
-    column.
+    Returns a deduped list of URLs preserving sheet order. Both full
+    /comments/<post_id>... URLs AND /s/<token> share links are kept;
+    the caller is expected to resolve share links before classifying.
 
-    Raises ValueError when neither column is found — better than
-    silently scanning the whole sheet and picking up unrelated URLs.
+    Raises ValueError when the Comment Link column is missing — better
+    than silently scanning the whole sheet and picking up unrelated
+    URLs.
     """
     if not csv_text:
         return []
@@ -207,29 +225,24 @@ def extract_reddit_urls(csv_text: str) -> list[str]:
         headers = next(reader)
     except StopIteration:
         return []
-    cols = _find_url_columns(headers)
-    if cols["comment"] is None and cols["post"] is None:
+    col_idx = _find_comment_column(headers)
+    if col_idx is None:
         raise ValueError(
-            "Sheet must have a column named 'Comment Link' (or 'Post Link'). "
+            "Sheet must have a column named 'Comment Link' (or 'Comment URL'). "
             "Header row read: " + ", ".join(repr(h) for h in headers[:8])
             + ("..." if len(headers) > 8 else "")
         )
     found = []
     seen = set()
     for row in reader:
-        if not row:
+        if not row or col_idx >= len(row):
             continue
-        # For each row we look at the comment-link column first, then
-        # the post-link column. This keeps the output order intuitive
-        # when both columns are populated on the same row.
-        for kind in ("comment", "post"):
-            idx = cols[kind]
-            if idx is None or idx >= len(row):
-                continue
-            url = _extract_url_from_cell(row[idx])
-            if url and url not in seen:
-                seen.add(url)
-                found.append(url)
+        # Only the Comment Link column. Anything else in the row
+        # (Post Link / notes / brand context) is intentionally ignored.
+        url = _extract_url_from_cell(row[col_idx])
+        if url and url not in seen:
+            seen.add(url)
+            found.append(url)
     return found
 
 
@@ -938,9 +951,51 @@ def match_and_deploy_post(db, classified: dict, *,
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+def resolve_reddit_share_url(short_url, *, reddit_get=None):
+    """Resolve a Reddit `/r/<sub>/s/<token>` share URL to its canonical
+    `/r/<sub>/comments/<post_id>/<slug>/<comment_id>` form.
+
+    Reddit's share dialog produces /s/ links that just redirect to the
+    canonical URL when you follow them. We do a HEAD with redirect-
+    follow to get the final URL, then strip the query string.
+
+    Returns the canonical URL on success, None on any failure (caller
+    treats that as a no_match for the row).
+    """
+    try:
+        import requests as _requests
+    except Exception:
+        return None
+    if not short_url or "/s/" not in short_url:
+        return short_url
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    # Use HEAD first — Reddit returns 302 → canonical. Fall back to GET
+    # if HEAD doesn't redirect (some CDNs only redirect on GET).
+    try:
+        r = _requests.head(short_url, headers=headers,
+                           allow_redirects=True, timeout=20)
+        final = r.url.split("?")[0].rstrip("/") if r.url else ""
+        if "/comments/" in final:
+            return final
+    except Exception:
+        pass
+    try:
+        r = _requests.get(short_url, headers=headers,
+                          allow_redirects=True, timeout=20)
+        final = r.url.split("?")[0].rstrip("/") if r.url else ""
+        if "/comments/" in final:
+            return final
+    except Exception:
+        pass
+    return None
+
+
 def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
                      reddit_get: Callable,
                      source_filter: Optional[str] = None,
+                     resolve_share: Optional[Callable] = None,
                      _task_id: Optional[str] = None) -> dict:
     """Walk every URL in the sheet, match each to a DB row, mark deployed.
 
@@ -952,6 +1007,11 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
     Set by the Bulk Deploy modal based on the calling view (Live
     Search vs Live Subs). Prevents URLs from accidentally matching
     spurious rows in the wrong pipeline.
+
+    `resolve_share` (optional) is a callable that takes a Reddit
+    `/s/<token>` short URL and returns its canonical `/comments/...`
+    form. If not provided, we use the local `resolve_reddit_share_url`
+    fallback (direct request, no proxy).
 
     Designed to be called via app.py's `start_task(...,
     pass_task_id=True)` — `_task_id` is injected by `start_task`.
@@ -967,6 +1027,7 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
     # Fetch + parse the sheet first — fail fast if it's not public.
     csv_text = fetch_sheet_csv(sheet_url)
     urls = extract_reddit_urls(csv_text)
+    resolver = resolve_share or resolve_reddit_share_url
 
     report = {
         "total": len(urls),
@@ -979,11 +1040,36 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
     # Open a dedicated DB connection for the task thread.
     db = db_factory()
     try:
-        for url in urls:
+        for original_url in urls:
+            # Step 1: resolve /s/ share URLs to their canonical form.
+            # This is the path Reddit's "Share" button produces; without
+            # resolution the URL has no post_id / comment_id and nothing
+            # downstream can match it.
+            url = original_url
+            resolved = False
+            if is_share_url(url):
+                canonical = resolver(url)
+                if canonical:
+                    url = canonical
+                    resolved = True
+                else:
+                    report["results"].append({
+                        "url": original_url, "kind": "comment",
+                        "action": "no_match",
+                        "reason": "could not resolve /s/ share link to a canonical URL",
+                    })
+                    report["processed"] += 1
+                    if _task_id:
+                        try:
+                            db.update_task_progress(_task_id, json.dumps(report))
+                        except Exception:
+                            pass
+                    continue
+
             classified = classify_reddit_url(url)
             if not classified:
                 row = {
-                    "url": url, "action": "no_match",
+                    "url": original_url, "action": "no_match",
                     "reason": "URL didn't parse as a Reddit post/comment",
                 }
             elif classified["kind"] == "comment":
@@ -991,6 +1077,10 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
                     db, classified, reddit_get=reddit_get,
                     source_filter=source_filter,
                 )
+                # Preserve the original sheet URL in the report so the
+                # user can correlate report rows back to their sheet.
+                if resolved:
+                    row["resolved_from"] = original_url
             else:
                 row = match_and_deploy_post(
                     db, classified, source_filter=source_filter,

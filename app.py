@@ -1463,6 +1463,49 @@ def _reddit_get_json(path, timeout=15, max_retries=3):
     except Exception:
         return None
 
+
+def _resolve_reddit_share_url_proxy(short_url):
+    """Module-level Reddit /s/ share-link resolver, proxy-aware.
+
+    Bulk Deploy passes this into `run_bulk_deploy` so /s/ links from
+    the sheet get expanded to their canonical /comments/<post_id>/
+    <slug>/<comment_id> form before being classified. Without this,
+    every /s/ row in the sheet silently dropped to "no_match".
+    """
+    import requests as _requests
+    import re as _re
+    if not short_url or "/s/" not in short_url:
+        return short_url
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    s_path = _re.sub(r'^https?://[^/]+', '', short_url)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    # Proxy path first — the Cloudflare proxy exposes /resolve<path>
+    # that follows the redirect server-side (faster + avoids residential
+    # / cloud egress restrictions).
+    if proxy:
+        try:
+            r = _requests.get(
+                f"{proxy.rstrip('/')}/resolve{s_path}", timeout=20,
+            )
+            resolved = ((r.json() or {}).get("url") or "").split("?")[0].rstrip("/")
+            if "/comments/" in resolved:
+                return resolved
+        except Exception:
+            pass
+    # Direct HEAD then GET fallback.
+    for method in (_requests.head, _requests.get):
+        try:
+            r = method(short_url, headers=headers,
+                       allow_redirects=True, timeout=20)
+            resolved = (r.url or "").split("?")[0].rstrip("/")
+            if "/comments/" in resolved:
+                return resolved
+        except Exception:
+            continue
+    return None
+
 @app.route("/api/comments/<int:cid>/url", methods=["PATCH"])
 def api_update_comment_url(cid):
     db = get_db()
@@ -1953,6 +1996,7 @@ def api_bulk_deploy_from_sheet():
             sheet_url,
             db_factory=_db_factory,
             reddit_get=_reddit_get_json,
+            resolve_share=_resolve_reddit_share_url_proxy,
             source_filter=source_filter,
             _task_id=_task_id,
         )

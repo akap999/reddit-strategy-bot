@@ -633,7 +633,8 @@ def _rollup_tier1(url, per_row, liveness, posted_at):
 
 def match_and_deploy_comment(db, classified: dict, *,
                               reddit_get: Callable,
-                              similarity_threshold: float = 0.5) -> dict:
+                              similarity_threshold: float = 0.5,
+                              source_filter: Optional[str] = None) -> dict:
     """Process a single comment URL — Tier 1 → Tier 2 → no-match.
 
     Returns a result dict the orchestrator records in tasks.progress.
@@ -649,23 +650,25 @@ def match_and_deploy_comment(db, classified: dict, *,
     fetch the Reddit JSON.
     """
     url = classified["url"]
+    # `source_filter` lets the caller scope the matcher to a single
+    # pipeline. The Bulk Deploy modal sets it based on the calling
+    # view (Live Search → "search_comment", Live Subs → "comment")
+    # so URLs in the sheet only match rows in the user's actual
+    # pipeline — never the OTHER pipeline's spurious copies that
+    # might exist from prior workflows.
+    want_legacy = source_filter in (None, "comment")
+    want_search = source_filter in (None, "search_comment")
 
-    # --- Tier 1: direct URL match (both tables) ---------------------------
-    # A Reddit URL may map to BOTH a `comments` row (legacy Live Subs
-    # pipeline) AND a `search_comments` row (Live Search pipeline) for
-    # the same underlying comment — if the post got imported into both
-    # pipelines, each generated its own copy. Previously we short-
-    # circuited on the first match and reported "already_deployed",
-    # leaving the OTHER table's row stuck on `assigned`/`draft`. Now
-    # we process every matching row independently and roll the results
-    # into one report entry.
+    # --- Tier 1: direct URL match (filtered by scope) ---------------------
     tier1_matches = []  # list of (source, row)
-    legacy_row = db.find_comment_by_url(url)
-    if legacy_row:
-        tier1_matches.append(("comment", legacy_row))
-    search_row = db.find_search_comment_by_url(url)
-    if search_row:
-        tier1_matches.append(("search_comment", search_row))
+    if want_legacy:
+        legacy_row = db.find_comment_by_url(url)
+        if legacy_row:
+            tier1_matches.append(("comment", legacy_row))
+    if want_search:
+        search_row = db.find_search_comment_by_url(url)
+        if search_row:
+            tier1_matches.append(("search_comment", search_row))
 
     # Shared state across Tiers 1 + 2 — both tiers may need the Reddit
     # JSON, and Tier-2 needs to know which DB rows Tier-1 already
@@ -726,10 +729,17 @@ def match_and_deploy_comment(db, classified: dict, *,
     # Each entry is augmented with its `kind` so the deploy step picks
     # the right table to update. Exclude rows Tier-1 already touched so
     # we don't re-process the same legacy already-deployed row.
+    # Apply the same scope filter as Tier-1 — if the caller wants
+    # search-only, don't consider legacy `comments` candidates and vice
+    # versa.
     already_touched = {(r["source"], r["id"]) for r in tier1_results}
     candidates = []
     for post_kind, post_row in matching_posts:
         cand_kind = "comment" if post_kind == "post" else "search_comment"
+        if cand_kind == "comment" and not want_legacy:
+            continue
+        if cand_kind == "search_comment" and not want_search:
+            continue
         for c in db.find_undeployed_comments_for_post(post_row["id"], cand_kind):
             if (cand_kind, c["id"]) in already_touched:
                 continue
@@ -868,23 +878,45 @@ def match_and_deploy_comment(db, classified: dict, *,
     return out
 
 
-def match_and_deploy_post(db, classified: dict) -> dict:
+def match_and_deploy_post(db, classified: dict, *,
+                           source_filter: Optional[str] = None) -> dict:
     """Process a single post URL — match by Reddit post id so slug
     differences (e.g. user copied the URL with a different title slug
     than the one we have stored) don't cause a miss.
+
+    `source_filter` maps the comment-side scope to the post-side: if
+    the user is operating on Live Search, only `search_posts` are
+    considered (kind="search_post"). The mapping is
+    "comment" → "post", "search_comment" → "search_post".
     """
     url = classified["url"]
-    post_kind, post_row = db.find_post_by_reddit_post_id(classified["post_id"])
-    if not post_row:
+    want_legacy_post = source_filter in (None, "comment")
+    want_search_post = source_filter in (None, "search_comment")
+    matching = []
+    for kind, row in db.find_posts_by_reddit_post_id(classified["post_id"]):
+        if kind == "post" and not want_legacy_post:
+            continue
+        if kind == "search_post" and not want_search_post:
+            continue
+        matching.append((kind, row))
+    if not matching:
         return {
             "url": url, "kind": "post", "action": "no_match",
-            "reason": "post URL not found in posts or search_posts",
+            "reason": "post URL not found in posts or search_posts (in scope)",
         }
-    if post_row.get("status") == "deployed":
+    # Prefer a non-deployed row; otherwise report already_deployed.
+    target = None
+    for kind, row in matching:
+        if row.get("status") != "deployed":
+            target = (kind, row)
+            break
+    if target is None:
+        kind, row = matching[0]
         return {
-            "url": url, "kind": "post", "source": post_kind,
-            "id": post_row["id"], "action": "already_deployed",
+            "url": url, "kind": "post", "source": kind,
+            "id": row["id"], "action": "already_deployed",
         }
+    post_kind, post_row = target
     try:
         ok = db.deploy_post(
             post_row["id"], post_kind, url,
@@ -908,8 +940,18 @@ def match_and_deploy_post(db, classified: dict) -> dict:
 
 def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
                      reddit_get: Callable,
+                     source_filter: Optional[str] = None,
                      _task_id: Optional[str] = None) -> dict:
     """Walk every URL in the sheet, match each to a DB row, mark deployed.
+
+    `source_filter` (optional) scopes the matcher to a single pipeline:
+      - "comment"        → only `comments` / `post_urls`
+      - "search_comment" → only `search_comments` / `search_posts`
+      - None             → both (legacy behaviour)
+
+    Set by the Bulk Deploy modal based on the calling view (Live
+    Search vs Live Subs). Prevents URLs from accidentally matching
+    spurious rows in the wrong pipeline.
 
     Designed to be called via app.py's `start_task(...,
     pass_task_id=True)` — `_task_id` is injected by `start_task`.
@@ -930,6 +972,7 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
         "total": len(urls),
         "processed": 0,
         "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_filter": source_filter or "both",
         "results": [],
     }
 
@@ -946,9 +989,12 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
             elif classified["kind"] == "comment":
                 row = match_and_deploy_comment(
                     db, classified, reddit_get=reddit_get,
+                    source_filter=source_filter,
                 )
             else:
-                row = match_and_deploy_post(db, classified)
+                row = match_and_deploy_post(
+                    db, classified, source_filter=source_filter,
+                )
             report["results"].append(row)
             report["processed"] += 1
             if _task_id:

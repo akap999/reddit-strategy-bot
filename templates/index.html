@@ -7789,7 +7789,7 @@ async function renderLsubsComments(c) {
                 <input type="date" id="lsubs-cmt-date-to" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
             </label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
-            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('comment')" title="Bulk-deploy Live Subreddits posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
         </div>
         <div id="lsubs-cmt-list"></div>
@@ -9099,7 +9099,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
-                <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal()" title="Bulk-deploy posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+                <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('search_comment')" title="Bulk-deploy Live Search posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
                 <button class="btn btn-sm" style="background:#2a3d1a;color:#cef79e" onclick="showBackfillPostedAtModal()" title="Fetch Reddit's actual posted timestamp (created_utc) for deployed comments that don't have one yet">Backfill posted dates</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
@@ -9448,7 +9448,23 @@ async function lsMarkPaidAll() {
 // Bulk Deploy from Google Sheet
 // =========================================================================
 
-function showBulkDeployModal() {
+function showBulkDeployModal(defaultSource) {
+    // `defaultSource` ("comment" | "search_comment" | null) picks the
+    // pipeline the matcher will scope to. Callers from the Live Search
+    // header pass "search_comment", Live Subs header passes "comment".
+    // The user can override via the dropdown if needed. Scope is
+    // critical because the same Reddit URL may exist as spurious
+    // copies in the OTHER table; without scope, the matcher hits the
+    // wrong row and the visible (Live Search) list never updates.
+    const scope = defaultSource || '';
+    const scopeOptions = [
+        { value: 'search_comment', label: 'Live Search comments (search_comments)' },
+        { value: 'comment',        label: 'Live Subreddits comments (comments)' },
+        { value: '',               label: 'Both pipelines (legacy behaviour)' },
+    ];
+    const scopeOpts = scopeOptions.map(o =>
+        `<option value="${o.value}" ${o.value === scope ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
     showModal(`
         <h3 class="text-xl font-bold mb-3">Bulk Deploy from Google Sheet</h3>
         <p class="text-xs text-gray-400 mb-3">
@@ -9460,6 +9476,11 @@ function showBulkDeployModal() {
             <span style="color:#ff8b60">removed</span> if Reddit shows it as deleted).
             <br><span class="text-gray-500">Multi-tab sheet? Click the tab you want in Google Sheets first — the URL in your browser's address bar will include the right <code>gid</code> and we'll fetch that specific tab. The sheet must be set to "Anyone with the link → Viewer".</span>
         </p>
+        <label class="text-xs text-gray-400 block mb-1">Scope</label>
+        <select id="bulk-deploy-scope" class="w-full mb-3"
+                style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
+            ${scopeOpts}
+        </select>
         <input id="bulk-deploy-sheet-url" class="w-full mb-3"
             placeholder="https://docs.google.com/spreadsheets/d/.../edit"
             style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
@@ -9487,6 +9508,7 @@ async function runBulkDeploy() {
         toast('Sheet URL is required', 'error');
         return;
     }
+    const scope = (document.getElementById('bulk-deploy-scope')?.value || '').trim();
     const runBtn = document.getElementById('bulk-deploy-run-btn');
     const statusEl = document.getElementById('bulk-deploy-status');
     const barWrap = document.getElementById('bulk-deploy-progress-bar');
@@ -9494,15 +9516,21 @@ async function runBulkDeploy() {
     const resultsEl = document.getElementById('bulk-deploy-results');
     const summaryEl = document.getElementById('bulk-deploy-summary');
     if (runBtn) runBtn.disabled = true;
-    if (statusEl) statusEl.textContent = 'Starting task...';
+    if (statusEl) {
+        const scopeName = scope === 'search_comment' ? 'Live Search'
+                         : scope === 'comment' ? 'Live Subs' : 'both pipelines';
+        statusEl.textContent = `Starting task (scope: ${scopeName})...`;
+    }
     if (resultsEl) resultsEl.style.display = 'none';
     if (summaryEl) summaryEl.textContent = '';
 
     let taskId;
+    const body = { sheet_url: sheetUrl };
+    if (scope) body.source = scope;
     try {
         const r = await api('/api/bulk-deploy/from-sheet', {
             method: 'POST',
-            body: { sheet_url: sheetUrl },
+            body: body,
         });
         taskId = r && r.task_id;
         if (!taskId) throw new Error('no task_id returned');

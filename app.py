@@ -1929,6 +1929,16 @@ def api_bulk_deploy_from_sheet():
     sheet_url = (data.get("sheet_url") or "").strip()
     if not sheet_url:
         return jsonify({"error": "sheet_url is required"}), 400
+    # `source` scopes the matcher to a single pipeline. The Bulk Deploy
+    # modal sets this based on the calling view so URLs only match the
+    # tables the user is operating on (avoids accidentally hitting the
+    # OTHER pipeline's spurious copies).
+    source_filter = data.get("source")
+    if source_filter not in (None, "", "comment", "search_comment"):
+        return jsonify({
+            "error": "source must be 'comment' or 'search_comment' or omitted"
+        }), 400
+    source_filter = source_filter or None
 
     # Open a fresh DB on the background thread (request-thread DB
     # connections are not shareable across threads).
@@ -1943,6 +1953,7 @@ def api_bulk_deploy_from_sheet():
             sheet_url,
             db_factory=_db_factory,
             reddit_get=_reddit_get_json,
+            source_filter=source_filter,
             _task_id=_task_id,
         )
 

@@ -5494,6 +5494,19 @@ def api_list_clients():
 
 @app.route('/api/clients', methods=['POST'])
 def api_create_client():
+    """Create a client.
+
+    `password` is optional. When omitted, we generate a random
+    placeholder password the client never sees and instead return an
+    `invite_url` the admin can hand over (or auto-email if SMTP is
+    set + `email_invite: true` is in the body). The client uses that
+    invite link — same flow as a password reset — to set their own
+    password on first sign-in.
+    """
+    import secrets as _secrets
+    import hashlib as _hashlib
+    from datetime import datetime, timedelta
+
     data = request.get_json() or {}
     name = (data.get('name') or '').strip()
     password = (data.get('password') or '').strip()
@@ -5501,8 +5514,16 @@ def api_create_client():
     brand_ids = data.get('brand_ids') or []
     monthly_target = data.get('monthly_target')
     notes = (data.get('notes') or '').strip() or None
-    if not name or not password or not emails:
-        return jsonify({"error": "name, password, and at least one email are required"}), 400
+    email_invite = bool(data.get('email_invite'))
+    if not name or not emails:
+        return jsonify({"error": "name and at least one email are required"}), 400
+    # If password is blank, we still set a random one so the row is
+    # always usable — but it's overwritten by the invite-link flow
+    # before the client ever logs in.
+    auto_password = False
+    if not password:
+        password = _secrets.token_urlsafe(32)
+        auto_password = True
     db = get_db()
     try:
         # Reject if any email is already on another client.
@@ -5521,7 +5542,42 @@ def api_create_client():
         )
         db.set_client_emails(cid, emails)
         db.set_client_brands(cid, brand_ids)
-        return jsonify({"id": cid, "ok": True})
+        # Always generate an invite link when no explicit password was
+        # provided — that's how the client will set their own. Also
+        # provide it when password WAS set, so admins have a backup
+        # delivery method.
+        ttl_days = int(os.environ.get('ADMIN_INVITE_TTL_DAYS', '7'))
+        raw = _secrets.token_urlsafe(40)
+        token_hash = _hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        expires_at = (datetime.utcnow() + timedelta(days=ttl_days)).strftime('%Y-%m-%d %H:%M:%S')
+        db.create_password_reset_token(
+            client_id=cid, token_hash=token_hash,
+            expires_at=expires_at, requested_email='admin-generated',
+            requested_ip=(request.headers.get('X-Forwarded-For', '') or request.remote_addr or ''),
+        )
+        invite_url = request.url_root.rstrip('/') + f"/portal/reset-password/{raw}"
+        emailed = False
+        if email_invite and emails:
+            primary_email = emails[0].strip().lower()
+            body = (
+                f"Hi,\n\n"
+                f"You've been invited to the {name} client portal.\n"
+                f"Click the link below to set your password (valid for {ttl_days} days):\n\n"
+                f"{invite_url}\n\n"
+                f"If you didn't expect this email, ignore it.\n"
+            )
+            emailed = _send_email(
+                to_addr=primary_email,
+                subject=f"{name} portal — set your password",
+                body_text=body,
+            )
+        return jsonify({
+            "id": cid, "ok": True,
+            "invite_url": invite_url,
+            "invite_expires_at": expires_at,
+            "auto_password": auto_password,
+            "emailed": emailed,
+        })
     finally:
         db.close()
 
@@ -5581,6 +5637,71 @@ def api_delete_client(cid):
     try:
         db.delete_client(cid)
         return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route('/api/clients/<int:cid>/invite-link', methods=['POST'])
+def api_client_invite_link(cid):
+    """Generate a single-use password-reset link for a client.
+
+    Use cases:
+      - First-time onboarding: admin creates the client without a
+        password and sends them this link to set their own.
+      - Password forgotten + SMTP not configured: admin generates a
+        fresh link and hand-delivers it.
+      - Re-issue after a lost / leaked password.
+
+    The returned link uses the same flow as `/portal/forgot-password`
+    but with a longer TTL (7 days by default — configurable via
+    ADMIN_INVITE_TTL_DAYS). Admin can also choose to email it
+    automatically if SMTP is wired up.
+    """
+    import secrets as _secrets
+    import hashlib as _hashlib
+    from datetime import datetime, timedelta
+
+    data = request.get_json() or {}
+    send_email = bool(data.get('send_email'))
+    ttl_days = int(os.environ.get('ADMIN_INVITE_TTL_DAYS', '7'))
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        if not client:
+            return jsonify({"error": "not_found"}), 404
+        raw = _secrets.token_urlsafe(40)
+        token_hash = _hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        expires_at = (datetime.utcnow() + timedelta(days=ttl_days)).strftime('%Y-%m-%d %H:%M:%S')
+        db.create_password_reset_token(
+            client_id=cid,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            requested_email='admin-generated',
+            requested_ip=(request.headers.get('X-Forwarded-For', '') or request.remote_addr or ''),
+        )
+        link = request.url_root.rstrip('/') + f"/portal/reset-password/{raw}"
+        # Optional: email the link to the client's primary email.
+        emailed = False
+        if send_email and client.get('primary_email'):
+            body = (
+                f"Hi,\n\n"
+                f"You've been invited to the {client['name']} client portal.\n"
+                f"Click the link below to set your password (valid for {ttl_days} days):\n\n"
+                f"{link}\n\n"
+                f"If you didn't expect this email, ignore it.\n"
+            )
+            emailed = _send_email(
+                to_addr=client['primary_email'],
+                subject=f"{client['name']} portal — set your password",
+                body_text=body,
+            )
+        return jsonify({
+            "url": link,
+            "expires_at": expires_at,
+            "ttl_days": ttl_days,
+            "emailed": emailed,
+            "primary_email": client.get('primary_email'),
+        })
     finally:
         db.close()
 

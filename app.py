@@ -2175,21 +2175,84 @@ def api_check_live_start():
                 bg.finish_check_live_run(run_id, status='error',
                                           error_detail="no Reddit URLs found in sheet")
                 return {"run_id": run_id, "error": "no_urls"}
+
+            def _classify_post_url(post_path):
+                """Lightweight liveness check for a POST URL. Reddit
+                returns a list with the post listing first; an empty
+                children list means the post was removed/deleted.
+                """
+                try:
+                    data = _reddit_get_json(post_path)
+                except Exception as e:
+                    return ('error', str(e))
+                if not data:
+                    return ('missing', 'fetch returned no data')
+                if not isinstance(data, list) or len(data) < 1:
+                    return ('missing', 'unexpected JSON shape')
+                children = (data[0] or {}).get('data', {}).get('children', [])
+                if not children:
+                    return ('removed', 'post listing empty')
+                cd = (children[0] or {}).get('data', {}) or {}
+                body = (cd.get('selftext') or '').strip().lower()
+                if cd.get('removed') is True or body in ('[removed]', '[deleted]'):
+                    return ('removed', '[removed]/[deleted] selftext or flag')
+                if cd.get('author') in ('[deleted]', '[removed]'):
+                    return ('removed', f"author={cd.get('author')}")
+                return ('live', None)
+
             for url in urls:
-                classified = classify_reddit_url(url)
+                # 1. Resolve /s/ short URLs to their canonical form.
+                #    Bulk Deploy does this; we were silently skipping
+                #    it, causing every /s/ row to come back 'missing'.
+                resolved = url
+                try:
+                    if '/s/' in url:
+                        r = _resolve_reddit_share_url_proxy(url)
+                        if r and '/comments/' in r:
+                            resolved = r
+                except Exception:
+                    resolved = url
+
+                # 2. Classify the resolved URL.
+                classified = classify_reddit_url(resolved)
                 comment_id = (classified or {}).get("comment_id") if classified else None
                 post_id = (classified or {}).get("post_id") if classified else None
-                try:
-                    meta = fetch_reddit_comment_meta(
-                        url, reddit_get=_reddit_get_json,
-                    )
-                    liveness = classify_liveness(meta)
-                    detail = None
-                    if liveness == 'missing':
-                        detail = meta.get("error") if isinstance(meta, dict) else None
-                except Exception as e:
-                    liveness = 'error'
-                    detail = str(e)
+
+                liveness = 'missing'
+                detail = None
+
+                if not classified:
+                    liveness = 'missing'
+                    detail = 'URL did not match Reddit comment/post pattern'
+                elif classified.get('kind') == 'comment' and comment_id:
+                    # Real comment URL → fetch + walk for the target id.
+                    try:
+                        meta = fetch_reddit_comment_meta(
+                            resolved, reddit_get=_reddit_get_json,
+                        )
+                        liveness = classify_liveness(meta)
+                        if liveness == 'missing':
+                            detail = "comment id not found in Reddit JSON response"
+                    except Exception as e:
+                        liveness = 'error'
+                        detail = str(e)
+                else:
+                    # POST URL — no comment_id. Check the post itself.
+                    try:
+                        from urllib.parse import urlparse
+                        path = urlparse(resolved).path.rstrip('/') + '.json'
+                        liveness, detail = _classify_post_url(path)
+                    except Exception as e:
+                        liveness = 'error'
+                        detail = str(e)
+
+                # Annotate detail with the resolved URL when we
+                # rewrote it — helps the user spot /s/ inputs.
+                if resolved != url and detail:
+                    detail = f"(resolved to {resolved}) {detail}"
+                elif resolved != url:
+                    detail = f"resolved from /s/ → {resolved}"
+
                 bg.add_check_live_result(
                     run_id, url=url, comment_id=comment_id,
                     post_id=post_id, liveness=liveness, detail=detail,

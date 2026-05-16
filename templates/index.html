@@ -9084,6 +9084,7 @@ async function renderLsComments(c) {
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
                 <option value="paid">Paid</option>
+                <option value="report">Report</option>
                 <option value="removed">Removed</option>
                 <option value="archived">Archived</option>
             </select>
@@ -9149,7 +9150,7 @@ function _lsPreFilteredSubsInComments() {
     if (postId) pool = pool.filter(c => c.search_post_id == postId);
     if (brandName) pool = pool.filter(c => c.brand_name === brandName);
     if (status && status !== 'archived') {
-        const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, removed: 6 };
+        const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, removed: 7 };
         const postMaxStatus = {};
         pool.forEach(c => {
             const pid = c.search_post_id;

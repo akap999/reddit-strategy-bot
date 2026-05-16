@@ -2681,78 +2681,120 @@ class Database:
     def get_report_months_for_client(self, client_id):
         """Distinct report_month values for a client's comments, with
         per-month counts. Used by the portal dashboard.
+
+        Brand-resolution matches the same logic as `get_all_comments_global`:
+          - `c.brand_id` direct match, OR
+          - `c.brand_id IS NULL AND p.brand_id IN (...)` (legacy posts
+            where the brand lives on the post), OR
+          - `c.brand_id IS NULL AND p.id IN (post_brands.post_id WHERE
+            post_brands.brand_id IN (...))` (multi-brand posts).
+
+        Without this fallback, search_comments with NULL brand_id were
+        invisible to the portal even when their parent post was tied
+        to one of the client's brands.
         """
         brand_ids = self.client_brand_ids(client_id)
         if not brand_ids:
             return []
         ph = ",".join("?" * len(brand_ids))
-        q1 = f"""SELECT report_month AS month,
+        q1 = f"""SELECT c.report_month AS month,
                         COUNT(*) AS total,
-                        SUM(CASE WHEN status = 'report' THEN 1 ELSE 0 END) AS live,
-                        SUM(CASE WHEN status = 'removed' THEN 1 ELSE 0 END) AS removed
-                 FROM comments
-                 WHERE brand_id IN ({ph})
-                   AND report_month IS NOT NULL
-                   AND status IN ('report', 'removed')
-                 GROUP BY report_month"""
-        q2 = f"""SELECT report_month AS month,
+                        SUM(CASE WHEN c.status = 'report' THEN 1 ELSE 0 END) AS live,
+                        SUM(CASE WHEN c.status = 'removed' THEN 1 ELSE 0 END) AS removed
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 WHERE (
+                       c.brand_id IN ({ph})
+                    OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                    OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
+                 )
+                   AND c.report_month IS NOT NULL
+                   AND c.status IN ('report', 'removed')
+                 GROUP BY c.report_month"""
+        q2 = f"""SELECT sc.report_month AS month,
                         COUNT(*) AS total,
-                        SUM(CASE WHEN status = 'report' THEN 1 ELSE 0 END) AS live,
-                        SUM(CASE WHEN status = 'removed' THEN 1 ELSE 0 END) AS removed
-                 FROM search_comments
-                 WHERE brand_id IN ({ph})
-                   AND report_month IS NOT NULL
-                   AND status IN ('report', 'removed')
-                 GROUP BY report_month"""
+                        SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
+                        SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 WHERE (
+                       sc.brand_id IN ({ph})
+                    OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
+                 )
+                   AND sc.report_month IS NOT NULL
+                   AND sc.status IN ('report', 'removed')
+                 GROUP BY sc.report_month"""
         agg = {}
-        for q in (q1, q2):
-            for r in self.conn.execute(q, brand_ids).fetchall():
-                m = r["month"]
-                if not m:
-                    continue
-                bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
-                bucket["total"] += r["total"] or 0
-                bucket["live"] += r["live"] or 0
-                bucket["removed"] += r["removed"] or 0
+        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
+            m = r["month"]
+            if not m:
+                continue
+            bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
+            bucket["total"] += r["total"] or 0
+            bucket["live"] += r["live"] or 0
+            bucket["removed"] += r["removed"] or 0
+        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
+            m = r["month"]
+            if not m:
+                continue
+            bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
+            bucket["total"] += r["total"] or 0
+            bucket["live"] += r["live"] or 0
+            bucket["removed"] += r["removed"] or 0
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
     def get_comments_for_client_month(self, client_id, month):
         """All comments for a client + month (both tables, merged + sorted
         by deployed_at desc). Each row has the columns the portal needs.
+
+        Brand resolution falls back to the parent post's brand_id when
+        the comment row has none — same logic as the dashboard query.
         """
         brand_ids = self.client_brand_ids(client_id)
         if not brand_ids:
             return []
         ph = ",".join("?" * len(brand_ids))
-        params = list(brand_ids) + [month]
+        params_q1 = list(brand_ids) * 3 + [month]
         q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                         c.reddit_comment_url, c.posted_at, c.deployed_at,
                         c.report_month, c.report_added_at,
                         c.created_at, c.is_reply, c.comment_type,
                         'comment' AS source,
-                        s.name AS subreddit_name, b.name AS brand_name
+                        s.name AS subreddit_name,
+                        COALESCE(b.name, pb.name) AS brand_name
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
                  LEFT JOIN brands b ON c.brand_id = b.id
-                 WHERE c.brand_id IN ({ph})
+                 LEFT JOIN brands pb ON p.brand_id = pb.id
+                 WHERE (
+                       c.brand_id IN ({ph})
+                    OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                    OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
+                 )
                    AND c.report_month = ?
                    AND c.status IN ('report', 'removed')"""
+        params_q2 = list(brand_ids) * 2 + [month]
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
                         sc.report_month, sc.report_added_at,
                         sc.created_at, sc.is_reply, sc.comment_type,
                         'search_comment' AS source,
-                        sp.subreddit AS subreddit_name, b.name AS brand_name
+                        sp.subreddit AS subreddit_name,
+                        COALESCE(b.name, spb.name) AS brand_name
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  LEFT JOIN brands b ON sc.brand_id = b.id
-                 WHERE sc.brand_id IN ({ph})
+                 LEFT JOIN brands spb ON sp.brand_id = spb.id
+                 WHERE (
+                       sc.brand_id IN ({ph})
+                    OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
+                 )
                    AND sc.report_month = ?
                    AND sc.status IN ('report', 'removed')"""
         rows = []
-        rows.extend(dict(r) for r in self.conn.execute(q1, params).fetchall())
-        rows.extend(dict(r) for r in self.conn.execute(q2, params).fetchall())
+        rows.extend(dict(r) for r in self.conn.execute(q1, params_q1).fetchall())
+        rows.extend(dict(r) for r in self.conn.execute(q2, params_q2).fetchall())
         rows.sort(key=lambda r: (r.get("posted_at") or r.get("deployed_at") or ""), reverse=True)
         return rows
 

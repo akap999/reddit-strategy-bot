@@ -1711,7 +1711,16 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         prev = item.get("status", "")
         print(f"[{log_prefix}] _mark_dead #{item['id']} ({src}) prev_status={prev}", flush=True)
         if src == "comment":
-            db.mark_comment_deleted(item["id"])
+            # Reported comments that vanish on Reddit should land in
+            # 'removed' (with report_month preserved) so the client
+            # dashboard still shows them — just under the "Removed"
+            # chip instead of "Live". Falling back to mark_comment_deleted
+            # would set status='deleted' and drop them off the dashboard
+            # query (which filters status IN ('report','removed')).
+            if prev == "report":
+                db.mark_comment_removed(item["id"])
+            else:
+                db.mark_comment_deleted(item["id"])
         else:
             db.mark_search_comment_removed(item["id"])
         db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
@@ -5746,6 +5755,82 @@ def _valid_report_month(m):
     return bool(m and _REPORT_MONTH_RE.match(m))
 
 
+def _fetch_report_items(db, ids):
+    """Resolve a list of {id, source} to the full payload
+    `_check_live_batch` expects: id, source, reddit_comment_url,
+    status, account_id, brand_name, subreddit. Skips rows missing
+    a URL — there's nothing to fetch in that case.
+    """
+    out = []
+    for entry in ids:
+        try:
+            cid = int(entry.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        src = entry.get("source") or "comment"
+        if src == "comment":
+            row = db.conn.execute(
+                """SELECT c.id, c.reddit_comment_url, c.status, c.account_id,
+                          b.name AS brand_name, s.name AS subreddit
+                     FROM comments c
+                     JOIN posts p ON c.post_id = p.id
+                LEFT JOIN brands b ON c.brand_id = b.id
+                LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                    WHERE c.id = ?""",
+                (cid,)
+            ).fetchone()
+        else:
+            row = db.conn.execute(
+                """SELECT sc.id, sc.reddit_comment_url, sc.status, sc.account_id,
+                          b.name AS brand_name, sp.subreddit AS subreddit
+                     FROM search_comments sc
+                     JOIN search_posts sp ON sc.search_post_id = sp.id
+                LEFT JOIN brands b ON sc.brand_id = b.id
+                    WHERE sc.id = ?""",
+                (cid,)
+            ).fetchone()
+        if not row or not row["reddit_comment_url"]:
+            continue
+        out.append({
+            "id": row["id"], "source": src,
+            "reddit_comment_url": row["reddit_comment_url"],
+            "status": row["status"], "account_id": row["account_id"],
+            "brand_name": row["brand_name"], "subreddit": row["subreddit"],
+        })
+    return out
+
+
+def _spawn_report_engagement_fetch(items):
+    """Fire-and-forget background fetch of Reddit engagement (upvotes,
+    num_replies) for newly-reported comments. Reuses `_check_live_batch`
+    so we also benefit from its dead-comment detection — a comment that
+    was paid yesterday and is gone today will land in 'removed' status
+    instead of staying 'live' on the dashboard with stale numbers.
+
+    Empty `items` is a no-op. We start the task lazily so the parent
+    request returns immediately.
+    """
+    if not items:
+        return None
+
+    def task():
+        bg = Database(DB_PATH)
+        bg.connect(); bg.initialize()
+        try:
+            return _check_live_batch(items, bg, log_prefix="REPORT-AUTO-STATS")
+        finally:
+            try: bg.close()
+            except Exception: pass
+
+    try:
+        return start_task("report-auto-stats", task)
+    except Exception as e:
+        # Best-effort. The user can always trigger a manual refresh
+        # from the portal if this fails for any reason.
+        print(f"[REPORT-AUTO-STATS] spawn failed: {e}", flush=True)
+        return None
+
+
 @app.route('/api/comments/<int:cid>/to-report', methods=['POST'])
 def api_comment_to_report(cid):
     data = request.get_json() or {}
@@ -5775,6 +5860,12 @@ def api_comment_to_report(cid):
                             "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}), 422
         if result is None:
             return jsonify({"error": "row not found or not in deployed/paid status"}), 422
+        # Kick off a background fetch so the client dashboard picks
+        # up upvotes/replies without the admin needing to click
+        # anything else. Fire-and-forget — the report move is already
+        # committed.
+        items = _fetch_report_items(db, [{"id": cid, "source": source}])
+        _spawn_report_engagement_fetch(items)
         return jsonify({"ok": True, "prev_status": result,
                         "report_month": month, "brand_id": brand_id})
     finally:
@@ -5820,6 +5911,17 @@ def api_bulk_to_report():
             ids=ids, report_month=month, actor_email=_admin_email(),
             brand_id_override=brand_id,
         )
+        # Background engagement fetch for everything we successfully
+        # moved. We don't know exactly which ids succeeded — the
+        # function returns aggregate counts — so we fetch for all of
+        # the originally-requested ids and let _check_live_batch
+        # handle the ones that aren't actually in report state (it
+        # operates by URL so it just refreshes their stats).
+        try:
+            items = _fetch_report_items(db, ids)
+            _spawn_report_engagement_fetch(items)
+        except Exception as e:
+            print(f"[bulk-to-report] auto-stats spawn failed: {e}", flush=True)
         return jsonify(out)
     finally:
         db.close()
@@ -5874,6 +5976,13 @@ def api_bulk_to_report_filtered():
             brand_id_override=brand_id,
         )
         out["candidates_considered"] = len(items)
+        # Auto-fetch engagement in the background — same shape as the
+        # single-row and bulk-by-ids paths above.
+        try:
+            fetch_items = _fetch_report_items(db, ids)
+            _spawn_report_engagement_fetch(fetch_items)
+        except Exception as e:
+            print(f"[bulk-to-report-filtered] auto-stats spawn failed: {e}", flush=True)
         return jsonify(out)
     finally:
         db.close()

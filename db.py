@@ -1246,11 +1246,71 @@ class Database:
             )
             self.conn.commit()
 
-        # Migrate existing paid items: set status='paid' where paid_at is set
-        self.conn.execute("UPDATE comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
-        self.conn.execute("UPDATE search_comments SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
-        self.conn.execute("UPDATE posts SET status = 'paid' WHERE paid_at IS NOT NULL AND status != 'paid'")
-        self.conn.commit()
+        # One-shot backfill: ancient rows had `paid_at` set but
+        # status still on the prior lifecycle step. We flip those
+        # to 'paid' EXACTLY ONCE, gated on a meta flag so subsequent
+        # startups don't undo deliberate post-paid status changes.
+        #
+        # CRITICAL: this used to run on every startup and the
+        # WHERE clause was `status != 'paid'`. That clobbered the
+        # report lifecycle — reported comments retain paid_at
+        # (because they were paid before being reported), so the
+        # migration kept reverting them to 'paid' on every restart
+        # AND every background task (since background tasks call
+        # initialize()→migrations). Two safeguards now:
+        #  1. Meta-gated so it only ever runs once.
+        #  2. NOT IN exclusion against every post-paid lifecycle
+        #     status as defense-in-depth.
+        # Ensure the meta table exists — it's created later in this
+        # function but we need it here for the gating check below.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        if not self.meta_get("paid_status_backfill_v1"):
+            POST_PAID = ('paid', 'report', 'removed', 'deleted')
+            ph = ",".join("?" * len(POST_PAID))
+            self.conn.execute(
+                f"UPDATE comments SET status = 'paid' "
+                f"WHERE paid_at IS NOT NULL AND status NOT IN ({ph})",
+                POST_PAID,
+            )
+            self.conn.execute(
+                f"UPDATE search_comments SET status = 'paid' "
+                f"WHERE paid_at IS NOT NULL AND status NOT IN ({ph})",
+                POST_PAID,
+            )
+            self.conn.execute(
+                f"UPDATE posts SET status = 'paid' "
+                f"WHERE paid_at IS NOT NULL AND status NOT IN ({ph})",
+                POST_PAID,
+            )
+            self.conn.commit()
+            self.meta_set("paid_status_backfill_v1", "1")
+
+        # One-shot repair: rows that the broken paid-status migration
+        # above clobbered. A reported row leaves `paid_at` set
+        # (preserving when it was paid) AND stamps `report_month` /
+        # `report_added_at`. The prior migration kept reverting them
+        # to status='paid' every startup. Restore those: if a row
+        # is in status='paid' but ALSO carries report_month, it was
+        # almost certainly a victim — flip it back to 'report'.
+        if not self.meta_get("report_status_repair_v1"):
+            self.conn.execute(
+                """UPDATE comments
+                      SET status = 'report'
+                    WHERE status = 'paid'
+                      AND report_month IS NOT NULL
+                      AND report_added_at IS NOT NULL"""
+            )
+            self.conn.execute(
+                """UPDATE search_comments
+                      SET status = 'report'
+                    WHERE status = 'paid'
+                      AND report_month IS NOT NULL
+                      AND report_added_at IS NOT NULL"""
+            )
+            self.conn.commit()
+            self.meta_set("report_status_repair_v1", "1")
 
         # Subreddit scrutiny cache (comment removal rate + gate penalty)
         self.conn.execute("""

@@ -14,7 +14,7 @@
   </div>
   <div class="flex items-center gap-2">
     <button id="live-check-btn" onclick="runLiveCheck()" class="btn-ghost">
-      🔄 Run live-check
+      🔄 Update status & stats
     </button>
     <a href="/portal/month/{{ month }}/export.csv{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="btn-primary">
       ⬇ Export CSV
@@ -88,7 +88,7 @@
 
 <!-- Live check progress (hidden until button clicked) -->
 <div id="live-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
-  <span class="font-medium">Live-check running…</span>
+  <span class="font-medium">Refreshing status &amp; engagement from Reddit…</span>
   <span id="live-check-progress"></span>
 </div>
 
@@ -262,7 +262,7 @@ async function runLiveCheck() {
     if (!taskId) throw new Error('no task_id');
   } catch (e) {
     progress.textContent = ' Failed to start: ' + (e.message || e);
-    btn.disabled = false; btn.textContent = '🔄 Run live-check';
+    btn.disabled = false; btn.textContent = '🔄 Update status & stats';
     return;
   }
   const poll = setInterval(async () => {
@@ -275,7 +275,7 @@ async function runLiveCheck() {
           setTimeout(() => window.location.reload(), 800);
         } else {
           progress.textContent = ' failed: ' + (t.error || 'unknown error');
-          btn.disabled = false; btn.textContent = '🔄 Run live-check';
+          btn.disabled = false; btn.textContent = '🔄 Update status & stats';
         }
       }
     } catch (e) {

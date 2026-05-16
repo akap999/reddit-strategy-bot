@@ -36,12 +36,12 @@
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ total }}</span><span class="text-sm text-slate-400">/{{ total }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ total }}</span><span class="text-sm text-slate-400">/<span id="kpi-total">{{ total }}</span></span></div>
   </div>
   {% if client.monthly_target %}
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Target</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ live }}<span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-target-live">{{ live }}</span><span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
   </div>
   {% endif %}
 </div>
@@ -270,46 +270,65 @@ function _readQueryToFilters() {
 }
 
 function applyFilters() {
+  // KPIs follow the active brand + subreddit filter (NOT the status
+  // filter — Live/Removed are themselves a status partition, so
+  // they'd zero each other out if status were applied). The
+  // denominator on "Showing" likewise drops to the brand/sub
+  // scope so "50 / 100" reads naturally when a brand is selected.
   let shown = 0;
-  // Each post card matches iff at least one of its rows matches the
-  // status/brand/sub filter AND the card's own brand/sub match.
+  let liveCount = 0;
+  let removedCount = 0;
+  let scopeTotal = 0;  // rows that pass brand+sub (status-agnostic)
+
+  const allRows = Array.from(document.querySelectorAll('tr[data-row]'));
+  for (const row of allRows) {
+    const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
+    const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
+    if (!okBrand || !okSub) {
+      row.style.display = 'none';
+      continue;
+    }
+    scopeTotal += 1;
+    if (row.dataset.status === 'report') liveCount += 1;
+    else if (row.dataset.status === 'removed') removedCount += 1;
+    // Status filter now decides visibility (not the KPI math).
+    const okStatus = !_fState.status || row.dataset.status === _fState.status;
+    row.style.display = okStatus ? '' : 'none';
+    if (okStatus) shown += 1;
+  }
+
+  // Apply sort to each post card's visible rows AND hide cards
+  // whose visible row count is zero.
   for (const card of document.querySelectorAll('[data-post-card]')) {
     const tbody = card.querySelector('tbody');
-    const rows = tbody ? Array.from(tbody.querySelectorAll('tr[data-row]')) : [];
-    let cardShown = 0;
-    for (const row of rows) {
-      const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
-      const okStatus = !_fState.status || row.dataset.status === _fState.status;
-      const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
-      const show = okBrand && okStatus && okSub;
-      row.style.display = show ? '' : 'none';
-      if (show) { cardShown++; shown++; }
-    }
-    // Apply sort to the visible rows in this card.
-    if (tbody) {
-      const visible = rows.filter(r => r.style.display !== 'none');
-      const cmp = {
-        'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
-        'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
-        'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
-        'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
-      }[_fState.sort] || (() => 0);
-      visible.sort(cmp);
-      for (const r of visible) tbody.appendChild(r);
-    }
-    card.style.display = cardShown ? '' : 'none';
+    if (!tbody) continue;
+    const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
+    const visible = rows.filter(r => r.style.display !== 'none');
+    const cmp = {
+      'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
+      'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
+      'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
+      'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
+    }[_fState.sort] || (() => 0);
+    visible.sort(cmp);
+    for (const r of visible) tbody.appendChild(r);
+    card.style.display = visible.length ? '' : 'none';
   }
-  // Standalone search-comment table (no post-card wrapper).
-  for (const row of document.querySelectorAll('tr[data-row]:not([data-post-card] *)')) {
-    const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
-    const okStatus = !_fState.status || row.dataset.status === _fState.status;
-    const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
-    const show = okBrand && okStatus && okSub;
-    if (row.closest('[data-post-card]')) continue;  // handled above
-    row.style.display = show ? '' : 'none';
-    if (show) shown++;
-  }
-  document.getElementById('kpi-shown').textContent = shown;
+
+  // KPI tiles. The Showing tile reads `<visible> / <scopeTotal>`
+  // where scopeTotal is the brand+sub denominator — so picking
+  // Amerisleep changes both numbers, not just the numerator.
+  const liveEl = document.getElementById('kpi-live');
+  if (liveEl) liveEl.textContent = liveCount;
+  const removedEl = document.getElementById('kpi-removed');
+  if (removedEl) removedEl.textContent = removedCount;
+  const shownEl = document.getElementById('kpi-shown');
+  if (shownEl) shownEl.textContent = shown;
+  const totalEl = document.getElementById('kpi-total');
+  if (totalEl) totalEl.textContent = scopeTotal;
+  const targetEl = document.getElementById('kpi-target-live');
+  if (targetEl) targetEl.textContent = liveCount;
+
   document.getElementById('empty-state').classList.toggle('hidden', shown !== 0);
 }
 

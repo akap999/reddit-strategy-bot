@@ -6693,12 +6693,14 @@ def portal_month_export(month):
     finally:
         db.close()
 
-    # Flat one-row-per-post layout. Columns in order:
-    # Subreddit | Published Date | Post Title | Post Link | Mention Link.
-    # "Mention Link" is the URL of the parent HQ comment (the cluster
-    # head where the brand mention lives). Live Search comments don't
-    # have a parent post — they tail out at the bottom in a small
-    # secondary section so the client still sees them.
+    # Sectioned single-file CSV — mirrors the HTML layout:
+    #   === HQ Mentions ===       (Live Subs posts, one row each)
+    #     Subreddit | Published Date | Post Title | Post Link | Mention Link
+    #   === Mentions ===          (Live Search comments, full column set)
+    #     Subreddit | Published Date | Comment URL | Comment Content |
+    #     Upvotes | Replies | Status
+    # Sections with zero rows are omitted so the file is clean for
+    # single-pipeline clients.
     def fmt_date(raw):
         if not raw:
             return ""
@@ -6707,38 +6709,51 @@ def portal_month_export(month):
 
     buf = _io.StringIO()
     w = _csv.writer(buf)
-    w.writerow([
-        "Subreddit", "Published Date", "Post Title",
-        "Post Link", "Mention Link",
-    ])
 
-    for post in grouped.get("posts", []):
-        sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
-        published = fmt_date(post.get('deployed_at') or post.get('paid_at') or post.get('created_at'))
+    posts_list = grouped.get("posts", []) or []
+    search_list = grouped.get("search_comments", []) or []
+
+    if posts_list:
+        w.writerow(["=== HQ Mentions ==="])
         w.writerow([
-            sub,
-            published,
-            post.get('title') or '',
-            post.get('reddit_url') or '',
-            post.get('mention_link') or '',
+            "Subreddit", "Published Date", "Post Title",
+            "Post Link", "Mention Link",
         ])
+        for post in posts_list:
+            sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
+            published = fmt_date(
+                post.get('deployed_at') or post.get('paid_at') or post.get('created_at')
+            )
+            w.writerow([
+                sub,
+                published,
+                post.get('title') or '',
+                post.get('reddit_url') or '',
+                post.get('mention_link') or '',
+            ])
 
-    search = grouped.get("search_comments", [])
-    if search:
-        # Visually separate the search section with a blank row + a
-        # one-line header. Each search-comment row reuses the same 5
-        # columns: "Mention Link" becomes the comment URL itself
-        # (no parent post in this pipeline).
-        w.writerow([])
-        w.writerow(["Search comments (no Live Subs post container)", "", "", "", ""])
-        for c in search:
+    if search_list:
+        if posts_list:
+            w.writerow([])  # blank separator row between sections
+        w.writerow(["=== Mentions ==="])
+        w.writerow([
+            "Subreddit", "Published Date", "Comment URL",
+            "Comment Content", "Upvotes", "Replies", "Status",
+        ])
+        for c in search_list:
             sub = f"r/{c.get('subreddit_name')}" if c.get('subreddit_name') else ''
             published = fmt_date(c.get('posted_at') or c.get('deployed_at'))
+            status_label = 'Live' if c.get('status') == 'report' else (
+                'Removed' if c.get('status') == 'removed' else (c.get('status') or '')
+            )
             w.writerow([
-                sub, published,
-                (c.get('body') or '')[:160],   # short body in the Title slot
-                '',                              # no parent post link
+                sub,
+                published,
                 c.get('reddit_comment_url') or '',
+                c.get('body') or '',
+                c.get('upvotes') if c.get('upvotes') is not None else '',
+                c.get('num_replies') if c.get('num_replies') is not None else '',
+                status_label,
             ])
 
     resp = make_response(buf.getvalue())

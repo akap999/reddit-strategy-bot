@@ -2,7 +2,11 @@
 {% block title %}{{ month }} report{% endblock %}
 
 {% block content %}
-{% set post_count = posts | length %}
+{% set hq_count = posts | length %}
+{% set mention_count = search_comments | length %}
+{% set live_mentions = search_comments | selectattr('status', 'equalto', 'report') | list | length %}
+{% set removed_mentions = search_comments | selectattr('status', 'equalto', 'removed') | list | length %}
+{% set total_all = hq_count + mention_count %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
   <div>
@@ -20,27 +24,37 @@
   </div>
 </div>
 
-<!-- KPI strip -->
-<div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+<!-- KPI strip — split by pipeline -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
   <div class="stat-card" style="padding: 16px;">
-    <div class="text-xs text-slate-500 uppercase tracking-wider">Posts reported</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-total">{{ post_count }}</div>
+    <div class="text-xs text-slate-500 uppercase tracking-wider">HQ Mentions</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-hq">{{ hq_count }}</div>
+    <div class="text-xs text-slate-400 mt-0.5">posts</div>
+  </div>
+  <div class="stat-card" style="padding: 16px;">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Mentions</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-mentions">{{ mention_count }}</div>
+    <div class="text-xs text-slate-400 mt-0.5">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ post_count }}</span><span class="text-sm text-slate-400">/{{ post_count }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ total_all }}</span><span class="text-sm text-slate-400">/<span id="kpi-total">{{ total_all }}</span></span></div>
   </div>
   {% if client.monthly_target %}
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Target</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ post_count }}<span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-target-live">{{ hq_count + live_mentions }}</span><span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
   </div>
   {% endif %}
 </div>
 
-<!-- Filters -->
-{% set distinct_brands = posts | map(attribute='brand_name') | reject('none') | unique | list %}
-{% set distinct_subs = posts | map(attribute='subreddit_name') | reject('none') | unique | list %}
+<!-- Filters (shared by both sections) -->
+{% set posts_brands = posts | map(attribute='brand_name') | reject('none') | list %}
+{% set posts_subs = posts | map(attribute='subreddit_name') | reject('none') | list %}
+{% set sc_brands = search_comments | map(attribute='brand_name') | reject('none') | list %}
+{% set sc_subs = search_comments | map(attribute='subreddit_name') | reject('none') | list %}
+{% set distinct_brands = (posts_brands + sc_brands) | unique | list %}
+{% set distinct_subs = (posts_subs + sc_subs) | unique | list %}
 <div class="surface border-soft rounded-xl p-3 mb-4 flex flex-wrap items-end gap-3" style="background: white;">
   <div class="flex-1 min-w-[140px]">
     <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Brand</label>
@@ -61,25 +75,39 @@
     </select>
   </div>
   <div class="flex-1 min-w-[140px]">
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Mentions status</label>
+    <select id="flt-status" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
+      <option value="">All</option>
+      <option value="report">Live</option>
+      <option value="removed">Removed</option>
+    </select>
+  </div>
+  <div class="flex-1 min-w-[140px]">
     <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Sort</label>
     <select id="flt-sort" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
       <option value="date-desc">Newest first</option>
       <option value="date-asc">Oldest first</option>
-      <option value="title-asc">Title A→Z</option>
+      <option value="upvotes-desc">Most upvotes (Mentions)</option>
+      <option value="replies-desc">Most replies (Mentions)</option>
     </select>
   </div>
   <button type="button" onclick="resetFilters()" class="text-xs text-slate-500 hover:text-slate-900 underline-offset-2 hover:underline px-2 py-1">Reset</button>
 </div>
 
-<!-- Live check progress (hidden until button clicked) -->
+<!-- Live check progress -->
 <div id="live-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
   <span class="font-medium">Refreshing status &amp; engagement from Reddit…</span>
   <span id="live-check-progress"></span>
 </div>
 
-<!-- Posts table -->
-<div class="surface border-soft rounded-xl overflow-hidden">
-  <table class="report-table" id="report-table">
+<!-- ============== HQ Mentions section (Live Subs posts) ============== -->
+{% if posts %}
+<div id="section-hq" class="surface border-soft rounded-xl overflow-hidden mb-6">
+  <div class="px-4 py-2.5 border-b border-soft bg-slate-50 flex items-center justify-between gap-3">
+    <div class="text-xs uppercase tracking-wider text-slate-500 font-medium">HQ Mentions</div>
+    <div class="text-xs text-slate-500"><span id="hq-shown">{{ hq_count }}</span>/{{ hq_count }}</div>
+  </div>
+  <table class="report-table" id="hq-table">
     <thead>
       <tr>
         <th>Subreddit</th>
@@ -93,7 +121,7 @@
       {% for post in posts %}
       {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
       {% set post_short_date = post_date[:10] %}
-      <tr data-row data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}">
+      <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}">
         <td data-label="Subreddit">
           {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% else %}—{% endif %}
           {% if post.brand_name %}<span class="chip chip-brand ml-1">{{ post.brand_name }}</span>{% endif %}
@@ -107,50 +135,83 @@
         <td data-label="Post Link">
           {% if post.reddit_url %}
           <a href="{{ post.reddit_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open post ↗</a>
-          {% else %}
-          <span class="text-slate-300">—</span>
-          {% endif %}
+          {% else %}<span class="text-slate-300">—</span>{% endif %}
         </td>
         <td data-label="Mention Link">
           {% if post.mention_link %}
           <a href="{{ post.mention_link }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open comment ↗</a>
-          {% else %}
-          <span class="text-slate-300">—</span>
-          {% endif %}
+          {% else %}<span class="text-slate-300">—</span>{% endif %}
         </td>
       </tr>
-      {% else %}
-      <tr><td colspan="5" class="text-center text-slate-400 py-12">No posts in this report yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
-  <div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
+  <div id="hq-empty-state" class="hidden text-center text-slate-400 py-8 text-sm">No HQ Mentions match the current filters.</div>
 </div>
+{% endif %}
 
+<!-- ============== Mentions section (Live Search comments — pre-flatten layout restored) ============== -->
 {% if search_comments %}
-<details class="mt-6">
-  <summary class="text-sm text-slate-500 cursor-pointer hover:text-slate-900">Search comments ({{ search_comments | length }}) — these don't have a Live Subs post container</summary>
-  <div class="surface border-soft rounded-xl overflow-hidden mt-3">
-    <table class="report-table">
-      <thead><tr><th>Subreddit</th><th>Published</th><th>Comment</th></tr></thead>
-      <tbody>
-        {% for r in search_comments %}
-        {% set published = r.posted_at or r.deployed_at or '' %}
-        {% set short_date = published[:10] if published else '' %}
-        <tr>
-          <td>{% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}</td>
-          <td style="color:#475569">{% if short_date %}{{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}{% endif %}</td>
-          <td>
-            {% if r.reddit_comment_url %}
-            <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open comment ↗</a>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<div id="section-mentions" class="surface border-soft rounded-xl overflow-hidden mb-6">
+  <div class="px-4 py-2.5 border-b border-soft bg-slate-50 flex items-center justify-between gap-3">
+    <div class="text-xs uppercase tracking-wider text-slate-500 font-medium">Mentions</div>
+    <div class="text-xs text-slate-500"><span id="mentions-shown">{{ mention_count }}</span>/{{ mention_count }}</div>
   </div>
-</details>
+  <table class="report-table" id="mentions-table">
+    <thead>
+      <tr>
+        <th>Subreddit</th>
+        <th>Published</th>
+        <th>Comment</th>
+        <th class="text-right">Upvotes</th>
+        <th class="text-right">Replies</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in search_comments %}
+      {% set published = r.posted_at or r.deployed_at or '' %}
+      {% set short_date = published[:10] if published else '' %}
+      {% set body = (r.body or '') %}
+      <tr data-row data-kind="mention" data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ published[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
+        <td data-label="Subreddit">
+          {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
+          {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
+        </td>
+        <td data-label="Published" style="color: #475569;">
+          {% if short_date %}{{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}{% else %}—{% endif %}
+        </td>
+        <td data-label="Comment" style="max-width: 460px;">
+          {% if r.reddit_comment_url %}
+          <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium block mb-1">View on Reddit ↗</a>
+          {% endif %}
+          <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
+        </td>
+        <td data-label="Upvotes" class="text-right" style="font-variant-numeric: tabular-nums;">
+          {% if r.upvotes is not none %}<span class="text-slate-900 font-medium">{{ r.upvotes }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+        </td>
+        <td data-label="Replies" class="text-right" style="font-variant-numeric: tabular-nums;">
+          {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+        </td>
+        <td data-label="Status">
+          {% if r.status == 'report' %}
+            <span class="chip chip-live">Live</span>
+          {% else %}
+            <span class="chip chip-removed">Removed</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div id="mentions-empty-state" class="hidden text-center text-slate-400 py-8 text-sm">No Mentions match the current filters.</div>
+</div>
+{% endif %}
+
+{% if not posts and not search_comments %}
+<div class="surface border-soft rounded-xl text-center py-12">
+  <p class="text-sm text-slate-400">No reports for this month yet.</p>
+</div>
 {% endif %}
 
 {% endblock %}
@@ -160,46 +221,91 @@
 const ASCID = {{ client.id if is_admin_view else 'null' }};
 const ASQS = ASCID ? ('?as=' + ASCID) : '';
 
-const _fState = { brand: '', sub: '', sort: 'date-desc' };
+const _fState = { brand: '', sub: '', status: '', sort: 'date-desc' };
 
 function _readQueryToFilters() {
   const u = new URLSearchParams(window.location.search);
   const brandQ = u.get('brand');
+  const statusQ = u.get('status');
   if (brandQ) {
     const sel = document.getElementById('flt-brand');
     const candidates = Array.from(sel.options).map(o => o.value).filter(Boolean);
     if (candidates.includes(brandQ)) { sel.value = brandQ; _fState.brand = brandQ; }
   }
+  if (statusQ) {
+    const sel = document.getElementById('flt-status');
+    const s = (statusQ === 'live') ? 'report' : statusQ;
+    if (sel && Array.from(sel.options).some(o => o.value === s)) {
+      sel.value = s; _fState.status = s;
+    }
+  }
 }
 
-function applyFilters() {
-  let shown = 0;
-  const tbody = document.querySelector('#report-table tbody');
+function _filterAndSort(tableId, isMentions) {
+  const tbody = document.querySelector(`#${tableId} tbody`);
+  if (!tbody) return 0;
   const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
+  let shown = 0;
   for (const row of rows) {
     const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
     const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
-    const show = okBrand && okSub;
+    // Status filter only applies to Mentions (HQ table has no
+    // status column — every post on it is by definition live).
+    const okStatus = !isMentions || !_fState.status || row.dataset.status === _fState.status;
+    const show = okBrand && okSub && okStatus;
     row.style.display = show ? '' : 'none';
-    if (show) shown++;
+    if (show) shown += 1;
   }
   // Sort visible rows in place.
   const visible = rows.filter(r => r.style.display !== 'none');
   const cmp = {
     'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
     'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
+    'upvotes-desc': (a, b) => (+(b.dataset.upvotes || -1)) - (+(a.dataset.upvotes || -1)),
+    'replies-desc': (a, b) => (+(b.dataset.replies || -1)) - (+(a.dataset.replies || -1)),
     'title-asc': (a, b) => (a.dataset.title || '').localeCompare(b.dataset.title || ''),
   }[_fState.sort] || (() => 0);
   visible.sort(cmp);
   for (const r of visible) tbody.appendChild(r);
-  document.getElementById('kpi-shown').textContent = shown;
-  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0 || rows.length === 0);
+  return shown;
+}
+
+function applyFilters() {
+  const hqShown = _filterAndSort('hq-table', false);
+  const mentionsShown = _filterAndSort('mentions-table', true);
+
+  // Per-section "shown" badges + empty states.
+  const hqShownEl = document.getElementById('hq-shown');
+  if (hqShownEl) hqShownEl.textContent = hqShown;
+  const hqEmpty = document.getElementById('hq-empty-state');
+  if (hqEmpty) {
+    const hasHqTable = !!document.getElementById('hq-table');
+    hqEmpty.classList.toggle('hidden', !hasHqTable || hqShown > 0);
+  }
+  const mShownEl = document.getElementById('mentions-shown');
+  if (mShownEl) mShownEl.textContent = mentionsShown;
+  const mEmpty = document.getElementById('mentions-empty-state');
+  if (mEmpty) {
+    const hasMTable = !!document.getElementById('mentions-table');
+    mEmpty.classList.toggle('hidden', !hasMTable || mentionsShown > 0);
+  }
+
+  // Top KPI: combined showing / total.
+  const total = (document.querySelectorAll('#hq-table tr[data-row]').length) +
+                (document.querySelectorAll('#mentions-table tr[data-row]').length);
+  const shownEl = document.getElementById('kpi-shown');
+  if (shownEl) shownEl.textContent = hqShown + mentionsShown;
+  const totalEl = document.getElementById('kpi-total');
+  if (totalEl) totalEl.textContent = total;
 }
 
 function resetFilters() {
-  for (const id of ['flt-brand', 'flt-sub']) document.getElementById(id).value = '';
+  for (const id of ['flt-brand', 'flt-sub', 'flt-status']) {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  }
   document.getElementById('flt-sort').value = 'date-desc';
-  _fState.brand = _fState.sub = '';
+  _fState.brand = _fState.sub = _fState.status = '';
   _fState.sort = 'date-desc';
   applyFilters();
 }
@@ -212,6 +318,7 @@ function resetFilters() {
   };
   wire('flt-brand', 'brand');
   wire('flt-sub', 'sub');
+  wire('flt-status', 'status');
   wire('flt-sort', 'sort');
   applyFilters();
 })();

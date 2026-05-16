@@ -137,8 +137,10 @@ function _aggregate(rows, monthFilter, statusFilter) {
   // Status filter: which number to highlight as the headline count.
   if (statusFilter === 'live') return { headline: live, total, live, removed, label: 'live' };
   if (statusFilter === 'removed') return { headline: removed, total, live, removed, label: 'removed' };
-  // Default headline shows the live count — the metric clients care about.
-  return { headline: live, total, live, removed, label: 'live' };
+  // 'all' (default) shows the grand total of reports — the user
+  // wants the picker to actually flip the headline number when
+  // they move off 'Live' or 'Removed'.
+  return { headline: total, total, live, removed, label: 'total' };
 }
 
 function _brandHref(brandId, month, status) {

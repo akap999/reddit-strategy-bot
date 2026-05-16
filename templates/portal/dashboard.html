@@ -144,17 +144,29 @@ function _aggregate(rows, monthFilter, statusFilter) {
 }
 
 function _brandHref(brandId, month, status) {
-  // If a month is selected, drill straight into the month page
-  // with brand filter applied as a query param the page will read.
-  const qparts = [];
-  if (status && status !== 'all') qparts.push('status=' + encodeURIComponent(status));
-  qparts.push('brand=' + encodeURIComponent(brandId));
-  if (ASCID) qparts.push('as=' + ASCID);
-  const qs = qparts.length ? ('?' + qparts.join('&')) : '';
-  if (month) return `/portal/month/${month}${qs}`;
-  // No month → land on the latest month for this brand if there is one.
-  const latest = (BRAND_ROWS.filter(r => r.brand_id === brandId).map(r => r.month).sort().reverse())[0];
-  return latest ? `/portal/month/${latest}${qs}` : '#';
+  // Routing:
+  //   - No month chosen on the card → /portal/brand/<id> (the brand
+  //     overview page, which lists every month for this brand).
+  //   - Specific month chosen → drill straight into /portal/month/<m>
+  //     with brand + status as query params so the in-page filter
+  //     opens pre-applied.
+  // (For the month-route case we still pass the brand NAME — the
+  //  month page's Brand dropdown filters by name, not id.)
+  if (month) {
+    const qparts = [];
+    if (status && status !== 'all') qparts.push('status=' + encodeURIComponent(status));
+    // Try to resolve brandId → brand_name from the loaded aggregate
+    // so the dropdown selects correctly. Fallback to passing the id
+    // (the dropdown won't match but the page still loads).
+    const known = BRAND_ROWS.find(r => r.brand_id === brandId);
+    const brandKey = known ? known.brand_name : String(brandId);
+    qparts.push('brand=' + encodeURIComponent(brandKey));
+    if (ASCID) qparts.push('as=' + ASCID);
+    return `/portal/month/${month}?${qparts.join('&')}`;
+  }
+  // No month → brand overview page.
+  const qs = ASCID ? ('?as=' + ASCID) : '';
+  return `/portal/brand/${brandId}${qs}`;
 }
 
 function renderBrandCards() {

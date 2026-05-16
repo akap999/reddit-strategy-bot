@@ -6313,6 +6313,57 @@ def portal_dashboard():
         db.close()
 
 
+@app.route('/portal/brand/<int:brand_id>')
+@client_required
+def portal_brand(brand_id):
+    """Brand overview page. Lists every month that has at least one
+    reported comment under this brand for the active client, as month
+    tiles (same shape as the dashboard's By Month grid). Clicking a
+    tile drills into /portal/month/<m>?brand=<brand_name> so the
+    filter follows the user through.
+    """
+    cid, is_admin = _acting_client_id()
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        if not client:
+            return abort(404)
+        # Authorization: the client must actually have this brand on
+        # their `client_brands` row. Otherwise admins could in theory
+        # construct a URL referring to a brand the client doesn't
+        # own — even in admin-view that's a confusing surface.
+        client_brand_ids = set(db.client_brand_ids(cid))
+        if brand_id not in client_brand_ids:
+            return abort(404)
+        # Resolve brand name; bail if the brand row doesn't exist.
+        brand_row = db.conn.execute(
+            "SELECT id, name FROM brands WHERE id = ?", (brand_id,)
+        ).fetchone()
+        if not brand_row:
+            return abort(404)
+        # Reuse the existing aggregate query — already scoped to the
+        # client's brands — and filter to this one brand. The aggregate
+        # returns a flat (brand, month) grid; collapse to per-month.
+        agg = db.get_report_aggregate_for_client(cid)
+        per_month = {}
+        for r in agg:
+            if r['brand_id'] != brand_id:
+                continue
+            m = r['month']
+            slot = per_month.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
+            slot["total"] += r.get("total") or 0
+            slot["live"] += r.get("live") or 0
+            slot["removed"] += r.get("removed") or 0
+        months = sorted(per_month.values(), key=lambda r: r["month"], reverse=True)
+        return render_template(
+            'portal/brand.html',
+            client=client, brand=dict(brand_row),
+            months=months, is_admin_view=is_admin,
+        )
+    finally:
+        db.close()
+
+
 @app.route('/portal/month/<month>')
 @client_required
 def portal_month(month):

@@ -1,0 +1,55 @@
+{% extends "portal/_layout.html" %}
+{% block title %}{{ brand.name }} report{% endblock %}
+
+{% block content %}
+{% set qs = ('?as=' + client.id|string) if is_admin_view else '' %}
+{% set qs_amp = ('&as=' + client.id|string) if is_admin_view else '' %}
+<div class="mb-6">
+  <a href="/portal/dashboard{{ qs }}" class="text-sm text-slate-500 hover:text-slate-900">← Dashboard</a>
+  <h1 class="text-2xl font-semibold text-slate-900 mt-1">{{ brand.name }}</h1>
+  <p class="mt-1 text-sm text-slate-500">Monthly reports for this brand.</p>
+</div>
+
+{% if not months %}
+<div class="stat-card text-center py-16">
+  <div class="mx-auto mb-4" style="width: 64px; height: 64px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px;">🏷</div>
+  <h2 class="text-lg font-semibold mb-2">No reports for {{ brand.name }} yet</h2>
+  <p class="text-sm text-slate-500 max-w-md mx-auto">When your account manager pushes content under this brand into a monthly report, you'll see a tile here.</p>
+</div>
+{% else %}
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+  {% for m in months %}
+  {% set pct = ((m.live or 0) * 100 // (client.monthly_target or 1)) if client.monthly_target else 0 %}
+  {# Drill into the existing month page with this brand's name pre-applied
+     as a filter — keeps the in-page Brand dropdown in sync. #}
+  <a href="/portal/month/{{ m.month }}?brand={{ brand.name | urlencode }}{{ qs_amp }}" class="stat-card hover:shadow-sm transition group">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">{{ m.month[5:] }}/{{ m.month[:4] }}</div>
+        <div class="text-2xl font-semibold mt-1">{{ m.month }}</div>
+      </div>
+      <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
+    </div>
+    <div class="flex items-baseline gap-2 mb-3">
+      <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
+      <span class="text-sm text-slate-500">live / {{ m.total }} total</span>
+      {% if client.monthly_target %}
+      <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+      {% endif %}
+    </div>
+    {% if client.monthly_target %}
+    <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+      <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
+    </div>
+    {% endif %}
+    <div class="flex items-center gap-3 mt-3 text-xs">
+      <span class="chip chip-live">{{ m.live }} live</span>
+      {% if m.removed %}
+      <span class="chip chip-removed">{{ m.removed }} removed</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

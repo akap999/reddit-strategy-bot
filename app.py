@@ -5720,11 +5720,11 @@ def api_comment_to_report(cid):
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
     source = (data.get('source') or 'comment').strip()
-    client_id = data.get('client_id')
+    brand_id = data.get('brand_id')
     try:
-        client_id = int(client_id) if client_id not in (None, '', 0) else None
+        brand_id = int(brand_id) if brand_id not in (None, '', 0) else None
     except (TypeError, ValueError):
-        client_id = None
+        brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     if source not in ('comment', 'search_comment'):
@@ -5733,12 +5733,19 @@ def api_comment_to_report(cid):
     try:
         result = db.move_comment_to_report(
             cid, source, month,
-            actor_email=_admin_email(), client_id=client_id,
+            actor_email=_admin_email(), brand_id=brand_id,
         )
+        if result is db.BRAND_REQUIRED:
+            # Tell the UI which brands to offer. Empty list →
+            # client falls back to /api/brands/all.
+            candidates = db.report_brand_candidates(cid, source)
+            return jsonify({"error": "brand_required",
+                            "candidates": candidates,
+                            "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}), 422
         if result is None:
             return jsonify({"error": "row not found or not in deployed/paid status"}), 422
         return jsonify({"ok": True, "prev_status": result,
-                        "report_month": month, "client_id": client_id})
+                        "report_month": month, "brand_id": brand_id})
     finally:
         db.close()
 
@@ -5760,22 +5767,27 @@ def api_comment_undo_report(cid):
 
 @app.route('/api/comments/bulk-to-report', methods=['POST'])
 def api_bulk_to_report():
-    """Body: {ids: [{id, source}], report_month, client_id?}"""
+    """Body: {ids: [{id, source}], report_month, brand_id?}
+
+    `brand_id` (optional) is applied as an override to any row in
+    the batch whose brand_id is currently NULL. Already-branded
+    rows keep their brand untouched.
+    """
     data = request.get_json() or {}
     ids = data.get('ids') or []
     month = (data.get('report_month') or '').strip()
-    client_id = data.get('client_id')
+    brand_id = data.get('brand_id')
     try:
-        client_id = int(client_id) if client_id not in (None, '', 0) else None
+        brand_id = int(brand_id) if brand_id not in (None, '', 0) else None
     except (TypeError, ValueError):
-        client_id = None
+        brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     db = get_db()
     try:
         out = db.bulk_move_to_report(
             ids=ids, report_month=month, actor_email=_admin_email(),
-            client_id=client_id,
+            brand_id_override=brand_id,
         )
         return jsonify(out)
     finally:
@@ -5787,16 +5799,21 @@ def api_bulk_to_report_filtered():
     """Move every comment matching the given filter (mirror of
     /api/all-comments/mark-paid-all's shape) into report state.
 
-    Body: {report_month, client_id?, brand_id?, subreddit_id?,
+    Body: {report_month, brand_id?, subreddit_id?,
            account_id?, source?, date?, status?}
+
+    `brand_id` is treated as a filter on candidate rows AND as an
+    override for any unbranded rows in the resulting batch. The two
+    use cases are the same value in practice — when the admin picks
+    a brand, they want exactly those rows.
     """
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
-    client_id = data.get('client_id')
+    brand_id = data.get('brand_id')
     try:
-        client_id = int(client_id) if client_id not in (None, '', 0) else None
+        brand_id = int(brand_id) if brand_id not in (None, '', 0) else None
     except (TypeError, ValueError):
-        client_id = None
+        brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     db = get_db()
@@ -5809,7 +5826,7 @@ def api_bulk_to_report_filtered():
         # Pull candidate rows
         candidates = db.get_all_comments_global(
             status=status_filter,
-            brand_id=int(data['brand_id']) if data.get('brand_id') else None,
+            brand_id=brand_id,
             subreddit_id=int(data['subreddit_id']) if data.get('subreddit_id') else None,
             account_id=data.get('account_id') or None,
             source=data.get('source') or None,
@@ -5823,7 +5840,7 @@ def api_bulk_to_report_filtered():
                 ids.append({"id": r['id'], "source": r.get('source', 'comment')})
         out = db.bulk_move_to_report(
             ids=ids, report_month=month, actor_email=_admin_email(),
-            client_id=client_id,
+            brand_id_override=brand_id,
         )
         out["candidates_considered"] = len(items)
         return jsonify(out)

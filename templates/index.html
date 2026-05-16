@@ -10127,51 +10127,91 @@ function _monthOptionsHtml(selectedMonth) {
 }
 
 async function showSendToReportModal(cid, source) {
-    // Load clients list up-front so the picker can be required.
-    let clients = [];
-    try { clients = await api('/api/clients'); } catch (_) {}
-    const clientOpts = (clients || []).map(c =>
-        `<option value="${c.id}">${c.name}</option>`
-    ).join('');
-    const hasClients = (clients && clients.length > 0);
+    // Open with just a month picker. Brand resolution happens
+    // server-side via the comment → parent-post chain; the modal
+    // only asks for a brand if the server returns 422 telling us
+    // it couldn't infer one (lazy picker, second pass below).
     showModal(`
         <h3 class="text-xl font-bold mb-3">Send to Monthly Report</h3>
-        <p class="text-xs text-gray-400 mb-3">Pick the <strong>client</strong> this report belongs to and the month it should count toward. The comment moves from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>.</p>
-        ${hasClients ? '' : '<div class="mb-3 p-2 rounded bg-red-900/30 border border-red-600 text-xs text-red-300">No clients exist yet. <a href="#" onclick="closeModal();navigate(\'clients\');return false" class="underline">Create one first</a>.</div>'}
-        <label class="text-xs text-gray-400">Client <span class="text-red-400">*</span></label>
-        <select id="rep-client" class="w-full mb-3" ${hasClients ? '' : 'disabled'}>
-            <option value="">— pick a client —</option>
-            ${clientOpts}
-        </select>
+        <p class="text-xs text-gray-400 mb-3">The comment moves from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>. Dashboard visibility is determined by the comment's brand and which clients are linked to it.</p>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <div id="rep-brand-section"></div>
         <div class="flex gap-2 mt-3">
-            <button class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')" ${hasClients ? '' : 'disabled'}>Send</button>
+            <button id="rep-send-btn" class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')">Send</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
 }
 
+// Render the brand-picker stage of the modal in place. Called
+// only when the backend returned 422 brand_required.
+async function _renderBrandPickerStage(candidates) {
+    // `candidates` (from server): the scoped list when the parent
+    // post is multi-brand. Empty → fall back to all brands.
+    let brands = candidates;
+    if (!brands || brands.length === 0) {
+        try { brands = await api('/api/brands/all'); } catch (_) { brands = []; }
+    }
+    const brandOpts = (brands || []).map(b =>
+        `<option value="${b.id}">${b.name}</option>`
+    ).join('');
+    const section = document.getElementById('rep-brand-section');
+    if (!section) return;
+    section.innerHTML = `
+        <div class="mt-3 mb-2 p-2 rounded bg-amber-900/30 border border-amber-700 text-xs text-amber-200">
+            We couldn't infer this comment's brand from its parent post. Pick one to continue.
+        </div>
+        <label class="text-xs text-gray-400">Brand <span class="text-red-400">*</span></label>
+        <select id="rep-brand" class="w-full mb-3">
+            <option value="">— pick a brand —</option>
+            ${brandOpts}
+        </select>
+    `;
+}
+
 async function submitSendToReport(cid, source) {
     const month = document.getElementById('rep-month').value;
-    const clientId = parseInt(document.getElementById('rep-client').value) || null;
-    if (!clientId) { toast('Pick a client first', 'error'); return; }
     if (!month) { toast('Pick a month', 'error'); return; }
+    const brandPickerEl = document.getElementById('rep-brand');
+    const brandId = brandPickerEl ? (parseInt(brandPickerEl.value) || null) : null;
+    // If the picker is already on screen (second pass), require a pick.
+    if (brandPickerEl && !brandId) { toast('Pick a brand first', 'error'); return; }
+
+    const body = { report_month: month, source };
+    if (brandId) body.brand_id = brandId;
+
+    // Use raw fetch so we can inspect the 422 body (api() drops it).
+    let resp;
     try {
-        await api(`/api/comments/${cid}/to-report`, {
+        resp = await fetch(`/api/comments/${cid}/to-report`, {
             method: 'POST',
-            body: { report_month: month, source, client_id: clientId },
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
         });
+    } catch (e) {
+        toast('Network error: ' + (e.message || e), 'error');
+        return;
+    }
+    const payload = await resp.json().catch(() => ({}));
+
+    if (resp.ok) {
         toast(`Sent to ${month}`, 'success');
         closeModal();
-        // Refresh whichever view is active.
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
         else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
             try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
         }
-    } catch (e) {
-        toast('Failed: ' + (e.message || e), 'error');
+        return;
     }
+
+    if (resp.status === 422 && payload.error === 'brand_required') {
+        // Lazy picker: server told us it couldn't infer a brand.
+        await _renderBrandPickerStage(payload.candidates || []);
+        return;
+    }
+
+    toast('Failed: ' + (payload.error || payload.message || resp.statusText), 'error');
 }
 
 async function undoReport(cid, source) {
@@ -10202,21 +10242,20 @@ async function showMarkReportedAllModal(scope) {
         status: document.getElementById('ls-cf-status')?.value || null,
         source: 'search_comment',
     };
-    let clients = [];
-    try { clients = await api('/api/clients'); } catch (_) {}
-    const clientOpts = (clients || []).map(c =>
-        `<option value="${c.id}">${c.name}</option>`
+    let brands = [];
+    try { brands = await api('/api/brands/all'); } catch (_) {}
+    const brandOpts = (brands || []).map(b =>
+        `<option value="${b.id}" ${filterContext.brand_id == b.id ? 'selected' : ''}>${b.name}</option>`
     ).join('');
-    const hasClients = (clients && clients.length > 0);
     showModal(`
         <h3 class="text-xl font-bold mb-3">Mark Reported All</h3>
-        <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen client's monthly report.</p>
-        ${hasClients ? '' : '<div class="mb-3 p-2 rounded bg-red-900/30 border border-red-600 text-xs text-red-300">No clients exist yet. <a href="#" onclick="closeModal();navigate(\'clients\');return false" class="underline">Create one first</a>.</div>'}
-        <label class="text-xs text-gray-400">Client <span class="text-red-400">*</span></label>
-        <select id="rep-client" class="w-full mb-2" ${hasClients ? '' : 'disabled'}>
-            <option value="">— pick a client —</option>
-            ${clientOpts}
+        <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen month's report. Dashboard visibility is determined by each comment's brand (and which clients are linked to it).</p>
+        <label class="text-xs text-gray-400">Brand override <span class="text-gray-500">(optional)</span></label>
+        <select id="rep-brand" class="w-full mb-1">
+            <option value="">— leave existing brands as-is —</option>
+            ${brandOpts}
         </select>
+        <p class="text-xs text-gray-500 mb-3">If set, applied to <em>only</em> the batch's unbranded comments. Already-branded rows keep their brand untouched. Unbranded rows are <strong>skipped</strong> when no override is set.</p>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-2">${_monthOptionsHtml()}</select>
         <label class="text-xs text-gray-400">Status filter (only deployed/paid eligible)</label>
@@ -10226,7 +10265,7 @@ async function showMarkReportedAllModal(scope) {
             <option value="paid" ${filterContext.status === 'paid' ? 'selected' : ''}>Only paid</option>
         </select>
         <div class="flex gap-2 mt-3">
-            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')" ${hasClients ? '' : 'disabled'}>Run</button>
+            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')">Run</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
@@ -10235,14 +10274,19 @@ async function showMarkReportedAllModal(scope) {
 async function submitMarkReportedAll(scope) {
     const month = document.getElementById('rep-month').value;
     const status = document.getElementById('rep-status').value || null;
-    const clientId = parseInt(document.getElementById('rep-client').value) || null;
-    if (!clientId) { toast('Pick a client first', 'error'); return; }
+    const brandOverride = parseInt(document.getElementById('rep-brand').value) || null;
     if (!month) { toast('Pick a month', 'error'); return; }
-    const body = { report_month: month, client_id: clientId };
+    const body = { report_month: month };
+    if (brandOverride) body.brand_id = brandOverride;
     if (status) body.status = status;
     if (scope === 'livesubs') {
         const bid = document.getElementById('lsubs-cmt-brand')?.value;
-        if (bid) body.brand_id = bid;
+        // The header filter scopes WHICH comments are candidates;
+        // the override above sets WHAT brand unbranded rows get.
+        // When both are set we still respect the override for unbranded;
+        // when only the header filter is set, that brand also acts as
+        // the candidate filter without overriding existing brands.
+        if (bid && !body.brand_id) body.brand_id = bid;
         body.source = 'comment';
     } else if (scope === 'livesearch') {
         body.source = 'search_comment';
@@ -10251,7 +10295,11 @@ async function submitMarkReportedAll(scope) {
         const res = await api('/api/comments/bulk-to-report-filtered', { method: 'POST', body });
         const updated = (res && res.updated) || 0;
         const skipped = (res && res.skipped) || 0;
-        toast(`Reported ${updated} comment(s) to ${month}${skipped ? ` · ${skipped} skipped (not eligible)` : ''}`, 'success');
+        const brandRequired = (res && res.brand_required) || 0;
+        const skippedMsg = skipped
+            ? ` · ${skipped} skipped${brandRequired ? ` (${brandRequired} unbranded — set a brand override to include)` : ''}`
+            : '';
+        toast(`Reported ${updated} comment(s) to ${month}${skippedMsg}`, 'success');
         closeModal();
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
         else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {

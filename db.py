@@ -1410,6 +1410,78 @@ class Database:
             self.conn.execute(idx_sql)
         self.conn.commit()
 
+        # One-shot: recover brand_id on already-reported rows that
+        # were written via the old report_client_id workaround.
+        # See _backfill_report_brand_ids for the rules.
+        try:
+            self._backfill_report_brand_ids()
+        except Exception as e:
+            # Migrations must never block startup. Log and move on.
+            print(f"[migrations] backfill_report_brand_ids failed: {e}", flush=True)
+
+    def _backfill_report_brand_ids(self):
+        """Legacy rows reported during the brief `report_client_id`
+        experiment may carry a client link but no `brand_id`, so the
+        new brand-only dashboard query won't find them.
+
+        For every report/removed row with NULL brand_id AND a
+        report_client_id pointing to a client with exactly ONE brand
+        in `client_brands`, set the row's brand_id to that brand.
+        Multi-brand-client rows are left untouched — the admin can
+        Undo + Re-report them with an explicit brand pick.
+
+        Idempotent: a second run is a no-op because the WHERE clause
+        filters on brand_id IS NULL.
+        """
+        # Skip if the legacy column was never added (e.g. fresh DB
+        # after we eventually drop it).
+        c_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(comments)").fetchall()]
+        sc_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(search_comments)").fetchall()]
+        if "report_client_id" not in c_cols and "report_client_id" not in sc_cols:
+            return
+        # Single-brand-client lookup. We rely on the existence of the
+        # client_brands table (created earlier in _run_migrations).
+        single_brand_clients = {
+            int(r["client_id"]): int(r["brand_id"])
+            for r in self.conn.execute(
+                """SELECT client_id, MIN(brand_id) AS brand_id
+                     FROM client_brands
+                    GROUP BY client_id
+                   HAVING COUNT(*) = 1"""
+            ).fetchall()
+        }
+        if not single_brand_clients:
+            return
+        if "report_client_id" in c_cols:
+            rows = self.conn.execute(
+                """SELECT id, report_client_id FROM comments
+                    WHERE brand_id IS NULL
+                      AND report_client_id IS NOT NULL
+                      AND status IN ('report', 'removed')"""
+            ).fetchall()
+            for r in rows:
+                bid = single_brand_clients.get(int(r["report_client_id"]))
+                if bid:
+                    self.conn.execute(
+                        "UPDATE comments SET brand_id = ? WHERE id = ? AND brand_id IS NULL",
+                        (bid, r["id"])
+                    )
+        if "report_client_id" in sc_cols:
+            rows = self.conn.execute(
+                """SELECT id, report_client_id FROM search_comments
+                    WHERE brand_id IS NULL
+                      AND report_client_id IS NOT NULL
+                      AND status IN ('report', 'removed')"""
+            ).fetchall()
+            for r in rows:
+                bid = single_brand_clients.get(int(r["report_client_id"]))
+                if bid:
+                    self.conn.execute(
+                        "UPDATE search_comments SET brand_id = ? WHERE id = ? AND brand_id IS NULL",
+                        (bid, r["id"])
+                    )
+        self.conn.commit()
+
     # --- Background Tasks ---
 
     def create_task(self, task_id, task_type):
@@ -2588,29 +2660,113 @@ class Database:
 
     # --- Report lifecycle helpers ---
 
+    # Sentinel returned by move_comment_to_report when the row has no
+    # brand_id and the caller didn't supply one. The API layer maps
+    # this to a 422 with reason="brand_required" so the UI can prompt
+    # for a brand and retry. Distinct from None (row missing / wrong
+    # status) so callers don't confuse "needs brand" with "not found".
+    BRAND_REQUIRED = object()
+
+    def _resolve_post_brand(self, comment_id, source):
+        """Return the parent post's brand for a comment, if it's
+        unambiguous; otherwise None.
+
+        Unambiguous means:
+          - `comments`: `posts.brand_id` is set, OR exactly one row
+            in `post_brands` for that post.
+          - `search_comments`: `search_posts.brand_id` is set.
+
+        Multi-brand posts and unbranded posts both return None —
+        the caller (move_comment_to_report) treats both as
+        "need a manual pick" and surfaces candidates separately.
+        """
+        if source == "comment":
+            row = self.conn.execute(
+                """SELECT p.brand_id FROM comments c
+                     JOIN posts p ON c.post_id = p.id
+                    WHERE c.id = ?""",
+                (comment_id,)
+            ).fetchone()
+            if row and row["brand_id"] is not None:
+                return int(row["brand_id"])
+            # Multi-brand post case via junction.
+            jr = self.conn.execute(
+                """SELECT pb.brand_id FROM comments c
+                     JOIN post_brands pb ON pb.post_id = c.post_id
+                    WHERE c.id = ?""",
+                (comment_id,)
+            ).fetchall()
+            if len(jr) == 1:
+                return int(jr[0]["brand_id"])
+            return None
+        else:
+            row = self.conn.execute(
+                """SELECT sp.brand_id FROM search_comments sc
+                     JOIN search_posts sp ON sc.search_post_id = sp.id
+                    WHERE sc.id = ?""",
+                (comment_id,)
+            ).fetchone()
+            if row and row["brand_id"] is not None:
+                return int(row["brand_id"])
+            return None
+
+    def report_brand_candidates(self, comment_id, source):
+        """When `move_comment_to_report` returns BRAND_REQUIRED,
+        the API layer calls this to decide what brand picker the
+        modal should show.
+
+        Returns a list of `{id, name}` dicts:
+          - For a multi-brand `comments` parent post → those
+            specific brands (so the picker is scoped, not
+            "everything in the system").
+          - Otherwise (fully-orphaned post) → an empty list. The
+            UI falls back to /api/brands/all in that case.
+        """
+        if source == "comment":
+            rows = self.conn.execute(
+                """SELECT b.id, b.name FROM comments c
+                     JOIN post_brands pb ON pb.post_id = c.post_id
+                     JOIN brands b ON b.id = pb.brand_id
+                    WHERE c.id = ?
+                    ORDER BY b.name""",
+                (comment_id,)
+            ).fetchall()
+            return [{"id": r["id"], "name": r["name"]} for r in rows]
+        return []
+
     def move_comment_to_report(self, comment_id, source, report_month,
-                                actor_email=None, client_id=None):
-        """Flip a comment's status to 'report', stamp the month, and
-        (recommended) record which client this report belongs to.
+                                actor_email=None, brand_id=None):
+        """Flip a comment's status to 'report' and stamp the month.
 
-        Returns the previous status (for the audit row) or None if the
-        row wasn't found / wasn't eligible.
+        Returns the previous status string on success, None if the
+        row wasn't found / isn't in deployed-or-paid status, or the
+        BRAND_REQUIRED sentinel if the row has no brand_id and we
+        couldn't infer one from the parent post.
 
-        Source: "comment" or "search_comment". Only rows currently in
-        'deployed' or 'paid' status are eligible.
+        Source: "comment" or "search_comment". Only rows currently
+        in 'deployed' or 'paid' status are eligible.
 
-        `client_id` (optional but strongly recommended): the explicit
-        client this comment is being reported to. When set, the
-        portal dashboard finds the row by `report_client_id = ?`
-        directly — no brand_id deduction required. Legacy rows where
-        client_id wasn't supplied still fall back to brand resolution
-        on the dashboard side.
+        Brand resolution priority (mirrors the dashboard chain in
+        `get_comments_for_client_month` — keep these two in sync):
+
+          1. Caller-supplied `brand_id` (manual disambiguation).
+          2. The row's own `brand_id`.
+          3. Parent post's brand (single-brand) — for `comments`,
+             `posts.brand_id`; for `search_comments`,
+             `search_posts.brand_id`.
+          4. `post_brands` junction — but only if exactly one
+             brand. Multi-brand posts require manual pick.
+
+        If none of those yields a brand → BRAND_REQUIRED. When the
+        row has NULL `brand_id` and we resolve via 3 or 4 we
+        silently set `comments.brand_id` so future dashboard
+        queries can match it directly (no repeated JOIN chain).
         """
         if not report_month or not comment_id:
             return None
         table = "comments" if source == "comment" else "search_comments"
         row = self.conn.execute(
-            f"SELECT status, report_month FROM {table} WHERE id = ?",
+            f"SELECT status, report_month, brand_id FROM {table} WHERE id = ?",
             (comment_id,)
         ).fetchone()
         if not row:
@@ -2618,15 +2774,29 @@ class Database:
         old_status = row["status"]
         if old_status not in ("deployed", "paid"):
             return None
+        effective_brand_id = row["brand_id"]
+        if effective_brand_id is None:
+            # Resolution chain. Caller override wins; then parent post.
+            try:
+                override = int(brand_id) if brand_id not in (None, '', 0) else None
+            except (TypeError, ValueError):
+                override = None
+            resolved = override if override else self._resolve_post_brand(comment_id, source)
+            if resolved is None:
+                return self.BRAND_REQUIRED
+            effective_brand_id = resolved
+            self.conn.execute(
+                f"UPDATE {table} SET brand_id = ? WHERE id = ?",
+                (resolved, comment_id)
+            )
         self.conn.execute(
             f"""UPDATE {table}
                 SET status = 'report',
                     prev_status = ?,
                     report_month = ?,
-                    report_added_at = datetime('now'),
-                    report_client_id = ?
+                    report_added_at = datetime('now')
                 WHERE id = ?""",
-            (old_status, report_month, client_id, comment_id)
+            (old_status, report_month, comment_id)
         )
         self.conn.commit()
         self._log_report_audit(
@@ -2677,83 +2847,82 @@ class Database:
             print(f"[report_audit] insert failed: {e}", flush=True)
 
     def bulk_move_to_report(self, *, ids, report_month, actor_email=None,
-                              client_id=None):
+                              brand_id_override=None):
         """`ids` is a list of {id, source} dicts. Each row that's
         eligible (status in deployed/paid) is flipped. Returns counts
-        {updated, skipped}. `client_id` (optional) is stamped on every
-        successfully-moved row.
+        {updated, skipped, brand_required}.
+
+        `brand_id_override` (optional): if supplied, applied to any
+        row in the batch whose `brand_id` is currently NULL. Branded
+        rows in the batch keep their existing brand untouched. Rows
+        that lack a brand AND have no override skip with a bump in
+        `brand_required` so the caller can surface the count.
         """
         if not ids or not report_month:
-            return {"updated": 0, "skipped": 0}
+            return {"updated": 0, "skipped": 0, "brand_required": 0}
         updated = 0
         skipped = 0
+        brand_required = 0
         for entry in ids:
             try:
                 cid = int(entry.get("id"))
             except (TypeError, ValueError, AttributeError):
                 skipped += 1; continue
             src = entry.get("source") or "comment"
-            if self.move_comment_to_report(
+            res = self.move_comment_to_report(
                 cid, src, report_month, actor_email=actor_email,
-                client_id=client_id,
-            ) is not None:
+                brand_id=brand_id_override,
+            )
+            if res is self.BRAND_REQUIRED:
+                brand_required += 1
+                skipped += 1
+            elif res is not None:
                 updated += 1
             else:
                 skipped += 1
-        return {"updated": updated, "skipped": skipped}
+        return {"updated": updated, "skipped": skipped,
+                "brand_required": brand_required}
 
     def get_report_months_for_client(self, client_id):
         """Distinct report_month values for a client's comments, with
         per-month counts. Used by the portal dashboard.
 
-        Two visibility rules, OR'd together:
-          1. **Explicit assignment** — `report_client_id = client_id`.
-             This is the modern path; the admin picks the client when
-             reporting, and the row carries an explicit link.
-          2. **Legacy brand resolution** — for rows where
-             `report_client_id IS NULL` (pre-client-picker), we fall
-             back to matching by `brand_id` either directly on the
-             comment or on its parent post.
+        Visibility is purely brand-based: a comment is visible to a
+        client iff its `brand_id` is in `client_brands` for that
+        client. For unbranded comments we fall back to the parent
+        post's brand (single-brand posts) or the `post_brands`
+        junction (multi-brand legacy posts).
 
-        Without the explicit assignment, search_comments with NULL
-        brand_id were invisible to the portal even when intended for
-        a specific client.
+        This is the natural model — a brand can serve any number of
+        clients, so the same comment shows up on every linked
+        client's dashboard with no per-row plumbing.
         """
         brand_ids = self.client_brand_ids(client_id)
-        # Build a single query per table that OR's the explicit and
-        # legacy paths so a row that matches BOTH is counted only once.
-        if brand_ids:
-            ph = ",".join("?" * len(brand_ids))
-            legacy_c = (
-                f"OR (c.report_client_id IS NULL AND ("
-                f"  c.brand_id IN ({ph})"
-                f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
-                f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
-                f"))"
-            )
-            legacy_sc = (
-                f"OR (sc.report_client_id IS NULL AND ("
-                f"  sc.brand_id IN ({ph})"
-                f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
-                f"))"
-            )
-            legacy_params_c = brand_ids * 3
-            legacy_params_sc = brand_ids * 2
-        else:
-            legacy_c = ""
-            legacy_sc = ""
-            legacy_params_c = []
-            legacy_params_sc = []
+        if not brand_ids:
+            return []
+        ph = ",".join("?" * len(brand_ids))
+        match_c = (
+            f"("
+            f"  c.brand_id IN ({ph})"
+            f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+            f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
+            f")"
+        )
+        match_sc = (
+            f"("
+            f"  sc.brand_id IN ({ph})"
+            f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
+            f")"
+        )
+        params_c = brand_ids * 3
+        params_sc = brand_ids * 2
         q1 = f"""SELECT c.report_month AS month,
                         COUNT(*) AS total,
                         SUM(CASE WHEN c.status = 'report' THEN 1 ELSE 0 END) AS live,
                         SUM(CASE WHEN c.status = 'removed' THEN 1 ELSE 0 END) AS removed
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
-                 WHERE (
-                       c.report_client_id = ?
-                       {legacy_c}
-                 )
+                 WHERE {match_c}
                    AND c.report_month IS NOT NULL
                    AND c.status IN ('report', 'removed')
                  GROUP BY c.report_month"""
@@ -2763,15 +2932,12 @@ class Database:
                         SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
-                 WHERE (
-                       sc.report_client_id = ?
-                       {legacy_sc}
-                 )
+                 WHERE {match_sc}
                    AND sc.report_month IS NOT NULL
                    AND sc.status IN ('report', 'removed')
                  GROUP BY sc.report_month"""
         agg = {}
-        for r in self.conn.execute(q1, [client_id] + legacy_params_c).fetchall():
+        for r in self.conn.execute(q1, params_c).fetchall():
             m = r["month"]
             if not m:
                 continue
@@ -2779,7 +2945,7 @@ class Database:
             bucket["total"] += r["total"] or 0
             bucket["live"] += r["live"] or 0
             bucket["removed"] += r["removed"] or 0
-        for r in self.conn.execute(q2, [client_id] + legacy_params_sc).fetchall():
+        for r in self.conn.execute(q2, params_sc).fetchall():
             m = r["month"]
             if not m:
                 continue
@@ -2791,37 +2957,30 @@ class Database:
 
     def get_comments_for_client_month(self, client_id, month):
         """All comments for a client + month (both tables, merged + sorted
-        by deployed_at desc). Same visibility rules as
-        `get_report_months_for_client` — explicit `report_client_id`
-        first, brand resolution as a legacy fallback.
+        by deployed_at desc). Brand-based visibility, same chain as
+        `get_report_months_for_client`.
         """
         brand_ids = self.client_brand_ids(client_id)
-        if brand_ids:
-            ph = ",".join("?" * len(brand_ids))
-            legacy_c = (
-                f"OR (c.report_client_id IS NULL AND ("
-                f"  c.brand_id IN ({ph})"
-                f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
-                f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
-                f"))"
-            )
-            legacy_sc = (
-                f"OR (sc.report_client_id IS NULL AND ("
-                f"  sc.brand_id IN ({ph})"
-                f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
-                f"))"
-            )
-            legacy_params_c = brand_ids * 3
-            legacy_params_sc = brand_ids * 2
-        else:
-            legacy_c = ""
-            legacy_sc = ""
-            legacy_params_c = []
-            legacy_params_sc = []
-        params_q1 = [client_id] + legacy_params_c + [month]
+        if not brand_ids:
+            return []
+        ph = ",".join("?" * len(brand_ids))
+        match_c = (
+            f"("
+            f"  c.brand_id IN ({ph})"
+            f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+            f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
+            f")"
+        )
+        match_sc = (
+            f"("
+            f"  sc.brand_id IN ({ph})"
+            f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
+            f")"
+        )
+        params_q1 = (brand_ids * 3) + [month]
         q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                         c.reddit_comment_url, c.posted_at, c.deployed_at,
-                        c.report_month, c.report_added_at, c.report_client_id,
+                        c.report_month, c.report_added_at,
                         c.created_at, c.is_reply, c.comment_type,
                         'comment' AS source,
                         s.name AS subreddit_name,
@@ -2831,16 +2990,13 @@ class Database:
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
                  LEFT JOIN brands b ON c.brand_id = b.id
                  LEFT JOIN brands pb ON p.brand_id = pb.id
-                 WHERE (
-                       c.report_client_id = ?
-                       {legacy_c}
-                 )
+                 WHERE {match_c}
                    AND c.report_month = ?
                    AND c.status IN ('report', 'removed')"""
-        params_q2 = [client_id] + legacy_params_sc + [month]
+        params_q2 = (brand_ids * 2) + [month]
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
-                        sc.report_month, sc.report_added_at, sc.report_client_id,
+                        sc.report_month, sc.report_added_at,
                         sc.created_at, sc.is_reply, sc.comment_type,
                         'search_comment' AS source,
                         sp.subreddit AS subreddit_name,
@@ -2849,10 +3005,7 @@ class Database:
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  LEFT JOIN brands b ON sc.brand_id = b.id
                  LEFT JOIN brands spb ON sp.brand_id = spb.id
-                 WHERE (
-                       sc.report_client_id = ?
-                       {legacy_sc}
-                 )
+                 WHERE {match_sc}
                    AND sc.report_month = ?
                    AND sc.status IN ('report', 'removed')"""
         rows = []

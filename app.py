@@ -2141,7 +2141,7 @@ def api_check_live_start():
     """
     import time as _time
     from bulk_deploy import (
-        fetch_sheet_csv, extract_reddit_urls, classify_reddit_url,
+        fetch_sheet_csv, extract_reddit_rows, classify_reddit_url,
         fetch_reddit_comment_meta, classify_liveness,
     )
 
@@ -2170,8 +2170,8 @@ def api_check_live_start():
                 bg.finish_check_live_run(run_id, status='error',
                                           error_detail=f"sheet fetch failed: {e}")
                 return {"run_id": run_id, "error": str(e)}
-            urls = extract_reddit_urls(csv_text)
-            if not urls:
+            rows = extract_reddit_rows(csv_text)
+            if not rows:
                 bg.finish_check_live_run(run_id, status='error',
                                           error_detail="no Reddit URLs found in sheet")
                 return {"run_id": run_id, "error": "no_urls"}
@@ -2200,7 +2200,8 @@ def api_check_live_start():
                     return ('removed', f"author={cd.get('author')}")
                 return ('live', None)
 
-            for url in urls:
+            for row in rows:
+                url = row["url"]
                 # 1. Resolve /s/ short URLs to their canonical form.
                 #    Bulk Deploy does this; we were silently skipping
                 #    it, causing every /s/ row to come back 'missing'.
@@ -2215,7 +2216,15 @@ def api_check_live_start():
 
                 # 2. Classify the resolved URL.
                 classified = classify_reddit_url(resolved)
-                comment_id = (classified or {}).get("comment_id") if classified else None
+                # The operator's sheet may carry an explicit comment
+                # ID column (assigned in their workflow). Prefer that
+                # over the one we'd parse from the URL — the user is
+                # tracking these by their sheet's IDs, not Reddit's.
+                # Fall back to the URL-parsed id when the sheet has
+                # no ID column or the cell is blank.
+                comment_id = row.get("comment_id") or (
+                    (classified or {}).get("comment_id") if classified else None
+                )
                 post_id = (classified or {}).get("post_id") if classified else None
 
                 liveness = 'missing'

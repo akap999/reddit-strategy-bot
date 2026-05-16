@@ -150,6 +150,13 @@ _REDDIT_SHARE_RE = re.compile(
 # "already_deployed" entries (the search_posts rows were already in a
 # terminal state, so the post matcher kept saying "already_deployed").
 _COMMENT_HEADER_NAMES = {"comment link", "comment url"}
+# Headers that carry an explicit comment ID assigned by the operator
+# (rather than the one we'd parse from the URL). The Check Live tool
+# uses this value verbatim in its report so the operator can match
+# their sheet's row identifiers to the liveness verdict.
+_COMMENT_ID_HEADER_NAMES = {
+    "comment id", "id", "cid", "comment_id", "row id",
+}
 
 
 def _normalize_header(h):
@@ -197,6 +204,58 @@ def is_share_url(url):
     to the canonical /comments/... URL.
     """
     return bool(url and _REDDIT_SHARE_RE.match(url))
+
+
+def _find_comment_id_column(headers):
+    """Return the 0-indexed column matching a Comment-ID-like header,
+    or None when the sheet doesn't carry an explicit ID column.
+    """
+    for i, h in enumerate(headers or []):
+        if _normalize_header(h) in _COMMENT_ID_HEADER_NAMES:
+            return i
+    return None
+
+
+def extract_reddit_rows(csv_text: str) -> list[dict]:
+    """Same shape as `extract_reddit_urls` but returns rows as dicts
+    so callers (Check Live) can preserve the operator's own comment
+    IDs from the sheet rather than rederiving them from the URL.
+
+    Returns: [{"url": str, "comment_id": str | None}, ...]
+    Deduped on `url` while preserving sheet order. Raises ValueError
+    when the Comment Link column is missing.
+    """
+    if not csv_text:
+        return []
+    import csv as _csv
+    import io as _io
+    reader = _csv.reader(_io.StringIO(csv_text))
+    try:
+        headers = next(reader)
+    except StopIteration:
+        return []
+    url_idx = _find_comment_column(headers)
+    if url_idx is None:
+        raise ValueError(
+            "Sheet must have a column named 'Comment Link' (or 'Comment URL'). "
+            "Header row read: " + ", ".join(repr(h) for h in headers[:8])
+            + ("..." if len(headers) > 8 else "")
+        )
+    id_idx = _find_comment_id_column(headers)
+    out = []
+    seen = set()
+    for row in reader:
+        if not row or url_idx >= len(row):
+            continue
+        url = _extract_url_from_cell(row[url_idx])
+        if not url or url in seen:
+            continue
+        sheet_cid = None
+        if id_idx is not None and id_idx < len(row):
+            sheet_cid = (row[id_idx] or "").strip() or None
+        seen.add(url)
+        out.append({"url": url, "comment_id": sheet_cid})
+    return out
 
 
 def extract_reddit_urls(csv_text: str) -> list[str]:

@@ -1245,6 +1245,12 @@ class Database:
                 "WHERE subreddit_id IN (SELECT id FROM subreddits WHERE is_live = 1)"
             )
             self.conn.commit()
+        # prev_status is used by the mark-removed / undo-removed flow
+        # so the admin can revert a misclick. Comments already have
+        # this; posts get it now.
+        if "prev_status" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN prev_status TEXT")
+            self.conn.commit()
 
         # One-shot backfill: ancient rows had `paid_at` set but
         # status still on the prior lifecycle step. We flip those
@@ -1440,6 +1446,38 @@ class Database:
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Standalone "Check Live" runs — admin pastes a sheet URL,
+        # names the run, and we record per-URL liveness without
+        # touching any comment rows in the main DB. Each run has its
+        # own header (status/counts) and a per-URL detail table.
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS check_live_runs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                sheet_url     TEXT,
+                status        TEXT NOT NULL DEFAULT 'running', -- running | complete | error
+                started_at    TEXT DEFAULT (datetime('now')),
+                completed_at  TEXT,
+                total         INTEGER DEFAULT 0,
+                live_count    INTEGER DEFAULT 0,
+                removed_count INTEGER DEFAULT 0,
+                missing_count INTEGER DEFAULT 0,
+                error_count   INTEGER DEFAULT 0,
+                error_detail  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS check_live_run_results (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id        INTEGER NOT NULL REFERENCES check_live_runs(id) ON DELETE CASCADE,
+                url           TEXT NOT NULL,
+                comment_id    TEXT,
+                post_id       TEXT,
+                liveness      TEXT,   -- live | removed | missing | error
+                detail        TEXT,
+                created_at    TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_check_live_run_results_run
+                ON check_live_run_results(run_id);
+        """)
         self.conn.commit()
 
         # ----- tasks: progress column for live updates -----
@@ -1606,6 +1644,76 @@ class Database:
             "DELETE FROM tasks WHERE created_at < datetime('now', ?)",
             (f'-{hours} hours',)
         )
+        self.conn.commit()
+
+    # --- Check Live runs (admin-side standalone health checker) ---
+
+    def create_check_live_run(self, name, sheet_url):
+        cur = self.conn.execute(
+            "INSERT INTO check_live_runs (name, sheet_url) VALUES (?, ?)",
+            (name, sheet_url)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def add_check_live_result(self, run_id, *, url, comment_id, post_id, liveness, detail=None):
+        self.conn.execute(
+            """INSERT INTO check_live_run_results
+                 (run_id, url, comment_id, post_id, liveness, detail)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (run_id, url, comment_id, post_id, liveness, detail)
+        )
+        # Bump the parent run's counters in the same transaction so a
+        # live progress polls see the running totals.
+        col = {
+            'live': 'live_count', 'removed': 'removed_count',
+            'missing': 'missing_count',
+        }.get(liveness, 'error_count')
+        self.conn.execute(
+            f"UPDATE check_live_runs SET total = total + 1, {col} = {col} + 1 WHERE id = ?",
+            (run_id,)
+        )
+        self.conn.commit()
+
+    def finish_check_live_run(self, run_id, status='complete', error_detail=None):
+        self.conn.execute(
+            """UPDATE check_live_runs
+                  SET status = ?, completed_at = datetime('now'), error_detail = ?
+                WHERE id = ?""",
+            (status, error_detail, run_id)
+        )
+        self.conn.commit()
+
+    def list_check_live_runs(self, limit=50):
+        rows = self.conn.execute(
+            """SELECT id, name, sheet_url, status, started_at, completed_at,
+                      total, live_count, removed_count, missing_count, error_count
+                 FROM check_live_runs
+                ORDER BY id DESC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_check_live_run(self, run_id):
+        head = self.conn.execute(
+            "SELECT * FROM check_live_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not head:
+            return None
+        out = dict(head)
+        rows = self.conn.execute(
+            """SELECT url, comment_id, post_id, liveness, detail, created_at
+                 FROM check_live_run_results
+                WHERE run_id = ?
+                ORDER BY id ASC""",
+            (run_id,)
+        ).fetchall()
+        out["results"] = [dict(r) for r in rows]
+        return out
+
+    def delete_check_live_run(self, run_id):
+        # Cascade is set in schema, so just delete the header.
+        self.conn.execute("DELETE FROM check_live_runs WHERE id = ?", (run_id,))
         self.conn.commit()
 
     def mark_comment_ours(self, comment_id, is_ours):

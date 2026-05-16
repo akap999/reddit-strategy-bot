@@ -1618,6 +1618,57 @@ def api_mark_post_paid(pid):
         db.close()
 
 
+@app.route("/api/posts/<int:pid>/mark-removed", methods=["POST"])
+def api_mark_post_removed(pid):
+    """Flip a post to status='removed'. Preserves the prior status
+    in `prev_status` so the user can Undo. Idempotent — repeated
+    calls are no-ops once the row is already removed.
+    """
+    db = get_db()
+    try:
+        row = db.conn.execute(
+            "SELECT status FROM posts WHERE id = ?", (pid,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "not_found"}), 404
+        if row["status"] == "removed":
+            return jsonify({"ok": True, "noop": True})
+        # `prev_status` already exists on the posts table.
+        db.conn.execute(
+            "UPDATE posts SET status = 'removed', prev_status = ? WHERE id = ?",
+            (row["status"], pid)
+        )
+        db.conn.commit()
+        return jsonify({"ok": True, "prev_status": row["status"]})
+    finally:
+        db.close()
+
+
+@app.route("/api/posts/<int:pid>/undo-removed", methods=["POST"])
+def api_undo_post_removed(pid):
+    """Revert a 'removed' post back to its prev_status (default
+    'complete' if missing). Lets the admin un-do a misclick.
+    """
+    db = get_db()
+    try:
+        row = db.conn.execute(
+            "SELECT status, prev_status FROM posts WHERE id = ?", (pid,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "not_found"}), 404
+        if row["status"] != "removed":
+            return jsonify({"error": "not_in_removed_state"}), 422
+        restore_to = row["prev_status"] or "complete"
+        db.conn.execute(
+            "UPDATE posts SET status = ?, prev_status = NULL WHERE id = ?",
+            (restore_to, pid)
+        )
+        db.conn.commit()
+        return jsonify({"ok": True, "restored_to": restore_to})
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/all-comments")
 def api_all_comments(sid):
     db = get_db()
@@ -2033,6 +2084,126 @@ def api_bulk_deploy_from_sheet():
 
     tid = start_task("bulk-deploy", _task, pass_task_id=True)
     return jsonify({"task_id": tid})
+
+
+# =============================================================================
+# Check Live — admin-side standalone health checker.
+#
+# Takes a Google Sheet with a "Comment Link" column (same shape as
+# Bulk Deploy), classifies every URL as live/removed/missing/error
+# using the existing fetch_reddit_comment_meta + classify_liveness
+# helpers, and persists the run + per-URL details against a name
+# the admin assigns. Does NOT touch any comment rows in the main DB
+# — purely a reporting tool.
+# =============================================================================
+
+@app.route("/api/check-live/runs", methods=["GET"])
+def api_check_live_list_runs():
+    db = get_db()
+    try:
+        return jsonify({"runs": db.list_check_live_runs(limit=100)})
+    finally:
+        db.close()
+
+
+@app.route("/api/check-live/runs/<int:run_id>", methods=["GET"])
+def api_check_live_get_run(run_id):
+    db = get_db()
+    try:
+        run = db.get_check_live_run(run_id)
+        if not run:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify(run)
+    finally:
+        db.close()
+
+
+@app.route("/api/check-live/runs/<int:run_id>", methods=["DELETE"])
+def api_check_live_delete_run(run_id):
+    db = get_db()
+    try:
+        db.delete_check_live_run(run_id)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/check-live/start", methods=["POST"])
+def api_check_live_start():
+    """Body: {name: str, sheet_url: str}.
+    Creates a check_live_runs row, then spawns a background task that:
+      1. Fetches the sheet CSV.
+      2. Extracts Reddit URLs from the "Comment Link" column.
+      3. For each URL, calls fetch_reddit_comment_meta + classify.
+      4. Stores per-URL detail rows on check_live_run_results.
+      5. Flips the run header to status='complete' when done.
+    Returns {run_id, task_id}.
+    """
+    import time as _time
+    from bulk_deploy import (
+        fetch_sheet_csv, extract_reddit_urls, classify_reddit_url,
+        fetch_reddit_comment_meta, classify_liveness,
+    )
+
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    sheet_url = (data.get("sheet_url") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    if not sheet_url:
+        return jsonify({"error": "sheet_url is required"}), 400
+
+    db = get_db()
+    try:
+        run_id = db.create_check_live_run(name, sheet_url)
+    finally:
+        db.close()
+
+    def task():
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            try:
+                csv_text = fetch_sheet_csv(sheet_url)
+            except Exception as e:
+                bg.finish_check_live_run(run_id, status='error',
+                                          error_detail=f"sheet fetch failed: {e}")
+                return {"run_id": run_id, "error": str(e)}
+            urls = extract_reddit_urls(csv_text)
+            if not urls:
+                bg.finish_check_live_run(run_id, status='error',
+                                          error_detail="no Reddit URLs found in sheet")
+                return {"run_id": run_id, "error": "no_urls"}
+            for url in urls:
+                classified = classify_reddit_url(url)
+                comment_id = (classified or {}).get("comment_id") if classified else None
+                post_id = (classified or {}).get("post_id") if classified else None
+                try:
+                    meta = fetch_reddit_comment_meta(
+                        url, reddit_get=_reddit_get_json,
+                    )
+                    liveness = classify_liveness(meta)
+                    detail = None
+                    if liveness == 'missing':
+                        detail = meta.get("error") if isinstance(meta, dict) else None
+                except Exception as e:
+                    liveness = 'error'
+                    detail = str(e)
+                bg.add_check_live_result(
+                    run_id, url=url, comment_id=comment_id,
+                    post_id=post_id, liveness=liveness, detail=detail,
+                )
+                # Be polite — same pacing as the bulk deploy matcher.
+                _time.sleep(1)
+            bg.finish_check_live_run(run_id, status='complete')
+            return {"run_id": run_id, "ok": True}
+        finally:
+            try: bg.close()
+            except Exception: pass
+
+    tid = start_task("check-live-sheet", task)
+    return jsonify({"run_id": run_id, "task_id": tid})
 
 
 @app.route("/api/subreddits/<int:sid>/check-live", methods=["POST"])
@@ -2900,6 +3071,39 @@ def api_brand_live_subreddits(bid):
         if not brand:
             return jsonify({"error": "Brand not found"}), 404
         return jsonify({"brand_id": bid, "subreddits": _brand_search_subs(brand)})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/live-subreddits", methods=["POST"])
+def api_brand_live_subreddits_add(bid):
+    """Append a subreddit to the brand's saved live-subs list.
+    Body: {subreddit_name: str}. Idempotent — re-adding a name that's
+    already present is a no-op. The name is normalized (lowercased,
+    r/ prefix stripped). Also auto-provisions a `subreddits` row via
+    `ensure_live_subreddit` so the post pipeline can FK to it.
+    """
+    db = get_db()
+    try:
+        data = request.json or {}
+        name = _normalize_sub_name(data.get("subreddit_name", ""))
+        if not name:
+            return jsonify({"error": "subreddit_name required"}), 400
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "Brand not found"}), 404
+        existing = _brand_search_subs(brand)
+        if name in existing:
+            return jsonify({"ok": True, "noop": True, "subreddits": existing})
+        # Auto-provision the row so post-generator FKs resolve.
+        db.ensure_live_subreddit(name)
+        new_list = existing + [name]
+        db.conn.execute(
+            "UPDATE brands SET search_subreddits = ? WHERE id = ?",
+            (json.dumps(new_list), bid)
+        )
+        db.conn.commit()
+        return jsonify({"ok": True, "subreddits": new_list})
     finally:
         db.close()
 

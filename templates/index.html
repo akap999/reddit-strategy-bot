@@ -120,6 +120,7 @@
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
             <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
             <a onclick="navigate('clients')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="clients" style="color:#0d9488">Clients</a>
+            <a onclick="navigate('checklive')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="checklive" style="color:#9efbb4">Check Live</a>
         </nav>
         <div class="p-4 text-xs" style="border-top:1px solid #343536;color:#818384">
             CLI: python3 bot.py
@@ -458,7 +459,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients, checklive: renderCheckLive };
     (views[view] || views.dashboard)(app);
 }
 
@@ -2270,7 +2271,7 @@ function _refreshLiveSubsPostView() {
     if (_lsubsTab === 'posts' && typeof lsubsLoadPosts === 'function') {
         lsubsLoadPosts(true);  // silent — no spinner flicker
     } else if (_lsubsTab === 'generate' && typeof lsubsLoadTable === 'function') {
-        lsubsLoadTable();
+        lsubsLoadTable(true);  // silent — preserve scroll, skip spinner
     }
 }
 
@@ -2368,7 +2369,9 @@ function renderPostsFromCache() {
                     </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
-                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                        ${p.status === 'removed'
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
+                            : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </div></td>
                 </tr>
@@ -2391,9 +2394,10 @@ async function showPostDetail(pid) {
         </div>
         <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
-        ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3">Reddit: ${post.reddit_url}</p>` : ''}
+        ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3 break-all">Reddit: ${post.reddit_url}</p>` : ''}
         <p class="text-xs text-gray-500">${post.comment_count} comments</p>
         <div class="flex gap-2 mt-4">
+            ${post.reddit_url ? `<a href="${post.reddit_url}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">View on Reddit ↗</a>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
         </div>
     `);
@@ -2521,6 +2525,28 @@ async function undeployPost(pid) {
     await api(`/api/posts/${pid}/undeploy`, { method: 'POST', body: {} });
     toast('Post undeployed', 'success');
     _postsUpdateLocal(pid, { status: 'complete', reddit_url: null });
+}
+
+async function markPostRemoved(pid) {
+    if (!confirm('Mark this post as removed on Reddit? You can Undo to revert.')) return;
+    try {
+        const res = await api(`/api/posts/${pid}/mark-removed`, { method: 'POST', body: {} });
+        toast('Post marked as removed', 'success');
+        _postsUpdateLocal(pid, { status: 'removed', prev_status: res && res.prev_status });
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function undoPostRemoved(pid) {
+    try {
+        const res = await api(`/api/posts/${pid}/undo-removed`, { method: 'POST', body: {} });
+        const restored = (res && res.restored_to) || 'complete';
+        toast(`Post restored to ${restored}`, 'success');
+        _postsUpdateLocal(pid, { status: restored, prev_status: null });
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function autoAssignPost(pid) {
@@ -6973,12 +6999,19 @@ function renderLsubsGenerate(c) {
                     </select>
                 </div>
                 <div>
-                    <label class="text-xs text-gray-400 mb-1 block">Subreddit <span class="text-gray-600">(from this brand's saved list)</span></label>
+                    <label class="text-xs text-gray-400 mb-1 block">Subreddit <span class="text-gray-600">(from this brand's saved list, or type a new one below)</span></label>
                     <select id="lsubs-sub" disabled style="width:100%">
                         <option value="">Pick a brand first…</option>
                     </select>
+                    <div class="flex gap-1 mt-2">
+                        <input id="lsubs-sub-new" placeholder="Or type a new subreddit name (e.g. AskReddit)"
+                               class="flex-1 text-xs"
+                               style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
+                        <button id="lsubs-sub-add-btn" class="btn btn-sm btn-secondary" onclick="lsubsAddCustomSubreddit()" disabled
+                                title="Add this subreddit to the brand's saved list and pick it">+ Add</button>
+                    </div>
                     <div id="lsubs-sub-empty" class="text-xs text-yellow-400 mt-1" style="display:none">
-                        This brand has no saved subreddits yet. Add some via <a class="underline cursor-pointer" onclick="navigate('brands')" style="color:#FF8b60">Edit Brand</a> or save them while running a Live Search.
+                        This brand has no saved subreddits yet. Type one above and click <b>+ Add</b>, or save them while running a Live Search.
                     </div>
                 </div>
             </div>
@@ -7004,6 +7037,54 @@ function renderLsubsGenerate(c) {
     `;
 }
 
+// Add a custom subreddit (typed by the user) to the active brand's
+// saved live-subs list. Backend call is idempotent. On success we
+// re-issue the brand-subs fetch to refresh the dropdown, then auto-
+// select the just-added sub so the user can immediately generate
+// into it.
+async function lsubsAddCustomSubreddit() {
+    const bid = document.getElementById('lsubs-brand')?.value;
+    const inputEl = document.getElementById('lsubs-sub-new');
+    const raw = (inputEl?.value || '').trim();
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    if (!raw) { toast('Enter a subreddit name', 'error'); return; }
+    // Normalize client-side too so we can match it against the
+    // returned list reliably.
+    let name = raw;
+    if (name.toLowerCase().startsWith('r/')) name = name.slice(2);
+    name = name.replace(/^\/+|\/+$/g, '').toLowerCase();
+    if (!name) { toast('Enter a subreddit name', 'error'); return; }
+    try {
+        const res = await api(`/api/brands/${bid}/live-subreddits`, {
+            method: 'POST', body: { subreddit_name: name }
+        });
+        toast(res && res.noop ? `r/${name} was already saved` : `Added r/${name}`, 'success');
+        if (inputEl) inputEl.value = '';
+        _lsubsSubreddits = (res && res.subreddits) || [];
+        // Rebuild the dropdown and select the newly-added sub.
+        const subEl = document.getElementById('lsubs-sub');
+        if (subEl) {
+            const allOpt = '<option value="__ALL__">All subreddits</option>';
+            const subOpts = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
+            subEl.innerHTML = allOpt + subOpts;
+            subEl.value = name;
+            subEl.disabled = false;
+            // Re-enable generation buttons since a specific sub is now picked.
+            const genBtn = document.getElementById('lsubs-gen-btn');
+            const customBtn = document.getElementById('lsubs-custom-btn');
+            const fillerBtn = document.getElementById('lsubs-filler-btn');
+            if (genBtn) genBtn.disabled = false;
+            if (customBtn) customBtn.disabled = false;
+            if (fillerBtn) fillerBtn.disabled = false;
+        }
+        const emptyEl = document.getElementById('lsubs-sub-empty');
+        if (emptyEl) emptyEl.style.display = 'none';
+        lsubsLoadTable();
+    } catch (e) {
+        toast('Failed to add subreddit: ' + (e.message || e), 'error');
+    }
+}
+
 function lsubsOnBrandChange() {
     const bid = document.getElementById('lsubs-brand')?.value;
     const subEl = document.getElementById('lsubs-sub');
@@ -7011,6 +7092,7 @@ function lsubsOnBrandChange() {
     const genBtn = document.getElementById('lsubs-gen-btn');
     const customBtn = document.getElementById('lsubs-custom-btn');
     const fillerBtn = document.getElementById('lsubs-filler-btn');
+    const addBtn = document.getElementById('lsubs-sub-add-btn');
     if (!bid) {
         subEl.disabled = true;
         subEl.innerHTML = '<option value="">Pick a brand first…</option>';
@@ -7018,10 +7100,13 @@ function lsubsOnBrandChange() {
         if (genBtn) genBtn.disabled = true;
         if (customBtn) customBtn.disabled = true;
         if (fillerBtn) fillerBtn.disabled = true;
+        if (addBtn) addBtn.disabled = true;
         _lsubsSubreddits = [];
         document.getElementById('lsubs-table').innerHTML = '';
         return;
     }
+    // Enable the custom-add button once a brand is picked.
+    if (addBtn) addBtn.disabled = false;
     api(`/api/brands/${bid}/live-subreddits`).then(res => {
         _lsubsSubreddits = res.subreddits || [];
         if (!_lsubsSubreddits.length) {
@@ -7064,18 +7149,23 @@ function lsubsOnBrandChange() {
     });
 }
 
-async function lsubsLoadTable() {
+async function lsubsLoadTable(silent = false) {
     const { bid, sub } = lsubsContext();
     const tableEl = document.getElementById('lsubs-table');
     if (!tableEl) return;
     if (!bid) { tableEl.innerHTML = ''; return; }
-    tableEl.innerHTML = '<div class="spinner mx-auto my-4"></div>';
+    // Preserve scroll + suppress the spinner-wipe on silent refreshes
+    // (post-action update path) so the user doesn't perceive a full
+    // page refresh after marking a post Paid / Removed / etc.
+    const scrollY = window.scrollY;
+    if (!silent) tableEl.innerHTML = '<div class="spinner mx-auto my-4"></div>';
     try {
         // 'All subreddits' → brand-wide query (drop subreddit_id).
         // Specific sub → resolve the live-subreddit row + scope.
         if (!sub || sub === '__ALL__') {
             const posts = await api(`/api/posts/all?brand_id=${bid}&live=1`);
             lsubsRenderTable(posts || []);
+            if (silent) window.scrollTo(0, scrollY);
             return;
         }
         // Live subs are filtered out of /api/subreddits by default — pass live=1
@@ -7088,6 +7178,7 @@ async function lsubsLoadTable() {
         }
         const posts = await api(`/api/posts/all?subreddit_id=${subRow.id}&brand_id=${bid}&live=1`);
         lsubsRenderTable(posts || []);
+        if (silent) window.scrollTo(0, scrollY);
     } catch (e) {
         tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
     }
@@ -7128,7 +7219,9 @@ function lsubsRenderTable(posts) {
                     </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
-                        ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                        ${p.status === 'removed'
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
+                            : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </div></td>
                 </tr>
@@ -7421,6 +7514,7 @@ async function lsubsLoadPosts(silent = false) {
     // silent=true is used by post-action handlers (deploy / undeploy / paid /
     // delete) to refresh the row state without the spinner flicker that
     // otherwise makes every action look like a full page reload.
+    const scrollY = window.scrollY;
     if (!silent) tableEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1' });
     const bid = document.getElementById('lsubs-posts-brand')?.value;
@@ -7470,7 +7564,9 @@ async function lsubsLoadPosts(silent = false) {
                             <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${p.id})" title="Generate comments (AI-crawl optimized)">Gen Cmts</button>
                             <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${p.id})" title="Generate HQ thread (1 main + 4 replies)">Gen HQ</button>
                             ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
-                            ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                            ${p.status === 'removed'
+                                ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
+                                : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                             <button class="btn btn-sm btn-secondary" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name || '').replace(/'/g, "\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change which subreddit this post is filed under">Edit sub</button>
                             <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                         </div></td>
@@ -7478,6 +7574,7 @@ async function lsubsLoadPosts(silent = false) {
                 `).join('')}</tbody>
             </table>
         `;
+        if (silent) window.scrollTo(0, scrollY);
     } catch (e) {
         tableEl.innerHTML = `<p class="text-sm text-red-400">Failed to load posts: ${e.message || e}</p>`;
     }
@@ -7528,30 +7625,51 @@ async function lsubsEditSubreddit(pid, currentSub, brandId) {
     showModal(`
         <h3 class="text-xl font-bold mb-3">Move post to a different subreddit</h3>
         <p class="text-xs text-gray-400 mb-3">Currently in <code>r/${currentSub || '(none)'}</code>. The Reddit URL stays the same — this just changes which subreddit it counts against internally.</p>
-        <label class="text-xs text-gray-400">Target subreddit</label>
-        <select id="lsubs-edit-sub-target" class="w-full mb-3">
+        <label class="text-xs text-gray-400">Target subreddit (from existing list)</label>
+        <select id="lsubs-edit-sub-target" class="w-full mb-2">
             <option value="">— pick a subreddit —</option>
             ${brandSubs.length ? `<optgroup label="From this brand's saved subs">${brandOpts || '<option disabled>(no other saved subs)</option>'}</optgroup>` : ''}
             ${otherOpts ? `<optgroup label="Any other live subreddit">${otherOpts}</optgroup>` : ''}
         </select>
+        <label class="text-xs text-gray-400">Or type a new subreddit name <span class="text-gray-600">(it'll be added to this brand's saved list)</span></label>
+        <input id="lsubs-edit-sub-new" placeholder="e.g. AskReddit"
+               class="w-full mb-3 text-sm"
+               style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
         <div class="flex gap-2 mt-3">
-            <button class="btn btn-primary btn-sm" onclick="_lsubsSubmitEditSub(${pid})">Move</button>
+            <button class="btn btn-primary btn-sm" onclick="_lsubsSubmitEditSub(${pid}, ${brandId || 'null'})">Move</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
 }
 
-async function _lsubsSubmitEditSub(pid) {
-    const subName = (document.getElementById('lsubs-edit-sub-target').value || '').trim();
-    if (!subName) { toast('Pick a subreddit first', 'error'); return; }
+async function _lsubsSubmitEditSub(pid, brandId) {
+    // The text input takes priority over the dropdown — that mirrors
+    // the "type a new one" copy under the picker.
+    const typed = (document.getElementById('lsubs-edit-sub-new')?.value || '').trim();
+    const picked = (document.getElementById('lsubs-edit-sub-target')?.value || '').trim();
+    let subName = typed;
+    if (subName.toLowerCase().startsWith('r/')) subName = subName.slice(2);
+    subName = subName.replace(/^\/+|\/+$/g, '').toLowerCase();
+    if (!subName) subName = picked;
+    if (!subName) { toast('Pick or type a subreddit first', 'error'); return; }
     try {
+        // If the user typed a new name AND we know the brand, also
+        // add it to the brand's saved live-subs list. Idempotent on
+        // the backend, so safe to call even when it's already there.
+        if (typed && brandId) {
+            try {
+                await api(`/api/brands/${brandId}/live-subreddits`, {
+                    method: 'POST', body: { subreddit_name: subName }
+                });
+            } catch (e) { /* best-effort */ }
+        }
         await api(`/api/posts/${pid}/subreddit`, {
             method: 'PUT', body: { subreddit_name: subName }
         });
         toast('Post moved', 'success');
         closeModal();
-        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
-        else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable();
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+        else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable(true);
     } catch (e) {
         toast('Failed: ' + (e.message || e), 'error');
     }
@@ -10045,6 +10163,195 @@ function _backfillPostedRenderResults(results) {
 
 let _clientsCache = [];
 let _allBrandsForClients = [];
+
+// =========================================================================
+// Check Live — admin tool that takes a Google Sheet of comment URLs
+// (same shape as Bulk Deploy's sheet) and reports a per-URL liveness
+// status without touching the DB's comment rows. Each run is named
+// + saved so the admin can come back to it.
+// =========================================================================
+
+async function renderCheckLive(c) {
+    c.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <h2 class="text-xl font-bold" style="color:#9efbb4">Check Live</h2>
+                <p class="text-xs text-gray-400 mt-1">Health-check a sheet of comment URLs. Each run is named and saved — no DB changes are made.</p>
+            </div>
+            <button class="btn btn-accent btn-sm" onclick="showCheckLiveStartModal()">+ New Run</button>
+        </div>
+        <div id="checklive-list">
+            <div class="spinner mx-auto my-6"></div>
+        </div>
+    `;
+    await _checkLiveLoadRuns();
+}
+
+async function _checkLiveLoadRuns() {
+    const listEl = document.getElementById('checklive-list');
+    if (!listEl) return;
+    try {
+        const res = await api('/api/check-live/runs');
+        const runs = (res && res.runs) || [];
+        if (!runs.length) {
+            listEl.innerHTML = `<p class="text-sm text-gray-500 mt-2">No Check Live runs yet. Click <b>+ New Run</b> to start one.</p>`;
+            return;
+        }
+        listEl.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Name</th><th>Status</th><th>Total</th><th>Live</th>
+                    <th>Removed</th><th>Missing</th><th>Errors</th>
+                    <th>Started</th><th>Completed</th><th></th>
+                </tr></thead>
+                <tbody>${runs.map(r => `
+                    <tr>
+                        <td><a href="javascript:void(0)" onclick="showCheckLiveRunDetail(${r.id})" class="hover:underline" style="color:#0079D3">${r.name || `Run #${r.id}`}</a></td>
+                        <td><span class="badge badge-${r.status === 'complete' ? 'deployed' : (r.status === 'error' ? 'removed' : 'draft')}">${r.status}</span></td>
+                        <td class="text-sm">${r.total || 0}</td>
+                        <td class="text-sm" style="color:#9efbb4">${r.live_count || 0}</td>
+                        <td class="text-sm" style="color:#ff6b9b">${r.removed_count || 0}</td>
+                        <td class="text-sm text-gray-400">${r.missing_count || 0}</td>
+                        <td class="text-sm text-gray-400">${r.error_count || 0}</td>
+                        <td class="text-xs text-gray-500">${(r.started_at || '').substring(0, 16).replace('T', ' ')}</td>
+                        <td class="text-xs text-gray-500">${(r.completed_at || '—').substring(0, 16).replace('T', ' ')}</td>
+                        <td><button class="btn btn-sm btn-danger" onclick="_checkLiveDeleteRun(${r.id}, '${(r.name || '').replace(/'/g, "\\'")}')">Del</button></td>
+                    </tr>
+                `).join('')}</tbody>
+            </table>
+        `;
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load runs: ${e.message || e}</p>`;
+    }
+}
+
+function showCheckLiveStartModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Start a new Check Live run</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            Paste a Google Sheet link with a <code style="background:#272729;padding:1px 4px;border-radius:3px">Comment Link</code> column.
+            Same shape as Bulk Deploy. The sheet must be set to "Anyone with the link → Viewer".
+        </p>
+        <label class="text-xs text-gray-400">Run name <span class="text-red-400">*</span></label>
+        <input id="checklive-name" placeholder="e.g. May audit — tarotap"
+               class="w-full mb-3"
+               style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
+        <label class="text-xs text-gray-400">Google Sheet URL <span class="text-red-400">*</span></label>
+        <input id="checklive-sheet" placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+               class="w-full mb-3"
+               style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="_checkLiveSubmitStart()">Start</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function _checkLiveSubmitStart() {
+    const name = (document.getElementById('checklive-name')?.value || '').trim();
+    const sheetUrl = (document.getElementById('checklive-sheet')?.value || '').trim();
+    if (!name) { toast('Give the run a name', 'error'); return; }
+    if (!sheetUrl) { toast('Sheet URL is required', 'error'); return; }
+    try {
+        const res = await api('/api/check-live/start', {
+            method: 'POST', body: { name, sheet_url: sheetUrl }
+        });
+        toast(`Run "${name}" started — polling for progress…`, 'success');
+        closeModal();
+        await _checkLiveLoadRuns();
+        // Poll every 3s while the run is still in 'running' state.
+        if (res && res.run_id) _checkLivePollRun(res.run_id);
+    } catch (e) {
+        toast('Failed to start: ' + (e.message || e), 'error');
+    }
+}
+
+function _checkLivePollRun(runId) {
+    let cancelled = false;
+    const handle = setInterval(async () => {
+        if (cancelled) { clearInterval(handle); return; }
+        try {
+            const res = await api(`/api/check-live/runs/${runId}`);
+            // Refresh the list so counters tick up live.
+            await _checkLiveLoadRuns();
+            if (res && (res.status === 'complete' || res.status === 'error')) {
+                clearInterval(handle);
+                if (res.status === 'complete') {
+                    toast(`Run "${res.name}" complete: ${res.live_count || 0} live, ${res.removed_count || 0} removed`, 'success');
+                } else {
+                    toast(`Run "${res.name}" failed: ${res.error_detail || 'see details'}`, 'error');
+                }
+            }
+        } catch (e) {
+            clearInterval(handle);
+        }
+    }, 3000);
+}
+
+async function showCheckLiveRunDetail(runId) {
+    showModal(`<div class="text-center py-6"><div class="spinner mx-auto"></div><p class="mt-2 text-gray-400">Loading run…</p></div>`);
+    let run;
+    try { run = await api(`/api/check-live/runs/${runId}`); }
+    catch (e) { closeModal(); toast('Failed to load run: ' + (e.message || e), 'error'); return; }
+    const rows = run.results || [];
+    const livenessChip = (v) => {
+        const colorMap = {
+            'live':    'background:#0e3d1c;color:#9efbb4',
+            'removed': 'background:#4a1a2a;color:#ff6b9b',
+            'missing': 'background:#3a3a3a;color:#a0a0a0',
+            'error':   'background:#3a1a1a;color:#ff8b8b',
+        };
+        return `<span class="badge" style="${colorMap[v] || ''}">${v || '—'}</span>`;
+    };
+    const summary = `
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
+            <div class="stat-card" style="padding:8px"><div class="text-xs text-gray-500">Total</div><div class="text-xl font-bold">${run.total || 0}</div></div>
+            <div class="stat-card" style="padding:8px"><div class="text-xs text-gray-500">Live</div><div class="text-xl font-bold" style="color:#9efbb4">${run.live_count || 0}</div></div>
+            <div class="stat-card" style="padding:8px"><div class="text-xs text-gray-500">Removed</div><div class="text-xl font-bold" style="color:#ff6b9b">${run.removed_count || 0}</div></div>
+            <div class="stat-card" style="padding:8px"><div class="text-xs text-gray-500">Missing</div><div class="text-xl font-bold text-gray-400">${run.missing_count || 0}</div></div>
+            <div class="stat-card" style="padding:8px"><div class="text-xs text-gray-500">Errors</div><div class="text-xl font-bold text-gray-400">${run.error_count || 0}</div></div>
+        </div>
+    `;
+    const tableRows = rows.map(r => `
+        <tr>
+            <td class="text-xs">${r.comment_id || '—'}</td>
+            <td style="max-width:360px"><a href="${r.url}" target="_blank" rel="noopener" class="text-xs hover:underline" style="color:#0079D3">${(r.url || '').substring(0, 80)}${(r.url || '').length > 80 ? '…' : ''}</a></td>
+            <td>${livenessChip(r.liveness)}</td>
+            <td class="text-xs text-gray-500">${r.detail || ''}</td>
+        </tr>
+    `).join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-1">${run.name}</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            <span class="badge badge-${run.status === 'complete' ? 'deployed' : (run.status === 'error' ? 'removed' : 'draft')}">${run.status}</span>
+            ${run.sheet_url ? `· <a href="${run.sheet_url}" target="_blank" rel="noopener" class="hover:underline" style="color:#0079D3">Sheet ↗</a>` : ''}
+            ${run.started_at ? `· started ${run.started_at.substring(0, 16).replace('T', ' ')}` : ''}
+            ${run.completed_at ? `· completed ${run.completed_at.substring(0, 16).replace('T', ' ')}` : ''}
+        </p>
+        ${run.error_detail ? `<div class="text-xs text-red-400 mb-2">${run.error_detail}</div>` : ''}
+        ${summary}
+        <div style="max-height:50vh; overflow-y:auto; border:1px solid #343536; border-radius:6px">
+            <table>
+                <thead><tr><th>Comment ID</th><th>URL</th><th>Status</th><th>Detail</th></tr></thead>
+                <tbody>${tableRows || '<tr><td colspan="4" class="text-gray-500 text-center py-4">No results yet.</td></tr>'}</tbody>
+            </table>
+        </div>
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+        </div>
+    `);
+}
+
+async function _checkLiveDeleteRun(runId, name) {
+    if (!confirm(`Delete run "${name}"? Its results will be removed too.`)) return;
+    try {
+        await api(`/api/check-live/runs/${runId}`, { method: 'DELETE' });
+        toast(`Deleted run "${name}"`, 'success');
+        await _checkLiveLoadRuns();
+    } catch (e) {
+        toast('Delete failed: ' + (e.message || e), 'error');
+    }
+}
 
 async function renderClients(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';

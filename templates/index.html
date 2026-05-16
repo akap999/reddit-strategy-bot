@@ -181,7 +181,9 @@ async function resolveRedditUrl(url) {
 // =========================================================================
 const _toastRecent = new Map(); // key -> timestamp — dedup within short window
 let _toastLastError = 0; // timestamp of last error toast (any message)
-function toast(msg, type = 'info', duration = 3500) {
+function toast(msg, type = 'info', duration = null) {
+    // Notifications stay on screen until the user clicks ×.
+    // `duration` is accepted for backwards-compat but ignored.
     const now = Date.now();
     // Suppress identical toasts within 2s
     const key = type + ':' + msg;
@@ -195,12 +197,27 @@ function toast(msg, type = 'info', duration = 3500) {
     if (_toastRecent.size > 50) {
         for (const [k, t] of _toastRecent) { if (now - t > 5000) _toastRecent.delete(k); }
     }
+    // Render in the persistent shape (message + × close button).
+    // No setTimeout — every toast hangs around until the user
+    // dismisses it explicitly.
+    const container = document.getElementById('toasts');
+    if (!container) return;
     const el = document.createElement('div');
-    el.className = `toast toast-${type}`;
-    el.style.whiteSpace = 'pre-line';
-    el.textContent = msg;
-    document.getElementById('toasts').appendChild(el);
-    setTimeout(() => el.remove(), duration);
+    el.className = `toast toast-${type} persistent`;
+    const msgEl = document.createElement('div');
+    msgEl.className = 'toast-msg';
+    msgEl.textContent = msg;
+    el.appendChild(msgEl);
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'toast-actions';
+    const close = document.createElement('button');
+    close.className = 'toast-close';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    close.onclick = () => el.remove();
+    actionsEl.appendChild(close);
+    el.appendChild(actionsEl);
+    container.appendChild(el);
 }
 
 // Sticky toast — stays visible until the user clicks ×. Used for
@@ -7496,16 +7513,17 @@ async function lsubsEditSubreddit(pid, currentSub, brandId) {
     let allLiveSubs = [];
     try { allLiveSubs = (await api('/api/subreddits?live=1')) || []; }
     catch (e) {}
-    // Map names → ids so we can submit subreddit_id rather than name.
-    const liveByName = {};
-    for (const s of allLiveSubs) { liveByName[(s.name || '').toLowerCase()] = s.id; }
+    // Option value is the subreddit NAME — works whether or not
+    // there's already a row in the subreddits table. The backend
+    // resolves name → id (and auto-provisions a Live row if missing).
     const brandOpts = brandSubs
         .filter(n => (n || '').toLowerCase() !== (currentSub || '').toLowerCase())
-        .map(n => `<option value="${liveByName[n.toLowerCase()] || ''}">r/${n}</option>`)
+        .map(n => `<option value="${(n || '').toLowerCase()}">r/${n}</option>`)
         .join('');
+    const brandSet = new Set((brandSubs || []).map(n => (n || '').toLowerCase()));
     const otherOpts = allLiveSubs
-        .filter(s => !brandSubs.includes(s.name) && (s.name || '').toLowerCase() !== (currentSub || '').toLowerCase())
-        .map(s => `<option value="${s.id}">r/${s.name}</option>`)
+        .filter(s => !brandSet.has((s.name || '').toLowerCase()) && (s.name || '').toLowerCase() !== (currentSub || '').toLowerCase())
+        .map(s => `<option value="${(s.name || '').toLowerCase()}">r/${s.name}</option>`)
         .join('');
     showModal(`
         <h3 class="text-xl font-bold mb-3">Move post to a different subreddit</h3>
@@ -7524,11 +7542,11 @@ async function lsubsEditSubreddit(pid, currentSub, brandId) {
 }
 
 async function _lsubsSubmitEditSub(pid) {
-    const sid = parseInt(document.getElementById('lsubs-edit-sub-target').value) || null;
-    if (!sid) { toast('Pick a subreddit first', 'error'); return; }
+    const subName = (document.getElementById('lsubs-edit-sub-target').value || '').trim();
+    if (!subName) { toast('Pick a subreddit first', 'error'); return; }
     try {
         await api(`/api/posts/${pid}/subreddit`, {
-            method: 'PUT', body: { subreddit_id: sid }
+            method: 'PUT', body: { subreddit_name: subName }
         });
         toast('Post moved', 'success');
         closeModal();

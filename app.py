@@ -5448,31 +5448,43 @@ def api_set_post_subreddit(pid):
     deployed / paid). The Reddit post itself doesn't move; this is
     an internal organization knob so the admin can re-classify which
     sub a post counts against on the dashboard / generator.
+
+    Accepts either `subreddit_id` (an existing row in `subreddits`)
+    or `subreddit_name` (a sub name — used when the picker comes
+    from the brand's saved list, which carries names not ids).
+    For `subreddit_name`, the existing `ensure_live_subreddit`
+    helper finds or auto-provisions the row.
     """
     db = get_db()
     try:
         data = request.json or {}
         sub_id = data.get("subreddit_id")
+        sub_name = (data.get("subreddit_name") or "").strip()
         try:
             sub_id_int = int(sub_id) if sub_id not in (None, '', 0) else None
         except (TypeError, ValueError):
             sub_id_int = None
+        if not sub_id_int and not sub_name:
+            return jsonify({"error": "subreddit_id or subreddit_name required"}), 400
         if not sub_id_int:
-            return jsonify({"error": "subreddit_id required"}), 400
-        # Verify the target sub exists. We don't enforce live=1 — the
-        # caller wants flexibility and Live Subs already provisions
-        # subreddits aggressively.
-        row = db.conn.execute(
-            "SELECT id FROM subreddits WHERE id = ?", (sub_id_int,)
-        ).fetchone()
-        if not row:
-            return jsonify({"error": "subreddit_id not found"}), 404
+            # Resolve by name — auto-create as a live row if missing.
+            row = db.ensure_live_subreddit(sub_name)
+            if not row:
+                return jsonify({"error": "could not resolve subreddit_name"}), 400
+            sub_id_int = int(row["id"])
+        else:
+            # Verify the target id exists.
+            row = db.conn.execute(
+                "SELECT id FROM subreddits WHERE id = ?", (sub_id_int,)
+            ).fetchone()
+            if not row:
+                return jsonify({"error": "subreddit_id not found"}), 404
         db.conn.execute(
             "UPDATE posts SET subreddit_id = ? WHERE id = ?",
             (sub_id_int, pid)
         )
         db.conn.commit()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "subreddit_id": sub_id_int})
     finally:
         db.close()
 

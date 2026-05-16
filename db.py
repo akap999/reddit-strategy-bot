@@ -1251,6 +1251,18 @@ class Database:
         if "prev_status" not in post_cols2:
             self.conn.execute("ALTER TABLE posts ADD COLUMN prev_status TEXT")
             self.conn.commit()
+        # Post-level monthly report stamp. The post lifecycle now has
+        # a 'report' status (set by `move_post_to_report`); these
+        # columns record which month the post was pushed into and
+        # when. Mirrors the comments table fields. Dashboard query
+        # still reads from `comments` for visibility — these columns
+        # are for the admin Posts tab (badge, undo, lifecycle).
+        if "report_month" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN report_month TEXT")
+            self.conn.commit()
+        if "report_added_at" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN report_added_at TEXT")
+            self.conn.commit()
 
         # One-shot backfill: ancient rows had `paid_at` set but
         # status still on the prior lifecycle step. We flip those
@@ -3182,6 +3194,168 @@ class Database:
                 skipped += 1
         return {"updated": updated, "skipped": skipped,
                 "brand_required": brand_required}
+
+    # --- Post-level report flow ---------------------------------------
+    #
+    # A "reported post" is one whose status='report'. We get there by
+    # flipping the post AND its deployed/paid comments (including the
+    # HQ root) so the dashboard's comment-level visibility query
+    # surfaces the right rows. Undo reverses both.
+
+    def move_post_to_report(self, post_id, *, report_month,
+                             actor_email=None, brand_id_override=None,
+                             comment_ids=None):
+        """Flip a post to status='report' and propagate to its comments.
+
+        - If `comment_ids` is supplied, only those (plus any deployed
+          HQ root not already in the list) are flipped to report.
+        - If `comment_ids` is None, every deployed/paid comment under
+          the post is flipped.
+
+        Returns counts: {comments_updated, brand_required, post_flipped}.
+        Idempotent: calling on a post that's already in 'report' state
+        just refreshes report_month + retries comment flips for any
+        deployed/paid stragglers.
+        """
+        if not report_month or not post_id:
+            return {"comments_updated": 0, "brand_required": 0, "post_flipped": False}
+        post_row = self.conn.execute(
+            "SELECT id, status, prev_status, report_month FROM posts WHERE id = ?",
+            (post_id,)
+        ).fetchone()
+        if not post_row:
+            return {"comments_updated": 0, "brand_required": 0, "post_flipped": False}
+        # Gather candidate comments. Always include the deployed HQ
+        # root so the dashboard's Mention Link resolves.
+        all_cmts = self.conn.execute(
+            """SELECT id, status, comment_type, parent_comment_id, reddit_comment_url
+                 FROM comments WHERE post_id = ?""",
+            (post_id,)
+        ).fetchall()
+        eligible = {}  # id → row
+        for c in all_cmts:
+            if c["status"] in ("deployed", "paid"):
+                if comment_ids is None or c["id"] in comment_ids:
+                    eligible[c["id"]] = c
+                # HQ root anchor — always include if deployed.
+                if (c["comment_type"] == "hq" and not c["parent_comment_id"]
+                        and (c["reddit_comment_url"] or '').strip()):
+                    eligible[c["id"]] = c
+        # Flip each comment via the existing helper (handles brand
+        # resolution + audit logging).
+        comments_updated = 0
+        brand_required = 0
+        for cid in eligible:
+            res = self.move_comment_to_report(
+                cid, "comment", report_month,
+                actor_email=actor_email, brand_id=brand_id_override,
+            )
+            if res is self.BRAND_REQUIRED:
+                brand_required += 1
+            elif res is not None:
+                comments_updated += 1
+        # Flip the post itself. Preserve prev_status only if not
+        # already in report (so a re-report doesn't lose the
+        # original prev_status).
+        old_status = post_row["status"]
+        if old_status != "report":
+            self.conn.execute(
+                """UPDATE posts
+                      SET status = 'report',
+                          prev_status = ?,
+                          report_month = ?,
+                          report_added_at = datetime('now')
+                    WHERE id = ?""",
+                (old_status, report_month, post_id)
+            )
+        else:
+            # Idempotent refresh: keep prev_status, just update month.
+            self.conn.execute(
+                """UPDATE posts
+                      SET report_month = ?,
+                          report_added_at = COALESCE(report_added_at, datetime('now'))
+                    WHERE id = ?""",
+                (report_month, post_id)
+            )
+        self.conn.commit()
+        return {
+            "comments_updated": comments_updated,
+            "brand_required": brand_required,
+            "post_flipped": old_status != "report",
+        }
+
+    def undo_post_report(self, post_id, *, actor_email=None):
+        """Revert a 'report' post + all of its reported comments for
+        the SAME month back to their previous status. Idempotent: a
+        post not in 'report' state is left alone.
+        Returns: {comments_reverted, post_restored_to}.
+        """
+        post_row = self.conn.execute(
+            "SELECT id, status, prev_status, report_month FROM posts WHERE id = ?",
+            (post_id,)
+        ).fetchone()
+        if not post_row or post_row["status"] != "report":
+            return {"comments_reverted": 0, "post_restored_to": None}
+        month = post_row["report_month"]
+        # Revert each report-month comment under this post.
+        rows = self.conn.execute(
+            """SELECT id FROM comments
+                WHERE post_id = ?
+                  AND status = 'report'
+                  AND COALESCE(report_month, '') = COALESCE(?, '')""",
+            (post_id, month)
+        ).fetchall()
+        comments_reverted = 0
+        for r in rows:
+            if self.undo_report(r["id"], "comment",
+                                 actor_email=actor_email) is not None:
+                comments_reverted += 1
+        # Restore the post.
+        restore_to = post_row["prev_status"] or "complete"
+        self.conn.execute(
+            """UPDATE posts
+                  SET status = ?, prev_status = NULL,
+                      report_month = NULL, report_added_at = NULL
+                WHERE id = ?""",
+            (restore_to, post_id)
+        )
+        self.conn.commit()
+        return {"comments_reverted": comments_reverted,
+                "post_restored_to": restore_to}
+
+    def bulk_move_posts_to_report(self, *, post_ids, report_month,
+                                    actor_email=None,
+                                    brand_id_override=None):
+        """Iterate `post_ids` and call `move_post_to_report` for each.
+        Aggregates counts. Used by the Mark Reported All flow.
+        """
+        if not post_ids or not report_month:
+            return {"posts_updated": 0, "comments_updated": 0,
+                    "brand_required": 0, "skipped": 0}
+        posts_updated = 0
+        comments_updated = 0
+        brand_required = 0
+        skipped = 0
+        for pid in post_ids:
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                skipped += 1; continue
+            res = self.move_post_to_report(
+                pid_int, report_month=report_month,
+                actor_email=actor_email,
+                brand_id_override=brand_id_override,
+            )
+            if res.get("post_flipped") or res.get("comments_updated"):
+                posts_updated += 1
+            else:
+                skipped += 1
+            comments_updated += res.get("comments_updated", 0)
+            brand_required += res.get("brand_required", 0)
+        return {"posts_updated": posts_updated,
+                "comments_updated": comments_updated,
+                "brand_required": brand_required,
+                "skipped": skipped}
 
     def get_report_months_for_client(self, client_id):
         """Distinct report_month values for a client's comments, with

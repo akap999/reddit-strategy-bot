@@ -2370,7 +2370,9 @@ function renderPostsFromCache() {
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status === 'removed'
-                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo removed</button>`
+                            : p.status === 'report'
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReportThisPost(${p.id})" title="Move this post back from report state (also reverts its reported comments)">↺ Undo report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`
                             : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                         ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
@@ -7221,7 +7223,9 @@ function lsubsRenderTable(posts) {
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status === 'removed'
-                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo removed</button>`
+                            : p.status === 'report'
+                            ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReportThisPost(${p.id})" title="Move this post back from report state (also reverts its reported comments)">↺ Undo report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`
                             : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                         ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
@@ -7472,6 +7476,8 @@ async function renderLsubsPosts(c) {
                     <option value="published">Published</option>
                     <option value="paid">Paid</option>
                     <option value="informed">Informed</option>
+                    <option value="report">Reported</option>
+                    <option value="removed">Removed</option>
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -7495,6 +7501,7 @@ async function renderLsubsPosts(c) {
                 </label>
                 <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('comments')" title="Generate comments for selected posts (AI-crawl optimized)">Gen Comments (selected)</button>
                 <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('hq')" title="Generate HQ thread (1 main + 4 replies) for selected posts">Gen HQ (selected)</button>
+                <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllPostsModal()" title="Push every currently-filtered published/paid post (plus its eligible comments) into a monthly report">📊 Mark Reported All</button>
             </div>
         </div>
         <div id="lsubs-posts-table"></div>
@@ -10592,6 +10599,90 @@ function _monthOptionsHtml(selectedMonth) {
 // shows a checkbox list of the post's deployed/paid comments
 // (pre-checked), a month picker, and on submit calls
 // /api/comments/bulk-to-report with just the checked ids.
+// Bulk-report every post that matches the active Live Subs Posts
+// tab filters (brand / subreddit / status / intent). Mirrors Live
+// Search's Mark Reported All but at post granularity — each
+// matched post + its deployed/paid comments are flipped to report.
+async function showMarkReportedAllPostsModal() {
+    // Snapshot the current filter state so the modal copy reflects
+    // what the user will actually report.
+    const bid = document.getElementById('lsubs-posts-brand')?.value || '';
+    const statusEl = document.getElementById('lsubs-posts-status');
+    const status = statusEl?.value || '';
+    const intentEl = document.getElementById('lsubs-posts-intent');
+    const intent = intentEl?.value || '';
+    const brandLabel = bid ? (statusEl?.options[statusEl.selectedIndex]?.text || '') : null;
+    const brandName = bid
+        ? (document.getElementById('lsubs-posts-brand')?.options[document.getElementById('lsubs-posts-brand').selectedIndex]?.text || '')
+        : null;
+    // Fetch brands for the optional override picker (Live Subs may
+    // contain unbranded comments that need an explicit attribution).
+    let brands = [];
+    try { brands = await api('/api/brands/all'); } catch (_) {}
+    const brandOpts = (brands || []).map(b =>
+        `<option value="${b.id}" ${bid && parseInt(bid) === b.id ? 'selected' : ''}>${b.name}</option>`
+    ).join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Mark Reported All — Posts</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            Pushes every <strong>published</strong> or <strong>paid</strong> post matching the active Live Subs filters into the chosen month's report. The post and its deployed/paid comments (including the HQ root) are flipped to <code>report</code>.
+        </p>
+        <div class="text-xs text-gray-500 mb-3">
+            Active filters: brand=${brandName || '(any)'} · status=${status || 'published+paid'} · intent=${intent || '(any)'}
+        </div>
+        <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
+        <select id="rep-all-posts-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <label class="text-xs text-gray-400">Brand override <span class="text-gray-600">(optional — applied to unbranded comments only)</span></label>
+        <select id="rep-all-posts-brand" class="w-full mb-3">
+            <option value="">— leave existing brands as-is —</option>
+            ${brandOpts}
+        </select>
+        <label class="text-xs text-gray-400">Status scope</label>
+        <select id="rep-all-posts-status" class="w-full mb-3">
+            <option value="">Both published and paid (default)</option>
+            <option value="published" ${status === 'published' ? 'selected' : ''}>Only published</option>
+            <option value="paid" ${status === 'paid' ? 'selected' : ''}>Only paid</option>
+        </select>
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAllPosts()">Run</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitMarkReportedAllPosts() {
+    const month = document.getElementById('rep-all-posts-month').value;
+    if (!month) { toast('Pick a month', 'error'); return; }
+    const brandOverride = parseInt(document.getElementById('rep-all-posts-brand').value) || null;
+    const status = document.getElementById('rep-all-posts-status').value || null;
+    // Mirror the active Posts tab filters so what the modal shows
+    // matches what gets touched.
+    const body = { report_month: month };
+    if (brandOverride) body.brand_id = brandOverride;
+    if (status) body.status = status;
+    const bid = parseInt(document.getElementById('lsubs-posts-brand')?.value) || null;
+    if (bid && !body.brand_id) body.brand_id = bid;
+    const intent = document.getElementById('lsubs-posts-intent')?.value;
+    if (intent) body.intent = intent;
+    try {
+        const res = await api('/api/posts/bulk-to-report-filtered', {
+            method: 'POST', body
+        });
+        const posts = (res && res.posts_updated) || 0;
+        const cmts = (res && res.comments_updated) || 0;
+        const considered = (res && res.candidates_considered) || 0;
+        const br = (res && res.brand_required) || 0;
+        toast(
+            `${posts}/${considered} post${posts === 1 ? '' : 's'} reported · ${cmts} comment${cmts === 1 ? '' : 's'}${br ? ` · ${br} needed a brand override` : ''}`,
+            posts > 0 ? 'success' : 'info'
+        );
+        closeModal();
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
 async function showReportThisPostModal(postId) {
     // Pull this post's comments from the existing cache. If the
     // cache is empty for any reason (rare), fall back to fetching.
@@ -10659,49 +10750,37 @@ async function showReportThisPostModal(postId) {
 async function submitReportThisPost(postId) {
     const month = document.getElementById('rep-post-month').value;
     if (!month) { toast('Pick a month', 'error'); return; }
-    // Collect checked rows. Disabled checkboxes (the HQ root anchors)
-    // are still in the DOM via :disabled — querySelectorAll('.rep-post-cmt:checked')
-    // includes them too (disabled inputs CAN be checked).
-    const ids = Array.from(document.querySelectorAll('.rep-post-cmt:checked')).map(cb => ({
-        id: parseInt(cb.dataset.cid),
-        source: 'comment',
-    }));
-    // Defense-in-depth: even if a stray code path managed to
-    // uncheck the HQ anchor, force-include any deployed HQ root
-    // for this post so the Mention Link on the dashboard always
-    // resolves to a reported comment.
-    const postComments = (_lsubsCommentsCache || []).filter(c => c.p_id === postId);
-    const idSet = new Set(ids.map(x => x.id));
-    for (const c of postComments) {
-        const isHq = c.comment_type === 'hq' && !c.parent_comment_id;
-        const deployed = c.status === 'deployed' || c.status === 'paid';
-        if (isHq && deployed && c.reddit_comment_url && !idSet.has(c.id)) {
-            ids.push({ id: c.id, source: 'comment' });
-            idSet.add(c.id);
-        }
-    }
-    if (!ids.length) { toast('Select at least one comment', 'error'); return; }
+    // Collect checked comment ids. Disabled checkboxes (the HQ root
+    // anchors) ARE still :checked since `disabled` doesn't strip the
+    // checked attribute. Backend re-validates and ensures HQ root
+    // inclusion as defense-in-depth.
+    const commentIds = Array.from(document.querySelectorAll('.rep-post-cmt:checked'))
+        .map(cb => parseInt(cb.dataset.cid))
+        .filter(Boolean);
     const brandSel = document.getElementById('rep-post-brand');
     const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;
-    const body = { ids, report_month: month };
+    const body = { report_month: month, comment_ids: commentIds };
     if (brandId) body.brand_id = brandId;
     try {
-        const res = await fetch('/api/comments/bulk-to-report', {
+        const res = await fetch(`/api/posts/${postId}/to-report`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         const payload = await res.json().catch(() => ({}));
         if (res.ok) {
-            const updated = payload.updated || 0;
-            const skipped = payload.skipped || 0;
+            const flipped = payload.post_flipped;
+            const updated = payload.comments_updated || 0;
             const br = payload.brand_required || 0;
-            toast(`Reported ${updated} comment(s) to ${month}${skipped ? ` · ${skipped} skipped${br ? ` (${br} need a brand)` : ''}` : ''}`, 'success');
+            toast(
+                `Post ${flipped ? 'reported' : 're-reported'} to ${month} (${updated} comment${updated === 1 ? '' : 's'}${br ? ` · ${br} need a brand` : ''})`,
+                'success'
+            );
             closeModal();
-            // Keep this card expanded after the refresh so the user
-            // sees the rows flip to 'report' state in place.
             _lsubsExpandedPosts.add(String(postId));
-            lsubsLoadComments(true);
+            if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+            else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable(true);
+            else lsubsLoadComments(true);
         } else if (res.status === 422 && payload.error === 'brand_required') {
             // The bulk endpoint doesn't (yet) return per-row
             // candidates — fall back to /api/brands/all so the
@@ -10730,21 +10809,18 @@ async function submitReportThisPost(postId) {
 }
 
 async function undoReportThisPost(postId) {
-    if (!confirm("Move all of this post's reported comments back to their previous status?")) return;
-    const reported = (_lsubsCommentsCache || []).filter(
-        c => c.p_id === postId && c.status === 'report'
-    );
-    if (!reported.length) { toast('No reported comments on this post.', 'info'); return; }
-    let ok = 0, fail = 0;
-    for (const c of reported) {
-        try {
-            await api(`/api/comments/${c.id}/undo-report`, { method: 'POST', body: { source: 'comment' } });
-            ok++;
-        } catch (e) { fail++; }
+    if (!confirm("Move this post back from 'report' state? All of its reported comments will also be reverted.")) return;
+    try {
+        const res = await api(`/api/posts/${postId}/undo-report`, { method: 'POST', body: {} });
+        const reverted = (res && res.comments_reverted) || 0;
+        toast(`Post un-reported · ${reverted} comment${reverted === 1 ? '' : 's'} reverted`, 'success');
+        _lsubsExpandedPosts.add(String(postId));
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+        else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable(true);
+        else lsubsLoadComments(true);
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
     }
-    toast(`Reverted ${ok} comment(s)${fail ? ` · ${fail} failed` : ''}`, ok ? 'success' : 'error');
-    _lsubsExpandedPosts.add(String(postId));
-    lsubsLoadComments(true);
 }
 
 async function showSendToReportModal(cid, source) {

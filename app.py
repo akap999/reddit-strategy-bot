@@ -6196,6 +6196,163 @@ def api_comment_to_report(cid):
         db.close()
 
 
+@app.route('/api/posts/<int:pid>/to-report', methods=['POST'])
+def api_post_to_report(pid):
+    """Flip a Live Subs post + its comments into status='report'.
+
+    Body:
+      {
+        "report_month": "YYYY-MM",
+        "brand_id": int | null,          # override for unbranded comments
+        "comment_ids": [int, ...] | null # optional explicit subset.
+                                          # null = all deployed/paid comments
+                                          # under the post (plus HQ root).
+      }
+
+    Returns {ok, comments_updated, brand_required, post_flipped} or
+    422 {error: 'report_month must be YYYY-MM'}.
+    """
+    data = request.get_json() or {}
+    month = (data.get('report_month') or '').strip()
+    if not _valid_report_month(month):
+        return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    try:
+        brand_id = int(data['brand_id']) if data.get('brand_id') not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        brand_id = None
+    comment_ids_raw = data.get('comment_ids')
+    comment_ids = None
+    if isinstance(comment_ids_raw, list):
+        comment_ids = set()
+        for c in comment_ids_raw:
+            try:
+                comment_ids.add(int(c))
+            except (TypeError, ValueError):
+                pass
+    db = get_db()
+    try:
+        post = db.conn.execute("SELECT id FROM posts WHERE id = ?", (pid,)).fetchone()
+        if not post:
+            return jsonify({"error": "post_not_found"}), 404
+        result = db.move_post_to_report(
+            pid, report_month=month,
+            actor_email=_admin_email(),
+            brand_id_override=brand_id,
+            comment_ids=comment_ids,
+        )
+        # Fire-and-forget engagement fetch on the comments we flipped
+        # (mirrors the existing comment-level auto-stats hook).
+        try:
+            ids = [{"id": c["id"], "source": "comment"}
+                   for c in db.conn.execute(
+                       """SELECT id FROM comments
+                           WHERE post_id = ? AND status = 'report'
+                             AND report_month = ?""",
+                       (pid, month)
+                   ).fetchall()]
+            items = _fetch_report_items(db, ids)
+            _spawn_report_engagement_fetch(items)
+        except Exception as e:
+            print(f"[posts/to-report] auto-stats spawn failed: {e}", flush=True)
+        return jsonify({"ok": True, **result})
+    finally:
+        db.close()
+
+
+@app.route('/api/posts/<int:pid>/undo-report', methods=['POST'])
+def api_post_undo_report(pid):
+    """Revert a 'report' post + all of its reported comments back
+    to their previous status. Idempotent."""
+    db = get_db()
+    try:
+        result = db.undo_post_report(pid, actor_email=_admin_email())
+        if result.get("post_restored_to") is None:
+            return jsonify({"error": "post_not_in_report_state"}), 422
+        return jsonify({"ok": True, **result})
+    finally:
+        db.close()
+
+
+@app.route('/api/posts/bulk-to-report-filtered', methods=['POST'])
+def api_posts_bulk_to_report_filtered():
+    """Iterate every Live Subs post matching the given filter set
+    and flip each to status='report' (along with its comments).
+
+    Body:
+      {
+        report_month: "YYYY-MM",
+        brand_id?: int,
+        subreddit_id?: int,
+        status?: "published" | "paid" | null,  # default both
+        intent?: "commercial" | "comparison" | "informational",
+      }
+    """
+    data = request.get_json() or {}
+    month = (data.get('report_month') or '').strip()
+    if not _valid_report_month(month):
+        return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    try:
+        brand_id = int(data['brand_id']) if data.get('brand_id') not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        brand_id = None
+    try:
+        sub_id = int(data['subreddit_id']) if data.get('subreddit_id') not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        sub_id = None
+    status_filter = data.get('status') or None
+    intent_filter = data.get('intent') or None
+    if status_filter not in (None, 'published', 'paid'):
+        return jsonify({"error": "status must be 'published' or 'paid' or omitted"}), 400
+
+    db = get_db()
+    try:
+        # Build a candidate-post query that mirrors the Live Subs
+        # Posts tab's filters. status default = published OR paid
+        # (the lifecycle states eligible for reporting).
+        where = ["p.is_live = 1"]
+        params = []
+        if status_filter:
+            where.append("p.status = ?"); params.append(status_filter)
+        else:
+            where.append("p.status IN ('published', 'paid')")
+        if brand_id:
+            where.append(
+                "(p.brand_id = ? OR p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?))"
+            )
+            params += [brand_id, brand_id]
+        if sub_id:
+            where.append("p.subreddit_id = ?"); params.append(sub_id)
+        if intent_filter:
+            where.append("p.intent = ?"); params.append(intent_filter)
+        rows = db.conn.execute(
+            f"SELECT id FROM posts p WHERE {' AND '.join(where)}",
+            params
+        ).fetchall()
+        post_ids = [r["id"] for r in rows]
+        result = db.bulk_move_posts_to_report(
+            post_ids=post_ids,
+            report_month=month,
+            actor_email=_admin_email(),
+            brand_id_override=brand_id,
+        )
+        # Auto-stats for everything just flipped.
+        try:
+            cmt_ids = db.conn.execute(
+                f"""SELECT id FROM comments
+                     WHERE post_id IN ({','.join('?' * len(post_ids))})
+                       AND status = 'report' AND report_month = ?""",
+                post_ids + [month]
+            ).fetchall() if post_ids else []
+            items = _fetch_report_items(db, [{"id": r["id"], "source": "comment"} for r in cmt_ids])
+            _spawn_report_engagement_fetch(items)
+        except Exception as e:
+            print(f"[posts/bulk-to-report-filtered] auto-stats spawn failed: {e}", flush=True)
+        result["candidates_considered"] = len(post_ids)
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 @app.route('/api/comments/<int:cid>/undo-report', methods=['POST'])
 def api_comment_undo_report(cid):
     source = (request.get_json() or {}).get('source', 'comment')

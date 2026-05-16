@@ -3270,6 +3270,84 @@ class Database:
         out.sort(key=lambda r: (r["brand_name"].lower(), -1 * int((r["month"] or "0000-00").replace("-", ""))))
         return out
 
+    def get_posts_for_client_month(self, client_id, month):
+        """Post-grouped view of a client's reported deliverables for
+        a month. Returns:
+
+            {
+                "posts": [
+                    { id, title, subreddit_name, brand_name, posted_at,
+                      deployed_at, reddit_url, comments: [comment_dicts] },
+                    ...
+                ],
+                "search_comments": [comment_dicts],  # flat — no post layer
+            }
+
+        Posts are sorted newest-first by deployed/posted date.
+        Comments within a post are sorted by `posted_at` ascending so
+        the thread reads top-down. Visibility is brand-based,
+        identical to `get_comments_for_client_month`.
+        """
+        flat = self.get_comments_for_client_month(client_id, month)
+        # Live Search comments stay flat — they have no Live Subs post.
+        search_comments = [r for r in flat if r.get("source") == "search_comment"]
+        # Live Subs comments → group by their parent post id (`p_id`
+        # isn't in the row dict; we need to enrich). The flat query
+        # selected from `comments c JOIN posts p` — fetch the post
+        # rows in one shot.
+        live_comments = [r for r in flat if r.get("source") == "comment"]
+        if not live_comments:
+            return {"posts": [], "search_comments": search_comments}
+        # Pull each row's post_id via a single round-trip query so we
+        # don't add a JOIN to the comment select (which would change
+        # the shape get_comments_for_client_month returns).
+        cmt_ids = [int(c["id"]) for c in live_comments if c.get("id") is not None]
+        if not cmt_ids:
+            return {"posts": [], "search_comments": search_comments}
+        ph = ",".join("?" * len(cmt_ids))
+        post_id_rows = self.conn.execute(
+            f"SELECT id, post_id FROM comments WHERE id IN ({ph})",
+            cmt_ids
+        ).fetchall()
+        cid_to_pid = {r["id"]: r["post_id"] for r in post_id_rows}
+        post_ids = sorted(set(cid_to_pid.values()))
+        if not post_ids:
+            return {"posts": [], "search_comments": search_comments}
+        php = ",".join("?" * len(post_ids))
+        post_rows = self.conn.execute(
+            f"""SELECT p.id, p.title, p.deployed_at, p.paid_at, p.created_at,
+                       s.name AS subreddit_name,
+                       b.name AS brand_name,
+                       (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) AS reddit_url
+                  FROM posts p
+             LEFT JOIN subreddits s ON p.subreddit_id = s.id
+             LEFT JOIN brands b ON p.brand_id = b.id
+                 WHERE p.id IN ({php})""",
+            post_ids
+        ).fetchall()
+        posts = {r["id"]: dict(r) for r in post_rows}
+        # Attach comments to their posts.
+        for post in posts.values():
+            post["comments"] = []
+        for c in live_comments:
+            pid = cid_to_pid.get(c["id"])
+            if pid in posts:
+                posts[pid]["comments"].append(c)
+        # Within each post, sort comments by posted_at asc (oldest
+        # first — thread reads top-down).
+        for post in posts.values():
+            post["comments"].sort(
+                key=lambda r: (r.get("posted_at") or r.get("deployed_at") or "")
+            )
+        # Posts sorted newest-first by deployed_at, with paid_at /
+        # created_at as fallbacks.
+        ordered = sorted(
+            posts.values(),
+            key=lambda p: (p.get("deployed_at") or p.get("paid_at") or p.get("created_at") or ""),
+            reverse=True,
+        )
+        return {"posts": ordered, "search_comments": search_comments}
+
     def get_comments_for_client_month(self, client_id, month):
         """All comments for a client + month (both tables, merged + sorted
         by deployed_at desc). Brand-based visibility, same chain as

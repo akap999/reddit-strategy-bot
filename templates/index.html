@@ -7018,12 +7018,29 @@ function lsubsOnBrandChange() {
         }
         if (emptyEl) emptyEl.style.display = 'none';
         subEl.disabled = false;
-        subEl.innerHTML = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
-        subEl.onchange = lsubsLoadTable;
-        if (genBtn) genBtn.disabled = false;
-        if (customBtn) customBtn.disabled = false;
-        if (fillerBtn) fillerBtn.disabled = false;
-        // Auto-load table for the first sub so the user sees existing posts for this brand × sub.
+        // 'All subreddits' is the first option and the default so
+        // the user lands on a brand-wide view of every existing
+        // live post. Generation buttons stay disabled until they
+        // pick a specific sub (since we need a destination for
+        // newly-generated posts).
+        const allOpt = '<option value="__ALL__">All subreddits</option>';
+        const subOpts = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
+        subEl.innerHTML = allOpt + subOpts;
+        subEl.value = '__ALL__';
+        subEl.onchange = () => {
+            // Toggle the generate-buttons' enabled state when the
+            // user switches between 'All' and a specific sub.
+            const isAll = subEl.value === '__ALL__';
+            if (genBtn) genBtn.disabled = isAll;
+            if (customBtn) customBtn.disabled = isAll;
+            if (fillerBtn) fillerBtn.disabled = isAll;
+            lsubsLoadTable();
+        };
+        // Default 'All' → generation buttons disabled; existing-post
+        // table loads brand-wide.
+        if (genBtn) genBtn.disabled = true;
+        if (customBtn) customBtn.disabled = true;
+        if (fillerBtn) fillerBtn.disabled = true;
         lsubsLoadTable();
     }).catch(() => {
         toast('Failed to load brand subreddits', 'error');
@@ -7034,9 +7051,16 @@ async function lsubsLoadTable() {
     const { bid, sub } = lsubsContext();
     const tableEl = document.getElementById('lsubs-table');
     if (!tableEl) return;
-    if (!bid || !sub) { tableEl.innerHTML = ''; return; }
+    if (!bid) { tableEl.innerHTML = ''; return; }
     tableEl.innerHTML = '<div class="spinner mx-auto my-4"></div>';
     try {
+        // 'All subreddits' → brand-wide query (drop subreddit_id).
+        // Specific sub → resolve the live-subreddit row + scope.
+        if (!sub || sub === '__ALL__') {
+            const posts = await api(`/api/posts/all?brand_id=${bid}&live=1`);
+            lsubsRenderTable(posts || []);
+            return;
+        }
         // Live subs are filtered out of /api/subreddits by default — pass live=1
         // to find the auto-provisioned row.
         const subs = await api('/api/subreddits?live=1');
@@ -7425,11 +7449,12 @@ async function lsubsLoadPosts(silent = false) {
                                 <span class="text-gray-600">/ ${p.comment_count||0}</span>
                             </span>
                         </td>
-                        <td><div class="flex gap-1 flex-wrap" style="white-space:nowrap">
+                        <td><div class="flex gap-1 items-center" style="white-space:nowrap; flex-wrap:nowrap; overflow-x:auto; max-width: 100%;">
                             <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${p.id})" title="Generate comments (AI-crawl optimized)">Gen Cmts</button>
                             <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${p.id})" title="Generate HQ thread (1 main + 4 replies)">Gen HQ</button>
                             ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                             ${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}
+                            <button class="btn btn-sm btn-secondary" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name || '').replace(/'/g, "\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change which subreddit this post is filed under">Edit sub</button>
                             <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                         </div></td>
                     </tr>
@@ -7457,6 +7482,63 @@ async function _lsubsLookupPostBrand(pid) {
 
 // Open the Gen Comments modal (per-post). Form lets the user pick count
 // + AI-crawl toggle. Submit calls _lsubsRunGenComments with the chosen values.
+// Open a modal to reassign a Live Subs post to a different sub.
+// Unconditional — admin can move the post at any stage; the Reddit
+// URL stays the same, only the DB classification changes.
+async function lsubsEditSubreddit(pid, currentSub, brandId) {
+    // Show this brand's saved live-subs first, then offer the full
+    // pool as a fallback (the user explicitly wants no constraint).
+    let brandSubs = [];
+    if (brandId) {
+        try { brandSubs = (await api(`/api/brands/${brandId}/live-subreddits`)).subreddits || []; }
+        catch (e) {}
+    }
+    let allLiveSubs = [];
+    try { allLiveSubs = (await api('/api/subreddits?live=1')) || []; }
+    catch (e) {}
+    // Map names → ids so we can submit subreddit_id rather than name.
+    const liveByName = {};
+    for (const s of allLiveSubs) { liveByName[(s.name || '').toLowerCase()] = s.id; }
+    const brandOpts = brandSubs
+        .filter(n => (n || '').toLowerCase() !== (currentSub || '').toLowerCase())
+        .map(n => `<option value="${liveByName[n.toLowerCase()] || ''}">r/${n}</option>`)
+        .join('');
+    const otherOpts = allLiveSubs
+        .filter(s => !brandSubs.includes(s.name) && (s.name || '').toLowerCase() !== (currentSub || '').toLowerCase())
+        .map(s => `<option value="${s.id}">r/${s.name}</option>`)
+        .join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Move post to a different subreddit</h3>
+        <p class="text-xs text-gray-400 mb-3">Currently in <code>r/${currentSub || '(none)'}</code>. The Reddit URL stays the same — this just changes which subreddit it counts against internally.</p>
+        <label class="text-xs text-gray-400">Target subreddit</label>
+        <select id="lsubs-edit-sub-target" class="w-full mb-3">
+            <option value="">— pick a subreddit —</option>
+            ${brandSubs.length ? `<optgroup label="From this brand's saved subs">${brandOpts || '<option disabled>(no other saved subs)</option>'}</optgroup>` : ''}
+            ${otherOpts ? `<optgroup label="Any other live subreddit">${otherOpts}</optgroup>` : ''}
+        </select>
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="_lsubsSubmitEditSub(${pid})">Move</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function _lsubsSubmitEditSub(pid) {
+    const sid = parseInt(document.getElementById('lsubs-edit-sub-target').value) || null;
+    if (!sid) { toast('Pick a subreddit first', 'error'); return; }
+    try {
+        await api(`/api/posts/${pid}/subreddit`, {
+            method: 'PUT', body: { subreddit_id: sid }
+        });
+        toast('Post moved', 'success');
+        closeModal();
+        if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
+        else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable();
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
 function lsubsGenCommentsForPost(pid) {
     showModal(`
         <h3 class="text-xl font-bold mb-3">Generate Comments</h3>
@@ -7793,7 +7875,7 @@ async function renderLsubsComments(c) {
                 <input type="date" id="lsubs-cmt-date-to" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
             </label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
-            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('comment')" title="Bulk-deploy Live Subreddits posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+            <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('')" title="Bulk-deploy comments from a sheet — matches across both Live Subs and Live Search pipelines">Bulk Deploy from Sheet</button>
             <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesubs')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
         </div>
@@ -7876,6 +7958,23 @@ async function lsubsLoadComments(silent = false) {
     }
 }
 
+// Track which post cards the user has opened so re-renders preserve
+// the expanded state (otherwise patching one comment collapses all
+// the cards back to closed).
+const _lsubsExpandedPosts = new Set();
+
+function _lsubsTogglePostCard(pid) {
+    const card = document.querySelector(`[data-post-card="${pid}"]`);
+    if (!card) return;
+    const body = card.querySelector('[data-post-body]');
+    const caret = card.querySelector('[data-post-caret]');
+    const willExpand = body.style.display === 'none';
+    body.style.display = willExpand ? '' : 'none';
+    if (caret) caret.textContent = willExpand ? '▾' : '▸';
+    if (willExpand) _lsubsExpandedPosts.add(String(pid));
+    else _lsubsExpandedPosts.delete(String(pid));
+}
+
 // Pure render from cache. Called by lsubsLoadComments after a fetch and
 // by patch helpers when an in-place row swap isn't sufficient (e.g. delete
 // or new comment appearance).
@@ -7887,16 +7986,15 @@ function _lsubsRenderComments() {
         listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
         return;
     }
-    // Read filters once; matchHead is reused for both clusters and organic.
-    // Date inputs return ISO YYYY-MM-DD strings; created_at is a full ISO
-    // timestamp — comparing the leading 10 chars lexicographically is
-    // equivalent to comparing dates and avoids a Date() roundtrip per row.
+    // Read filters once. The status filter is now POST-LEVEL: a post
+    // card stays visible iff AT LEAST ONE of its comments matches.
+    // (Date filter still scopes to cluster head — clusters are HQ
+    // threads of related comments posted as one batch.)
     const statusFilter = document.getElementById('lsubs-cmt-status')?.value || '';
     const dateFrom = document.getElementById('lsubs-cmt-date-from')?.value || '';
     const dateTo = document.getElementById('lsubs-cmt-date-to')?.value || '';
     const hasAnyFilter = !!(statusFilter || dateFrom || dateTo);
     const matchHead = (c) => {
-        if (statusFilter && c.status !== statusFilter) return false;
         if (dateFrom || dateTo) {
             const d = (c.created_at || '').substring(0, 10);
             if (dateFrom && d < dateFrom) return false;
@@ -7954,20 +8052,38 @@ function _lsubsRenderComments() {
         }
         const organic = items.filter(it => !used.has(it.id));
 
-        // HEAD-LEVEL FILTER: a cluster is kept iff its root (cluster[0].c)
-        // matches the head filter. Organic comments have no parent, so the
-        // comment itself is the head. After filtering, if a post group has
-        // nothing left to show, we omit its entire card (return '').
-        const filteredClusters = hasAnyFilter
+        // POST-LEVEL STATUS FILTER: a post card stays iff AT LEAST
+        // ONE comment under it matches the status. We don't drop
+        // matching-comment-only — the user wants to see the whole
+        // post context (status-mixed comments + all). Date filter
+        // still scopes to cluster heads / organic to keep "show me
+        // posts where activity happened in this date range" sane.
+        const postMatchesStatus = !statusFilter || items.some(it => it.status === statusFilter);
+        const filteredClusters = (dateFrom || dateTo)
             ? clusters.filter(cluster => matchHead(cluster[0].c))
             : clusters;
-        const filteredOrganic = hasAnyFilter
+        const filteredOrganic = (dateFrom || dateTo)
             ? organic.filter(matchHead)
             : organic;
+        if (!postMatchesStatus) return '';
         if (hasAnyFilter && !filteredClusters.length && !filteredOrganic.length) {
             return '';
         }
         visiblePostGroups += 1;
+
+        // Post-level derived chips: count comments by status. Helps
+        // the admin see what's outstanding without expanding the card.
+        const statusCounts = items.reduce((m, it) => {
+            m[it.status] = (m[it.status] || 0) + 1;
+            return m;
+        }, {});
+        const statusChipOrder = ['draft','assigned','informed','deployed','paid','report','removed'];
+        const statusChipsHtml = statusChipOrder
+            .filter(s => statusCounts[s])
+            .map(s => `<span class="badge badge-${s}" style="font-size:10px">${statusCounts[s]} ${s}</span>`)
+            .join(' ');
+        const reportableCount = (statusCounts.deployed || 0) + (statusCounts.paid || 0);
+        const reportedCount = statusCounts.report || 0;
 
         const tableShell = (rowsHtml) => `
             <table>
@@ -8021,22 +8137,37 @@ function _lsubsRenderComments() {
             ? ` · ${filteredClusters.length} HQ thread${filteredClusters.length === 1 ? '' : 's'}`
             : '';
 
+        // Collapse state. Default = collapsed. The user can expand
+        // multiple cards independently; their picks survive a
+        // re-render via `_lsubsExpandedPosts`.
+        const isExpanded = _lsubsExpandedPosts.has(String(pid));
+        const caret = isExpanded ? '▾' : '▸';
+        const bodyStyle = isExpanded ? '' : 'display:none';
+
         return `
-        <div class="card p-3 mb-3">
-            <div class="flex justify-between items-center mb-2 pb-2" style="border-bottom:1px solid #2a2a2b">
-                <div>
-                    <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline" style="color:#0079D3">${g.post_title.substring(0, 90)}</a>
-                    <span class="text-xs text-gray-500 ml-2">r/${g.subreddit_name}</span>
-                    ${g.brand_name ? `<span class="badge badge-brand ml-2">${g.brand_name}</span>` : ''}
+        <div class="card p-3 mb-3" data-post-card="${pid}">
+            <div class="flex justify-between items-center cursor-pointer"
+                 onclick="_lsubsTogglePostCard(${pid})"
+                 style="user-select:none">
+                <div class="flex items-center gap-2 flex-1" style="min-width:0">
+                    <span data-post-caret style="color:#9ec4ff;font-size:14px;width:14px">${caret}</span>
+                    <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline truncate" style="color:#0079D3;max-width:60%" onclick="event.stopPropagation()">${g.post_title.substring(0, 90)}</a>
+                    <span class="text-xs text-gray-500">r/${g.subreddit_name}</span>
+                    ${g.brand_name ? `<span class="badge badge-brand">${g.brand_name}</span>` : ''}
+                    ${statusChipsHtml ? `<span class="ml-1 flex gap-1 flex-wrap" style="opacity:0.85">${statusChipsHtml}</span>` : ''}
                 </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-xs text-gray-500">${headerCount}${clustersSummary}</span>
-                    <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
-                    <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
+                <div class="flex items-center gap-1" onclick="event.stopPropagation()">
+                    <span class="text-xs text-gray-500 mr-1">${headerCount}${clustersSummary}</span>
+                    ${reportableCount ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="event.stopPropagation(); showReportThisPostModal(${pid})" title="Push this post's deployed/paid comments into a monthly client report">📊 Report this post</button>` : ''}
+                    ${reportedCount ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="event.stopPropagation(); undoReportThisPost(${pid})" title="Move this post's reported comments back to their previous status">↺ Undo report</button>` : ''}
+                    <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); lsubsGenCommentsForPost(${pid})" title="Generate AI-crawl-optimized comments for this post">+ Cmts</button>
+                    <button class="btn btn-sm btn-accent" onclick="event.stopPropagation(); lsubsGenHqForPost(${pid})" title="Generate an HQ thread for this post">+ HQ</button>
                 </div>
             </div>
-            ${clustersHtml}
-            ${organicHtml}
+            <div data-post-body style="${bodyStyle}; padding-top:8px; margin-top:8px; border-top:1px solid #2a2a2b">
+                ${clustersHtml}
+                ${organicHtml}
+            </div>
         </div>`;
     }).join('');
 
@@ -9109,7 +9240,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
                 <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesearch')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
-                <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('search_comment')" title="Bulk-deploy Live Search posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+                <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('')" title="Bulk-deploy comments from a sheet — matches across both Live Subs and Live Search pipelines">Bulk Deploy from Sheet</button>
                 <button class="btn btn-sm" style="background:#2a3d1a;color:#cef79e" onclick="showBackfillPostedAtModal()" title="Fetch Reddit's actual posted timestamp (created_utc) for deployed comments that don't have one yet">Backfill posted dates</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelectedPostComments()">Delete Selected</button>
@@ -9490,9 +9621,12 @@ function showBulkDeployModal(defaultSource) {
     // wrong row and the visible (Live Search) list never updates.
     const scope = defaultSource || '';
     const scopeOptions = [
-        { value: 'search_comment', label: 'Live Search comments (search_comments)' },
-        { value: 'comment',        label: 'Live Subreddits comments (comments)' },
-        { value: '',               label: 'Both pipelines (legacy behaviour)' },
+        // Default = both — the user typically uploads one sheet
+        // containing URLs from either pipeline and wants the
+        // matcher to figure each one out.
+        { value: '',               label: 'Both pipelines (default)' },
+        { value: 'search_comment', label: 'Live Search only' },
+        { value: 'comment',        label: 'Live Subreddits only' },
     ];
     const scopeOpts = scopeOptions.map(o =>
         `<option value="${o.value}" ${o.value === scope ? 'selected' : ''}>${o.label}</option>`
@@ -10124,6 +10258,140 @@ function _monthOptionsHtml(selectedMonth) {
     }
     const sel = selectedMonth || (now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0'));
     return opts.map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
+}
+
+// "Report this post" wraps the existing per-comment report flow:
+// shows a checkbox list of the post's deployed/paid comments
+// (pre-checked), a month picker, and on submit calls
+// /api/comments/bulk-to-report with just the checked ids.
+async function showReportThisPostModal(postId) {
+    // Pull this post's comments from the existing cache. If the
+    // cache is empty for any reason (rare), fall back to fetching.
+    let postComments = (_lsubsCommentsCache || []).filter(c => c.p_id === postId);
+    if (!postComments.length) {
+        try {
+            const res = await api(`/api/all-comments?live=1&source=comment`);
+            const all = (res && Array.isArray(res.items)) ? res.items : (Array.isArray(res) ? res : []);
+            postComments = all.filter(c => c.p_id === postId);
+        } catch (e) {}
+    }
+    const eligible = postComments.filter(c => c.status === 'deployed' || c.status === 'paid');
+    if (!eligible.length) {
+        toast('No deployed/paid comments under this post to report.', 'info');
+        return;
+    }
+    const postTitle = postComments[0]?.post_title || '';
+    const subreddit = postComments[0]?.subreddit_name || '';
+    const checkboxes = eligible.map((c, idx) => `
+        <label class="flex items-start gap-2 p-2 rounded hover:bg-gray-800" style="cursor:pointer">
+            <input type="checkbox" class="rep-post-cmt" data-cid="${c.id}" checked style="margin-top:3px">
+            <div class="flex-1 text-xs" style="min-width:0">
+                <div class="flex items-center gap-1 mb-0.5">
+                    <span class="badge badge-${c.status}" style="font-size:9px">${c.status}</span>
+                    ${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : ''}
+                    ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0e2a3d;color:#60a5fa;font-size:9px">HQ</span>' : ''}
+                </div>
+                <div class="text-gray-300" style="line-height:1.3">${(c.body || '').substring(0, 140)}${(c.body || '').length > 140 ? '…' : ''}</div>
+            </div>
+        </label>
+    `).join('');
+    showModal(`
+        <h3 class="text-xl font-bold mb-1">Report this post</h3>
+        <p class="text-xs text-gray-400 mb-3">
+            <span class="font-bold text-gray-300">${postTitle.substring(0, 90)}</span>
+            ${subreddit ? `<span class="ml-1">· r/${subreddit}</span>` : ''}
+            <br>Pick the comments to include — only the checked ones will appear on the client dashboard.
+        </p>
+        <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
+        <select id="rep-post-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <div id="rep-post-brand-section"></div>
+        <div class="mb-2 flex items-center gap-2">
+            <span class="text-xs text-gray-400">${eligible.length} eligible comment${eligible.length === 1 ? '' : 's'}</span>
+            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => cb.checked = true)">All</button>
+            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => cb.checked = false)">None</button>
+        </div>
+        <div style="max-height:280px; overflow-y:auto; border:1px solid #343536; border-radius:6px; padding:4px">
+            ${checkboxes}
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary btn-sm" onclick="submitReportThisPost(${postId})">Report selected</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitReportThisPost(postId) {
+    const month = document.getElementById('rep-post-month').value;
+    if (!month) { toast('Pick a month', 'error'); return; }
+    const ids = Array.from(document.querySelectorAll('.rep-post-cmt:checked')).map(cb => ({
+        id: parseInt(cb.dataset.cid),
+        source: 'comment',
+    }));
+    if (!ids.length) { toast('Select at least one comment', 'error'); return; }
+    const brandSel = document.getElementById('rep-post-brand');
+    const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;
+    const body = { ids, report_month: month };
+    if (brandId) body.brand_id = brandId;
+    try {
+        const res = await fetch('/api/comments/bulk-to-report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const updated = payload.updated || 0;
+            const skipped = payload.skipped || 0;
+            const br = payload.brand_required || 0;
+            toast(`Reported ${updated} comment(s) to ${month}${skipped ? ` · ${skipped} skipped${br ? ` (${br} need a brand)` : ''}` : ''}`, 'success');
+            closeModal();
+            // Keep this card expanded after the refresh so the user
+            // sees the rows flip to 'report' state in place.
+            _lsubsExpandedPosts.add(String(postId));
+            lsubsLoadComments(true);
+        } else if (res.status === 422 && payload.error === 'brand_required') {
+            // The bulk endpoint doesn't (yet) return per-row
+            // candidates — fall back to /api/brands/all so the
+            // user can pick a brand override for the unbranded rows.
+            let brands = [];
+            try { brands = await api('/api/brands/all'); } catch (_) {}
+            const section = document.getElementById('rep-post-brand-section');
+            if (section) {
+                section.innerHTML = `
+                    <div class="mb-3 p-2 rounded bg-amber-900/30 border border-amber-700 text-xs text-amber-200">
+                        One or more selected comments have no brand. Pick a brand override to attribute them.
+                    </div>
+                    <label class="text-xs text-gray-400">Brand override</label>
+                    <select id="rep-post-brand" class="w-full mb-3">
+                        <option value="">— pick a brand —</option>
+                        ${(brands || []).map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                    </select>
+                `;
+            }
+        } else {
+            toast('Failed: ' + (payload.error || payload.message || res.statusText), 'error');
+        }
+    } catch (e) {
+        toast('Network error: ' + (e.message || e), 'error');
+    }
+}
+
+async function undoReportThisPost(postId) {
+    if (!confirm("Move all of this post's reported comments back to their previous status?")) return;
+    const reported = (_lsubsCommentsCache || []).filter(
+        c => c.p_id === postId && c.status === 'report'
+    );
+    if (!reported.length) { toast('No reported comments on this post.', 'info'); return; }
+    let ok = 0, fail = 0;
+    for (const c of reported) {
+        try {
+            await api(`/api/comments/${c.id}/undo-report`, { method: 'POST', body: { source: 'comment' } });
+            ok++;
+        } catch (e) { fail++; }
+    }
+    toast(`Reverted ${ok} comment(s)${fail ? ` · ${fail} failed` : ''}`, ok ? 'success' : 'error');
+    _lsubsExpandedPosts.add(String(postId));
+    lsubsLoadComments(true);
 }
 
 async function showSendToReportModal(cid, source) {

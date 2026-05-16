@@ -5440,6 +5440,42 @@ def api_set_post_owner(pid):
     finally:
         db.close()
 
+
+@app.route("/api/posts/<int:pid>/subreddit", methods=["PUT"])
+def api_set_post_subreddit(pid):
+    """Reassign a live-subs post to a different subreddit.
+    Unconditional — works at any lifecycle stage (draft / complete /
+    deployed / paid). The Reddit post itself doesn't move; this is
+    an internal organization knob so the admin can re-classify which
+    sub a post counts against on the dashboard / generator.
+    """
+    db = get_db()
+    try:
+        data = request.json or {}
+        sub_id = data.get("subreddit_id")
+        try:
+            sub_id_int = int(sub_id) if sub_id not in (None, '', 0) else None
+        except (TypeError, ValueError):
+            sub_id_int = None
+        if not sub_id_int:
+            return jsonify({"error": "subreddit_id required"}), 400
+        # Verify the target sub exists. We don't enforce live=1 — the
+        # caller wants flexibility and Live Subs already provisions
+        # subreddits aggressively.
+        row = db.conn.execute(
+            "SELECT id FROM subreddits WHERE id = ?", (sub_id_int,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "subreddit_id not found"}), 404
+        db.conn.execute(
+            "UPDATE posts SET subreddit_id = ? WHERE id = ?",
+            (sub_id_int, pid)
+        )
+        db.conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
 @app.route("/api/accounts/filtered-usernames")
 def api_filtered_usernames():
     db = get_db()
@@ -6288,13 +6324,18 @@ def portal_month(month):
         client = db.get_client(cid)
         if not client:
             return abort(404)
+        # Post-grouped view: Live Subs comments are clustered under
+        # their parent post; Live Search comments are kept flat
+        # (they have no post container). Total/live/removed KPIs are
+        # derived from the union below in the template.
+        grouped = db.get_posts_for_client_month(cid, month)
+        # Keep the flat row list around for KPI math + the search
+        # comments section (rendered as before).
         rows = db.get_comments_for_client_month(cid, month)
-        # Per-row formatted fields the template uses verbatim. Keep
-        # the engagement columns empty by default — the live-stats
-        # button populates them async.
         return render_template(
             'portal/month.html',
             client=client, month=month, rows=rows,
+            posts=grouped["posts"], search_comments=grouped["search_comments"],
             is_admin_view=is_admin,
         )
     finally:
@@ -6309,33 +6350,71 @@ def portal_month_export(month):
     cid, _ = _acting_client_id()
     db = get_db()
     try:
-        rows = db.get_comments_for_client_month(cid, month)
+        grouped = db.get_posts_for_client_month(cid, month)
     finally:
         db.close()
-    # Same column shape as `lsExportCsv` in templates/index.html.
-    # Subreddit | Published Date (mm/dd/yyyy) | Comment URL | Body |
-    # Upvotes | Conversations. Upvotes/Conversations are blank for
-    # rows where we don't yet have live-stats; the client can run
-    # the in-portal live-check to refresh them.
+
+    # Post-grouped, denormalized layout. Each POST row carries the
+    # post's metadata (subreddit / title / URL / posted date) with
+    # the comment-specific columns blank; each COMMENT row repeats
+    # the same post metadata so a spreadsheet sort by
+    # (Section, Subreddit, Posted Date) keeps the children under
+    # their parent. Live Search comments — which don't have a
+    # Live Subs post container — land in a final SEARCH_COMMENT
+    # section.
+    def fmt_date(raw):
+        if not raw:
+            return ""
+        m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', str(raw))
+        return f"{m.group(2)}/{m.group(3)}/{m.group(1)}" if m else ""
+
     buf = _io.StringIO()
     w = _csv.writer(buf)
-    w.writerow(["Subreddit", "Published Date", "Comment URL",
-                "Comment Content", "Upvotes", "Conversations"])
-    for r in rows:
-        date_raw = (r.get("posted_at") or r.get("deployed_at") or "")
-        date_fmt = ""
-        if date_raw:
-            m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', str(date_raw))
-            if m:
-                date_fmt = f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
+    w.writerow([
+        "Section", "Subreddit", "Brand", "Posted Date",
+        "Post Title", "Post URL",
+        "Account", "Comment URL", "Comment Content",
+        "Upvotes", "Replies",
+    ])
+
+    for post in grouped.get("posts", []):
+        post_sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
+        post_brand = post.get('brand_name') or ''
+        post_date = fmt_date(post.get('deployed_at') or post.get('paid_at') or post.get('created_at'))
+        post_title = post.get('title') or ''
+        post_url = post.get('reddit_url') or ''
+        # POST header row — comment-specific columns blank.
         w.writerow([
-            f"r/{r.get('subreddit_name') or ''}" if r.get('subreddit_name') else '',
-            date_fmt,
-            r.get('reddit_comment_url') or '',
-            r.get('body') or '',
-            r.get('upvotes', ''),
-            r.get('num_replies', ''),
+            "POST", post_sub, post_brand, post_date,
+            post_title, post_url,
+            "", "", "", "", "",
         ])
+        for c in post.get("comments", []):
+            w.writerow([
+                "COMMENT", post_sub, post_brand, post_date,
+                post_title, post_url,
+                f"u/{c.get('account_id')}" if c.get('account_id') else "",
+                c.get('reddit_comment_url') or "",
+                c.get('body') or "",
+                c.get('upvotes') if c.get('upvotes') is not None else "",
+                c.get('num_replies') if c.get('num_replies') is not None else "",
+            ])
+
+    # Live Search comments — flat, no parent post layer.
+    for c in grouped.get("search_comments", []):
+        sub = f"r/{c.get('subreddit_name')}" if c.get('subreddit_name') else ''
+        brand = c.get('brand_name') or ''
+        date = fmt_date(c.get('posted_at') or c.get('deployed_at'))
+        w.writerow([
+            "SEARCH_COMMENT", sub, brand, date,
+            "", "",  # no post title / URL
+            f"u/{c.get('account_id')}" if c.get('account_id') else "",
+            c.get('reddit_comment_url') or "",
+            c.get('body') or "",
+            c.get('upvotes') if c.get('upvotes') is not None else "",
+            c.get('num_replies') if c.get('num_replies') is not None else "",
+        ])
+
     resp = make_response(buf.getvalue())
     resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
     resp.headers['Content-Disposition'] = f'attachment; filename="report-{month}.csv"'

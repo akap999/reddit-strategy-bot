@@ -5,6 +5,7 @@
 {% set live = rows | selectattr('status', 'equalto', 'report') | list | length %}
 {% set removed = rows | selectattr('status', 'equalto', 'removed') | list | length %}
 {% set total = rows | length %}
+{% set post_count = posts | length %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
   <div>
@@ -27,6 +28,7 @@
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Live</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-live">{{ live }}</div>
+    <div class="text-xs text-slate-400 mt-0.5">{{ post_count }} post{{ '' if post_count == 1 else 's' }}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Removed</div>
@@ -92,9 +94,87 @@
   <span id="live-check-progress"></span>
 </div>
 
-<!-- Comments table -->
-<div class="surface border-soft rounded-xl overflow-hidden">
-  <table class="report-table" id="report-table">
+<!-- ============== Post-grouped section (Live Subs reports) ============== -->
+{% if posts %}
+<div id="post-cards" class="space-y-3 mb-6">
+  {% for post in posts %}
+    {% set live_in_post = post.comments | selectattr('status', 'equalto', 'report') | list | length %}
+    {% set removed_in_post = post.comments | selectattr('status', 'equalto', 'removed') | list | length %}
+    {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
+    {% set post_short_date = post_date[:10] %}
+  <div class="surface border-soft rounded-xl overflow-hidden" data-post-card data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}">
+    <button type="button" onclick="togglePostCard(this)" class="w-full px-4 py-3 flex items-start gap-3 hover:bg-slate-50 text-left">
+      <span data-caret class="text-slate-400 mt-0.5">▸</span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% endif %}
+          {% if post.brand_name %}<span class="chip chip-brand">{{ post.brand_name }}</span>{% endif %}
+          {% if post_short_date %}
+          <span class="text-xs text-slate-500">{{ post_short_date[5:7] }}/{{ post_short_date[8:10] }}/{{ post_short_date[:4] }}</span>
+          {% endif %}
+        </div>
+        <div class="font-medium text-slate-900 mt-1">{{ (post.title or '(untitled)')[:120] }}</div>
+        <div class="mt-1 flex items-center gap-2 text-xs flex-wrap">
+          <span class="chip chip-live">{{ live_in_post }} live</span>
+          {% if removed_in_post %}<span class="chip chip-removed">{{ removed_in_post }} removed</span>{% endif %}
+          {% if post.reddit_url %}
+          <a href="{{ post.reddit_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline">View post on Reddit ↗</a>
+          {% endif %}
+        </div>
+      </div>
+    </button>
+    <div data-body class="hidden border-t border-soft">
+      <table class="report-table">
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Comment</th>
+            <th class="text-right">Upvotes</th>
+            <th class="text-right">Replies</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in post.comments %}
+          {% set body = (r.body or '') %}
+          <tr data-row data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ (r.posted_at or r.deployed_at or '')[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
+            <td data-label="Account" class="text-xs text-slate-500">{% if r.account_id %}u/{{ r.account_id }}{% else %}—{% endif %}</td>
+            <td data-label="Comment" style="max-width: 460px;">
+              {% if r.reddit_comment_url %}
+              <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium block mb-1">View on Reddit ↗</a>
+              {% endif %}
+              <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
+            </td>
+            <td data-label="Upvotes" class="text-right" style="font-variant-numeric: tabular-nums;">
+              {% if r.upvotes is not none %}<span class="text-slate-900 font-medium">{{ r.upvotes }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+            </td>
+            <td data-label="Replies" class="text-right" style="font-variant-numeric: tabular-nums;">
+              {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+            </td>
+            <td data-label="Status">
+              {% if r.status == 'report' %}
+                <span class="chip chip-live">Live</span>
+              {% else %}
+                <span class="chip chip-removed">Removed</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- ============== Search comments section (flat — no post container) ============== -->
+{% if search_comments %}
+<div class="surface border-soft rounded-xl overflow-hidden mb-6">
+  <div class="px-4 py-2 border-b border-soft bg-slate-50 text-xs uppercase tracking-wider text-slate-500 font-medium">
+    Search comments · {{ search_comments | length }}
+  </div>
+  <table class="report-table">
     <thead>
       <tr>
         <th>Subreddit</th>
@@ -106,25 +186,17 @@
       </tr>
     </thead>
     <tbody>
-      {% for r in rows %}
+      {% for r in search_comments %}
       {% set published = r.posted_at or r.deployed_at or '' %}
       {% set short_date = published[:10] if published else '' %}
       {% set body = (r.body or '') %}
-      <tr data-row
-          data-brand="{{ r.brand_name or '' }}"
-          data-status="{{ r.status }}"
-          data-sub="{{ r.subreddit_name or '' }}"
-          data-date="{{ published[:19] }}"
-          data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}"
-          data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
+      <tr data-row data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ published[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
         <td data-label="Subreddit">
           {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
           {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
         </td>
         <td data-label="Published" style="color: #475569;">
-          {% if short_date %}
-            {{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}
-          {% else %}—{% endif %}
+          {% if short_date %}{{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}{% else %}—{% endif %}
         </td>
         <td data-label="Comment" style="max-width: 460px;">
           {% if r.reddit_comment_url %}
@@ -139,20 +211,22 @@
           {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
         </td>
         <td data-label="Status">
-          {% if r.status == 'report' %}
-            <span class="chip chip-live">Live</span>
-          {% else %}
-            <span class="chip chip-removed">Removed</span>
-          {% endif %}
+          {% if r.status == 'report' %}<span class="chip chip-live">Live</span>{% else %}<span class="chip chip-removed">Removed</span>{% endif %}
         </td>
       </tr>
-      {% else %}
-      <tr><td colspan="6" class="text-center text-slate-400 py-12">No comments in this report yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
-  <div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
 </div>
+{% endif %}
+
+{% if not posts and not search_comments %}
+<div class="surface border-soft rounded-xl text-center py-12">
+  <p class="text-sm text-slate-400">No comments in this report yet.</p>
+</div>
+{% endif %}
+
+<div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
 
 {% endblock %}
 
@@ -161,31 +235,33 @@
 const ASCID = {{ client.id if is_admin_view else 'null' }};
 const ASQS = ASCID ? ('?as=' + ASCID) : '';
 
+// Expand / collapse a post card.
+function togglePostCard(headerBtn) {
+  const card = headerBtn.closest('[data-post-card]');
+  if (!card) return;
+  const body = card.querySelector('[data-body]');
+  const caret = card.querySelector('[data-caret]');
+  const willExpand = body.classList.contains('hidden');
+  body.classList.toggle('hidden', !willExpand);
+  if (caret) caret.textContent = willExpand ? '▾' : '▸';
+}
+
 // =====================================================================
-// Filter + sort wiring (client-side; the row set is small enough).
+// Filter + sort wiring
 // =====================================================================
 const _fState = { brand: '', status: '', sub: '', sort: 'date-desc' };
 
 function _readQueryToFilters() {
-  // The dashboard's brand cards link here with ?brand=<id>&status=<...>.
-  // The brand card sends a brand_id, but here we filter by name (data-brand).
-  // For deep-link parity, also support brand=<name> and status=report/removed.
   const u = new URLSearchParams(window.location.search);
   const brandQ = u.get('brand');
   const statusQ = u.get('status');
   if (brandQ) {
-    // brand may be the numeric id from the dashboard card. Match
-    // by name if there's exactly one chip with that name in this
-    // month's data.
     const sel = document.getElementById('flt-brand');
     const candidates = Array.from(sel.options).map(o => o.value).filter(Boolean);
-    // Prefer exact match (name); also try numeric (no-op here — we
-    // don't surface ids in this template, so this is a soft fallback).
     if (candidates.includes(brandQ)) { sel.value = brandQ; _fState.brand = brandQ; }
   }
   if (statusQ) {
     const sel = document.getElementById('flt-status');
-    // Translate dashboard "live" → "report" (DB status name).
     const s = (statusQ === 'live') ? 'report' : statusQ;
     if (Array.from(sel.options).some(o => o.value === s)) {
       sel.value = s; _fState.status = s;
@@ -194,30 +270,47 @@ function _readQueryToFilters() {
 }
 
 function applyFilters() {
-  const tbody = document.querySelector('#report-table tbody');
-  const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
   let shown = 0;
-  for (const row of rows) {
+  // Each post card matches iff at least one of its rows matches the
+  // status/brand/sub filter AND the card's own brand/sub match.
+  for (const card of document.querySelectorAll('[data-post-card]')) {
+    const tbody = card.querySelector('tbody');
+    const rows = tbody ? Array.from(tbody.querySelectorAll('tr[data-row]')) : [];
+    let cardShown = 0;
+    for (const row of rows) {
+      const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
+      const okStatus = !_fState.status || row.dataset.status === _fState.status;
+      const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
+      const show = okBrand && okStatus && okSub;
+      row.style.display = show ? '' : 'none';
+      if (show) { cardShown++; shown++; }
+    }
+    // Apply sort to the visible rows in this card.
+    if (tbody) {
+      const visible = rows.filter(r => r.style.display !== 'none');
+      const cmp = {
+        'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
+        'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
+        'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
+        'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
+      }[_fState.sort] || (() => 0);
+      visible.sort(cmp);
+      for (const r of visible) tbody.appendChild(r);
+    }
+    card.style.display = cardShown ? '' : 'none';
+  }
+  // Standalone search-comment table (no post-card wrapper).
+  for (const row of document.querySelectorAll('tr[data-row]:not([data-post-card] *)')) {
     const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
     const okStatus = !_fState.status || row.dataset.status === _fState.status;
     const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
     const show = okBrand && okStatus && okSub;
+    if (row.closest('[data-post-card]')) continue;  // handled above
     row.style.display = show ? '' : 'none';
     if (show) shown++;
   }
-  // Sort visible rows in-place.
-  const visible = rows.filter(r => r.style.display !== 'none');
-  const dir = _fState.sort;
-  const cmp = {
-    'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
-    'date-asc': (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
-    'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
-    'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
-  }[dir] || (() => 0);
-  visible.sort(cmp);
-  for (const r of visible) tbody.appendChild(r);
   document.getElementById('kpi-shown').textContent = shown;
-  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0 || rows.length === 0);
+  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0);
 }
 
 function resetFilters() {
@@ -234,7 +327,7 @@ function resetFilters() {
   _readQueryToFilters();
   const wire = (id, key) => {
     const el = document.getElementById(id);
-    el.addEventListener('change', () => { _fState[key] = el.value; applyFilters(); });
+    if (el) el.addEventListener('change', () => { _fState[key] = el.value; applyFilters(); });
   };
   wire('flt-brand', 'brand');
   wire('flt-status', 'status');

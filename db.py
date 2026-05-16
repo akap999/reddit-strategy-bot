@@ -1026,6 +1026,14 @@ class Database:
             # report_month IS NOT NULL are written together.
             "report_month": "ALTER TABLE comments ADD COLUMN report_month TEXT",
             "report_added_at": "ALTER TABLE comments ADD COLUMN report_added_at TEXT",
+            # Direct client assignment — set when admin pushes a row
+            # to report state. Replaces the previous "deduce client
+            # from brand_id" approach which silently broke when
+            # comments had NULL brand_id or were stored on a brand
+            # other than the one the admin meant for that client.
+            # NULL = legacy rows (pre-client-picker); dashboard then
+            # falls back to brand resolution for those.
+            "report_client_id": "ALTER TABLE comments ADD COLUMN report_client_id INTEGER REFERENCES clients(id)",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -1145,6 +1153,7 @@ class Database:
             # migration. See the comments-table block for rationale.
             "report_month": "ALTER TABLE search_comments ADD COLUMN report_month TEXT",
             "report_added_at": "ALTER TABLE search_comments ADD COLUMN report_added_at TEXT",
+            "report_client_id": "ALTER TABLE search_comments ADD COLUMN report_client_id INTEGER REFERENCES clients(id)",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -2580,13 +2589,22 @@ class Database:
     # --- Report lifecycle helpers ---
 
     def move_comment_to_report(self, comment_id, source, report_month,
-                                actor_email=None):
-        """Flip a comment's status to 'report' and stamp the month.
+                                actor_email=None, client_id=None):
+        """Flip a comment's status to 'report', stamp the month, and
+        (recommended) record which client this report belongs to.
+
         Returns the previous status (for the audit row) or None if the
         row wasn't found / wasn't eligible.
 
         Source: "comment" or "search_comment". Only rows currently in
         'deployed' or 'paid' status are eligible.
+
+        `client_id` (optional but strongly recommended): the explicit
+        client this comment is being reported to. When set, the
+        portal dashboard finds the row by `report_client_id = ?`
+        directly — no brand_id deduction required. Legacy rows where
+        client_id wasn't supplied still fall back to brand resolution
+        on the dashboard side.
         """
         if not report_month or not comment_id:
             return None
@@ -2605,9 +2623,10 @@ class Database:
                 SET status = 'report',
                     prev_status = ?,
                     report_month = ?,
-                    report_added_at = datetime('now')
+                    report_added_at = datetime('now'),
+                    report_client_id = ?
                 WHERE id = ?""",
-            (old_status, report_month, comment_id)
+            (old_status, report_month, client_id, comment_id)
         )
         self.conn.commit()
         self._log_report_audit(
@@ -2657,10 +2676,12 @@ class Database:
         except Exception as e:
             print(f"[report_audit] insert failed: {e}", flush=True)
 
-    def bulk_move_to_report(self, *, ids, report_month, actor_email=None):
+    def bulk_move_to_report(self, *, ids, report_month, actor_email=None,
+                              client_id=None):
         """`ids` is a list of {id, source} dicts. Each row that's
         eligible (status in deployed/paid) is flipped. Returns counts
-        {updated, skipped}.
+        {updated, skipped}. `client_id` (optional) is stamped on every
+        successfully-moved row.
         """
         if not ids or not report_month:
             return {"updated": 0, "skipped": 0}
@@ -2672,7 +2693,10 @@ class Database:
             except (TypeError, ValueError, AttributeError):
                 skipped += 1; continue
             src = entry.get("source") or "comment"
-            if self.move_comment_to_report(cid, src, report_month, actor_email) is not None:
+            if self.move_comment_to_report(
+                cid, src, report_month, actor_email=actor_email,
+                client_id=client_id,
+            ) is not None:
                 updated += 1
             else:
                 skipped += 1
@@ -2682,21 +2706,44 @@ class Database:
         """Distinct report_month values for a client's comments, with
         per-month counts. Used by the portal dashboard.
 
-        Brand-resolution matches the same logic as `get_all_comments_global`:
-          - `c.brand_id` direct match, OR
-          - `c.brand_id IS NULL AND p.brand_id IN (...)` (legacy posts
-            where the brand lives on the post), OR
-          - `c.brand_id IS NULL AND p.id IN (post_brands.post_id WHERE
-            post_brands.brand_id IN (...))` (multi-brand posts).
+        Two visibility rules, OR'd together:
+          1. **Explicit assignment** — `report_client_id = client_id`.
+             This is the modern path; the admin picks the client when
+             reporting, and the row carries an explicit link.
+          2. **Legacy brand resolution** — for rows where
+             `report_client_id IS NULL` (pre-client-picker), we fall
+             back to matching by `brand_id` either directly on the
+             comment or on its parent post.
 
-        Without this fallback, search_comments with NULL brand_id were
-        invisible to the portal even when their parent post was tied
-        to one of the client's brands.
+        Without the explicit assignment, search_comments with NULL
+        brand_id were invisible to the portal even when intended for
+        a specific client.
         """
         brand_ids = self.client_brand_ids(client_id)
-        if not brand_ids:
-            return []
-        ph = ",".join("?" * len(brand_ids))
+        # Build a single query per table that OR's the explicit and
+        # legacy paths so a row that matches BOTH is counted only once.
+        if brand_ids:
+            ph = ",".join("?" * len(brand_ids))
+            legacy_c = (
+                f"OR (c.report_client_id IS NULL AND ("
+                f"  c.brand_id IN ({ph})"
+                f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+                f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
+                f"))"
+            )
+            legacy_sc = (
+                f"OR (sc.report_client_id IS NULL AND ("
+                f"  sc.brand_id IN ({ph})"
+                f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
+                f"))"
+            )
+            legacy_params_c = brand_ids * 3
+            legacy_params_sc = brand_ids * 2
+        else:
+            legacy_c = ""
+            legacy_sc = ""
+            legacy_params_c = []
+            legacy_params_sc = []
         q1 = f"""SELECT c.report_month AS month,
                         COUNT(*) AS total,
                         SUM(CASE WHEN c.status = 'report' THEN 1 ELSE 0 END) AS live,
@@ -2704,9 +2751,8 @@ class Database:
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  WHERE (
-                       c.brand_id IN ({ph})
-                    OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
-                    OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
+                       c.report_client_id = ?
+                       {legacy_c}
                  )
                    AND c.report_month IS NOT NULL
                    AND c.status IN ('report', 'removed')
@@ -2718,14 +2764,14 @@ class Database:
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  WHERE (
-                       sc.brand_id IN ({ph})
-                    OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
+                       sc.report_client_id = ?
+                       {legacy_sc}
                  )
                    AND sc.report_month IS NOT NULL
                    AND sc.status IN ('report', 'removed')
                  GROUP BY sc.report_month"""
         agg = {}
-        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
+        for r in self.conn.execute(q1, [client_id] + legacy_params_c).fetchall():
             m = r["month"]
             if not m:
                 continue
@@ -2733,7 +2779,7 @@ class Database:
             bucket["total"] += r["total"] or 0
             bucket["live"] += r["live"] or 0
             bucket["removed"] += r["removed"] or 0
-        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
+        for r in self.conn.execute(q2, [client_id] + legacy_params_sc).fetchall():
             m = r["month"]
             if not m:
                 continue
@@ -2745,19 +2791,37 @@ class Database:
 
     def get_comments_for_client_month(self, client_id, month):
         """All comments for a client + month (both tables, merged + sorted
-        by deployed_at desc). Each row has the columns the portal needs.
-
-        Brand resolution falls back to the parent post's brand_id when
-        the comment row has none — same logic as the dashboard query.
+        by deployed_at desc). Same visibility rules as
+        `get_report_months_for_client` — explicit `report_client_id`
+        first, brand resolution as a legacy fallback.
         """
         brand_ids = self.client_brand_ids(client_id)
-        if not brand_ids:
-            return []
-        ph = ",".join("?" * len(brand_ids))
-        params_q1 = list(brand_ids) * 3 + [month]
+        if brand_ids:
+            ph = ",".join("?" * len(brand_ids))
+            legacy_c = (
+                f"OR (c.report_client_id IS NULL AND ("
+                f"  c.brand_id IN ({ph})"
+                f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+                f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
+                f"))"
+            )
+            legacy_sc = (
+                f"OR (sc.report_client_id IS NULL AND ("
+                f"  sc.brand_id IN ({ph})"
+                f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
+                f"))"
+            )
+            legacy_params_c = brand_ids * 3
+            legacy_params_sc = brand_ids * 2
+        else:
+            legacy_c = ""
+            legacy_sc = ""
+            legacy_params_c = []
+            legacy_params_sc = []
+        params_q1 = [client_id] + legacy_params_c + [month]
         q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
                         c.reddit_comment_url, c.posted_at, c.deployed_at,
-                        c.report_month, c.report_added_at,
+                        c.report_month, c.report_added_at, c.report_client_id,
                         c.created_at, c.is_reply, c.comment_type,
                         'comment' AS source,
                         s.name AS subreddit_name,
@@ -2768,16 +2832,15 @@ class Database:
                  LEFT JOIN brands b ON c.brand_id = b.id
                  LEFT JOIN brands pb ON p.brand_id = pb.id
                  WHERE (
-                       c.brand_id IN ({ph})
-                    OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
-                    OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
+                       c.report_client_id = ?
+                       {legacy_c}
                  )
                    AND c.report_month = ?
                    AND c.status IN ('report', 'removed')"""
-        params_q2 = list(brand_ids) * 2 + [month]
+        params_q2 = [client_id] + legacy_params_sc + [month]
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
-                        sc.report_month, sc.report_added_at,
+                        sc.report_month, sc.report_added_at, sc.report_client_id,
                         sc.created_at, sc.is_reply, sc.comment_type,
                         'search_comment' AS source,
                         sp.subreddit AS subreddit_name,
@@ -2787,8 +2850,8 @@ class Database:
                  LEFT JOIN brands b ON sc.brand_id = b.id
                  LEFT JOIN brands spb ON sp.brand_id = spb.id
                  WHERE (
-                       sc.brand_id IN ({ph})
-                    OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
+                       sc.report_client_id = ?
+                       {legacy_sc}
                  )
                    AND sc.report_month = ?
                    AND sc.status IN ('report', 'removed')"""

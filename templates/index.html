@@ -9266,17 +9266,32 @@ function lsFilterComments() {
         : _lsComments.filter(c => c.status !== 'deleted' && c.status !== 'archived');
     if (postId) filtered = filtered.filter(c => c.search_post_id == postId);
     if (brandName) filtered = filtered.filter(c => c.brand_name === brandName);
-    // Status filter: post-level — show posts whose highest-ranked comment matches
-    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, removed: 6 };
+    // Status filter behavior:
+    //  - For 'report' / 'removed' / 'paid' (terminal-ish statuses)
+    //    we do a DIRECT comment-status match so the user sees every
+    //    comment in that exact status, regardless of what other
+    //    siblings under the same post look like. (Previously, a post
+    //    with a 'removed' sibling would hide its 'report' sibling
+    //    because removed outranks report — that bug surfaced when a
+    //    user moved comments to report but the filter showed empty.)
+    //  - For earlier-stage statuses (draft/assigned/informed/deployed)
+    //    we keep the post-max-status behaviour so the UI shows posts
+    //    currently AT that stage of the pipeline rather than past it.
+    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, removed: 7 };
+    const DIRECT_STATUSES = new Set(['paid', 'report', 'removed']);
     if (status && status !== 'archived') {
-        const postMaxStatus = {};
-        filtered.forEach(c => {
-            const pid = c.search_post_id;
-            const rank = LS_STATUS_RANK[c.status] ?? -1;
-            if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
-        });
-        const targetRank = LS_STATUS_RANK[status] ?? -1;
-        filtered = filtered.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+        if (DIRECT_STATUSES.has(status)) {
+            filtered = filtered.filter(c => c.status === status);
+        } else {
+            const postMaxStatus = {};
+            filtered.forEach(c => {
+                const pid = c.search_post_id;
+                const rank = LS_STATUS_RANK[c.status] ?? -1;
+                if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
+            });
+            const targetRank = LS_STATUS_RANK[status] ?? -1;
+            filtered = filtered.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+        }
     }
     // Subreddit multi-select filter
     const allSubsCount = lsAllSubsInComments().length;
@@ -10111,14 +10126,27 @@ function _monthOptionsHtml(selectedMonth) {
     return opts.map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
 }
 
-function showSendToReportModal(cid, source) {
+async function showSendToReportModal(cid, source) {
+    // Load clients list up-front so the picker can be required.
+    let clients = [];
+    try { clients = await api('/api/clients'); } catch (_) {}
+    const clientOpts = (clients || []).map(c =>
+        `<option value="${c.id}">${c.name}</option>`
+    ).join('');
+    const hasClients = (clients && clients.length > 0);
     showModal(`
         <h3 class="text-xl font-bold mb-3">Send to Monthly Report</h3>
-        <p class="text-xs text-gray-400 mb-3">Pick the report month this comment should count toward. The comment will move from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>.</p>
-        <label class="text-xs text-gray-400">Month</label>
+        <p class="text-xs text-gray-400 mb-3">Pick the <strong>client</strong> this report belongs to and the month it should count toward. The comment moves from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>.</p>
+        ${hasClients ? '' : '<div class="mb-3 p-2 rounded bg-red-900/30 border border-red-600 text-xs text-red-300">No clients exist yet. <a href="#" onclick="closeModal();navigate(\'clients\');return false" class="underline">Create one first</a>.</div>'}
+        <label class="text-xs text-gray-400">Client <span class="text-red-400">*</span></label>
+        <select id="rep-client" class="w-full mb-3" ${hasClients ? '' : 'disabled'}>
+            <option value="">— pick a client —</option>
+            ${clientOpts}
+        </select>
+        <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
         <div class="flex gap-2 mt-3">
-            <button class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')">Send</button>
+            <button class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')" ${hasClients ? '' : 'disabled'}>Send</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
@@ -10126,9 +10154,14 @@ function showSendToReportModal(cid, source) {
 
 async function submitSendToReport(cid, source) {
     const month = document.getElementById('rep-month').value;
+    const clientId = parseInt(document.getElementById('rep-client').value) || null;
+    if (!clientId) { toast('Pick a client first', 'error'); return; }
     if (!month) { toast('Pick a month', 'error'); return; }
     try {
-        await api(`/api/comments/${cid}/to-report`, { method: 'POST', body: { report_month: month, source } });
+        await api(`/api/comments/${cid}/to-report`, {
+            method: 'POST',
+            body: { report_month: month, source, client_id: clientId },
+        });
         toast(`Sent to ${month}`, 'success');
         closeModal();
         // Refresh whichever view is active.
@@ -10158,7 +10191,7 @@ async function undoReport(cid, source) {
 // "Mark Reported All" — bulk action mirrored on Mark Paid All.
 // Currently applied from the Live Search Comments header — pushes
 // the current filter's deployed/paid rows to report state.
-function showMarkReportedAllModal(scope) {
+async function showMarkReportedAllModal(scope) {
     // scope: 'livesearch' (uses ls-cf-* filters) or 'livesubs' (uses lsubs-cmt-* filters)
     const filterContext = scope === 'livesubs' ? {
         brand_id: document.getElementById('lsubs-cmt-brand')?.value || null,
@@ -10169,10 +10202,22 @@ function showMarkReportedAllModal(scope) {
         status: document.getElementById('ls-cf-status')?.value || null,
         source: 'search_comment',
     };
+    let clients = [];
+    try { clients = await api('/api/clients'); } catch (_) {}
+    const clientOpts = (clients || []).map(c =>
+        `<option value="${c.id}">${c.name}</option>`
+    ).join('');
+    const hasClients = (clients && clients.length > 0);
     showModal(`
         <h3 class="text-xl font-bold mb-3">Mark Reported All</h3>
-        <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen month's report.</p>
-        <label class="text-xs text-gray-400">Month</label>
+        <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen client's monthly report.</p>
+        ${hasClients ? '' : '<div class="mb-3 p-2 rounded bg-red-900/30 border border-red-600 text-xs text-red-300">No clients exist yet. <a href="#" onclick="closeModal();navigate(\'clients\');return false" class="underline">Create one first</a>.</div>'}
+        <label class="text-xs text-gray-400">Client <span class="text-red-400">*</span></label>
+        <select id="rep-client" class="w-full mb-2" ${hasClients ? '' : 'disabled'}>
+            <option value="">— pick a client —</option>
+            ${clientOpts}
+        </select>
+        <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-2">${_monthOptionsHtml()}</select>
         <label class="text-xs text-gray-400">Status filter (only deployed/paid eligible)</label>
         <select id="rep-status" class="w-full mb-2">
@@ -10181,7 +10226,7 @@ function showMarkReportedAllModal(scope) {
             <option value="paid" ${filterContext.status === 'paid' ? 'selected' : ''}>Only paid</option>
         </select>
         <div class="flex gap-2 mt-3">
-            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')">Run</button>
+            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')" ${hasClients ? '' : 'disabled'}>Run</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
@@ -10190,8 +10235,10 @@ function showMarkReportedAllModal(scope) {
 async function submitMarkReportedAll(scope) {
     const month = document.getElementById('rep-month').value;
     const status = document.getElementById('rep-status').value || null;
+    const clientId = parseInt(document.getElementById('rep-client').value) || null;
+    if (!clientId) { toast('Pick a client first', 'error'); return; }
     if (!month) { toast('Pick a month', 'error'); return; }
-    const body = { report_month: month };
+    const body = { report_month: month, client_id: clientId };
     if (status) body.status = status;
     if (scope === 'livesubs') {
         const bid = document.getElementById('lsubs-cmt-brand')?.value;

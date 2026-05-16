@@ -5720,16 +5720,25 @@ def api_comment_to_report(cid):
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
     source = (data.get('source') or 'comment').strip()
+    client_id = data.get('client_id')
+    try:
+        client_id = int(client_id) if client_id not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        client_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     if source not in ('comment', 'search_comment'):
         return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
     db = get_db()
     try:
-        result = db.move_comment_to_report(cid, source, month, actor_email=_admin_email())
+        result = db.move_comment_to_report(
+            cid, source, month,
+            actor_email=_admin_email(), client_id=client_id,
+        )
         if result is None:
             return jsonify({"error": "row not found or not in deployed/paid status"}), 422
-        return jsonify({"ok": True, "prev_status": result, "report_month": month})
+        return jsonify({"ok": True, "prev_status": result,
+                        "report_month": month, "client_id": client_id})
     finally:
         db.close()
 
@@ -5751,16 +5760,22 @@ def api_comment_undo_report(cid):
 
 @app.route('/api/comments/bulk-to-report', methods=['POST'])
 def api_bulk_to_report():
-    """Body: {ids: [{id, source}], report_month}"""
+    """Body: {ids: [{id, source}], report_month, client_id?}"""
     data = request.get_json() or {}
     ids = data.get('ids') or []
     month = (data.get('report_month') or '').strip()
+    client_id = data.get('client_id')
+    try:
+        client_id = int(client_id) if client_id not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        client_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     db = get_db()
     try:
         out = db.bulk_move_to_report(
             ids=ids, report_month=month, actor_email=_admin_email(),
+            client_id=client_id,
         )
         return jsonify(out)
     finally:
@@ -5772,11 +5787,16 @@ def api_bulk_to_report_filtered():
     """Move every comment matching the given filter (mirror of
     /api/all-comments/mark-paid-all's shape) into report state.
 
-    Body: {report_month, brand_id?, subreddit_id?, account_id?,
-           source?, date?, status?}
+    Body: {report_month, client_id?, brand_id?, subreddit_id?,
+           account_id?, source?, date?, status?}
     """
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
+    client_id = data.get('client_id')
+    try:
+        client_id = int(client_id) if client_id not in (None, '', 0) else None
+    except (TypeError, ValueError):
+        client_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     db = get_db()
@@ -5803,6 +5823,7 @@ def api_bulk_to_report_filtered():
                 ids.append({"id": r['id'], "source": r.get('source', 'comment')})
         out = db.bulk_move_to_report(
             ids=ids, report_month=month, actor_email=_admin_email(),
+            client_id=client_id,
         )
         out["candidates_considered"] = len(items)
         return jsonify(out)

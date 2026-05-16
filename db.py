@@ -3434,6 +3434,27 @@ class Database:
             post_ids
         ).fetchall()
         posts = {r["id"]: dict(r) for r in post_rows}
+        # Mention Link: the URL of the HQ root comment under each post
+        # — i.e. the cluster head where the brand mention lives. The
+        # client report uses this as the deliverable's primary
+        # engagement link. If a post has multiple HQ threads, take the
+        # earliest-posted root; if it has no HQ comment, leave NULL.
+        mention_rows = self.conn.execute(
+            f"""SELECT post_id, reddit_comment_url
+                  FROM comments
+                 WHERE post_id IN ({php})
+                   AND comment_type = 'hq'
+                   AND parent_comment_id IS NULL
+                   AND reddit_comment_url IS NOT NULL
+              ORDER BY post_id, COALESCE(posted_at, deployed_at, created_at)""",
+            post_ids
+        ).fetchall()
+        mention_by_post = {}
+        for r in mention_rows:
+            # Earliest match wins (ORDER BY above).
+            mention_by_post.setdefault(r["post_id"], r["reddit_comment_url"])
+        for pid, post in posts.items():
+            post["mention_link"] = mention_by_post.get(pid)
         # Attach comments to their posts.
         for post in posts.values():
             post["comments"] = []

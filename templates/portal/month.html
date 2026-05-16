@@ -2,9 +2,6 @@
 {% block title %}{{ month }} report{% endblock %}
 
 {% block content %}
-{% set live = rows | selectattr('status', 'equalto', 'report') | list | length %}
-{% set removed = rows | selectattr('status', 'equalto', 'removed') | list | length %}
-{% set total = rows | length %}
 {% set post_count = posts | length %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
@@ -15,7 +12,7 @@
   </div>
   <div class="flex items-center gap-2">
     <button id="live-check-btn" onclick="runLiveCheck()" class="btn-ghost">
-      🔄 Update status & stats
+      🔄 Update status &amp; stats
     </button>
     <a href="/portal/month/{{ month }}/export.csv{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="btn-primary">
       ⬇ Export CSV
@@ -24,31 +21,26 @@
 </div>
 
 <!-- KPI strip -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+<div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
   <div class="stat-card" style="padding: 16px;">
-    <div class="text-xs text-slate-500 uppercase tracking-wider">Live</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-live">{{ live }}</div>
-    <div class="text-xs text-slate-400 mt-0.5">{{ post_count }} post{{ '' if post_count == 1 else 's' }}</div>
-  </div>
-  <div class="stat-card" style="padding: 16px;">
-    <div class="text-xs text-slate-500 uppercase tracking-wider">Removed</div>
-    <div class="text-2xl font-semibold mt-1 text-amber-600" style="font-variant-numeric: tabular-nums;" id="kpi-removed">{{ removed }}</div>
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Posts reported</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-total">{{ post_count }}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ total }}</span><span class="text-sm text-slate-400">/<span id="kpi-total">{{ total }}</span></span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ post_count }}</span><span class="text-sm text-slate-400">/{{ post_count }}</span></div>
   </div>
   {% if client.monthly_target %}
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Target</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-target-live">{{ live }}</span><span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ post_count }}<span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
   </div>
   {% endif %}
 </div>
 
 <!-- Filters -->
-{% set distinct_brands = rows | map(attribute='brand_name') | reject('none') | unique | list %}
-{% set distinct_subs = rows | map(attribute='subreddit_name') | reject('none') | unique | list %}
+{% set distinct_brands = posts | map(attribute='brand_name') | reject('none') | unique | list %}
+{% set distinct_subs = posts | map(attribute='subreddit_name') | reject('none') | unique | list %}
 <div class="surface border-soft rounded-xl p-3 mb-4 flex flex-wrap items-end gap-3" style="background: white;">
   <div class="flex-1 min-w-[140px]">
     <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Brand</label>
@@ -57,14 +49,6 @@
       {% for b in distinct_brands | sort %}
       <option value="{{ b }}">{{ b }}</option>
       {% endfor %}
-    </select>
-  </div>
-  <div class="flex-1 min-w-[140px]">
-    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Status</label>
-    <select id="flt-status" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
-      <option value="">All</option>
-      <option value="report">Live</option>
-      <option value="removed">Removed</option>
     </select>
   </div>
   <div class="flex-1 min-w-[140px]">
@@ -81,8 +65,7 @@
     <select id="flt-sort" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
       <option value="date-desc">Newest first</option>
       <option value="date-asc">Oldest first</option>
-      <option value="upvotes-desc">Most upvotes</option>
-      <option value="replies-desc">Most replies</option>
+      <option value="title-asc">Title A→Z</option>
     </select>
   </div>
   <button type="button" onclick="resetFilters()" class="text-xs text-slate-500 hover:text-slate-900 underline-offset-2 hover:underline px-2 py-1">Reset</button>
@@ -94,139 +77,81 @@
   <span id="live-check-progress"></span>
 </div>
 
-<!-- ============== Post-grouped section (Live Subs reports) ============== -->
-{% if posts %}
-<div id="post-cards" class="space-y-3 mb-6">
-  {% for post in posts %}
-    {% set live_in_post = post.comments | selectattr('status', 'equalto', 'report') | list | length %}
-    {% set removed_in_post = post.comments | selectattr('status', 'equalto', 'removed') | list | length %}
-    {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
-    {% set post_short_date = post_date[:10] %}
-  <div class="surface border-soft rounded-xl overflow-hidden" data-post-card data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}">
-    <button type="button" onclick="togglePostCard(this)" class="w-full px-4 py-3 flex items-start gap-3 hover:bg-slate-50 text-left">
-      <span data-caret class="text-slate-400 mt-0.5">▸</span>
-      <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-2 flex-wrap">
-          {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% endif %}
-          {% if post.brand_name %}<span class="chip chip-brand">{{ post.brand_name }}</span>{% endif %}
-          {% if post_short_date %}
-          <span class="text-xs text-slate-500">{{ post_short_date[5:7] }}/{{ post_short_date[8:10] }}/{{ post_short_date[:4] }}</span>
-          {% endif %}
-        </div>
-        <div class="font-medium text-slate-900 mt-1">{{ (post.title or '(untitled)')[:120] }}</div>
-        <div class="mt-1 flex items-center gap-2 text-xs flex-wrap">
-          <span class="chip chip-live">{{ live_in_post }} live</span>
-          {% if removed_in_post %}<span class="chip chip-removed">{{ removed_in_post }} removed</span>{% endif %}
-          {% if post.reddit_url %}
-          <a href="{{ post.reddit_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline">View post on Reddit ↗</a>
-          {% endif %}
-        </div>
-      </div>
-    </button>
-    <div data-body class="hidden border-t border-soft">
-      <table class="report-table">
-        <thead>
-          <tr>
-            <th>Account</th>
-            <th>Comment</th>
-            <th class="text-right">Upvotes</th>
-            <th class="text-right">Replies</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in post.comments %}
-          {% set body = (r.body or '') %}
-          <tr data-row data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ (r.posted_at or r.deployed_at or '')[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
-            <td data-label="Account" class="text-xs text-slate-500">{% if r.account_id %}u/{{ r.account_id }}{% else %}—{% endif %}</td>
-            <td data-label="Comment" style="max-width: 460px;">
-              {% if r.reddit_comment_url %}
-              <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium block mb-1">View on Reddit ↗</a>
-              {% endif %}
-              <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
-            </td>
-            <td data-label="Upvotes" class="text-right" style="font-variant-numeric: tabular-nums;">
-              {% if r.upvotes is not none %}<span class="text-slate-900 font-medium">{{ r.upvotes }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
-            </td>
-            <td data-label="Replies" class="text-right" style="font-variant-numeric: tabular-nums;">
-              {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
-            </td>
-            <td data-label="Status">
-              {% if r.status == 'report' %}
-                <span class="chip chip-live">Live</span>
-              {% else %}
-                <span class="chip chip-removed">Removed</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {% endfor %}
-</div>
-{% endif %}
-
-<!-- ============== Search comments section (flat — no post container) ============== -->
-{% if search_comments %}
-<div class="surface border-soft rounded-xl overflow-hidden mb-6">
-  <div class="px-4 py-2 border-b border-soft bg-slate-50 text-xs uppercase tracking-wider text-slate-500 font-medium">
-    Search comments · {{ search_comments | length }}
-  </div>
-  <table class="report-table">
+<!-- Posts table -->
+<div class="surface border-soft rounded-xl overflow-hidden">
+  <table class="report-table" id="report-table">
     <thead>
       <tr>
         <th>Subreddit</th>
-        <th>Published</th>
-        <th>Comment</th>
-        <th class="text-right">Upvotes</th>
-        <th class="text-right">Replies</th>
-        <th>Status</th>
+        <th>Published Date</th>
+        <th>Post Title</th>
+        <th>Post Link</th>
+        <th>Mention Link</th>
       </tr>
     </thead>
     <tbody>
-      {% for r in search_comments %}
-      {% set published = r.posted_at or r.deployed_at or '' %}
-      {% set short_date = published[:10] if published else '' %}
-      {% set body = (r.body or '') %}
-      <tr data-row data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ published[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
+      {% for post in posts %}
+      {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
+      {% set post_short_date = post_date[:10] %}
+      <tr data-row data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}">
         <td data-label="Subreddit">
-          {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
-          {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
+          {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% else %}—{% endif %}
+          {% if post.brand_name %}<span class="chip chip-brand ml-1">{{ post.brand_name }}</span>{% endif %}
         </td>
-        <td data-label="Published" style="color: #475569;">
-          {% if short_date %}{{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}{% else %}—{% endif %}
+        <td data-label="Published Date" style="color: #475569;">
+          {% if post_short_date %}{{ post_short_date[5:7] }}/{{ post_short_date[8:10] }}/{{ post_short_date[:4] }}{% else %}—{% endif %}
         </td>
-        <td data-label="Comment" style="max-width: 460px;">
-          {% if r.reddit_comment_url %}
-          <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium block mb-1">View on Reddit ↗</a>
+        <td data-label="Post Title" style="max-width: 460px;">
+          <div class="text-sm text-slate-900 font-medium">{{ (post.title or '(untitled)')[:240] }}</div>
+        </td>
+        <td data-label="Post Link">
+          {% if post.reddit_url %}
+          <a href="{{ post.reddit_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open post ↗</a>
+          {% else %}
+          <span class="text-slate-300">—</span>
           {% endif %}
-          <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
         </td>
-        <td data-label="Upvotes" class="text-right" style="font-variant-numeric: tabular-nums;">
-          {% if r.upvotes is not none %}<span class="text-slate-900 font-medium">{{ r.upvotes }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
-        </td>
-        <td data-label="Replies" class="text-right" style="font-variant-numeric: tabular-nums;">
-          {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
-        </td>
-        <td data-label="Status">
-          {% if r.status == 'report' %}<span class="chip chip-live">Live</span>{% else %}<span class="chip chip-removed">Removed</span>{% endif %}
+        <td data-label="Mention Link">
+          {% if post.mention_link %}
+          <a href="{{ post.mention_link }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open comment ↗</a>
+          {% else %}
+          <span class="text-slate-300">—</span>
+          {% endif %}
         </td>
       </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-center text-slate-400 py-12">No posts in this report yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  <div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
 </div>
-{% endif %}
 
-{% if not posts and not search_comments %}
-<div class="surface border-soft rounded-xl text-center py-12">
-  <p class="text-sm text-slate-400">No comments in this report yet.</p>
-</div>
+{% if search_comments %}
+<details class="mt-6">
+  <summary class="text-sm text-slate-500 cursor-pointer hover:text-slate-900">Search comments ({{ search_comments | length }}) — these don't have a Live Subs post container</summary>
+  <div class="surface border-soft rounded-xl overflow-hidden mt-3">
+    <table class="report-table">
+      <thead><tr><th>Subreddit</th><th>Published</th><th>Comment</th></tr></thead>
+      <tbody>
+        {% for r in search_comments %}
+        {% set published = r.posted_at or r.deployed_at or '' %}
+        {% set short_date = published[:10] if published else '' %}
+        <tr>
+          <td>{% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}</td>
+          <td style="color:#475569">{% if short_date %}{{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}{% endif %}</td>
+          <td>
+            {% if r.reddit_comment_url %}
+            <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open comment ↗</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
 {% endif %}
-
-<div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
 
 {% endblock %}
 
@@ -235,109 +160,46 @@
 const ASCID = {{ client.id if is_admin_view else 'null' }};
 const ASQS = ASCID ? ('?as=' + ASCID) : '';
 
-// Expand / collapse a post card.
-function togglePostCard(headerBtn) {
-  const card = headerBtn.closest('[data-post-card]');
-  if (!card) return;
-  const body = card.querySelector('[data-body]');
-  const caret = card.querySelector('[data-caret]');
-  const willExpand = body.classList.contains('hidden');
-  body.classList.toggle('hidden', !willExpand);
-  if (caret) caret.textContent = willExpand ? '▾' : '▸';
-}
-
-// =====================================================================
-// Filter + sort wiring
-// =====================================================================
-const _fState = { brand: '', status: '', sub: '', sort: 'date-desc' };
+const _fState = { brand: '', sub: '', sort: 'date-desc' };
 
 function _readQueryToFilters() {
   const u = new URLSearchParams(window.location.search);
   const brandQ = u.get('brand');
-  const statusQ = u.get('status');
   if (brandQ) {
     const sel = document.getElementById('flt-brand');
     const candidates = Array.from(sel.options).map(o => o.value).filter(Boolean);
     if (candidates.includes(brandQ)) { sel.value = brandQ; _fState.brand = brandQ; }
   }
-  if (statusQ) {
-    const sel = document.getElementById('flt-status');
-    const s = (statusQ === 'live') ? 'report' : statusQ;
-    if (Array.from(sel.options).some(o => o.value === s)) {
-      sel.value = s; _fState.status = s;
-    }
-  }
 }
 
 function applyFilters() {
-  // KPIs follow the active brand + subreddit filter (NOT the status
-  // filter — Live/Removed are themselves a status partition, so
-  // they'd zero each other out if status were applied). The
-  // denominator on "Showing" likewise drops to the brand/sub
-  // scope so "50 / 100" reads naturally when a brand is selected.
   let shown = 0;
-  let liveCount = 0;
-  let removedCount = 0;
-  let scopeTotal = 0;  // rows that pass brand+sub (status-agnostic)
-
-  const allRows = Array.from(document.querySelectorAll('tr[data-row]'));
-  for (const row of allRows) {
+  const tbody = document.querySelector('#report-table tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
+  for (const row of rows) {
     const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
     const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
-    if (!okBrand || !okSub) {
-      row.style.display = 'none';
-      continue;
-    }
-    scopeTotal += 1;
-    if (row.dataset.status === 'report') liveCount += 1;
-    else if (row.dataset.status === 'removed') removedCount += 1;
-    // Status filter now decides visibility (not the KPI math).
-    const okStatus = !_fState.status || row.dataset.status === _fState.status;
-    row.style.display = okStatus ? '' : 'none';
-    if (okStatus) shown += 1;
+    const show = okBrand && okSub;
+    row.style.display = show ? '' : 'none';
+    if (show) shown++;
   }
-
-  // Apply sort to each post card's visible rows AND hide cards
-  // whose visible row count is zero.
-  for (const card of document.querySelectorAll('[data-post-card]')) {
-    const tbody = card.querySelector('tbody');
-    if (!tbody) continue;
-    const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
-    const visible = rows.filter(r => r.style.display !== 'none');
-    const cmp = {
-      'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
-      'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
-      'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
-      'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
-    }[_fState.sort] || (() => 0);
-    visible.sort(cmp);
-    for (const r of visible) tbody.appendChild(r);
-    card.style.display = visible.length ? '' : 'none';
-  }
-
-  // KPI tiles. The Showing tile reads `<visible> / <scopeTotal>`
-  // where scopeTotal is the brand+sub denominator — so picking
-  // Amerisleep changes both numbers, not just the numerator.
-  const liveEl = document.getElementById('kpi-live');
-  if (liveEl) liveEl.textContent = liveCount;
-  const removedEl = document.getElementById('kpi-removed');
-  if (removedEl) removedEl.textContent = removedCount;
-  const shownEl = document.getElementById('kpi-shown');
-  if (shownEl) shownEl.textContent = shown;
-  const totalEl = document.getElementById('kpi-total');
-  if (totalEl) totalEl.textContent = scopeTotal;
-  const targetEl = document.getElementById('kpi-target-live');
-  if (targetEl) targetEl.textContent = liveCount;
-
-  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0);
+  // Sort visible rows in place.
+  const visible = rows.filter(r => r.style.display !== 'none');
+  const cmp = {
+    'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
+    'date-asc':  (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
+    'title-asc': (a, b) => (a.dataset.title || '').localeCompare(b.dataset.title || ''),
+  }[_fState.sort] || (() => 0);
+  visible.sort(cmp);
+  for (const r of visible) tbody.appendChild(r);
+  document.getElementById('kpi-shown').textContent = shown;
+  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0 || rows.length === 0);
 }
 
 function resetFilters() {
-  for (const id of ['flt-brand', 'flt-status', 'flt-sub']) {
-    document.getElementById(id).value = '';
-  }
+  for (const id of ['flt-brand', 'flt-sub']) document.getElementById(id).value = '';
   document.getElementById('flt-sort').value = 'date-desc';
-  _fState.brand = _fState.status = _fState.sub = '';
+  _fState.brand = _fState.sub = '';
   _fState.sort = 'date-desc';
   applyFilters();
 }
@@ -349,15 +211,11 @@ function resetFilters() {
     if (el) el.addEventListener('change', () => { _fState[key] = el.value; applyFilters(); });
   };
   wire('flt-brand', 'brand');
-  wire('flt-status', 'status');
   wire('flt-sub', 'sub');
   wire('flt-sort', 'sort');
   applyFilters();
 })();
 
-// =====================================================================
-// Live-check
-// =====================================================================
 async function runLiveCheck() {
   const btn = document.getElementById('live-check-btn');
   const status = document.getElementById('live-check-status');

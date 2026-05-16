@@ -2372,6 +2372,7 @@ function renderPostsFromCache() {
                         ${p.status === 'removed'
                             ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
                             : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
+                        ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </div></td>
                 </tr>
@@ -7222,6 +7223,7 @@ function lsubsRenderTable(posts) {
                         ${p.status === 'removed'
                             ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
                             : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
+                        ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
                         <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                     </div></td>
                 </tr>
@@ -7567,6 +7569,7 @@ async function lsubsLoadPosts(silent = false) {
                             ${p.status === 'removed'
                                 ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo</button>`
                                 : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
+                            ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
                             <button class="btn btn-sm btn-secondary" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name || '').replace(/'/g, "\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change which subreddit this post is filed under">Edit sub</button>
                             <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                         </div></td>

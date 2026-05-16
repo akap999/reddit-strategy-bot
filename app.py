@@ -6693,14 +6693,12 @@ def portal_month_export(month):
     finally:
         db.close()
 
-    # Post-grouped, denormalized layout. Each POST row carries the
-    # post's metadata (subreddit / title / URL / posted date) with
-    # the comment-specific columns blank; each COMMENT row repeats
-    # the same post metadata so a spreadsheet sort by
-    # (Section, Subreddit, Posted Date) keeps the children under
-    # their parent. Live Search comments — which don't have a
-    # Live Subs post container — land in a final SEARCH_COMMENT
-    # section.
+    # Flat one-row-per-post layout. Columns in order:
+    # Subreddit | Published Date | Post Title | Post Link | Mention Link.
+    # "Mention Link" is the URL of the parent HQ comment (the cluster
+    # head where the brand mention lives). Live Search comments don't
+    # have a parent post — they tail out at the bottom in a small
+    # secondary section so the client still sees them.
     def fmt_date(raw):
         if not raw:
             return ""
@@ -6710,49 +6708,38 @@ def portal_month_export(month):
     buf = _io.StringIO()
     w = _csv.writer(buf)
     w.writerow([
-        "Section", "Subreddit", "Brand", "Posted Date",
-        "Post Title", "Post URL",
-        "Account", "Comment URL", "Comment Content",
-        "Upvotes", "Replies",
+        "Subreddit", "Published Date", "Post Title",
+        "Post Link", "Mention Link",
     ])
 
     for post in grouped.get("posts", []):
-        post_sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
-        post_brand = post.get('brand_name') or ''
-        post_date = fmt_date(post.get('deployed_at') or post.get('paid_at') or post.get('created_at'))
-        post_title = post.get('title') or ''
-        post_url = post.get('reddit_url') or ''
-        # POST header row — comment-specific columns blank.
+        sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
+        published = fmt_date(post.get('deployed_at') or post.get('paid_at') or post.get('created_at'))
         w.writerow([
-            "POST", post_sub, post_brand, post_date,
-            post_title, post_url,
-            "", "", "", "", "",
+            sub,
+            published,
+            post.get('title') or '',
+            post.get('reddit_url') or '',
+            post.get('mention_link') or '',
         ])
-        for c in post.get("comments", []):
-            w.writerow([
-                "COMMENT", post_sub, post_brand, post_date,
-                post_title, post_url,
-                f"u/{c.get('account_id')}" if c.get('account_id') else "",
-                c.get('reddit_comment_url') or "",
-                c.get('body') or "",
-                c.get('upvotes') if c.get('upvotes') is not None else "",
-                c.get('num_replies') if c.get('num_replies') is not None else "",
-            ])
 
-    # Live Search comments — flat, no parent post layer.
-    for c in grouped.get("search_comments", []):
-        sub = f"r/{c.get('subreddit_name')}" if c.get('subreddit_name') else ''
-        brand = c.get('brand_name') or ''
-        date = fmt_date(c.get('posted_at') or c.get('deployed_at'))
-        w.writerow([
-            "SEARCH_COMMENT", sub, brand, date,
-            "", "",  # no post title / URL
-            f"u/{c.get('account_id')}" if c.get('account_id') else "",
-            c.get('reddit_comment_url') or "",
-            c.get('body') or "",
-            c.get('upvotes') if c.get('upvotes') is not None else "",
-            c.get('num_replies') if c.get('num_replies') is not None else "",
-        ])
+    search = grouped.get("search_comments", [])
+    if search:
+        # Visually separate the search section with a blank row + a
+        # one-line header. Each search-comment row reuses the same 5
+        # columns: "Mention Link" becomes the comment URL itself
+        # (no parent post in this pipeline).
+        w.writerow([])
+        w.writerow(["Search comments (no Live Subs post container)", "", "", "", ""])
+        for c in search:
+            sub = f"r/{c.get('subreddit_name')}" if c.get('subreddit_name') else ''
+            published = fmt_date(c.get('posted_at') or c.get('deployed_at'))
+            w.writerow([
+                sub, published,
+                (c.get('body') or '')[:160],   # short body in the Title slot
+                '',                              # no parent post link
+                c.get('reddit_comment_url') or '',
+            ])
 
     resp = make_response(buf.getvalue())
     resp.headers['Content-Type'] = 'text/csv; charset=utf-8'

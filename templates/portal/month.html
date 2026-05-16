@@ -75,7 +75,7 @@
     </select>
   </div>
   <div class="flex-1 min-w-[140px]">
-    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Mentions status</label>
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Status</label>
     <select id="flt-status" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
       <option value="">All</option>
       <option value="report">Live</option>
@@ -115,13 +115,15 @@
         <th>Post Title</th>
         <th>Post Link</th>
         <th>Mention Link</th>
+        <th>Status</th>
       </tr>
     </thead>
     <tbody>
       {% for post in posts %}
       {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
       {% set post_short_date = post_date[:10] %}
-      <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}">
+      {% set derived = post.derived_status or 'live' %}
+      <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}" data-status="{{ 'report' if derived == 'live' else 'removed' }}">
         <td data-label="Subreddit">
           {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% else %}—{% endif %}
           {% if post.brand_name %}<span class="chip chip-brand ml-1">{{ post.brand_name }}</span>{% endif %}
@@ -141,6 +143,13 @@
           {% if post.mention_link %}
           <a href="{{ post.mention_link }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium">Open comment ↗</a>
           {% else %}<span class="text-slate-300">—</span>{% endif %}
+        </td>
+        <td data-label="Status">
+          {% if derived == 'live' %}
+            <span class="chip chip-live">Live</span>
+          {% else %}
+            <span class="chip chip-removed">Removed</span>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -241,7 +250,7 @@ function _readQueryToFilters() {
   }
 }
 
-function _filterAndSort(tableId, isMentions) {
+function _filterAndSort(tableId, _unused) {
   const tbody = document.querySelector(`#${tableId} tbody`);
   if (!tbody) return 0;
   const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
@@ -249,9 +258,10 @@ function _filterAndSort(tableId, isMentions) {
   for (const row of rows) {
     const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
     const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
-    // Status filter only applies to Mentions (HQ table has no
-    // status column — every post on it is by definition live).
-    const okStatus = !isMentions || !_fState.status || row.dataset.status === _fState.status;
+    // Status filter applies to BOTH tables — HQ Mentions rows now
+    // carry a derived data-status (live=report / removed) computed
+    // server-side from post.status + reported-comment statuses.
+    const okStatus = !_fState.status || row.dataset.status === _fState.status;
     const show = okBrand && okSub && okStatus;
     row.style.display = show ? '' : 'none';
     if (show) shown += 1;

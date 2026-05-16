@@ -6717,19 +6717,22 @@ def portal_month_export(month):
         w.writerow(["=== HQ Mentions ==="])
         w.writerow([
             "Subreddit", "Published Date", "Post Title",
-            "Post Link", "Mention Link",
+            "Post Link", "Mention Link", "Status",
         ])
         for post in posts_list:
             sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
             published = fmt_date(
                 post.get('deployed_at') or post.get('paid_at') or post.get('created_at')
             )
+            derived = (post.get('derived_status') or 'live').lower()
+            status_label = 'Removed' if derived == 'removed' else 'Live'
             w.writerow([
                 sub,
                 published,
                 post.get('title') or '',
                 post.get('reddit_url') or '',
                 post.get('mention_link') or '',
+                status_label,
             ])
 
     if search_list:

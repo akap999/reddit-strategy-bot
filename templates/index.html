@@ -10610,19 +10610,27 @@ async function showReportThisPostModal(postId) {
     }
     const postTitle = postComments[0]?.post_title || '';
     const subreddit = postComments[0]?.subreddit_name || '';
-    const checkboxes = eligible.map((c, idx) => `
-        <label class="flex items-start gap-2 p-2 rounded hover:bg-gray-800" style="cursor:pointer">
-            <input type="checkbox" class="rep-post-cmt" data-cid="${c.id}" checked style="margin-top:3px">
+    // The HQ root anchors the Mention Link on the client dashboard.
+    // We always include it in the report so the dashboard row carries
+    // a valid Mention Link — the user can't uncheck it.
+    const isHqRoot = (c) => c.comment_type === 'hq' && !c.parent_comment_id;
+    const checkboxes = eligible.map((c, idx) => {
+        const required = isHqRoot(c);
+        const cbAttrs = `class="rep-post-cmt" data-cid="${c.id}" checked${required ? ' data-required="1" disabled' : ''}`;
+        return `
+        <label class="flex items-start gap-2 p-2 rounded hover:bg-gray-800" style="cursor:${required ? 'default' : 'pointer'}">
+            <input type="checkbox" ${cbAttrs} style="margin-top:3px">
             <div class="flex-1 text-xs" style="min-width:0">
                 <div class="flex items-center gap-1 mb-0.5">
                     <span class="badge badge-${c.status}" style="font-size:9px">${c.status}</span>
                     ${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : ''}
                     ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0e2a3d;color:#60a5fa;font-size:9px">HQ</span>' : ''}
+                    ${required ? '<span class="badge" style="background:#0d3d3a;color:#9efbe0;font-size:9px" title="Always included so the Mention Link on the client dashboard points to a reported comment">Mention anchor</span>' : ''}
                 </div>
                 <div class="text-gray-300" style="line-height:1.3">${(c.body || '').substring(0, 140)}${(c.body || '').length > 140 ? '…' : ''}</div>
             </div>
-        </label>
-    `).join('');
+        </label>`;
+    }).join('');
     showModal(`
         <h3 class="text-xl font-bold mb-1">Report this post</h3>
         <p class="text-xs text-gray-400 mb-3">
@@ -10636,7 +10644,7 @@ async function showReportThisPostModal(postId) {
         <div class="mb-2 flex items-center gap-2">
             <span class="text-xs text-gray-400">${eligible.length} eligible comment${eligible.length === 1 ? '' : 's'}</span>
             <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => cb.checked = true)">All</button>
-            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => cb.checked = false)">None</button>
+            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => { if (!cb.dataset.required) cb.checked = false; })">None</button>
         </div>
         <div style="max-height:280px; overflow-y:auto; border:1px solid #343536; border-radius:6px; padding:4px">
             ${checkboxes}
@@ -10651,10 +10659,27 @@ async function showReportThisPostModal(postId) {
 async function submitReportThisPost(postId) {
     const month = document.getElementById('rep-post-month').value;
     if (!month) { toast('Pick a month', 'error'); return; }
+    // Collect checked rows. Disabled checkboxes (the HQ root anchors)
+    // are still in the DOM via :disabled — querySelectorAll('.rep-post-cmt:checked')
+    // includes them too (disabled inputs CAN be checked).
     const ids = Array.from(document.querySelectorAll('.rep-post-cmt:checked')).map(cb => ({
         id: parseInt(cb.dataset.cid),
         source: 'comment',
     }));
+    // Defense-in-depth: even if a stray code path managed to
+    // uncheck the HQ anchor, force-include any deployed HQ root
+    // for this post so the Mention Link on the dashboard always
+    // resolves to a reported comment.
+    const postComments = (_lsubsCommentsCache || []).filter(c => c.p_id === postId);
+    const idSet = new Set(ids.map(x => x.id));
+    for (const c of postComments) {
+        const isHq = c.comment_type === 'hq' && !c.parent_comment_id;
+        const deployed = c.status === 'deployed' || c.status === 'paid';
+        if (isHq && deployed && c.reddit_comment_url && !idSet.has(c.id)) {
+            ids.push({ id: c.id, source: 'comment' });
+            idSet.add(c.id);
+        }
+    }
     if (!ids.length) { toast('Select at least one comment', 'error'); return; }
     const brandSel = document.getElementById('rep-post-brand');
     const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;

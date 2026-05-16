@@ -3423,7 +3423,7 @@ class Database:
             return {"posts": [], "search_comments": search_comments}
         php = ",".join("?" * len(post_ids))
         post_rows = self.conn.execute(
-            f"""SELECT p.id, p.title, p.deployed_at, p.paid_at, p.created_at,
+            f"""SELECT p.id, p.title, p.status, p.deployed_at, p.paid_at, p.created_at,
                        s.name AS subreddit_name,
                        b.name AS brand_name,
                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) AS reddit_url
@@ -3467,6 +3467,23 @@ class Database:
         for post in posts.values():
             post["comments"].sort(
                 key=lambda r: (r.get("posted_at") or r.get("deployed_at") or "")
+            )
+        # Derived HQ Mentions status for each post:
+        #   live    — post.status != 'removed' AND no reported comment
+        #             under this post has status='removed'.
+        #   removed — post.status == 'removed' OR any reported comment
+        #             under this post has status='removed'.
+        # Reported = the comment was selected into a monthly report
+        # (status in 'report' or 'removed'-with-report_month — both
+        # are included in `comments` by the parent query).
+        for post in posts.values():
+            post_status = (post.get("status") or "").lower()
+            any_cmt_removed = any(
+                (c.get("status") or "").lower() == "removed"
+                for c in post["comments"]
+            )
+            post["derived_status"] = (
+                "removed" if (post_status == "removed" or any_cmt_removed) else "live"
             )
         # Posts sorted newest-first by deployed_at, with paid_at /
         # created_at as fallbacks.

@@ -1895,6 +1895,23 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE author={author} body={body[:40]!r}", flush=True)
                 _mark_live(item)
                 live += 1
+                # Piggy-back engagement stats: we already have the
+                # parsed JSON. Cheap to persist so the portal
+                # dashboard / CSV can render them without a separate
+                # Reddit fetch. NULL-safe — Reddit always returns
+                # `score` on live comments; `replies` may be a string
+                # placeholder when there are zero replies.
+                try:
+                    replies_obj = comment.get("replies", "")
+                    num_replies = 0
+                    if isinstance(replies_obj, dict):
+                        num_replies = len(replies_obj.get("data", {}).get("children", []))
+                    db.update_live_stats_by_id_url(
+                        item["id"], item.get("reddit_comment_url", ""),
+                        comment.get("score"), num_replies,
+                    )
+                except Exception as stats_err:
+                    print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
 
         except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
             print(f"[{log_prefix}] #{item['id']} ({src}) {type(e).__name__}: {e}", flush=True)
@@ -2318,6 +2335,20 @@ def api_comments_live_stats():
                                 bg_db.update_posted_at_by_id_url(cid, url, posted_at)
                         except Exception as bg_err:
                             print(f"[LIVE-STATS] posted_at piggy-back error cid={cid}: {bg_err}", flush=True)
+                        # Persist the engagement numbers so the client
+                        # portal dashboard / CSV can render them without
+                        # re-hitting Reddit. id might be a source-prefixed
+                        # string for some callers — guard with int().
+                        try:
+                            int_cid = int(cid) if isinstance(cid, (int, str)) and str(cid).isdigit() else None
+                            if int_cid and bg_db:
+                                bg_db.update_live_stats_by_id_url(
+                                    int_cid, url,
+                                    parsed.get("score"),
+                                    parsed.get("num_replies"),
+                                )
+                        except Exception as bg_err:
+                            print(f"[LIVE-STATS] persist error cid={cid}: {bg_err}", flush=True)
                     else:
                         results[key] = {"liveness": "no_comment_in_response"}
                 else:
@@ -6123,9 +6154,14 @@ def portal_dashboard():
         if not client:
             return abort(404)
         months = db.get_report_months_for_client(cid)
+        # Flat per-(brand, month, status) aggregate for the
+        # "By Brand" tab. JSON-serialized into the template so
+        # JS can slice/filter without another round-trip.
+        brand_rows = db.get_report_aggregate_for_client(cid)
         return render_template(
             'portal/dashboard.html',
             client=client, months=months,
+            brand_rows=brand_rows,
             is_admin_view=is_admin,
         )
     finally:

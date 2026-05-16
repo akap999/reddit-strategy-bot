@@ -26,15 +26,15 @@
 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Delivered</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ live }}</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-live">{{ live }}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Removed</div>
-    <div class="text-2xl font-semibold mt-1 text-amber-600" style="font-variant-numeric: tabular-nums;">{{ removed }}</div>
+    <div class="text-2xl font-semibold mt-1 text-amber-600" style="font-variant-numeric: tabular-nums;" id="kpi-removed">{{ removed }}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
-    <div class="text-xs text-slate-500 uppercase tracking-wider">Total</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ total }}</div>
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-shown">{{ total }}</span><span class="text-sm text-slate-400">/{{ total }}</span></div>
   </div>
   {% if client.monthly_target %}
   <div class="stat-card" style="padding: 16px;">
@@ -42,6 +42,48 @@
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ live }}<span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
   </div>
   {% endif %}
+</div>
+
+<!-- Filters -->
+{% set distinct_brands = rows | map(attribute='brand_name') | reject('none') | unique | list %}
+{% set distinct_subs = rows | map(attribute='subreddit_name') | reject('none') | unique | list %}
+<div class="surface border-soft rounded-xl p-3 mb-4 flex flex-wrap items-end gap-3" style="background: white;">
+  <div class="flex-1 min-w-[140px]">
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Brand</label>
+    <select id="flt-brand" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
+      <option value="">All brands</option>
+      {% for b in distinct_brands | sort %}
+      <option value="{{ b }}">{{ b }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="flex-1 min-w-[140px]">
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Status</label>
+    <select id="flt-status" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
+      <option value="">All</option>
+      <option value="report">Live</option>
+      <option value="removed">Removed</option>
+    </select>
+  </div>
+  <div class="flex-1 min-w-[140px]">
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Subreddit</label>
+    <select id="flt-sub" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
+      <option value="">All subreddits</option>
+      {% for s in distinct_subs | sort %}
+      <option value="{{ s }}">r/{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="flex-1 min-w-[140px]">
+    <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">Sort</label>
+    <select id="flt-sort" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
+      <option value="date-desc">Newest first</option>
+      <option value="date-asc">Oldest first</option>
+      <option value="upvotes-desc">Most upvotes</option>
+      <option value="replies-desc">Most replies</option>
+    </select>
+  </div>
+  <button type="button" onclick="resetFilters()" class="text-xs text-slate-500 hover:text-slate-900 underline-offset-2 hover:underline px-2 py-1">Reset</button>
 </div>
 
 <!-- Live check progress (hidden until button clicked) -->
@@ -52,12 +94,14 @@
 
 <!-- Comments table -->
 <div class="surface border-soft rounded-xl overflow-hidden">
-  <table class="report-table">
+  <table class="report-table" id="report-table">
     <thead>
       <tr>
         <th>Subreddit</th>
         <th>Published</th>
         <th>Comment</th>
+        <th class="text-right">Upvotes</th>
+        <th class="text-right">Replies</th>
         <th>Status</th>
       </tr>
     </thead>
@@ -66,7 +110,13 @@
       {% set published = r.posted_at or r.deployed_at or '' %}
       {% set short_date = published[:10] if published else '' %}
       {% set body = (r.body or '') %}
-      <tr>
+      <tr data-row
+          data-brand="{{ r.brand_name or '' }}"
+          data-status="{{ r.status }}"
+          data-sub="{{ r.subreddit_name or '' }}"
+          data-date="{{ published[:19] }}"
+          data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}"
+          data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
         <td data-label="Subreddit">
           {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
           {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
@@ -82,6 +132,12 @@
           {% endif %}
           <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
         </td>
+        <td data-label="Upvotes" class="text-right" style="font-variant-numeric: tabular-nums;">
+          {% if r.upvotes is not none %}<span class="text-slate-900 font-medium">{{ r.upvotes }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+        </td>
+        <td data-label="Replies" class="text-right" style="font-variant-numeric: tabular-nums;">
+          {% if r.num_replies is not none %}<span class="text-slate-900 font-medium">{{ r.num_replies }}</span>{% else %}<span class="text-slate-300">—</span>{% endif %}
+        </td>
         <td data-label="Status">
           {% if r.status == 'report' %}
             <span class="chip chip-live">Live</span>
@@ -91,10 +147,11 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="4" class="text-center text-slate-400 py-12">No comments in this report yet.</td></tr>
+      <tr><td colspan="6" class="text-center text-slate-400 py-12">No comments in this report yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  <div id="empty-state" class="hidden text-center text-slate-400 py-12">No rows match the current filters.</div>
 </div>
 
 {% endblock %}
@@ -104,6 +161,91 @@
 const ASCID = {{ client.id if is_admin_view else 'null' }};
 const ASQS = ASCID ? ('?as=' + ASCID) : '';
 
+// =====================================================================
+// Filter + sort wiring (client-side; the row set is small enough).
+// =====================================================================
+const _fState = { brand: '', status: '', sub: '', sort: 'date-desc' };
+
+function _readQueryToFilters() {
+  // The dashboard's brand cards link here with ?brand=<id>&status=<...>.
+  // The brand card sends a brand_id, but here we filter by name (data-brand).
+  // For deep-link parity, also support brand=<name> and status=report/removed.
+  const u = new URLSearchParams(window.location.search);
+  const brandQ = u.get('brand');
+  const statusQ = u.get('status');
+  if (brandQ) {
+    // brand may be the numeric id from the dashboard card. Match
+    // by name if there's exactly one chip with that name in this
+    // month's data.
+    const sel = document.getElementById('flt-brand');
+    const candidates = Array.from(sel.options).map(o => o.value).filter(Boolean);
+    // Prefer exact match (name); also try numeric (no-op here — we
+    // don't surface ids in this template, so this is a soft fallback).
+    if (candidates.includes(brandQ)) { sel.value = brandQ; _fState.brand = brandQ; }
+  }
+  if (statusQ) {
+    const sel = document.getElementById('flt-status');
+    // Translate dashboard "live" → "report" (DB status name).
+    const s = (statusQ === 'live') ? 'report' : statusQ;
+    if (Array.from(sel.options).some(o => o.value === s)) {
+      sel.value = s; _fState.status = s;
+    }
+  }
+}
+
+function applyFilters() {
+  const tbody = document.querySelector('#report-table tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr[data-row]'));
+  let shown = 0;
+  for (const row of rows) {
+    const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
+    const okStatus = !_fState.status || row.dataset.status === _fState.status;
+    const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
+    const show = okBrand && okStatus && okSub;
+    row.style.display = show ? '' : 'none';
+    if (show) shown++;
+  }
+  // Sort visible rows in-place.
+  const visible = rows.filter(r => r.style.display !== 'none');
+  const dir = _fState.sort;
+  const cmp = {
+    'date-desc': (a, b) => (b.dataset.date || '').localeCompare(a.dataset.date || ''),
+    'date-asc': (a, b) => (a.dataset.date || '').localeCompare(b.dataset.date || ''),
+    'upvotes-desc': (a, b) => (+b.dataset.upvotes) - (+a.dataset.upvotes),
+    'replies-desc': (a, b) => (+b.dataset.replies) - (+a.dataset.replies),
+  }[dir] || (() => 0);
+  visible.sort(cmp);
+  for (const r of visible) tbody.appendChild(r);
+  document.getElementById('kpi-shown').textContent = shown;
+  document.getElementById('empty-state').classList.toggle('hidden', shown !== 0 || rows.length === 0);
+}
+
+function resetFilters() {
+  for (const id of ['flt-brand', 'flt-status', 'flt-sub']) {
+    document.getElementById(id).value = '';
+  }
+  document.getElementById('flt-sort').value = 'date-desc';
+  _fState.brand = _fState.status = _fState.sub = '';
+  _fState.sort = 'date-desc';
+  applyFilters();
+}
+
+(function initFilters() {
+  _readQueryToFilters();
+  const wire = (id, key) => {
+    const el = document.getElementById(id);
+    el.addEventListener('change', () => { _fState[key] = el.value; applyFilters(); });
+  };
+  wire('flt-brand', 'brand');
+  wire('flt-status', 'status');
+  wire('flt-sub', 'sub');
+  wire('flt-sort', 'sort');
+  applyFilters();
+})();
+
+// =====================================================================
+// Live-check
+// =====================================================================
 async function runLiveCheck() {
   const btn = document.getElementById('live-check-btn');
   const status = document.getElementById('live-check-status');

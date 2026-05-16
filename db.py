@@ -1034,6 +1034,14 @@ class Database:
             # NULL = legacy rows (pre-client-picker); dashboard then
             # falls back to brand resolution for those.
             "report_client_id": "ALTER TABLE comments ADD COLUMN report_client_id INTEGER REFERENCES clients(id)",
+            # Reddit engagement snapshot. Updated by the
+            # /api/comments/live-stats task — and reused by the
+            # client portal dashboard / CSV export. NULL until the
+            # first successful fetch; `last_stats_at` lets the UI
+            # show "as of …".
+            "upvotes": "ALTER TABLE comments ADD COLUMN upvotes INTEGER",
+            "num_replies": "ALTER TABLE comments ADD COLUMN num_replies INTEGER",
+            "last_stats_at": "ALTER TABLE comments ADD COLUMN last_stats_at TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -1154,6 +1162,12 @@ class Database:
             "report_month": "ALTER TABLE search_comments ADD COLUMN report_month TEXT",
             "report_added_at": "ALTER TABLE search_comments ADD COLUMN report_added_at TEXT",
             "report_client_id": "ALTER TABLE search_comments ADD COLUMN report_client_id INTEGER REFERENCES clients(id)",
+            # See `comments` table for rationale. Same shape on
+            # the search side so the portal can pull stats
+            # uniformly across both pipelines.
+            "upvotes": "ALTER TABLE search_comments ADD COLUMN upvotes INTEGER",
+            "num_replies": "ALTER TABLE search_comments ADD COLUMN num_replies INTEGER",
+            "last_stats_at": "ALTER TABLE search_comments ADD COLUMN last_stats_at TEXT",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
@@ -1648,6 +1662,39 @@ class Database:
         else:
             return
         self.conn.commit()
+
+    def update_live_stats_by_id_url(self, comment_id, reddit_url, upvotes, num_replies):
+        """Persist a live-stats fetch result. Uses both id AND URL to
+        avoid cross-table collisions (same pattern as
+        `update_posted_at_by_id_url`). Writes to whichever table the
+        (id, url) pair matches; a NULL url means "skip" rather than
+        falling back to id-only (too risky).
+
+        Both `upvotes` and `num_replies` can be NULL — in that case
+        we still bump `last_stats_at` so the UI can show that we
+        tried. Callers should pass through whatever Reddit returned
+        (including 0).
+        """
+        if not comment_id or not reddit_url:
+            return
+        try:
+            self.conn.execute(
+                """UPDATE comments
+                      SET upvotes = ?, num_replies = ?,
+                          last_stats_at = datetime('now')
+                    WHERE id = ? AND reddit_comment_url = ?""",
+                (upvotes, num_replies, comment_id, reddit_url)
+            )
+            self.conn.execute(
+                """UPDATE search_comments
+                      SET upvotes = ?, num_replies = ?,
+                          last_stats_at = datetime('now')
+                    WHERE id = ? AND reddit_comment_url = ?""",
+                (upvotes, num_replies, comment_id, reddit_url)
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"[live-stats] persist failed cid={comment_id}: {e}", flush=True)
 
     def update_posted_at_by_id_url(self, comment_id, reddit_url, posted_at):
         """Side-channel patch used by the live-stats / piggy-back path
@@ -2955,6 +3002,129 @@ class Database:
             bucket["removed"] += r["removed"] or 0
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
+    def update_live_stats(self, comment_id, source, upvotes, num_replies):
+        """Persist a single Reddit engagement snapshot. Called from
+        the /api/comments/live-stats task per successful fetch.
+
+        `upvotes` and `num_replies` are stored as-is (NULL → cleared).
+        `last_stats_at` is stamped to UTC now so the UI can show
+        freshness without us needing a separate query.
+        """
+        table = "comments" if source == "comment" else "search_comments"
+        try:
+            self.conn.execute(
+                f"""UPDATE {table}
+                       SET upvotes = ?, num_replies = ?,
+                           last_stats_at = datetime('now')
+                     WHERE id = ?""",
+                (upvotes, num_replies, comment_id)
+            )
+            self.conn.commit()
+        except Exception as e:
+            # Best-effort: live-stats is a refresh, not a write
+            # path. Log and continue so one bad row doesn't kill
+            # the whole batch.
+            print(f"[live-stats] persist failed cid={comment_id} src={source}: {e}", flush=True)
+
+    def get_report_aggregate_for_client(self, client_id):
+        """Flat per-(brand, month, status) aggregate for the client.
+        The portal dashboard renders the "By Brand" tab by slicing
+        this in JS — month/status filters on each brand card just
+        re-aggregate the same rows.
+
+        Returns: [{brand_id, brand_name, month, total, live, removed}, ...]
+
+        Uses the same brand-resolution chain as
+        `get_comments_for_client_month`. Counts a comment under its
+        resolved brand (own → post.brand_id → post_brands single
+        row → search_posts.brand_id).
+        """
+        brand_ids = self.client_brand_ids(client_id)
+        if not brand_ids:
+            return []
+        ph = ",".join("?" * len(brand_ids))
+        # The resolved brand for each row, expressed as a CASE so
+        # we can GROUP BY it without re-walking the chain in code.
+        q1 = f"""
+            SELECT
+              CASE
+                WHEN c.brand_id IS NOT NULL THEN c.brand_id
+                WHEN p.brand_id IS NOT NULL THEN p.brand_id
+                ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
+              END AS resolved_brand_id,
+              c.report_month AS month,
+              c.status AS status,
+              COUNT(*) AS cnt
+            FROM comments c
+            JOIN posts p ON c.post_id = p.id
+            WHERE c.report_month IS NOT NULL
+              AND c.status IN ('report', 'removed')
+              AND (
+                c.brand_id IN ({ph})
+                OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
+              )
+            GROUP BY resolved_brand_id, c.report_month, c.status
+        """
+        q2 = f"""
+            SELECT
+              COALESCE(sc.brand_id, sp.brand_id) AS resolved_brand_id,
+              sc.report_month AS month,
+              sc.status AS status,
+              COUNT(*) AS cnt
+            FROM search_comments sc
+            JOIN search_posts sp ON sc.search_post_id = sp.id
+            WHERE sc.report_month IS NOT NULL
+              AND sc.status IN ('report', 'removed')
+              AND (
+                sc.brand_id IN ({ph})
+                OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
+              )
+            GROUP BY resolved_brand_id, sc.report_month, sc.status
+        """
+        # Cell map keyed on (brand_id, month) — accumulate totals
+        # from both tables and split live/removed per row's status.
+        cells = {}
+        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
+            key = (r["resolved_brand_id"], r["month"])
+            slot = cells.setdefault(key, {"total": 0, "live": 0, "removed": 0})
+            slot["total"] += r["cnt"]
+            if r["status"] == "report":
+                slot["live"] += r["cnt"]
+            elif r["status"] == "removed":
+                slot["removed"] += r["cnt"]
+        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
+            key = (r["resolved_brand_id"], r["month"])
+            slot = cells.setdefault(key, {"total": 0, "live": 0, "removed": 0})
+            slot["total"] += r["cnt"]
+            if r["status"] == "report":
+                slot["live"] += r["cnt"]
+            elif r["status"] == "removed":
+                slot["removed"] += r["cnt"]
+        # Resolve brand names in one shot (one IN-clause per call).
+        present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
+        names = {}
+        if present_brand_ids:
+            ph2 = ",".join("?" * len(present_brand_ids))
+            for r in self.conn.execute(
+                f"SELECT id, name FROM brands WHERE id IN ({ph2})",
+                present_brand_ids
+            ).fetchall():
+                names[r["id"]] = r["name"]
+        out = []
+        for (bid, month), slot in cells.items():
+            out.append({
+                "brand_id": bid,
+                "brand_name": names.get(bid) or "(unbranded)",
+                "month": month,
+                "total": slot["total"],
+                "live": slot["live"],
+                "removed": slot["removed"],
+            })
+        # Stable sort: brand name asc, month desc.
+        out.sort(key=lambda r: (r["brand_name"].lower(), -1 * int((r["month"] or "0000-00").replace("-", ""))))
+        return out
+
     def get_comments_for_client_month(self, client_id, month):
         """All comments for a client + month (both tables, merged + sorted
         by deployed_at desc). Brand-based visibility, same chain as
@@ -2982,9 +3152,11 @@ class Database:
                         c.reddit_comment_url, c.posted_at, c.deployed_at,
                         c.report_month, c.report_added_at,
                         c.created_at, c.is_reply, c.comment_type,
+                        c.upvotes, c.num_replies, c.last_stats_at,
                         'comment' AS source,
                         s.name AS subreddit_name,
-                        COALESCE(b.name, pb.name) AS brand_name
+                        COALESCE(b.name, pb.name) AS brand_name,
+                        COALESCE(c.brand_id, p.brand_id) AS resolved_brand_id
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
@@ -2998,9 +3170,11 @@ class Database:
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
                         sc.report_month, sc.report_added_at,
                         sc.created_at, sc.is_reply, sc.comment_type,
+                        sc.upvotes, sc.num_replies, sc.last_stats_at,
                         'search_comment' AS source,
                         sp.subreddit AS subreddit_name,
-                        COALESCE(b.name, spb.name) AS brand_name
+                        COALESCE(b.name, spb.name) AS brand_name,
+                        COALESCE(sc.brand_id, sp.brand_id) AS resolved_brand_id
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  LEFT JOIN brands b ON sc.brand_id = b.id

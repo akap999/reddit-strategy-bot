@@ -2,49 +2,230 @@
 {% block title %}Dashboard{% endblock %}
 
 {% block content %}
-<div class="mb-8">
-  <h1 class="text-2xl font-semibold text-slate-900">Reports overview</h1>
-  <p class="mt-1 text-sm text-slate-500">Your monthly Reddit content deliverables.</p>
+<div class="mb-6 flex items-end justify-between flex-wrap gap-4">
+  <div>
+    <h1 class="text-2xl font-semibold text-slate-900">Reports overview</h1>
+    <p class="mt-1 text-sm text-slate-500">Your monthly Reddit content deliverables.</p>
+  </div>
+  <!-- View toggle: By Month (default) | By Brand -->
+  <div class="inline-flex rounded-lg border border-slate-200 bg-white p-0.5" role="tablist" aria-label="Dashboard view">
+    <button id="view-tab-month" type="button" onclick="switchView('month')"
+            class="px-3 py-1.5 text-sm rounded-md font-medium transition"
+            style="background:#0f172a;color:white;" aria-selected="true">By Month</button>
+    <button id="view-tab-brand" type="button" onclick="switchView('brand')"
+            class="px-3 py-1.5 text-sm rounded-md font-medium transition text-slate-600 hover:text-slate-900"
+            aria-selected="false">By Brand</button>
+  </div>
 </div>
 
+<!-- ============= By Month view ============= -->
+<div id="view-month">
 {% if not months %}
-<div class="stat-card text-center py-16">
-  <div class="mx-auto mb-4" style="width: 64px; height: 64px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px;">📊</div>
-  <h2 class="text-lg font-semibold mb-2">No reports yet</h2>
-  <p class="text-sm text-slate-500 max-w-md mx-auto">When your account manager finalises this month's deliverables, you'll see a card here. Check back soon.</p>
-</div>
+  <div class="stat-card text-center py-16">
+    <div class="mx-auto mb-4" style="width: 64px; height: 64px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px;">📊</div>
+    <h2 class="text-lg font-semibold mb-2">No reports yet</h2>
+    <p class="text-sm text-slate-500 max-w-md mx-auto">When your account manager finalises this month's deliverables, you'll see a card here. Check back soon.</p>
+  </div>
 {% else %}
-<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-  {% for m in months %}
-  {% set pct = ((m.live or 0) * 100 // (client.monthly_target or 1)) if client.monthly_target else 0 %}
-  <a href="/portal/month/{{ m.month }}{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="stat-card hover:shadow-sm transition group">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">{{ m.month[5:] }}/{{ m.month[:4] }}</div>
-        <div class="text-2xl font-semibold mt-1">{{ m.month | format_month_long if false else m.month }}</div>
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for m in months %}
+    {% set pct = ((m.live or 0) * 100 // (client.monthly_target or 1)) if client.monthly_target else 0 %}
+    <a href="/portal/month/{{ m.month }}{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="stat-card hover:shadow-sm transition group">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">{{ m.month[5:] }}/{{ m.month[:4] }}</div>
+          <div class="text-2xl font-semibold mt-1">{{ m.month }}</div>
+        </div>
+        <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
       </div>
-      <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
-    </div>
-    <div class="flex items-baseline gap-2 mb-3">
-      <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
-      <span class="text-sm text-slate-500">/ {{ m.total }} delivered</span>
+      <div class="flex items-baseline gap-2 mb-3">
+        <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
+        <span class="text-sm text-slate-500">/ {{ m.total }} delivered</span>
+        {% if client.monthly_target %}
+        <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+        {% endif %}
+      </div>
       {% if client.monthly_target %}
-      <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+      <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+        <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
+      </div>
       {% endif %}
-    </div>
-    {% if client.monthly_target %}
-    <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
-      <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
-    </div>
-    {% endif %}
-    <div class="flex items-center gap-3 mt-3 text-xs">
-      <span class="chip chip-live">{{ m.live }} live</span>
-      {% if m.removed %}
-      <span class="chip chip-removed">{{ m.removed }} removed</span>
-      {% endif %}
-    </div>
-  </a>
-  {% endfor %}
-</div>
+      <div class="flex items-center gap-3 mt-3 text-xs">
+        <span class="chip chip-live">{{ m.live }} live</span>
+        {% if m.removed %}
+        <span class="chip chip-removed">{{ m.removed }} removed</span>
+        {% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
 {% endif %}
+</div>
+
+<!-- ============= By Brand view ============= -->
+<div id="view-brand" class="hidden">
+{% if not brand_rows %}
+  <div class="stat-card text-center py-16">
+    <div class="mx-auto mb-4" style="width: 64px; height: 64px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px;">🏷</div>
+    <h2 class="text-lg font-semibold mb-2">No reports yet</h2>
+    <p class="text-sm text-slate-500 max-w-md mx-auto">Brand cards appear here once your reports start landing.</p>
+  </div>
+{% else %}
+  <div id="brand-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <!-- Cards rendered client-side from BRAND_ROWS so the
+         month/status filters can re-aggregate without a round-trip. -->
+  </div>
+{% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const BRAND_ROWS = {{ brand_rows | tojson }};
+const ASCID = {{ client.id if is_admin_view else 'null' }};
+const ASQS = ASCID ? ('&as=' + ASCID) : '';
+
+function switchView(view) {
+  const monthTab = document.getElementById('view-tab-month');
+  const brandTab = document.getElementById('view-tab-brand');
+  const monthBlock = document.getElementById('view-month');
+  const brandBlock = document.getElementById('view-brand');
+  const isMonth = view === 'month';
+  // Visual tab state
+  monthTab.style.background = isMonth ? '#0f172a' : 'transparent';
+  monthTab.style.color = isMonth ? 'white' : '';
+  monthTab.classList.toggle('text-slate-600', !isMonth);
+  brandTab.style.background = !isMonth ? '#0f172a' : 'transparent';
+  brandTab.style.color = !isMonth ? 'white' : '';
+  brandTab.classList.toggle('text-slate-600', isMonth);
+  monthTab.setAttribute('aria-selected', isMonth ? 'true' : 'false');
+  brandTab.setAttribute('aria-selected', !isMonth ? 'true' : 'false');
+  // Block visibility
+  monthBlock.classList.toggle('hidden', !isMonth);
+  brandBlock.classList.toggle('hidden', isMonth);
+  if (!isMonth) renderBrandCards();
+  // Remember choice for the next reload.
+  try { localStorage.setItem('portal_dash_view', view); } catch(_) {}
+}
+
+// Group BRAND_ROWS by brand_id so each card can render its own
+// totals + filters. The dataset is already small (≤ all months ×
+// all brands) — no need for further indexing.
+function _byBrand() {
+  const map = new Map();
+  for (const r of BRAND_ROWS) {
+    if (!map.has(r.brand_id)) {
+      map.set(r.brand_id, { brand_id: r.brand_id, brand_name: r.brand_name, rows: [] });
+    }
+    map.get(r.brand_id).rows.push(r);
+  }
+  return Array.from(map.values()).sort((a, b) => (a.brand_name || '').localeCompare(b.brand_name || ''));
+}
+
+function _allMonths(rows) {
+  return Array.from(new Set(rows.map(r => r.month))).sort().reverse();
+}
+
+function _aggregate(rows, monthFilter, statusFilter) {
+  let total = 0, live = 0, removed = 0;
+  for (const r of rows) {
+    if (monthFilter && r.month !== monthFilter) continue;
+    total += r.total || 0;
+    live += r.live || 0;
+    removed += r.removed || 0;
+  }
+  // Status filter: which number to highlight as the headline count.
+  if (statusFilter === 'live') return { headline: live, total, live, removed, label: 'live' };
+  if (statusFilter === 'removed') return { headline: removed, total, live, removed, label: 'removed' };
+  return { headline: total, total, live, removed, label: 'reports' };
+}
+
+function _brandHref(brandId, month, status) {
+  // If a month is selected, drill straight into the month page
+  // with brand filter applied as a query param the page will read.
+  const qparts = [];
+  if (status && status !== 'all') qparts.push('status=' + encodeURIComponent(status));
+  qparts.push('brand=' + encodeURIComponent(brandId));
+  if (ASCID) qparts.push('as=' + ASCID);
+  const qs = qparts.length ? ('?' + qparts.join('&')) : '';
+  if (month) return `/portal/month/${month}${qs}`;
+  // No month → land on the latest month for this brand if there is one.
+  const latest = (BRAND_ROWS.filter(r => r.brand_id === brandId).map(r => r.month).sort().reverse())[0];
+  return latest ? `/portal/month/${latest}${qs}` : '#';
+}
+
+function renderBrandCards() {
+  const grid = document.getElementById('brand-cards-grid');
+  if (!grid) return;
+  const brands = _byBrand();
+  grid.innerHTML = brands.map(b => {
+    const months = _allMonths(b.rows);
+    const monthOpts = ['<option value="">All months</option>']
+      .concat(months.map(m => `<option value="${m}">${m}</option>`))
+      .join('');
+    const agg0 = _aggregate(b.rows, '', 'all');
+    const idSafe = String(b.brand_id);
+    return `
+      <div class="stat-card" data-brand-card="${idSafe}">
+        <div class="flex items-center justify-between mb-3 gap-2">
+          <div class="text-base font-semibold text-slate-900 truncate" title="${b.brand_name}">${b.brand_name}</div>
+          <a href="${_brandHref(b.brand_id, '', 'all')}" class="text-xs text-teal-700 hover:text-teal-900 whitespace-nowrap">View →</a>
+        </div>
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          <div>
+            <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Month</label>
+            <select data-card-month class="w-full text-xs px-2 py-1 border border-slate-200 rounded-md">${monthOpts}</select>
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Status</label>
+            <select data-card-status class="w-full text-xs px-2 py-1 border border-slate-200 rounded-md">
+              <option value="all">All</option>
+              <option value="live">Live</option>
+              <option value="removed">Removed</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex items-baseline gap-2 mb-2">
+          <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;" data-card-headline>${agg0.headline}</span>
+          <span class="text-sm text-slate-500" data-card-label>${agg0.label}</span>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="chip chip-live"><span data-card-live>${agg0.live}</span> live</span>
+          <span class="chip chip-removed"><span data-card-removed>${agg0.removed}</span> removed</span>
+          <span class="text-slate-400 ml-auto" data-card-total>${agg0.total} total</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+  // Wire each card's filters to re-aggregate from BRAND_ROWS.
+  for (const b of brands) {
+    const card = grid.querySelector(`[data-brand-card="${b.brand_id}"]`);
+    if (!card) continue;
+    const monthSel = card.querySelector('[data-card-month]');
+    const statusSel = card.querySelector('[data-card-status]');
+    const update = () => {
+      const month = monthSel.value;
+      const status = statusSel.value;
+      const a = _aggregate(b.rows, month, status);
+      card.querySelector('[data-card-headline]').textContent = a.headline;
+      card.querySelector('[data-card-label]').textContent = a.label;
+      card.querySelector('[data-card-live]').textContent = a.live;
+      card.querySelector('[data-card-removed]').textContent = a.removed;
+      card.querySelector('[data-card-total]').textContent = a.total + ' total';
+      // Update the "View →" link to honor the filters.
+      const link = card.querySelector('a.text-xs');
+      if (link) link.setAttribute('href', _brandHref(b.brand_id, month, status));
+    };
+    monthSel.addEventListener('change', update);
+    statusSel.addEventListener('change', update);
+  }
+}
+
+// Restore the last-chosen view.
+(function initView() {
+  let v = 'month';
+  try { v = localStorage.getItem('portal_dash_view') || 'month'; } catch(_) {}
+  switchView(v === 'brand' ? 'brand' : 'month');
+})();
+</script>
 {% endblock %}

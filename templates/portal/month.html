@@ -34,7 +34,7 @@
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-mentions">{{ mention_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}</div>
+    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
@@ -290,13 +290,54 @@ function applyFilters() {
     mEmpty.classList.toggle('hidden', !hasMTable || mentionsShown > 0);
   }
 
-  // Top KPI: combined showing / total.
-  const total = (document.querySelectorAll('#hq-table tr[data-row]').length) +
-                (document.querySelectorAll('#mentions-table tr[data-row]').length);
+  // KPI tiles — make every tile follow the active brand/sub filter
+  // (the Mentions live/removed math also excludes Status, which is
+  // itself a partition; otherwise picking "Live" would zero the
+  // "removed" subtitle).
+  if (document.getElementById('kpi-hq')) {
+    document.getElementById('kpi-hq').textContent = hqShown;
+  }
+  if (document.getElementById('kpi-mentions')) {
+    document.getElementById('kpi-mentions').textContent = mentionsShown;
+  }
+  // Mentions live/removed subtitle: recompute from visible rows
+  // ignoring the Status filter (count by status across rows that
+  // pass brand + sub).
+  const mTbody = document.querySelector('#mentions-table tbody');
+  let liveM = 0, removedM = 0;
+  if (mTbody) {
+    for (const row of mTbody.querySelectorAll('tr[data-row]')) {
+      const okBrand = !_fState.brand || row.dataset.brand === _fState.brand;
+      const okSub = !_fState.sub || row.dataset.sub === _fState.sub;
+      if (!okBrand || !okSub) continue;
+      if (row.dataset.status === 'report') liveM += 1;
+      else if (row.dataset.status === 'removed') removedM += 1;
+    }
+  }
+  const mSubEl = document.getElementById('kpi-mentions-sub');
+  if (mSubEl) mSubEl.textContent = removedM
+      ? `${liveM} live · ${removedM} removed`
+      : `${liveM} live`;
+  // Target tile follows the brand/sub scope too.
+  const tgtEl = document.getElementById('kpi-target-live');
+  if (tgtEl) tgtEl.textContent = hqShown + liveM;
+
+  // Combined showing / total. Denominator is the brand+sub scope
+  // (status-agnostic), so picking a brand changes both numbers.
+  const hqRowsTotal = Array.from(document.querySelectorAll('#hq-table tr[data-row]')).filter(r => {
+    const okBrand = !_fState.brand || r.dataset.brand === _fState.brand;
+    const okSub = !_fState.sub || r.dataset.sub === _fState.sub;
+    return okBrand && okSub;
+  }).length;
+  const mRowsTotal = Array.from(document.querySelectorAll('#mentions-table tr[data-row]')).filter(r => {
+    const okBrand = !_fState.brand || r.dataset.brand === _fState.brand;
+    const okSub = !_fState.sub || r.dataset.sub === _fState.sub;
+    return okBrand && okSub;
+  }).length;
   const shownEl = document.getElementById('kpi-shown');
   if (shownEl) shownEl.textContent = hqShown + mentionsShown;
   const totalEl = document.getElementById('kpi-total');
-  if (totalEl) totalEl.textContent = total;
+  if (totalEl) totalEl.textContent = hqRowsTotal + mRowsTotal;
 }
 
 function resetFilters() {

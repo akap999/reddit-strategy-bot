@@ -873,11 +873,66 @@ def api_publish_post(pid):
         post = db.get_post(pid)
         if reddit_url and post:
             db.link_url_to_post(pid, reddit_url, post["subreddit_id"])
+            # Piggy-back the Reddit-side publish timestamp so the
+            # client dashboard's "Published Date" reflects when the
+            # post actually went live on Reddit, not when the admin
+            # clicked Mark Published. Best-effort + cached; the API
+            # call already proxies through Cloudflare so it's cheap.
+            try:
+                _spawn_post_posted_at_fetch(pid, reddit_url)
+            except Exception as e:
+                print(f"[publish] posted_at fetch spawn failed pid={pid}: {e}", flush=True)
         if owner_account:
             db.set_post_owner(pid, owner_account)
         return jsonify({"ok": True})
     finally:
         db.close()
+
+
+def _fetch_post_posted_at(reddit_url):
+    """Resolve a Reddit post URL to its `created_utc` (ISO string).
+    Returns None on any failure — caller treats that as "leave NULL,
+    use deployed_at fallback".
+    """
+    if not reddit_url:
+        return None
+    from urllib.parse import urlparse
+    from bulk_deploy import _utc_seconds_to_iso
+    try:
+        parsed = urlparse(reddit_url.split("?")[0].rstrip("/"))
+        path = parsed.path.rstrip("/") + ".json"
+    except Exception:
+        return None
+    data = _reddit_get_json(path)
+    if not data or not isinstance(data, list) or len(data) < 1:
+        return None
+    children = (data[0] or {}).get("data", {}).get("children", [])
+    if not children:
+        return None
+    cu = (children[0] or {}).get("data", {}).get("created_utc")
+    return _utc_seconds_to_iso(cu)
+
+
+def _spawn_post_posted_at_fetch(pid, reddit_url):
+    """Fire-and-forget background fetch + persist of a post's
+    Reddit-side `created_utc`. Same pattern as the comment
+    auto-stats hook on report — runs after the response is sent.
+    """
+    def task():
+        bg = Database(DB_PATH)
+        bg.connect(); bg.initialize()
+        try:
+            iso = _fetch_post_posted_at(reddit_url)
+            if iso:
+                bg.set_post_posted_at(pid, iso)
+            return {"pid": pid, "posted_at": iso}
+        finally:
+            try: bg.close()
+            except Exception: pass
+    try:
+        start_task("post-posted-at", task)
+    except Exception as e:
+        print(f"[posts.posted_at] spawn failed pid={pid}: {e}", flush=True)
 
 @app.route("/api/posts/<int:pid>", methods=["DELETE"])
 def api_delete_post(pid):
@@ -1972,6 +2027,29 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                     )
                 except Exception as stats_err:
                     print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
+                # Piggy-back posts.posted_at backfill for Live Subs
+                # comments — the JSON we just parsed includes the
+                # parent post listing at data[0]. Free Reddit-side
+                # publish timestamp for the post; the client portal
+                # renders this as 'Published Date'. NULL-safe + only
+                # writes when the post's posted_at is still NULL
+                # (see set_post_posted_at).
+                if src == "comment":
+                    try:
+                        post_children = (data[0] or {}).get("data", {}).get("children", [])
+                        if post_children:
+                            from bulk_deploy import _utc_seconds_to_iso
+                            cu = (post_children[0] or {}).get("data", {}).get("created_utc")
+                            iso = _utc_seconds_to_iso(cu) if cu else None
+                            if iso:
+                                pid_row = db.conn.execute(
+                                    "SELECT post_id FROM comments WHERE id = ?",
+                                    (item["id"],)
+                                ).fetchone()
+                                if pid_row and pid_row["post_id"]:
+                                    db.set_post_posted_at(pid_row["post_id"], iso)
+                    except Exception as pp_err:
+                        print(f"[{log_prefix}] #{item['id']} posted_at piggy-back failed: {pp_err}", flush=True)
 
         except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
             print(f"[{log_prefix}] #{item['id']} ({src}) {type(e).__name__}: {e}", flush=True)
@@ -6878,8 +6956,14 @@ def portal_month_export(month):
         ])
         for post in posts_list:
             sub = f"r/{post.get('subreddit_name')}" if post.get('subreddit_name') else ''
+            # posted_at = Reddit-side publish timestamp (preferred).
+            # deployed_at / paid_at / created_at = internal stamps,
+            # used only as fallback for legacy rows.
             published = fmt_date(
-                post.get('deployed_at') or post.get('paid_at') or post.get('created_at')
+                post.get('posted_at')
+                or post.get('deployed_at')
+                or post.get('paid_at')
+                or post.get('created_at')
             )
             derived = (post.get('derived_status') or 'live').lower()
             status_label = 'Removed' if derived == 'removed' else 'Live'

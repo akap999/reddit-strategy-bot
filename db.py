@@ -1263,6 +1263,15 @@ class Database:
         if "report_added_at" not in post_cols2:
             self.conn.execute("ALTER TABLE posts ADD COLUMN report_added_at TEXT")
             self.conn.commit()
+        # Real Reddit-side publish timestamp. `deployed_at` records
+        # when the admin clicked Mark Published in our bot — that's
+        # internal admin action, not the Reddit publish event. The
+        # client dashboard's "Published Date" column should reflect
+        # when the post actually went live on Reddit (Reddit's
+        # `data.created_utc` from the post's `.json` payload).
+        if "posted_at" not in post_cols2:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN posted_at TEXT")
+            self.conn.commit()
 
         # One-shot backfill: ancient rows had `paid_at` set but
         # status still on the prior lifecycle step. We flip those
@@ -1842,6 +1851,25 @@ class Database:
         else:
             return
         self.conn.commit()
+
+    def set_post_posted_at(self, post_id, posted_at):
+        """Stamp `posts.posted_at` from Reddit's `created_utc`.
+
+        Idempotent: only writes when the current value is NULL so
+        backfills don't clobber values from earlier (more authoritative)
+        runs. Silent on missing row / bad input.
+        """
+        if not post_id or not posted_at:
+            return
+        try:
+            self.conn.execute(
+                """UPDATE posts SET posted_at = ?
+                    WHERE id = ? AND posted_at IS NULL""",
+                (posted_at, post_id)
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"[posts.posted_at] persist failed pid={post_id}: {e}", flush=True)
 
     def update_live_stats_by_id_url(self, comment_id, reddit_url, upvotes, num_replies):
         """Persist a live-stats fetch result. Uses both id AND URL to
@@ -3597,7 +3625,8 @@ class Database:
             return {"posts": [], "search_comments": search_comments}
         php = ",".join("?" * len(post_ids))
         post_rows = self.conn.execute(
-            f"""SELECT p.id, p.title, p.status, p.deployed_at, p.paid_at, p.created_at,
+            f"""SELECT p.id, p.title, p.status, p.posted_at,
+                       p.deployed_at, p.paid_at, p.created_at,
                        s.name AS subreddit_name,
                        b.name AS brand_name,
                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) AS reddit_url
@@ -3659,11 +3688,17 @@ class Database:
             post["derived_status"] = (
                 "removed" if (post_status == "removed" or any_cmt_removed) else "live"
             )
-        # Posts sorted newest-first by deployed_at, with paid_at /
-        # created_at as fallbacks.
+        # Posts sorted newest-first by the actual Reddit publish
+        # timestamp where we have it, falling back to deployed_at /
+        # paid_at / created_at for legacy rows that haven't had
+        # posted_at populated yet.
         ordered = sorted(
             posts.values(),
-            key=lambda p: (p.get("deployed_at") or p.get("paid_at") or p.get("created_at") or ""),
+            key=lambda p: (p.get("posted_at")
+                            or p.get("deployed_at")
+                            or p.get("paid_at")
+                            or p.get("created_at")
+                            or ""),
             reverse=True,
         )
         return {"posts": ordered, "search_comments": search_comments}

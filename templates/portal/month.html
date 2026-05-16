@@ -120,7 +120,10 @@
     </thead>
     <tbody>
       {% for post in posts %}
-      {% set post_date = post.deployed_at or post.paid_at or post.created_at or '' %}
+      {# Prefer the real Reddit-side publish timestamp; fall back
+         to internal deploy/paid/created stamps for legacy rows
+         that haven't had posted_at populated yet. #}
+      {% set post_date = post.posted_at or post.deployed_at or post.paid_at or post.created_at or '' %}
       {% set post_short_date = post_date[:10] %}
       {% set derived = post.derived_status or 'live' %}
       <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}" data-status="{{ 'report' if derived == 'live' else 'removed' }}">

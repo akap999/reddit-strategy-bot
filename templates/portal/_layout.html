@@ -77,9 +77,11 @@
     <nav class="flex items-center gap-2">
       <a href="/portal/dashboard{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="px-3 py-2 text-sm rounded-md hover:bg-slate-100">Dashboard</a>
       <a href="/portal/account{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="px-3 py-2 text-sm rounded-md hover:bg-slate-100">Account</a>
-      {% if not is_admin_view %}
-      <a href="/portal/logout" class="px-3 py-2 text-sm text-slate-500 hover:text-slate-900">Sign out</a>
-      {% endif %}
+      {# Sign out always visible. In admin-view mode it also drops
+         the as_client_id session so the next request lands on the
+         portal login page — admin can re-OAuth from the admin panel
+         if they want back in. #}
+      <a href="/portal/logout" class="px-3 py-2 text-sm font-medium text-slate-700 hover:text-slate-900 border border-slate-200 rounded-md hover:bg-slate-100">Sign out</a>
     </nav>
   </div>
 </header>
@@ -87,10 +89,6 @@
 <main class="max-w-6xl mx-auto px-6 py-8">
   {% block content %}{% endblock %}
 </main>
-
-<footer class="max-w-6xl mx-auto px-6 py-6 text-xs text-slate-400">
-  Confidential · {{ client.name }}
-</footer>
 
 {% block scripts %}{% endblock %}
 </body>

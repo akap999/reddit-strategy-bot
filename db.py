@@ -2667,6 +2667,91 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def add_client_email(self, client_id, email):
+        """Append a single email to a client. Lowercased, trimmed.
+        Returns (True, None) on success or (False, reason) on failure.
+        Reasons: 'invalid' (empty / no @), 'taken' (used by some
+        other client), 'duplicate' (already on this client).
+        """
+        e = (email or "").strip().lower()
+        if not e or "@" not in e or "." not in e:
+            return (False, "invalid")
+        # Cross-client uniqueness check.
+        owner = self.conn.execute(
+            "SELECT client_id FROM client_emails WHERE LOWER(email) = LOWER(?)",
+            (e,)
+        ).fetchone()
+        if owner:
+            if owner["client_id"] == client_id:
+                return (False, "duplicate")
+            return (False, "taken")
+        # If the client has zero emails so far, this one becomes primary.
+        existing = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM client_emails WHERE client_id = ?",
+            (client_id,)
+        ).fetchone()
+        is_primary = 1 if (existing and existing["c"] == 0) else 0
+        self.conn.execute(
+            "INSERT INTO client_emails (client_id, email, is_primary) VALUES (?, ?, ?)",
+            (client_id, e, is_primary)
+        )
+        self.conn.commit()
+        return (True, None)
+
+    def remove_client_email(self, client_id, email):
+        """Delete one email from a client. Refuses to delete the last
+        email on the account (the client would lose all sign-in routes).
+        Returns (True, None) or (False, reason). Reasons: 'not_found',
+        'last_email'.
+        """
+        e = (email or "").strip().lower()
+        row = self.conn.execute(
+            "SELECT id, is_primary FROM client_emails WHERE client_id = ? AND LOWER(email) = LOWER(?)",
+            (client_id, e)
+        ).fetchone()
+        if not row:
+            return (False, "not_found")
+        total = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM client_emails WHERE client_id = ?",
+            (client_id,)
+        ).fetchone()["c"]
+        if total <= 1:
+            return (False, "last_email")
+        self.conn.execute("DELETE FROM client_emails WHERE id = ?", (row["id"],))
+        # If we dropped the primary, promote the next email alphabetically.
+        if row["is_primary"]:
+            promote = self.conn.execute(
+                "SELECT id FROM client_emails WHERE client_id = ? ORDER BY email LIMIT 1",
+                (client_id,)
+            ).fetchone()
+            if promote:
+                self.conn.execute(
+                    "UPDATE client_emails SET is_primary = 1 WHERE id = ?",
+                    (promote["id"],)
+                )
+        self.conn.commit()
+        return (True, None)
+
+    def set_primary_email(self, client_id, email):
+        """Flip the is_primary flag so exactly one row is primary."""
+        e = (email or "").strip().lower()
+        row = self.conn.execute(
+            "SELECT id FROM client_emails WHERE client_id = ? AND LOWER(email) = LOWER(?)",
+            (client_id, e)
+        ).fetchone()
+        if not row:
+            return (False, "not_found")
+        self.conn.execute(
+            "UPDATE client_emails SET is_primary = 0 WHERE client_id = ?",
+            (client_id,)
+        )
+        self.conn.execute(
+            "UPDATE client_emails SET is_primary = 1 WHERE id = ?",
+            (row["id"],)
+        )
+        self.conn.commit()
+        return (True, None)
+
     def set_client_emails(self, client_id, emails):
         """Replace the client's email set. `emails` is a list of strings;
         the first one is flagged is_primary."""

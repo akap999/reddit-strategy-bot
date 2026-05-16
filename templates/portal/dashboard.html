@@ -40,7 +40,7 @@
       </div>
       <div class="flex items-baseline gap-2 mb-3">
         <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
-        <span class="text-sm text-slate-500">/ {{ m.total }} delivered</span>
+        <span class="text-sm text-slate-500">live / {{ m.total }} total</span>
         {% if client.monthly_target %}
         <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
         {% endif %}
@@ -137,7 +137,8 @@ function _aggregate(rows, monthFilter, statusFilter) {
   // Status filter: which number to highlight as the headline count.
   if (statusFilter === 'live') return { headline: live, total, live, removed, label: 'live' };
   if (statusFilter === 'removed') return { headline: removed, total, live, removed, label: 'removed' };
-  return { headline: total, total, live, removed, label: 'reports' };
+  // Default headline shows the live count — the metric clients care about.
+  return { headline: live, total, live, removed, label: 'live' };
 }
 
 function _brandHref(brandId, month, status) {

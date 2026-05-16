@@ -6372,6 +6372,26 @@ def portal_month_check_live(month):
     return jsonify({"task_id": tid})
 
 
+def _account_qs(is_admin, cid):
+    """Build the ?as=... suffix used on every account-form action when
+    the admin is viewing-as a client. Keeps the form posts on the
+    correct client context."""
+    return f"?as={cid}" if is_admin else ""
+
+
+def _render_account(client, is_admin, error=None, success=None, section=None, status=200):
+    """Single render path so every email/password endpoint can pass
+    its own banner copy without duplicating the keyword set.
+    `section` ('email' | 'password') tells the template which form's
+    banner to highlight — handy when both forms live on the same page.
+    """
+    return render_template(
+        'portal/account.html',
+        client=client, is_admin_view=is_admin,
+        error=error, success=success, section=section,
+    ), status
+
+
 @app.route('/portal/account', methods=['GET'])
 @client_required
 def portal_account():
@@ -6379,11 +6399,8 @@ def portal_account():
     db = get_db()
     try:
         client = db.get_client(cid)
-        return render_template(
-            'portal/account.html',
-            client=client, error=None, success=None,
-            is_admin_view=is_admin,
-        )
+        resp, _ = _render_account(client, is_admin)
+        return resp
     finally:
         db.close()
 
@@ -6401,18 +6418,91 @@ def portal_change_password():
         # Admin in admin-view can change without knowing the current pw.
         if not is_admin:
             if not check_password_hash(client['password_hash'], current):
-                return render_template('portal/account.html', client=client,
-                                       error='Current password is incorrect.',
-                                       success=None, is_admin_view=is_admin), 401
+                resp, code = _render_account(client, is_admin,
+                    error='Current password is incorrect.', section='password', status=401)
+                return resp, code
         if not new or new != confirm or len(new) < 8:
-            return render_template('portal/account.html', client=client,
-                                   error='New password must be at least 8 characters and match confirmation.',
-                                   success=None, is_admin_view=is_admin), 400
+            resp, code = _render_account(client, is_admin,
+                error='New password must be at least 8 characters and match confirmation.',
+                section='password', status=400)
+            return resp, code
         db.update_client(cid, password_hash=generate_password_hash(new))
         client = db.get_client(cid)
-        return render_template('portal/account.html', client=client,
-                               error=None, success='Password updated.',
-                               is_admin_view=is_admin)
+        resp, _ = _render_account(client, is_admin,
+            success='Password updated.', section='password')
+        return resp
+    finally:
+        db.close()
+
+
+# ----- Email management (add / remove / set-primary) -----------------------
+
+@app.route('/portal/account/emails/add', methods=['POST'])
+@client_required
+def portal_account_email_add():
+    cid, is_admin = _acting_client_id()
+    email = (request.form.get('email') or '').strip()
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        ok, reason = db.add_client_email(cid, email)
+        client = db.get_client(cid)
+        if ok:
+            resp, _ = _render_account(client, is_admin,
+                success=f"Added {email}.", section='email')
+            return resp
+        copy = {
+            'invalid':   "That doesn't look like a valid email address.",
+            'taken':     "That email already belongs to another client account.",
+            'duplicate': "That email is already on this account.",
+        }.get(reason, 'Could not add email.')
+        resp, code = _render_account(client, is_admin,
+            error=copy, section='email', status=400)
+        return resp, code
+    finally:
+        db.close()
+
+
+@app.route('/portal/account/emails/remove', methods=['POST'])
+@client_required
+def portal_account_email_remove():
+    cid, is_admin = _acting_client_id()
+    email = (request.form.get('email') or '').strip()
+    db = get_db()
+    try:
+        ok, reason = db.remove_client_email(cid, email)
+        client = db.get_client(cid)
+        if ok:
+            resp, _ = _render_account(client, is_admin,
+                success=f"Removed {email}.", section='email')
+            return resp
+        copy = {
+            'not_found':  'That email is not on this account.',
+            'last_email': "You can't remove the last email on the account — add a new one first.",
+        }.get(reason, 'Could not remove email.')
+        resp, code = _render_account(client, is_admin,
+            error=copy, section='email', status=400)
+        return resp, code
+    finally:
+        db.close()
+
+
+@app.route('/portal/account/emails/primary', methods=['POST'])
+@client_required
+def portal_account_email_primary():
+    cid, is_admin = _acting_client_id()
+    email = (request.form.get('email') or '').strip()
+    db = get_db()
+    try:
+        ok, reason = db.set_primary_email(cid, email)
+        client = db.get_client(cid)
+        if ok:
+            resp, _ = _render_account(client, is_admin,
+                success=f"{email} is now your primary contact.", section='email')
+            return resp
+        resp, code = _render_account(client, is_admin,
+            error='That email is not on this account.', section='email', status=400)
+        return resp, code
     finally:
         db.close()
 

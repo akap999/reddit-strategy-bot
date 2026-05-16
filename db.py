@@ -1187,6 +1187,19 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_client_emails_client ON client_emails(client_id);
             CREATE INDEX IF NOT EXISTS idx_comments_report_month ON comments(report_month);
             CREATE INDEX IF NOT EXISTS idx_search_comments_report_month ON search_comments(report_month);
+
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id       INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                token_hash      TEXT NOT NULL UNIQUE,
+                expires_at      TEXT NOT NULL,                  -- ISO datetime UTC
+                consumed_at     TEXT,
+                requested_email TEXT,                            -- the email the user typed
+                requested_ip    TEXT,
+                created_at      TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_pwd_reset_client ON password_reset_tokens(client_id);
+            CREATE INDEX IF NOT EXISTS idx_pwd_reset_expires ON password_reset_tokens(expires_at);
         """)
         self.conn.commit()
 
@@ -2253,6 +2266,7 @@ class Database:
                         c.is_ours, c.matched_keywords, c.assigned_at, c.informed_at,
                         c.last_live_check, c.prev_status,
                         c.focus_phrase, c.focus_hit,
+                        c.report_month, c.report_added_at,
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name, b.name as brand_name,
@@ -2272,6 +2286,7 @@ class Database:
                         1 as is_ours, NULL as matched_keywords, sc.assigned_at, sc.informed_at,
                         sc.last_live_check, sc.prev_status,
                         NULL as focus_phrase, NULL as focus_hit,
+                        sc.report_month, sc.report_added_at,
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,
@@ -2507,6 +2522,60 @@ class Database:
             "SELECT brand_id FROM client_brands WHERE client_id = ?",
             (client_id,)
         ).fetchall()]
+
+    # --- Password reset tokens ---
+
+    def create_password_reset_token(self, client_id, token_hash,
+                                     expires_at, requested_email=None,
+                                     requested_ip=None):
+        """Insert a new reset-token row. `token_hash` is the SHA-256 of
+        the raw token we email out — we never store the raw token in
+        the DB. `expires_at` is an ISO datetime string (UTC).
+        """
+        self.conn.execute(
+            """INSERT INTO password_reset_tokens
+               (client_id, token_hash, expires_at, requested_email, requested_ip)
+               VALUES (?, ?, ?, ?, ?)""",
+            (client_id, token_hash, expires_at, requested_email, requested_ip)
+        )
+        self.conn.commit()
+
+    def get_password_reset_by_token_hash(self, token_hash):
+        """Look up an unconsumed, unexpired reset-token row by its hash.
+        Returns dict or None. The portal calls this when the user clicks
+        the reset link in their email; on a match it lets them set a
+        new password and then calls `consume_password_reset_token`.
+        """
+        row = self.conn.execute(
+            """SELECT * FROM password_reset_tokens
+               WHERE token_hash = ?
+                 AND consumed_at IS NULL
+                 AND expires_at > datetime('now')
+               LIMIT 1""",
+            (token_hash,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def consume_password_reset_token(self, token_hash):
+        """Mark the token consumed so it can't be reused."""
+        self.conn.execute(
+            """UPDATE password_reset_tokens
+               SET consumed_at = datetime('now')
+               WHERE token_hash = ?""",
+            (token_hash,)
+        )
+        self.conn.commit()
+
+    def cleanup_expired_password_resets(self):
+        """Best-effort cleanup of expired or consumed tokens older than
+        one day. Safe to call periodically.
+        """
+        self.conn.execute(
+            """DELETE FROM password_reset_tokens
+               WHERE expires_at < datetime('now', '-1 day')
+                  OR consumed_at < datetime('now', '-1 day')"""
+        )
+        self.conn.commit()
 
     # --- Report lifecycle helpers ---
 

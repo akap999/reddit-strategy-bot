@@ -5768,6 +5768,186 @@ def portal_logout():
     return redirect('/portal/login')
 
 
+# ----- Password reset (email-driven, self-serve) ---------------------------
+#
+# Flow:
+#   1. Client hits /portal/forgot-password, enters an email.
+#   2. If the email matches a client_emails row, we generate a random
+#      token (secrets.token_urlsafe), store its SHA-256 hash + expiry
+#      in `password_reset_tokens`, and email the raw token to the user
+#      as a one-click link. We always show the same "if your email is
+#      on file, you'll receive a link" message — never disclose whether
+#      a given email exists.
+#   3. The client clicks the link → /portal/reset-password/<token>,
+#      enters a new password, submits.
+#   4. We verify the token (unconsumed, unexpired), update the client's
+#      password_hash, and mark the token consumed.
+#
+# Email delivery: smtplib with SMTP_HOST / SMTP_PORT / SMTP_USER /
+# SMTP_PASS / MAIL_FROM env vars. If SMTP_HOST isn't configured, the
+# reset link is printed to the console (dev mode) so the admin can
+# hand it over manually until SMTP is wired up.
+
+import secrets as _secrets
+import hashlib as _hashlib
+from datetime import datetime, timedelta
+
+
+_RESET_TOKEN_TTL_MINUTES = int(os.environ.get('RESET_TOKEN_TTL_MINUTES', '60'))
+
+
+def _hash_reset_token(raw):
+    """SHA-256 the raw token before storing. Even if the DB leaks, the
+    raw tokens stay safe (attackers see hashes only).
+    """
+    return _hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _send_email(to_addr, subject, body_text):
+    """Best-effort plain-text email send.
+
+    Reads SMTP config from env. If SMTP_HOST is missing, prints the
+    message to stdout instead — useful for dev / staging where no
+    mail relay is wired. The reset flow falls back gracefully: the
+    user still sees the success page, but the link is in the server
+    log instead of their inbox.
+
+    Returns True on a successful network send, False on print-fallback
+    or any error (callers don't change behaviour based on this).
+    """
+    host = os.environ.get('SMTP_HOST', '').strip()
+    if not host:
+        print(f"[email/dev-fallback] To: {to_addr}\n"
+              f"[email/dev-fallback] Subject: {subject}\n"
+              f"[email/dev-fallback] ---\n{body_text}\n"
+              f"[email/dev-fallback] ---", flush=True)
+        return False
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg['From'] = os.environ.get('MAIL_FROM', 'no-reply@localhost')
+        msg['To'] = to_addr
+        msg['Subject'] = subject
+        msg.set_content(body_text)
+        port = int(os.environ.get('SMTP_PORT', '587'))
+        user = os.environ.get('SMTP_USER', '').strip()
+        pw = os.environ.get('SMTP_PASS', '').strip()
+        use_ssl = os.environ.get('SMTP_SSL', 'false').lower() in ('1', 'true', 'yes')
+        if use_ssl or port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as s:
+                if user and pw:
+                    s.login(user, pw)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as s:
+                s.ehlo()
+                try:
+                    s.starttls()
+                    s.ehlo()
+                except Exception:
+                    pass  # plain — uncommon but possible for internal relays
+                if user and pw:
+                    s.login(user, pw)
+                s.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[email] send failed to {to_addr}: {e}", flush=True)
+        return False
+
+
+@app.route('/portal/forgot-password', methods=['GET'])
+def portal_forgot_form():
+    return render_template('portal/forgot_password.html', sent=False, error=None)
+
+
+@app.route('/portal/forgot-password', methods=['POST'])
+def portal_forgot_submit():
+    email = (request.form.get('email') or '').strip().lower()
+    # Always render the same "check your inbox" page — never disclose
+    # whether the email exists. The actual fork is hidden behind that
+    # uniform response.
+    db = get_db()
+    try:
+        client = db.get_client_by_email(email) if email else None
+        if client:
+            raw = _secrets.token_urlsafe(40)
+            token_hash = _hash_reset_token(raw)
+            expires_at = (datetime.utcnow() + timedelta(minutes=_RESET_TOKEN_TTL_MINUTES)).strftime('%Y-%m-%d %H:%M:%S')
+            db.create_password_reset_token(
+                client_id=client['id'],
+                token_hash=token_hash,
+                expires_at=expires_at,
+                requested_email=email,
+                requested_ip=(request.headers.get('X-Forwarded-For', '') or request.remote_addr or ''),
+            )
+            link = request.url_root.rstrip('/') + f"/portal/reset-password/{raw}"
+            body = (
+                f"Hi,\n\n"
+                f"Someone requested a password reset for the {client['name']} client portal.\n"
+                f"If this was you, follow the link below to set a new password "
+                f"(valid for {_RESET_TOKEN_TTL_MINUTES} minutes):\n\n"
+                f"{link}\n\n"
+                f"If you didn't request this, ignore this email — your password will not change.\n"
+            )
+            _send_email(
+                to_addr=email,
+                subject=f"{client['name']} portal — password reset",
+                body_text=body,
+            )
+    finally:
+        db.close()
+    return render_template('portal/forgot_password.html', sent=True, error=None)
+
+
+@app.route('/portal/reset-password/<token>', methods=['GET'])
+def portal_reset_form(token):
+    db = get_db()
+    try:
+        row = db.get_password_reset_by_token_hash(_hash_reset_token(token))
+        if not row:
+            return render_template('portal/reset_password.html', token=None,
+                                   error='This reset link is invalid or has expired. Request a new one.',
+                                   success=False)
+        return render_template('portal/reset_password.html', token=token,
+                               error=None, success=False)
+    finally:
+        db.close()
+
+
+@app.route('/portal/reset-password/<token>', methods=['POST'])
+def portal_reset_submit(token):
+    new = request.form.get('new_password') or ''
+    confirm = request.form.get('confirm_password') or ''
+    if len(new) < 8 or new != confirm:
+        db = get_db()
+        try:
+            valid = bool(db.get_password_reset_by_token_hash(_hash_reset_token(token)))
+        finally:
+            db.close()
+        return render_template('portal/reset_password.html',
+                               token=token if valid else None,
+                               error='Password must be at least 8 characters and match confirmation.',
+                               success=False), 400
+    db = get_db()
+    try:
+        token_hash = _hash_reset_token(token)
+        row = db.get_password_reset_by_token_hash(token_hash)
+        if not row:
+            return render_template('portal/reset_password.html', token=None,
+                                   error='This reset link is invalid or has expired. Request a new one.',
+                                   success=False), 410
+        db.update_client(row['client_id'], password_hash=generate_password_hash(new))
+        db.consume_password_reset_token(token_hash)
+        # Best-effort cleanup of stale tokens to keep the table tidy
+        try: db.cleanup_expired_password_resets()
+        except Exception: pass
+        return render_template('portal/reset_password.html', token=None,
+                               error=None, success=True)
+    finally:
+        db.close()
+
+
 @app.route('/portal/exit-admin-view')
 def portal_exit_admin_view():
     session.pop('as_client_id', None)

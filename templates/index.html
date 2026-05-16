@@ -5003,9 +5003,11 @@ function renderAllCommentCard(c) {
     } else if (c.status === 'informed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'reassign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'deployed') {
-        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly client report">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'paid') {
-        actionBtns = `<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly client report">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+    } else if (c.status === 'report') {
+        actionBtns = `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, '${src}')" title="Move back to previous status">Undo report</button>`;
     } else if (c.status === 'removed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="${_acAction(src, c.id, 'unremove')}">Unremove</button>`;
     } else if (c.status === 'archived') {
@@ -5027,6 +5029,7 @@ function renderAllCommentCard(c) {
             ${c.comment_type === 'op_reply' ? '<span class="badge" style="background:#0e8a16;color:white">OP</span>' : ''}
             ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
             ${c.mentions_brand ? '<span class="badge" style="background:#FF4500;color:white;font-size:0.6rem">brand</span>' : ''}
+            ${c.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>` : ''}
             ${kwPills}
             <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}
             ${c.account_id ? `<span class="text-xs font-medium" style="color:#FFD700">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
@@ -7829,6 +7832,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                 ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
                 ${c.comment_type === 'op_reply' ? '<span class="badge ml-1" style="background:#3d2a0e;color:#ffb347">OP</span>' : ''}
                 ${c.focus_phrase ? `<span class="badge ml-1" style="background:${c.focus_hit === 1 ? '#0e3d1c;color:#9efbb4' : '#3d2e0e;color:#ffd166'}" title="${c.focus_hit === 1 ? 'Focus phrase paired with brand' : 'Focus phrase assigned but not paired with brand'}">↔ ${c.focus_phrase}</span>` : ''}
+                ${c.report_month ? `<span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>` : ''}
             </td>
             <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
             <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>
@@ -7840,6 +7844,8 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                     ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
                     ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
                     ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                    ${(c.status === 'deployed' || c.status === 'paid') ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'comment')" title="Push this comment into a monthly client report">📊 Report</button>` : ''}
+                    ${c.status === 'report' ? `<a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to its previous status">Undo report</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
                     ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="lsubsDeleteComment(${c.id})" title="Delete this comment (and any replies under it)">Del</button>
@@ -9378,13 +9384,20 @@ function lsFilterComments() {
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>
+                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly client report">📊 Report</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'paid' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
+                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly client report">📊 Report</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
+                                ` : ''}
+                                ${c.status === 'report' ? `
+                                    <a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-secondary btn-sm">View</a>
+                                    <span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>
+                                    <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}
                                 ${c.status === 'removed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button>

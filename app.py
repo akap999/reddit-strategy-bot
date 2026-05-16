@@ -61,6 +61,10 @@ def require_login():
         return  # Auth disabled in dev (no Google creds configured)
     if request.path in _PUBLIC_PATHS or request.path.startswith('/static/'):
         return
+    # Client portal has its own auth (email + password); the admin
+    # Google-OAuth gate doesn't apply to /portal/* routes.
+    if request.path.startswith('/portal'):
+        return
     if not session.get('user_email'):
         if request.path.startswith('/api/'):
             return jsonify({"error": "Unauthorized"}), 401
@@ -5433,6 +5437,501 @@ print(f"  {len(subs)} subreddits | {total_posts} posts | {total_comments} commen
 db.cleanup_old_tasks(24)
 print("  Cleaned up stale tasks")
 db.close()
+
+# ===========================================================================
+# Client Reporting Module — admin CRUD + client-facing portal
+# ===========================================================================
+#
+# Two surfaces live below:
+#
+# 1. Admin endpoints (gated by the existing Google OAuth in
+#    `require_login`) — CRUD for clients, and per-row + bulk
+#    actions to push deployed/paid comments into the new 'report'
+#    state.
+#
+# 2. Client portal (separate password-based auth, lives under
+#    /portal/*) — agency clients log in with one of their associated
+#    emails and see only their own monthly report deliverables.
+#    Reuses the existing `_check_live_batch` and the same CSV column
+#    shape the admin sees in `lsExportCsv`.
+#
+# Admin "view as client": admins with a valid OAuth session can view
+# any client's portal by appending `?as=<client_id>` to a /portal/*
+# URL. A sticky banner identifies the admin view; no client password
+# is required. Row-level access control still applies — the admin
+# sees only that one client's brands.
+
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask import render_template, abort, make_response
+import io as _io
+import csv as _csv
+import re
+
+
+def _admin_email():
+    """Current admin's email from the OAuth session (or empty)."""
+    return (session.get('user_email') or '').lower()
+
+
+def _admin_authed():
+    """True if the request has a valid admin OAuth session OR auth
+    is disabled (dev mode)."""
+    if not _auth_enabled:
+        return True
+    return bool(session.get('user_email'))
+
+
+# ----- Admin endpoints: client CRUD -----------------------------------------
+
+@app.route('/api/clients', methods=['GET'])
+def api_list_clients():
+    db = get_db()
+    try:
+        return jsonify(db.list_clients())
+    finally:
+        db.close()
+
+
+@app.route('/api/clients', methods=['POST'])
+def api_create_client():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    password = (data.get('password') or '').strip()
+    emails = data.get('emails') or []
+    brand_ids = data.get('brand_ids') or []
+    monthly_target = data.get('monthly_target')
+    notes = (data.get('notes') or '').strip() or None
+    if not name or not password or not emails:
+        return jsonify({"error": "name, password, and at least one email are required"}), 400
+    db = get_db()
+    try:
+        # Reject if any email is already on another client.
+        for e in emails:
+            existing = db.conn.execute(
+                "SELECT client_id FROM client_emails WHERE LOWER(email) = LOWER(?)",
+                (e,)
+            ).fetchone()
+            if existing:
+                return jsonify({"error": f"email already in use: {e}"}), 409
+        cid = db.create_client(
+            name=name,
+            password_hash=generate_password_hash(password),
+            monthly_target=monthly_target,
+            notes=notes,
+        )
+        db.set_client_emails(cid, emails)
+        db.set_client_brands(cid, brand_ids)
+        return jsonify({"id": cid, "ok": True})
+    finally:
+        db.close()
+
+
+@app.route('/api/clients/<int:cid>', methods=['GET'])
+def api_get_client(cid):
+    db = get_db()
+    try:
+        c = db.get_client(cid)
+        if not c:
+            return jsonify({"error": "not_found"}), 404
+        # Don't ever leak the password hash.
+        c.pop('password_hash', None)
+        return jsonify(c)
+    finally:
+        db.close()
+
+
+@app.route('/api/clients/<int:cid>', methods=['PUT'])
+def api_update_client(cid):
+    data = request.get_json() or {}
+    db = get_db()
+    try:
+        existing = db.get_client(cid)
+        if not existing:
+            return jsonify({"error": "not_found"}), 404
+        kwargs = {}
+        for k in ('name', 'monthly_target', 'notes'):
+            if k in data:
+                kwargs[k] = data[k]
+        # Password change is explicit + requires the new value
+        new_pw = data.get('password')
+        if new_pw:
+            kwargs['password_hash'] = generate_password_hash(new_pw)
+        if kwargs:
+            db.update_client(cid, **kwargs)
+        if 'emails' in data:
+            # Same uniqueness check
+            for e in data['emails'] or []:
+                row = db.conn.execute(
+                    "SELECT client_id FROM client_emails WHERE LOWER(email) = LOWER(?) AND client_id != ?",
+                    (e, cid)
+                ).fetchone()
+                if row:
+                    return jsonify({"error": f"email already in use: {e}"}), 409
+            db.set_client_emails(cid, data['emails'])
+        if 'brand_ids' in data:
+            db.set_client_brands(cid, data['brand_ids'])
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route('/api/clients/<int:cid>', methods=['DELETE'])
+def api_delete_client(cid):
+    db = get_db()
+    try:
+        db.delete_client(cid)
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+# ----- Admin endpoints: report lifecycle -----------------------------------
+
+_REPORT_MONTH_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')
+
+
+def _valid_report_month(m):
+    return bool(m and _REPORT_MONTH_RE.match(m))
+
+
+@app.route('/api/comments/<int:cid>/to-report', methods=['POST'])
+def api_comment_to_report(cid):
+    data = request.get_json() or {}
+    month = (data.get('report_month') or '').strip()
+    source = (data.get('source') or 'comment').strip()
+    if not _valid_report_month(month):
+        return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    if source not in ('comment', 'search_comment'):
+        return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+    db = get_db()
+    try:
+        result = db.move_comment_to_report(cid, source, month, actor_email=_admin_email())
+        if result is None:
+            return jsonify({"error": "row not found or not in deployed/paid status"}), 422
+        return jsonify({"ok": True, "prev_status": result, "report_month": month})
+    finally:
+        db.close()
+
+
+@app.route('/api/comments/<int:cid>/undo-report', methods=['POST'])
+def api_comment_undo_report(cid):
+    source = (request.get_json() or {}).get('source', 'comment')
+    if source not in ('comment', 'search_comment'):
+        return jsonify({"error": "bad source"}), 400
+    db = get_db()
+    try:
+        restored = db.undo_report(cid, source, actor_email=_admin_email())
+        if restored is None:
+            return jsonify({"error": "row not in report state"}), 422
+        return jsonify({"ok": True, "restored_to": restored})
+    finally:
+        db.close()
+
+
+@app.route('/api/comments/bulk-to-report', methods=['POST'])
+def api_bulk_to_report():
+    """Body: {ids: [{id, source}], report_month}"""
+    data = request.get_json() or {}
+    ids = data.get('ids') or []
+    month = (data.get('report_month') or '').strip()
+    if not _valid_report_month(month):
+        return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    db = get_db()
+    try:
+        out = db.bulk_move_to_report(
+            ids=ids, report_month=month, actor_email=_admin_email(),
+        )
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route('/api/comments/bulk-to-report-filtered', methods=['POST'])
+def api_bulk_to_report_filtered():
+    """Move every comment matching the given filter (mirror of
+    /api/all-comments/mark-paid-all's shape) into report state.
+
+    Body: {report_month, brand_id?, subreddit_id?, account_id?,
+           source?, date?, status?}
+    """
+    data = request.get_json() or {}
+    month = (data.get('report_month') or '').strip()
+    if not _valid_report_month(month):
+        return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    db = get_db()
+    try:
+        # Reuse the existing global comments query (same filters
+        # `mark-paid-all` accepts) but constrain to deployed/paid.
+        status_filter = data.get('status')
+        if status_filter not in (None, 'deployed', 'paid', ''):
+            return jsonify({"error": "status must be deployed or paid or omitted"}), 400
+        # Pull candidate rows
+        candidates = db.get_all_comments_global(
+            status=status_filter,
+            brand_id=int(data['brand_id']) if data.get('brand_id') else None,
+            subreddit_id=int(data['subreddit_id']) if data.get('subreddit_id') else None,
+            account_id=data.get('account_id') or None,
+            source=data.get('source') or None,
+            date=data.get('date') or None,
+            limit=10000, offset=0, live=None,
+        )
+        items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
+        ids = []
+        for r in items:
+            if r.get('status') in ('deployed', 'paid'):
+                ids.append({"id": r['id'], "source": r.get('source', 'comment')})
+        out = db.bulk_move_to_report(
+            ids=ids, report_month=month, actor_email=_admin_email(),
+        )
+        out["candidates_considered"] = len(items)
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+# ===========================================================================
+# Client portal — separate password-based auth + scoped views
+# ===========================================================================
+
+def _acting_client_id():
+    """Resolve the client this request is acting on:
+      1. Admin mode via `?as=<id>` (requires admin OAuth session) —
+         the admin can view any client's portal without a password.
+      2. Real client login via `session['client_id']`.
+    Returns (client_id, is_admin_view) or (None, False) when neither.
+    """
+    as_param = request.args.get('as')
+    if as_param and _admin_authed():
+        try:
+            cid = int(as_param)
+            session['as_client_id'] = cid
+            return cid, True
+        except (TypeError, ValueError):
+            return None, False
+    # Sticky admin view from the session
+    if 'as_client_id' in session and _admin_authed():
+        try:
+            return int(session['as_client_id']), True
+        except (TypeError, ValueError):
+            session.pop('as_client_id', None)
+    # Real client
+    return session.get('client_id'), False
+
+
+def client_required(f):
+    @wraps(f)
+    def wrap(*a, **kw):
+        cid, _admin = _acting_client_id()
+        if not cid:
+            if request.path.startswith('/portal/api'):
+                return jsonify({"error": "auth_required"}), 401
+            return redirect('/portal/login')
+        return f(*a, **kw)
+    return wrap
+
+
+@app.route('/portal')
+def portal_root():
+    cid, _ = _acting_client_id()
+    if not cid:
+        return redirect('/portal/login')
+    return redirect('/portal/dashboard')
+
+
+@app.route('/portal/login', methods=['GET'])
+def portal_login_form():
+    return render_template('portal/login.html', error=None)
+
+
+@app.route('/portal/login', methods=['POST'])
+def portal_login_submit():
+    email = (request.form.get('email') or '').strip().lower()
+    password = request.form.get('password') or ''
+    if not email or not password:
+        return render_template('portal/login.html', error='Email and password are required.'), 400
+    db = get_db()
+    try:
+        client = db.get_client_by_email(email)
+        if not client or not check_password_hash(client['password_hash'], password):
+            return render_template('portal/login.html', error='Invalid email or password.'), 401
+        session['client_id'] = client['id']
+        db.touch_client_last_login(client['id'])
+        return redirect('/portal/dashboard')
+    finally:
+        db.close()
+
+
+@app.route('/portal/logout')
+def portal_logout():
+    session.pop('client_id', None)
+    session.pop('as_client_id', None)
+    return redirect('/portal/login')
+
+
+@app.route('/portal/exit-admin-view')
+def portal_exit_admin_view():
+    session.pop('as_client_id', None)
+    return redirect('/')
+
+
+@app.route('/portal/dashboard')
+@client_required
+def portal_dashboard():
+    cid, is_admin = _acting_client_id()
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        if not client:
+            return abort(404)
+        months = db.get_report_months_for_client(cid)
+        return render_template(
+            'portal/dashboard.html',
+            client=client, months=months,
+            is_admin_view=is_admin,
+        )
+    finally:
+        db.close()
+
+
+@app.route('/portal/month/<month>')
+@client_required
+def portal_month(month):
+    if not _valid_report_month(month):
+        return abort(404)
+    cid, is_admin = _acting_client_id()
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        if not client:
+            return abort(404)
+        rows = db.get_comments_for_client_month(cid, month)
+        # Per-row formatted fields the template uses verbatim. Keep
+        # the engagement columns empty by default — the live-stats
+        # button populates them async.
+        return render_template(
+            'portal/month.html',
+            client=client, month=month, rows=rows,
+            is_admin_view=is_admin,
+        )
+    finally:
+        db.close()
+
+
+@app.route('/portal/month/<month>/export.csv')
+@client_required
+def portal_month_export(month):
+    if not _valid_report_month(month):
+        return abort(404)
+    cid, _ = _acting_client_id()
+    db = get_db()
+    try:
+        rows = db.get_comments_for_client_month(cid, month)
+    finally:
+        db.close()
+    # Same column shape as `lsExportCsv` in templates/index.html.
+    # Subreddit | Published Date (mm/dd/yyyy) | Comment URL | Body |
+    # Upvotes | Conversations. Upvotes/Conversations are blank for
+    # rows where we don't yet have live-stats; the client can run
+    # the in-portal live-check to refresh them.
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["Subreddit", "Published Date", "Comment URL",
+                "Comment Content", "Upvotes", "Conversations"])
+    for r in rows:
+        date_raw = (r.get("posted_at") or r.get("deployed_at") or "")
+        date_fmt = ""
+        if date_raw:
+            m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', str(date_raw))
+            if m:
+                date_fmt = f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
+        w.writerow([
+            f"r/{r.get('subreddit_name') or ''}" if r.get('subreddit_name') else '',
+            date_fmt,
+            r.get('reddit_comment_url') or '',
+            r.get('body') or '',
+            r.get('upvotes', ''),
+            r.get('num_replies', ''),
+        ])
+    resp = make_response(buf.getvalue())
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = f'attachment; filename="report-{month}.csv"'
+    return resp
+
+
+@app.route('/portal/month/<month>/check-live', methods=['POST'])
+@client_required
+def portal_month_check_live(month):
+    if not _valid_report_month(month):
+        return abort(404)
+    cid, _ = _acting_client_id()
+
+    def task():
+        bg = Database(DB_PATH)
+        bg.connect(); bg.initialize()
+        try:
+            rows = bg.get_comments_for_client_month(cid, month)
+            items = [
+                {"id": r["id"], "source": r.get("source", "comment"),
+                 "reddit_comment_url": r.get("reddit_comment_url"),
+                 "status": r.get("status"),
+                 "account_id": r.get("account_id"),
+                 "brand_name": r.get("brand_name"),
+                 "subreddit": r.get("subreddit_name")}
+                for r in rows if r.get("reddit_comment_url")
+            ]
+            return _check_live_batch(items, bg, log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month}")
+        finally:
+            try: bg.close()
+            except Exception: pass
+
+    tid = start_task('portal-check-live', task)
+    return jsonify({"task_id": tid})
+
+
+@app.route('/portal/account', methods=['GET'])
+@client_required
+def portal_account():
+    cid, is_admin = _acting_client_id()
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        return render_template(
+            'portal/account.html',
+            client=client, error=None, success=None,
+            is_admin_view=is_admin,
+        )
+    finally:
+        db.close()
+
+
+@app.route('/portal/account/password', methods=['POST'])
+@client_required
+def portal_change_password():
+    cid, is_admin = _acting_client_id()
+    current = request.form.get('current_password') or ''
+    new = request.form.get('new_password') or ''
+    confirm = request.form.get('confirm_password') or ''
+    db = get_db()
+    try:
+        client = db.get_client(cid)
+        # Admin in admin-view can change without knowing the current pw.
+        if not is_admin:
+            if not check_password_hash(client['password_hash'], current):
+                return render_template('portal/account.html', client=client,
+                                       error='Current password is incorrect.',
+                                       success=None, is_admin_view=is_admin), 401
+        if not new or new != confirm or len(new) < 8:
+            return render_template('portal/account.html', client=client,
+                                   error='New password must be at least 8 characters and match confirmation.',
+                                   success=None, is_admin_view=is_admin), 400
+        db.update_client(cid, password_hash=generate_password_hash(new))
+        client = db.get_client(cid)
+        return render_template('portal/account.html', client=client,
+                               error=None, success='Password updated.',
+                               is_admin_view=is_admin)
+    finally:
+        db.close()
+
 
 # ---------------------------------------------------------------------------
 # Run

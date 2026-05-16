@@ -1017,6 +1017,15 @@ class Database:
             # bot) so we can show the actual publish time on Reddit
             # in the CSV export and any analytics.
             "posted_at": "ALTER TABLE comments ADD COLUMN posted_at TEXT",
+            # Client reporting module — comments pushed to a monthly
+            # client report. `report_month` is "YYYY-MM"; when set, the
+            # row should be visible in the corresponding client's
+            # monthly dashboard. `report_added_at` is the timestamp
+            # the admin clicked "Send to Report". Both are NULL until
+            # the row enters the report state. status='report' AND
+            # report_month IS NOT NULL are written together.
+            "report_month": "ALTER TABLE comments ADD COLUMN report_month TEXT",
+            "report_added_at": "ALTER TABLE comments ADD COLUMN report_added_at TEXT",
         }
         for col, sql in migrations.items():
             if col not in cols:
@@ -1132,10 +1141,54 @@ class Database:
             # Real Reddit-posted timestamp — see the `comments` table
             # migration for the rationale. Same shape, separate table.
             "posted_at": "ALTER TABLE search_comments ADD COLUMN posted_at TEXT",
+            # Client reporting module — same shape as the `comments`
+            # migration. See the comments-table block for rationale.
+            "report_month": "ALTER TABLE search_comments ADD COLUMN report_month TEXT",
+            "report_added_at": "ALTER TABLE search_comments ADD COLUMN report_added_at TEXT",
         }.items():
             if col not in sc_cols:
                 self.conn.execute(sql)
                 self.conn.commit()
+
+        # --- Client reporting module: new tables ---------------------
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL,
+                password_hash   TEXT NOT NULL,
+                monthly_target  INTEGER,
+                notes           TEXT,
+                created_at      TEXT DEFAULT (datetime('now')),
+                last_login_at   TEXT
+            );
+            CREATE TABLE IF NOT EXISTS client_emails (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                email       TEXT NOT NULL,
+                is_primary  INTEGER DEFAULT 0,
+                UNIQUE(email)
+            );
+            CREATE TABLE IF NOT EXISTS client_brands (
+                client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                brand_id    INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+                PRIMARY KEY (client_id, brand_id)
+            );
+            CREATE TABLE IF NOT EXISTS report_audit (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                comment_id    INTEGER,
+                source        TEXT,
+                action        TEXT,
+                report_month  TEXT,
+                prev_month    TEXT,
+                actor_email   TEXT,
+                created_at    TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_client_brands_brand ON client_brands(brand_id);
+            CREATE INDEX IF NOT EXISTS idx_client_emails_client ON client_emails(client_id);
+            CREATE INDEX IF NOT EXISTS idx_comments_report_month ON comments(report_month);
+            CREATE INDEX IF NOT EXISTS idx_search_comments_report_month ON search_comments(report_month);
+        """)
+        self.conn.commit()
 
         # paid_at migration for posts
         post_cols2 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]
@@ -2327,6 +2380,312 @@ class Database:
                ORDER BY b.name"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Client reporting module — CRUD + lifecycle helpers
+    # ------------------------------------------------------------------
+
+    def create_client(self, name, password_hash, monthly_target=None, notes=None):
+        cur = self.conn.execute(
+            """INSERT INTO clients (name, password_hash, monthly_target, notes)
+               VALUES (?, ?, ?, ?)""",
+            (name, password_hash, monthly_target, notes)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_client(self, client_id, *, name=None, monthly_target=None,
+                      notes=None, password_hash=None):
+        sets = []
+        vals = []
+        if name is not None:
+            sets.append("name = ?"); vals.append(name)
+        if monthly_target is not None:
+            sets.append("monthly_target = ?"); vals.append(monthly_target)
+        if notes is not None:
+            sets.append("notes = ?"); vals.append(notes)
+        if password_hash is not None:
+            sets.append("password_hash = ?"); vals.append(password_hash)
+        if not sets:
+            return
+        vals.append(client_id)
+        self.conn.execute(
+            f"UPDATE clients SET {', '.join(sets)} WHERE id = ?",
+            vals
+        )
+        self.conn.commit()
+
+    def delete_client(self, client_id):
+        self.conn.execute("DELETE FROM clients WHERE id = ?", (client_id,))
+        self.conn.commit()
+
+    def get_client(self, client_id):
+        row = self.conn.execute(
+            "SELECT * FROM clients WHERE id = ?", (client_id,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["emails"] = [r["email"] for r in self.conn.execute(
+            "SELECT email FROM client_emails WHERE client_id = ? ORDER BY is_primary DESC, email",
+            (client_id,)
+        ).fetchall()]
+        d["primary_email"] = next(iter(
+            (r["email"] for r in self.conn.execute(
+                "SELECT email FROM client_emails WHERE client_id = ? AND is_primary = 1 LIMIT 1",
+                (client_id,)
+            ).fetchall())
+        ), (d["emails"][0] if d["emails"] else None))
+        d["brand_ids"] = [r["brand_id"] for r in self.conn.execute(
+            "SELECT brand_id FROM client_brands WHERE client_id = ?",
+            (client_id,)
+        ).fetchall()]
+        return d
+
+    def get_client_by_email(self, email):
+        """Look up the client by ANY of their associated emails (one
+        client may have many; all share the same password)."""
+        row = self.conn.execute(
+            """SELECT c.* FROM clients c
+               JOIN client_emails ce ON ce.client_id = c.id
+               WHERE LOWER(ce.email) = LOWER(?)
+               LIMIT 1""",
+            (email,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_clients(self):
+        rows = self.conn.execute(
+            """SELECT c.*,
+                      (SELECT COUNT(*) FROM client_emails WHERE client_id = c.id) AS email_count,
+                      (SELECT COUNT(*) FROM client_brands WHERE client_id = c.id) AS brand_count
+               FROM clients c
+               ORDER BY c.name COLLATE NOCASE"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_client_emails(self, client_id, emails):
+        """Replace the client's email set. `emails` is a list of strings;
+        the first one is flagged is_primary."""
+        self.conn.execute("DELETE FROM client_emails WHERE client_id = ?", (client_id,))
+        for i, e in enumerate(emails or []):
+            e = (e or "").strip().lower()
+            if not e:
+                continue
+            self.conn.execute(
+                "INSERT OR IGNORE INTO client_emails (client_id, email, is_primary) VALUES (?, ?, ?)",
+                (client_id, e, 1 if i == 0 else 0)
+            )
+        self.conn.commit()
+
+    def set_client_brands(self, client_id, brand_ids):
+        """Replace the client's brand associations. `brand_ids` is a list
+        of brand IDs."""
+        self.conn.execute("DELETE FROM client_brands WHERE client_id = ?", (client_id,))
+        for bid in (brand_ids or []):
+            try:
+                bid_int = int(bid)
+            except (TypeError, ValueError):
+                continue
+            self.conn.execute(
+                "INSERT OR IGNORE INTO client_brands (client_id, brand_id) VALUES (?, ?)",
+                (client_id, bid_int)
+            )
+        self.conn.commit()
+
+    def touch_client_last_login(self, client_id):
+        self.conn.execute(
+            "UPDATE clients SET last_login_at = datetime('now') WHERE id = ?",
+            (client_id,)
+        )
+        self.conn.commit()
+
+    def client_brand_ids(self, client_id):
+        """List of brand_ids a client can see. Used for row-level access
+        control across every /portal/* query."""
+        return [r["brand_id"] for r in self.conn.execute(
+            "SELECT brand_id FROM client_brands WHERE client_id = ?",
+            (client_id,)
+        ).fetchall()]
+
+    # --- Report lifecycle helpers ---
+
+    def move_comment_to_report(self, comment_id, source, report_month,
+                                actor_email=None):
+        """Flip a comment's status to 'report' and stamp the month.
+        Returns the previous status (for the audit row) or None if the
+        row wasn't found / wasn't eligible.
+
+        Source: "comment" or "search_comment". Only rows currently in
+        'deployed' or 'paid' status are eligible.
+        """
+        if not report_month or not comment_id:
+            return None
+        table = "comments" if source == "comment" else "search_comments"
+        row = self.conn.execute(
+            f"SELECT status, report_month FROM {table} WHERE id = ?",
+            (comment_id,)
+        ).fetchone()
+        if not row:
+            return None
+        old_status = row["status"]
+        if old_status not in ("deployed", "paid"):
+            return None
+        self.conn.execute(
+            f"""UPDATE {table}
+                SET status = 'report',
+                    prev_status = ?,
+                    report_month = ?,
+                    report_added_at = datetime('now')
+                WHERE id = ?""",
+            (old_status, report_month, comment_id)
+        )
+        self.conn.commit()
+        self._log_report_audit(
+            comment_id=comment_id, source=source, action="added",
+            report_month=report_month, prev_month=row["report_month"],
+            actor_email=actor_email,
+        )
+        return old_status
+
+    def undo_report(self, comment_id, source, actor_email=None):
+        """Reverse a 'report' status, restoring prev_status (or 'paid'
+        as a safe fallback). Returns the new status or None on failure.
+        """
+        table = "comments" if source == "comment" else "search_comments"
+        row = self.conn.execute(
+            f"SELECT status, prev_status, report_month FROM {table} WHERE id = ?",
+            (comment_id,)
+        ).fetchone()
+        if not row or row["status"] != "report":
+            return None
+        restore_to = row["prev_status"] if row["prev_status"] in ("deployed", "paid") else "paid"
+        self.conn.execute(
+            f"""UPDATE {table}
+                SET status = ?, prev_status = NULL,
+                    report_month = NULL, report_added_at = NULL
+                WHERE id = ?""",
+            (restore_to, comment_id)
+        )
+        self.conn.commit()
+        self._log_report_audit(
+            comment_id=comment_id, source=source, action="removed",
+            report_month=None, prev_month=row["report_month"],
+            actor_email=actor_email,
+        )
+        return restore_to
+
+    def _log_report_audit(self, *, comment_id, source, action,
+                           report_month, prev_month, actor_email):
+        try:
+            self.conn.execute(
+                """INSERT INTO report_audit
+                   (comment_id, source, action, report_month, prev_month, actor_email)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (comment_id, source, action, report_month, prev_month, actor_email)
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"[report_audit] insert failed: {e}", flush=True)
+
+    def bulk_move_to_report(self, *, ids, report_month, actor_email=None):
+        """`ids` is a list of {id, source} dicts. Each row that's
+        eligible (status in deployed/paid) is flipped. Returns counts
+        {updated, skipped}.
+        """
+        if not ids or not report_month:
+            return {"updated": 0, "skipped": 0}
+        updated = 0
+        skipped = 0
+        for entry in ids:
+            try:
+                cid = int(entry.get("id"))
+            except (TypeError, ValueError, AttributeError):
+                skipped += 1; continue
+            src = entry.get("source") or "comment"
+            if self.move_comment_to_report(cid, src, report_month, actor_email) is not None:
+                updated += 1
+            else:
+                skipped += 1
+        return {"updated": updated, "skipped": skipped}
+
+    def get_report_months_for_client(self, client_id):
+        """Distinct report_month values for a client's comments, with
+        per-month counts. Used by the portal dashboard.
+        """
+        brand_ids = self.client_brand_ids(client_id)
+        if not brand_ids:
+            return []
+        ph = ",".join("?" * len(brand_ids))
+        q1 = f"""SELECT report_month AS month,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN status = 'report' THEN 1 ELSE 0 END) AS live,
+                        SUM(CASE WHEN status = 'removed' THEN 1 ELSE 0 END) AS removed
+                 FROM comments
+                 WHERE brand_id IN ({ph})
+                   AND report_month IS NOT NULL
+                   AND status IN ('report', 'removed')
+                 GROUP BY report_month"""
+        q2 = f"""SELECT report_month AS month,
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN status = 'report' THEN 1 ELSE 0 END) AS live,
+                        SUM(CASE WHEN status = 'removed' THEN 1 ELSE 0 END) AS removed
+                 FROM search_comments
+                 WHERE brand_id IN ({ph})
+                   AND report_month IS NOT NULL
+                   AND status IN ('report', 'removed')
+                 GROUP BY report_month"""
+        agg = {}
+        for q in (q1, q2):
+            for r in self.conn.execute(q, brand_ids).fetchall():
+                m = r["month"]
+                if not m:
+                    continue
+                bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
+                bucket["total"] += r["total"] or 0
+                bucket["live"] += r["live"] or 0
+                bucket["removed"] += r["removed"] or 0
+        return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
+
+    def get_comments_for_client_month(self, client_id, month):
+        """All comments for a client + month (both tables, merged + sorted
+        by deployed_at desc). Each row has the columns the portal needs.
+        """
+        brand_ids = self.client_brand_ids(client_id)
+        if not brand_ids:
+            return []
+        ph = ",".join("?" * len(brand_ids))
+        params = list(brand_ids) + [month]
+        q1 = f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                        c.reddit_comment_url, c.posted_at, c.deployed_at,
+                        c.report_month, c.report_added_at,
+                        c.created_at, c.is_reply, c.comment_type,
+                        'comment' AS source,
+                        s.name AS subreddit_name, b.name AS brand_name
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
+                 WHERE c.brand_id IN ({ph})
+                   AND c.report_month = ?
+                   AND c.status IN ('report', 'removed')"""
+        q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
+                        sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
+                        sc.report_month, sc.report_added_at,
+                        sc.created_at, sc.is_reply, sc.comment_type,
+                        'search_comment' AS source,
+                        sp.subreddit AS subreddit_name, b.name AS brand_name
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
+                 WHERE sc.brand_id IN ({ph})
+                   AND sc.report_month = ?
+                   AND sc.status IN ('report', 'removed')"""
+        rows = []
+        rows.extend(dict(r) for r in self.conn.execute(q1, params).fetchall())
+        rows.extend(dict(r) for r in self.conn.execute(q2, params).fetchall())
+        rows.sort(key=lambda r: (r.get("posted_at") or r.get("deployed_at") or ""), reverse=True)
+        return rows
 
     def get_deployed_comment_urls(self, subreddit_id):
         """Get deployed comments with their Reddit URLs for live checking."""

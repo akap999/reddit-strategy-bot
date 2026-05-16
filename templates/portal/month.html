@@ -1,0 +1,145 @@
+{% extends "portal/_layout.html" %}
+{% block title %}{{ month }} report{% endblock %}
+
+{% block content %}
+{% set live = rows | selectattr('status', 'equalto', 'report') | list | length %}
+{% set removed = rows | selectattr('status', 'equalto', 'removed') | list | length %}
+{% set total = rows | length %}
+
+<div class="mb-6 flex items-start justify-between flex-wrap gap-4">
+  <div>
+    <a href="/portal/dashboard{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="text-sm text-slate-500 hover:text-slate-900">← Dashboard</a>
+    <h1 class="text-2xl font-semibold text-slate-900 mt-1">{{ month }} report</h1>
+    <p class="mt-1 text-sm text-slate-500">{{ client.name }}</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <button id="live-check-btn" onclick="runLiveCheck()" class="btn-ghost">
+      🔄 Run live-check
+    </button>
+    <a href="/portal/month/{{ month }}/export.csv{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="btn-primary">
+      ⬇ Export CSV
+    </a>
+  </div>
+</div>
+
+<!-- KPI strip -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+  <div class="stat-card" style="padding: 16px;">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Delivered</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ live }}</div>
+  </div>
+  <div class="stat-card" style="padding: 16px;">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Removed</div>
+    <div class="text-2xl font-semibold mt-1 text-amber-600" style="font-variant-numeric: tabular-nums;">{{ removed }}</div>
+  </div>
+  <div class="stat-card" style="padding: 16px;">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Total</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ total }}</div>
+  </div>
+  {% if client.monthly_target %}
+  <div class="stat-card" style="padding: 16px;">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Target</div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;">{{ live }}<span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Live check progress (hidden until button clicked) -->
+<div id="live-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
+  <span class="font-medium">Live-check running…</span>
+  <span id="live-check-progress"></span>
+</div>
+
+<!-- Comments table -->
+<div class="surface border-soft rounded-xl overflow-hidden">
+  <table class="report-table">
+    <thead>
+      <tr>
+        <th>Subreddit</th>
+        <th>Published</th>
+        <th>Comment</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      {% set published = r.posted_at or r.deployed_at or '' %}
+      {% set short_date = published[:10] if published else '' %}
+      {% set body = (r.body or '') %}
+      <tr>
+        <td data-label="Subreddit">
+          {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
+          {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
+        </td>
+        <td data-label="Published" style="color: #475569;">
+          {% if short_date %}
+            {{ short_date[5:7] }}/{{ short_date[8:10] }}/{{ short_date[:4] }}
+          {% else %}—{% endif %}
+        </td>
+        <td data-label="Comment" style="max-width: 460px;">
+          {% if r.reddit_comment_url %}
+          <a href="{{ r.reddit_comment_url }}" target="_blank" rel="noopener" class="text-teal-700 hover:text-teal-900 underline-offset-2 hover:underline text-xs font-medium block mb-1">View on Reddit ↗</a>
+          {% endif %}
+          <div class="text-sm text-slate-700" style="line-height: 1.4;">{{ body[:240] }}{% if body|length > 240 %}…{% endif %}</div>
+        </td>
+        <td data-label="Status">
+          {% if r.status == 'report' %}
+            <span class="chip chip-live">Live</span>
+          {% else %}
+            <span class="chip chip-removed">Removed</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-center text-slate-400 py-12">No comments in this report yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ASCID = {{ client.id if is_admin_view else 'null' }};
+const ASQS = ASCID ? ('?as=' + ASCID) : '';
+
+async function runLiveCheck() {
+  const btn = document.getElementById('live-check-btn');
+  const status = document.getElementById('live-check-status');
+  const progress = document.getElementById('live-check-progress');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  status.classList.remove('hidden');
+  progress.textContent = '';
+  let taskId;
+  try {
+    const r = await fetch('/portal/month/{{ month }}/check-live' + ASQS, { method: 'POST' });
+    const j = await r.json();
+    taskId = j.task_id;
+    if (!taskId) throw new Error('no task_id');
+  } catch (e) {
+    progress.textContent = ' Failed to start: ' + (e.message || e);
+    btn.disabled = false; btn.textContent = '🔄 Run live-check';
+    return;
+  }
+  const poll = setInterval(async () => {
+    try {
+      const t = await (await fetch('/api/tasks/' + taskId + ASQS)).json();
+      if (t.status === 'complete' || t.status === 'error') {
+        clearInterval(poll);
+        if (t.status === 'complete') {
+          progress.textContent = ' done — reloading...';
+          setTimeout(() => window.location.reload(), 800);
+        } else {
+          progress.textContent = ' failed: ' + (t.error || 'unknown error');
+          btn.disabled = false; btn.textContent = '🔄 Run live-check';
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }, 2000);
+}
+</script>
+{% endblock %}

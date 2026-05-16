@@ -1,0 +1,50 @@
+{% extends "portal/_layout.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+  <h1 class="text-2xl font-semibold text-slate-900">Reports overview</h1>
+  <p class="mt-1 text-sm text-slate-500">Your monthly Reddit content deliverables.</p>
+</div>
+
+{% if not months %}
+<div class="stat-card text-center py-16">
+  <div class="mx-auto mb-4" style="width: 64px; height: 64px; border-radius: 12px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px;">📊</div>
+  <h2 class="text-lg font-semibold mb-2">No reports yet</h2>
+  <p class="text-sm text-slate-500 max-w-md mx-auto">When your account manager finalises this month's deliverables, you'll see a card here. Check back soon.</p>
+</div>
+{% else %}
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+  {% for m in months %}
+  {% set pct = ((m.live or 0) * 100 // (client.monthly_target or 1)) if client.monthly_target else 0 %}
+  <a href="/portal/month/{{ m.month }}{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="stat-card hover:shadow-sm transition group">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">{{ m.month[5:] }}/{{ m.month[:4] }}</div>
+        <div class="text-2xl font-semibold mt-1">{{ m.month | format_month_long if false else m.month }}</div>
+      </div>
+      <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
+    </div>
+    <div class="flex items-baseline gap-2 mb-3">
+      <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
+      <span class="text-sm text-slate-500">/ {{ m.total }} delivered</span>
+      {% if client.monthly_target %}
+      <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+      {% endif %}
+    </div>
+    {% if client.monthly_target %}
+    <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+      <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
+    </div>
+    {% endif %}
+    <div class="flex items-center gap-3 mt-3 text-xs">
+      <span class="chip chip-live">{{ m.live }} live</span>
+      {% if m.removed %}
+      <span class="chip chip-removed">{{ m.removed }} removed</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

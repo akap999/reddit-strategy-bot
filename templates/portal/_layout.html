@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
+<title>{% block title %}Reports{% endblock %} · Client Portal</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --accent: #0d9488;          /* teal-600 — calm, neutral, agency-grade */
+    --accent-dark: #0f766e;     /* teal-700 */
+    --accent-soft: #ccfbf1;     /* teal-100 */
+    --bg: #f8fafc;              /* slate-50 */
+    --surface: #ffffff;
+    --border: #e2e8f0;          /* slate-200 */
+    --text: #0f172a;            /* slate-900 */
+    --text-muted: #64748b;      /* slate-500 */
+  }
+  html, body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
+  .surface { background: var(--surface); }
+  .accent { color: var(--accent); }
+  .border-soft { border: 1px solid var(--border); }
+  table.report-table { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; }
+  table.report-table th { text-align: left; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); padding: 10px 12px; border-bottom: 1px solid var(--border); background: #fafbfc; }
+  table.report-table td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: top; }
+  table.report-table tbody tr:hover { background: #f8fafc; }
+  table.report-table tbody tr:last-child td { border-bottom: 0; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .chip-live      { background: #ecfdf5; color: #047857; }
+  .chip-removed   { background: #fef3c7; color: #92400e; }
+  .chip-brand     { background: #eff6ff; color: #1d4ed8; }
+  .chip-sub       { background: #f1f5f9; color: #475569; }
+  .btn-primary    { background: var(--accent); color: white; padding: 10px 16px; border-radius: 8px; font-weight: 500; font-size: 14px; transition: background 0.15s; }
+  .btn-primary:hover { background: var(--accent-dark); }
+  .btn-ghost      { background: transparent; color: var(--text); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px; font-weight: 500; font-size: 14px; transition: background 0.15s; }
+  .btn-ghost:hover { background: #f1f5f9; }
+  .stat-card      { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; transition: border-color 0.15s; }
+  .stat-card:hover { border-color: #cbd5e1; }
+  /* Mobile: stack the table as cards */
+  @media (max-width: 720px) {
+    table.report-table thead { display: none; }
+    table.report-table, table.report-table tbody, table.report-table tr, table.report-table td { display: block; width: 100%; }
+    table.report-table tr { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px; padding: 12px; }
+    table.report-table td { border-bottom: none; padding: 4px 0; font-size: 13px; }
+    table.report-table td::before { content: attr(data-label) ": "; font-weight: 600; color: var(--text-muted); margin-right: 4px; }
+  }
+  .skeleton { background: linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 50%, #f1f5f9 100%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 6px; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+</style>
+</head>
+<body class="min-h-screen">
+
+{% if is_admin_view %}
+<div style="background: #fef3c7; border-bottom: 1px solid #fbbf24; padding: 10px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 13px;">
+  <div>
+    <span style="font-weight: 600; color: #78350f;">Admin view</span>
+    <span style="color: #92400e;">· Viewing as <strong>{{ client.name }}</strong></span>
+  </div>
+  <a href="/portal/exit-admin-view" style="color: #78350f; font-weight: 500; text-decoration: underline;">Return to admin</a>
+</div>
+{% endif %}
+
+<header class="surface border-b border-soft">
+  <div class="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
+    <a href="/portal/dashboard{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="flex items-center gap-3">
+      <div style="width: 36px; height: 36px; border-radius: 8px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-weight: 700;">
+        {{ (client.name or '?')[0]|upper }}
+      </div>
+      <div>
+        <div style="font-weight: 600; font-size: 15px; line-height: 1.2;">{{ client.name }}</div>
+        <div style="font-size: 12px; color: var(--text-muted); line-height: 1.2;">Reports portal</div>
+      </div>
+    </a>
+    <nav class="flex items-center gap-2">
+      <a href="/portal/dashboard{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="px-3 py-2 text-sm rounded-md hover:bg-slate-100">Dashboard</a>
+      <a href="/portal/account{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="px-3 py-2 text-sm rounded-md hover:bg-slate-100">Account</a>
+      {% if not is_admin_view %}
+      <a href="/portal/logout" class="px-3 py-2 text-sm text-slate-500 hover:text-slate-900">Sign out</a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-6 py-8">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="max-w-6xl mx-auto px-6 py-6 text-xs text-slate-400">
+  Confidential · {{ client.name }}
+</footer>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

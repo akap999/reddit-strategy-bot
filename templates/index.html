@@ -119,6 +119,7 @@
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
             <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
+            <a onclick="navigate('clients')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="clients" style="color:#0d9488">Clients</a>
         </nav>
         <div class="p-4 text-xs" style="border-top:1px solid #343536;color:#818384">
             CLI: python3 bot.py
@@ -440,7 +441,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients };
     (views[view] || views.dashboard)(app);
 }
 
@@ -7790,6 +7791,7 @@ async function renderLsubsComments(c) {
             </label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
             <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('comment')" title="Bulk-deploy Live Subreddits posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
+            <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesubs')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
         </div>
         <div id="lsubs-cmt-list"></div>
@@ -9099,6 +9101,7 @@ async function renderLsComments(c) {
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
                 <button class="btn btn-primary btn-sm" onclick="lsAutoAssignAll()">Auto Assign All</button>
                 <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaidAll()" title="Mark all currently-filtered DEPLOYED comments as paid">Mark Paid All</button>
+                <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesearch')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
                 <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('search_comment')" title="Bulk-deploy Live Search posts/comments from a Google Sheet of Reddit URLs">Bulk Deploy</button>
                 <button class="btn btn-sm" style="background:#2a3d1a;color:#cef79e" onclick="showBackfillPostedAtModal()" title="Fetch Reddit's actual posted timestamp (created_utc) for deployed comments that don't have one yet">Backfill posted dates</button>
                 <label class="flex items-center gap-1 text-xs" style="color:#818384;cursor:pointer"><input type="checkbox" id="ls-cg-select-all" onchange="lsToggleAllPostChecks(this.checked)"> Select All</label>
@@ -9852,6 +9855,301 @@ function _backfillPostedRenderResults(results) {
         </div>`;
     }).join('');
     el.innerHTML = rows || '<div class="text-gray-500" style="padding:4px">No rows yet…</div>';
+}
+
+
+// =========================================================================
+// Clients view + Reporting lifecycle (admin side)
+// =========================================================================
+
+let _clientsCache = [];
+let _allBrandsForClients = [];
+
+async function renderClients(c) {
+    c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    try {
+        const [clients, brands] = await Promise.all([
+            api('/api/clients'),
+            api('/api/brands/all'),
+        ]);
+        _clientsCache = Array.isArray(clients) ? clients : [];
+        _allBrandsForClients = Array.isArray(brands) ? brands : [];
+    } catch (e) {
+        c.innerHTML = `<p class="text-sm text-red-400">Failed to load: ${e.message || e}</p>`;
+        return;
+    }
+    c.innerHTML = `
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <h2 class="text-xl font-bold" style="color:#0d9488">Clients</h2>
+                <p class="text-xs text-gray-400 mt-1">Manage agency clients, their associated brands, and access to the reporting portal.</p>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="showClientAddModal()">+ Add Client</button>
+        </div>
+        <table>
+            <thead><tr>
+                <th>Name</th>
+                <th>Emails</th>
+                <th>Brands</th>
+                <th>Target / mo</th>
+                <th>Last login</th>
+                <th>Actions</th>
+            </tr></thead>
+            <tbody>${(_clientsCache || []).map(_renderClientRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No clients yet — click "Add Client" to create your first one.</td></tr>'}</tbody>
+        </table>
+    `;
+}
+
+function _renderClientRow(c) {
+    const last = c.last_login_at ? c.last_login_at.replace('T', ' ').slice(0, 16) : '—';
+    return `<tr>
+        <td><span class="font-bold">${c.name}</span></td>
+        <td>${c.email_count || 0}</td>
+        <td>${c.brand_count || 0}</td>
+        <td>${c.monthly_target || '—'}</td>
+        <td class="text-xs text-gray-400">${last}</td>
+        <td>
+            <div class="flex gap-1 flex-wrap">
+                <a class="btn btn-sm" style="background:#0d9488;color:white" href="/portal/dashboard?as=${c.id}" target="_blank" title="Open this client's portal in admin view">Open dashboard →</a>
+                <button class="btn btn-sm btn-secondary" onclick="showClientEditModal(${c.id})">Edit</button>
+                <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="deleteClient(${c.id})">Delete</button>
+            </div>
+        </td>
+    </tr>`;
+}
+
+function _clientBrandPicker(selectedIds) {
+    const sel = new Set((selectedIds || []).map(Number));
+    return _allBrandsForClients.map(b => {
+        const checked = sel.has(b.id) ? 'checked' : '';
+        const subLabel = b.subreddit_name ? ` <span class="text-xs text-gray-500">(r/${b.subreddit_name})</span>` : '';
+        return `<label class="block py-1 text-sm cursor-pointer hover:bg-gray-700 px-2 rounded">
+            <input type="checkbox" name="brand_id" value="${b.id}" ${checked} class="mr-2"> ${b.name}${subLabel}
+        </label>`;
+    }).join('');
+}
+
+function showClientAddModal() {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Add Client</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Client name</label><input id="cli-name" placeholder="Acme Holdings"></div>
+            <div><label class="text-xs text-gray-400">Emails (one per line)</label><textarea id="cli-emails" rows="3" placeholder="ops@acme.com&#10;reports@acme.com"></textarea></div>
+            <div><label class="text-xs text-gray-400">Password</label><input id="cli-password" type="text" placeholder="Generate or type a password to share with the client"></div>
+            <div><label class="text-xs text-gray-400">Monthly target (optional)</label><input id="cli-target" type="number" placeholder="100"></div>
+            <div>
+                <label class="text-xs text-gray-400">Brands (check all that this client owns)</label>
+                <div style="max-height:200px;overflow:auto;border:1px solid #343536;border-radius:6px;padding:4px;background:#1a1a1b">
+                    ${_clientBrandPicker([])}
+                </div>
+            </div>
+            <div><label class="text-xs text-gray-400">Notes (admin-only)</label><textarea id="cli-notes" rows="2"></textarea></div>
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary btn-sm" onclick="submitClientAdd()">Create</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitClientAdd() {
+    const body = {
+        name: (document.getElementById('cli-name').value || '').trim(),
+        password: (document.getElementById('cli-password').value || '').trim(),
+        emails: (document.getElementById('cli-emails').value || '').split(/\n+/).map(s => s.trim()).filter(Boolean),
+        monthly_target: parseInt(document.getElementById('cli-target').value) || null,
+        notes: (document.getElementById('cli-notes').value || '').trim(),
+        brand_ids: Array.from(document.querySelectorAll('input[name="brand_id"]:checked')).map(x => parseInt(x.value)),
+    };
+    if (!body.name || !body.password || body.emails.length === 0) {
+        toast('Name, password, and at least one email are required', 'error');
+        return;
+    }
+    try {
+        await api('/api/clients', { method: 'POST', body });
+        toast('Client created', 'success');
+        closeModal();
+        renderClients(document.getElementById('app'));
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function showClientEditModal(cid) {
+    let c;
+    try { c = await api(`/api/clients/${cid}`); }
+    catch (e) { toast('Failed to load client', 'error'); return; }
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Edit Client: ${c.name}</h3>
+        <div class="space-y-3">
+            <div><label class="text-xs text-gray-400">Client name</label><input id="cli-name" value="${c.name || ''}"></div>
+            <div><label class="text-xs text-gray-400">Emails (one per line; first is primary)</label><textarea id="cli-emails" rows="3">${(c.emails || []).join('\n')}</textarea></div>
+            <div><label class="text-xs text-gray-400">New password (leave blank to keep current)</label><input id="cli-password" type="text" placeholder=""></div>
+            <div><label class="text-xs text-gray-400">Monthly target</label><input id="cli-target" type="number" value="${c.monthly_target || ''}"></div>
+            <div>
+                <label class="text-xs text-gray-400">Brands</label>
+                <div style="max-height:200px;overflow:auto;border:1px solid #343536;border-radius:6px;padding:4px;background:#1a1a1b">
+                    ${_clientBrandPicker(c.brand_ids || [])}
+                </div>
+            </div>
+            <div><label class="text-xs text-gray-400">Notes</label><textarea id="cli-notes" rows="2">${c.notes || ''}</textarea></div>
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary btn-sm" onclick="submitClientEdit(${cid})">Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitClientEdit(cid) {
+    const body = {
+        name: (document.getElementById('cli-name').value || '').trim(),
+        emails: (document.getElementById('cli-emails').value || '').split(/\n+/).map(s => s.trim()).filter(Boolean),
+        monthly_target: parseInt(document.getElementById('cli-target').value) || null,
+        notes: (document.getElementById('cli-notes').value || '').trim(),
+        brand_ids: Array.from(document.querySelectorAll('input[name="brand_id"]:checked')).map(x => parseInt(x.value)),
+    };
+    const newpw = (document.getElementById('cli-password').value || '').trim();
+    if (newpw) body.password = newpw;
+    try {
+        await api(`/api/clients/${cid}`, { method: 'PUT', body });
+        toast('Client updated', 'success');
+        closeModal();
+        renderClients(document.getElementById('app'));
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function deleteClient(cid) {
+    if (!confirm('Delete this client? Their emails + brand associations + report audit go too. Comments themselves are NOT deleted.')) return;
+    try {
+        await api(`/api/clients/${cid}`, { method: 'DELETE' });
+        toast('Client deleted', 'success');
+        renderClients(document.getElementById('app'));
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+
+// --- "Send to Report" + "Mark Reported All" flow ---
+
+function _monthOptionsHtml(selectedMonth) {
+    // Generate the last 6 + next 1 months as YYYY-MM, plus a free-text fallback.
+    const opts = [];
+    const now = new Date();
+    for (let i = -6; i <= 1; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+        const m = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+        opts.push(m);
+    }
+    const sel = selectedMonth || (now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0'));
+    return opts.map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
+}
+
+function showSendToReportModal(cid, source) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Send to Monthly Report</h3>
+        <p class="text-xs text-gray-400 mb-3">Pick the report month this comment should count toward. The comment will move from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>.</p>
+        <label class="text-xs text-gray-400">Month</label>
+        <select id="rep-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')">Send</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitSendToReport(cid, source) {
+    const month = document.getElementById('rep-month').value;
+    if (!month) { toast('Pick a month', 'error'); return; }
+    try {
+        await api(`/api/comments/${cid}/to-report`, { method: 'POST', body: { report_month: month, source } });
+        toast(`Sent to ${month}`, 'success');
+        closeModal();
+        // Refresh whichever view is active.
+        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        }
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function undoReport(cid, source) {
+    if (!confirm('Remove this comment from the monthly report? Its status will revert to the previous step (paid or deployed).')) return;
+    try {
+        await api(`/api/comments/${cid}/undo-report`, { method: 'POST', body: { source } });
+        toast('Removed from report', 'success');
+        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        }
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
+// "Mark Reported All" — bulk action mirrored on Mark Paid All.
+// Currently applied from the Live Search Comments header — pushes
+// the current filter's deployed/paid rows to report state.
+function showMarkReportedAllModal(scope) {
+    // scope: 'livesearch' (uses ls-cf-* filters) or 'livesubs' (uses lsubs-cmt-* filters)
+    const filterContext = scope === 'livesubs' ? {
+        brand_id: document.getElementById('lsubs-cmt-brand')?.value || null,
+        status: document.getElementById('lsubs-cmt-status')?.value || null,
+        source: 'comment',
+    } : {
+        brand_id: null,  // Live Search uses brand_name as filter; we let backend grab all candidates and filter status
+        status: document.getElementById('ls-cf-status')?.value || null,
+        source: 'search_comment',
+    };
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Mark Reported All</h3>
+        <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen month's report.</p>
+        <label class="text-xs text-gray-400">Month</label>
+        <select id="rep-month" class="w-full mb-2">${_monthOptionsHtml()}</select>
+        <label class="text-xs text-gray-400">Status filter (only deployed/paid eligible)</label>
+        <select id="rep-status" class="w-full mb-2">
+            <option value="">All deployed/paid</option>
+            <option value="deployed" ${filterContext.status === 'deployed' ? 'selected' : ''}>Only deployed</option>
+            <option value="paid" ${filterContext.status === 'paid' ? 'selected' : ''}>Only paid</option>
+        </select>
+        <div class="flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')">Run</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>
+    `);
+}
+
+async function submitMarkReportedAll(scope) {
+    const month = document.getElementById('rep-month').value;
+    const status = document.getElementById('rep-status').value || null;
+    if (!month) { toast('Pick a month', 'error'); return; }
+    const body = { report_month: month };
+    if (status) body.status = status;
+    if (scope === 'livesubs') {
+        const bid = document.getElementById('lsubs-cmt-brand')?.value;
+        if (bid) body.brand_id = bid;
+        body.source = 'comment';
+    } else if (scope === 'livesearch') {
+        body.source = 'search_comment';
+    }
+    try {
+        const res = await api('/api/comments/bulk-to-report-filtered', { method: 'POST', body });
+        const updated = (res && res.updated) || 0;
+        const skipped = (res && res.skipped) || 0;
+        toast(`Reported ${updated} comment(s) to ${month}${skipped ? ` · ${skipped} skipped (not eligible)` : ''}`, 'success');
+        closeModal();
+        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        }
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
 }
 
 

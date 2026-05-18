@@ -72,19 +72,32 @@ def balance_posts_by_subreddit(posts, limit, subreddits):
 
 
 class RedditSearchBot:
-    def __init__(self, retry_attempts=2, retry_delay=1, reddit_base=None):
-        """Initialize the Reddit bot with multiple API endpoints."""
+    def __init__(self, retry_attempts=3, retry_delay=2, reddit_base=None,
+                 script_user_agent=None):
+        """Initialize the Reddit bot with multiple API endpoints.
+
+        `script_user_agent` (optional) — pass through the project's
+        script-style UA (e.g. `REDDIT_USER_AGENT` from config). Reddit
+        treats well-formed script UAs more gently than browser-mimicking
+        UAs, so the default is a script-style string.
+
+        `retry_attempts` / `retry_delay` defaults were bumped because
+        the proxy now sometimes returns an HTML challenge / 403 / 5xx
+        on the first try and recovers on retry.
+        """
         self.apis = {
             "reddit": reddit_base or "https://www.reddit.com",
             "pullpush": "https://api.pullpush.io/reddit/search/submission",
             "arctic": "https://arctic-shift.photon-reddit.com/api/posts/search",
         }
+        # Remember whether a proxy is in use — drives the
+        # old.reddit.com fallback in _make_request.
+        self.using_proxy = bool(reddit_base)
+        ua = script_user_agent or os.environ.get("REDDIT_USER_AGENT") \
+            or "python:reddit-strategy:v1 (search bot)"
         self.headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
+            "User-Agent": ua,
+            "Accept": "application/json",
         }
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
@@ -96,25 +109,88 @@ class RedditSearchBot:
     # ------------------------------------------------------------------
 
     def _make_request(self, url, params, timeout=30):
-        """GET request with exponential backoff on rate limits (HTTP 429)."""
+        """GET request that mirrors `app.py:_reddit_get` resilience:
+          - Retries on 429 / 403 / 500 / 502 / 503 / 504 with
+            exponential backoff.
+          - Detects when the response body starts with '<' (Reddit
+            served an HTML interstitial / login wall instead of JSON,
+            usually a bot-challenge or proxy worker hiccup) and
+            retries.
+          - After retries are exhausted, if the proxy was used AND
+            the last response is still HTML, falls back to
+            `https://old.reddit.com<path>` (which serves JSON to
+            cloud egress more reliably than www.reddit.com).
+        Returns the final Response object. Raises only on connection
+        errors that never resolved within `retry_attempts`.
+        """
         last_error = None
+        last_response = None
         for attempt in range(self.retry_attempts):
             try:
                 response = requests.get(
                     url, params=params, headers=self.headers, timeout=timeout
                 )
-                if response.status_code == 429:
-                    wait = self.retry_delay * (2 ** attempt)
-                    print(f"\n    ⏳ Rate limited. Retrying in {wait}s...", end=" ", flush=True)
-                    time.sleep(wait)
-                    continue
+                # Transient HTTP errors — backoff + retry.
+                if response.status_code in (429, 403, 500, 502, 503, 504):
+                    if attempt < self.retry_attempts - 1:
+                        wait = self.retry_delay * (2 ** attempt)
+                        print(f"\n    ⏳ Reddit returned {response.status_code}. Retrying in {wait}s...", end=" ", flush=True)
+                        time.sleep(wait)
+                        last_response = response
+                        continue
+                # HTML where we expected JSON — almost always a
+                # proxy-passed bot-challenge page. Retry; on final
+                # attempt fall through to the old.reddit.com fallback
+                # below.
+                if response.status_code == 200 and response.text.lstrip()[:1] == "<":
+                    if attempt < self.retry_attempts - 1:
+                        wait = self.retry_delay * (2 ** attempt)
+                        print(f"\n    ⚠ Got HTML instead of JSON (Content-Type: {response.headers.get('Content-Type','')}). Retrying in {wait}s...", end=" ", flush=True)
+                        time.sleep(wait)
+                        last_response = response
+                        continue
                 response.raise_for_status()
                 return response
             except requests.exceptions.RequestException as e:
                 last_error = e
                 if attempt < self.retry_attempts - 1:
                     time.sleep(self.retry_delay * (2 ** attempt))
-        raise last_error
+                    continue
+                # No more retries — try the old.reddit.com fallback
+                # below if the request was through the proxy.
+                break
+
+        # Fallback: if we were going through the proxy and the proxy
+        # kept returning HTML (or we exhausted connection errors),
+        # try old.reddit.com directly. Cloud egress generally still
+        # gets JSON from old.reddit.com even when www.reddit.com is
+        # serving challenge pages.
+        if self.using_proxy:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                path = parsed.path  # e.g. /r/sub/search.json
+                fallback_url = f"https://old.reddit.com{path}"
+                print(f"\n    🔁 Falling back to old.reddit.com{path}...", end=" ", flush=True)
+                fb_resp = requests.get(
+                    fallback_url, params=params, headers=self.headers, timeout=timeout
+                )
+                if fb_resp.status_code == 200 and fb_resp.text.lstrip()[:1] != "<":
+                    return fb_resp
+                print(f"(fallback status={fb_resp.status_code}, html={fb_resp.text.lstrip()[:1] == '<'})", end=" ", flush=True)
+                # Even if fallback also returned HTML/error, surface
+                # the response so the diagnostic block in
+                # _search_reddit_native can log details.
+                if last_response is None:
+                    last_response = fb_resp
+            except Exception as fb_err:
+                print(f"\n    ❌ old.reddit.com fallback error: {fb_err}", flush=True)
+
+        if last_response is not None:
+            return last_response
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"_make_request: no response for {url}")
 
     def _parse_post(self, p):
         """Normalise a raw post dict (Reddit native, Pullpush, or Arctic) into a
@@ -174,11 +250,41 @@ class RedditSearchBot:
                 params["after"] = after
 
             response = self._make_request(url, params)
-            data = response.json()
+            # Guard against the silent-zero-results failure mode: if
+            # the body isn't JSON (HTML challenge, empty body), log
+            # the response shape so future failures are diagnosable
+            # from stdout instead of vanishing into "0 results".
+            try:
+                data = response.json()
+            except Exception as json_err:
+                ct = response.headers.get("Content-Type", "?")
+                preview = (response.text or "")[:200].replace("\n", " ")
+                print(
+                    f"\n    ❌ Reddit search JSON decode failed "
+                    f"(status={response.status_code}, ct={ct}): {json_err} | "
+                    f"body[:200]={preview!r}",
+                    flush=True,
+                )
+                break
             posts = data.get("data", {}).get("children", [])
             after = data.get("data", {}).get("after")
 
             if not posts:
+                # First-page empty is the user-visible silent-zero
+                # path — log enough context to triage (status,
+                # Content-Type, body preview, and whether `after`
+                # was set so we know if Reddit just paginated us off
+                # the end on a deep query vs. truly returned nothing).
+                if page == 1:
+                    ct = response.headers.get("Content-Type", "?")
+                    preview = (response.text or "")[:200].replace("\n", " ")
+                    print(
+                        f"\n    ⚠ Reddit search returned 0 results on page 1 "
+                        f"(status={response.status_code}, ct={ct}, after={after!r}) "
+                        f"url={url} q={params.get('q')!r} sub={subreddit_path or '(global)'} | "
+                        f"body[:200]={preview!r}",
+                        flush=True,
+                    )
                 break
 
             new_count = 0

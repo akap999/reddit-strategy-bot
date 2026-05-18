@@ -4342,7 +4342,14 @@ def api_search_reddit():
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-        bot = RedditSearchBot(reddit_base=proxy.rstrip("/") if proxy else None)
+        # Pass the project's script-style UA so Reddit treats the
+        # search bot identically to every other Reddit call in the
+        # app — _reddit_get uses the same UA. Browser-mimicking UAs
+        # (Chrome) trigger HTML challenge pages much more often.
+        bot = RedditSearchBot(
+            reddit_base=proxy.rstrip("/") if proxy else None,
+            script_user_agent=REDDIT_USER_AGENT,
+        )
         task_db = Database(DB_PATH)
         task_db.connect()
         try:

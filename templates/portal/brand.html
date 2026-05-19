@@ -4,10 +4,20 @@
 {% block content %}
 {% set qs = ('?as=' + client.id|string) if is_admin_view else '' %}
 {% set qs_amp = ('&as=' + client.id|string) if is_admin_view else '' %}
-<div class="mb-6">
-  <a href="/portal/dashboard{{ qs }}" class="text-sm text-slate-500 hover:text-slate-900">← Dashboard</a>
-  <h1 class="text-2xl font-semibold text-slate-900 mt-1">{{ brand.name }}</h1>
-  <p class="mt-1 text-sm text-slate-500">Monthly reports for this brand.</p>
+<div class="mb-6 flex items-start justify-between flex-wrap gap-4">
+  <div>
+    <a href="/portal/dashboard{{ qs }}" class="text-sm text-slate-500 hover:text-slate-900">← Dashboard</a>
+    <h1 class="text-2xl font-semibold text-slate-900 mt-1">{{ brand.name }}</h1>
+    <p class="mt-1 text-sm text-slate-500">Monthly reports for this brand.</p>
+  </div>
+  <button id="brand-check-btn" type="button" onclick="runBrandCheckLive()" class="btn-ghost">
+    🔄 Update status for {{ brand.name }}
+  </button>
+</div>
+
+<div id="brand-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
+  <span class="font-medium">Refreshing {{ brand.name }} status…</span>
+  <span id="brand-check-progress"></span>
 </div>
 
 {% if not months %}
@@ -71,4 +81,61 @@
   {% endfor %}
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ASCID = {{ client.id if is_admin_view else 'null' }};
+const BRAND_ID = {{ brand.id }};
+
+async function runBrandCheckLive() {
+  const btn = document.getElementById('brand-check-btn');
+  const status = document.getElementById('brand-check-status');
+  const progress = document.getElementById('brand-check-progress');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  status.classList.remove('hidden');
+  progress.textContent = '';
+  let taskId;
+  try {
+    const qs = ASCID ? ('?as=' + ASCID) : '';
+    const r = await fetch(`/portal/brand/${BRAND_ID}/check-live` + qs, { method: 'POST' });
+    const j = await r.json();
+    taskId = j.task_id;
+    if (!taskId) throw new Error('no task_id');
+  } catch (e) {
+    progress.textContent = ' Failed to start: ' + (e.message || e);
+    btn.disabled = false; btn.textContent = `🔄 Update status for {{ brand.name }}`;
+    return;
+  }
+  const polledQs = ASCID ? ('?as=' + ASCID) : '';
+  const poll = setInterval(async () => {
+    try {
+      const t = await (await fetch('/api/tasks/' + taskId + polledQs)).json();
+      if (t && t.progress && t.status === 'running') {
+        const p = t.progress;
+        const pct = p.total ? Math.floor((p.checked / p.total) * 100) : 0;
+        const parts = [`${p.checked || 0} of ${p.total || 0}`];
+        if (p.live) parts.push(`<span style="color:#0d9488">${p.live} live</span>`);
+        if (p.dead) parts.push(`<span style="color:#b45309">${p.dead} removed</span>`);
+        if (p.restored) parts.push(`<span style="color:#0d9488">${p.restored} restored</span>`);
+        if (p.errors) parts.push(`<span style="color:#b91c1c">${p.errors} errors</span>`);
+        progress.innerHTML = ` · ${parts.join(' · ')}` + (p.total ? ` (${pct}%)` : '');
+      }
+      if (t.status === 'complete' || t.status === 'error') {
+        clearInterval(poll);
+        if (t.status === 'complete') {
+          progress.textContent = ' done — reloading…';
+          setTimeout(() => window.location.reload(), 800);
+        } else {
+          progress.textContent = ' failed: ' + (t.error || 'unknown error');
+          btn.disabled = false; btn.textContent = `🔄 Update status for {{ brand.name }}`;
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }, 1500);
+}
+</script>
 {% endblock %}

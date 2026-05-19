@@ -7306,34 +7306,55 @@ def portal_month_export(month):
     return resp
 
 
+def _build_check_live_items(rows, brand_filter=None):
+    """Map reported-comment rows into the shape `_check_live_batch`
+    expects. Optional `brand_filter` (case-insensitive name) narrows
+    to a single brand — used when the live-check is scoped from a
+    brand context."""
+    items = []
+    bf = (brand_filter or "").strip().lower() or None
+    for r in rows:
+        if bf and (r.get("brand_name") or "").strip().lower() != bf:
+            continue
+        items.append({
+            "id": r["id"],
+            "source": r.get("source", "comment"),
+            "reddit_comment_url": r.get("reddit_comment_url"),
+            "status": r.get("status"),
+            "account_id": r.get("account_id"),
+            "brand_name": r.get("brand_name"),
+            "subreddit": r.get("subreddit_name"),
+        })
+    return items
+
+
 @app.route('/portal/month/<month>/check-live', methods=['POST'])
 @client_required
 def portal_month_check_live(month):
     if not _valid_report_month(month):
         return abort(404)
     cid, _ = _acting_client_id()
+    # Optional brand scope. When the user arrived at the month page
+    # via a brand card, the URL carries ?brand=<name>; passing it
+    # back here scopes the live-check to that brand's reports for
+    # the month so we don't recheck every other brand's deliverables.
+    brand_filter = (request.args.get('brand') or '').strip() or None
+    if not brand_filter:
+        try:
+            body = request.get_json(silent=True) or {}
+            brand_filter = (body.get('brand') or '').strip() or None
+        except Exception:
+            brand_filter = None
 
     def task(_task_id=None):
         bg = Database(DB_PATH)
         bg.connect(); bg.initialize()
         try:
             rows = bg.get_comments_for_client_month(cid, month)
-            # Include ALL reported comments — even ones without a
-            # Reddit URL. The batch will mark URL-less reported
-            # comments as removed so the HQ Mention's derived_status
-            # correctly reflects 'not live'.
-            items = [
-                {"id": r["id"], "source": r.get("source", "comment"),
-                 "reddit_comment_url": r.get("reddit_comment_url"),
-                 "status": r.get("status"),
-                 "account_id": r.get("account_id"),
-                 "brand_name": r.get("brand_name"),
-                 "subreddit": r.get("subreddit_name")}
-                for r in rows
-            ]
+            items = _build_check_live_items(rows, brand_filter)
             return _check_live_batch(
                 items, bg,
-                log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month}",
+                log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month} brand={brand_filter or '*'}",
                 task_id=_task_id,
             )
         finally:
@@ -7341,6 +7362,86 @@ def portal_month_check_live(month):
             except Exception: pass
 
     tid = start_task('portal-check-live', task, pass_task_id=True)
+    return jsonify({"task_id": tid})
+
+
+@app.route('/portal/brand/<int:bid>/check-live', methods=['POST'])
+@client_required
+def portal_brand_check_live(bid):
+    """Run live-check on every reported comment that resolves to
+    this brand across ALL months — scoped to the active client.
+    Used by the brand-overview page so the admin can refresh just
+    one brand without recomputing every other brand's status."""
+    cid, _ = _acting_client_id()
+    db = get_db()
+    try:
+        # Authorization: client must have this brand on their
+        # client_brands row.
+        if bid not in set(db.client_brand_ids(cid)):
+            return abort(404)
+        brand_row = db.conn.execute(
+            "SELECT name FROM brands WHERE id = ?", (bid,)
+        ).fetchone()
+        brand_name = brand_row["name"] if brand_row else None
+    finally:
+        db.close()
+    if not brand_name:
+        return abort(404)
+
+    def task(_task_id=None):
+        bg = Database(DB_PATH)
+        bg.connect(); bg.initialize()
+        try:
+            # Iterate every month the client has reports in, then
+            # filter each month's rows to this brand. Reuses the
+            # same per-month query so we get the same brand-
+            # resolution chain — including the fallback to parent
+            # post brand for unbranded comments.
+            month_list = bg.get_report_months_for_client(cid)
+            items = []
+            for m in month_list:
+                rows = bg.get_comments_for_client_month(cid, m["month"])
+                items.extend(_build_check_live_items(rows, brand_name))
+            return _check_live_batch(
+                items, bg,
+                log_prefix=f"PORTAL-CHECK-LIVE c={cid} brand={brand_name}",
+                task_id=_task_id,
+            )
+        finally:
+            try: bg.close()
+            except Exception: pass
+
+    tid = start_task('portal-check-live-brand', task, pass_task_id=True)
+    return jsonify({"task_id": tid})
+
+
+@app.route('/portal/check-live-all', methods=['POST'])
+@client_required
+def portal_check_live_all():
+    """Run live-check across every reported comment for the client
+    (all brands, all months). The dashboard's global 'Update status'
+    button calls this."""
+    cid, _ = _acting_client_id()
+
+    def task(_task_id=None):
+        bg = Database(DB_PATH)
+        bg.connect(); bg.initialize()
+        try:
+            month_list = bg.get_report_months_for_client(cid)
+            items = []
+            for m in month_list:
+                rows = bg.get_comments_for_client_month(cid, m["month"])
+                items.extend(_build_check_live_items(rows))
+            return _check_live_batch(
+                items, bg,
+                log_prefix=f"PORTAL-CHECK-LIVE-ALL c={cid}",
+                task_id=_task_id,
+            )
+        finally:
+            try: bg.close()
+            except Exception: pass
+
+    tid = start_task('portal-check-live-all', task, pass_task_id=True)
     return jsonify({"task_id": tid})
 
 

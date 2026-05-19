@@ -3727,22 +3727,41 @@ class Database:
             post["comments"].sort(
                 key=lambda r: (r.get("posted_at") or r.get("deployed_at") or "")
             )
-        # Derived HQ Mentions status for each post:
-        #   live    — post.status != 'removed' AND no reported comment
-        #             under this post has status='removed'.
-        #   removed — post.status == 'removed' OR any reported comment
-        #             under this post has status='removed'.
-        # Reported = the comment was selected into a monthly report
-        # (status in 'report' or 'removed'-with-report_month — both
-        # are included in `comments` by the parent query).
+        # Derived HQ Mentions status for each post. "Live" means the
+        # whole mention is actually visible on Reddit — that
+        # requires:
+        #   - The post itself isn't removed,
+        #   - Every reported comment under the post has a Reddit
+        #     URL AND is itself in status='report' (not removed).
+        # Any of the following flip it to "removed":
+        #   - posts.status = 'removed'
+        #   - ANY reported comment is status='removed'
+        #   - ANY reported comment has no reddit_comment_url (we
+        #     never actually posted it, so it can't be live)
+        #   - The post has NO reported comments at all — there's
+        #     nothing to verify as live on Reddit.
         for post in posts.values():
             post_status = (post.get("status") or "").lower()
+            cmts = post["comments"]
+            no_comments = not cmts
             any_cmt_removed = any(
                 (c.get("status") or "").lower() == "removed"
-                for c in post["comments"]
+                for c in cmts
+            )
+            any_cmt_no_url = any(
+                (c.get("status") or "").lower() == "report"
+                and not (c.get("reddit_comment_url") or "").strip()
+                for c in cmts
             )
             post["derived_status"] = (
-                "removed" if (post_status == "removed" or any_cmt_removed) else "live"
+                "removed"
+                if (
+                    post_status == "removed"
+                    or any_cmt_removed
+                    or any_cmt_no_url
+                    or no_comments
+                )
+                else "live"
             )
         # Posts sorted newest-first by the actual Reddit publish
         # timestamp where we have it, falling back to deployed_at /

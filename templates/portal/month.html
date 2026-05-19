@@ -385,9 +385,24 @@ async function runLiveCheck() {
   btn.textContent = 'Running…';
   status.classList.remove('hidden');
   progress.textContent = '';
+  // Scope to the active brand filter if one is set — that's how
+  // the user mentally separates 'check this brand' from 'check
+  // everything for this month'. ?brand= param lives on the URL
+  // when the user arrived via a brand card; we also let the in-
+  // page filter override it.
+  let scopeBrand = (document.getElementById('flt-brand')?.value || '').trim();
+  if (!scopeBrand) {
+    try {
+      scopeBrand = new URLSearchParams(window.location.search).get('brand') || '';
+    } catch (_) {}
+  }
+  let url = '/portal/month/{{ month }}/check-live' + ASQS;
+  if (scopeBrand) {
+    url += (ASQS ? '&' : '?') + 'brand=' + encodeURIComponent(scopeBrand);
+  }
   let taskId;
   try {
-    const r = await fetch('/portal/month/{{ month }}/check-live' + ASQS, { method: 'POST' });
+    const r = await fetch(url, { method: 'POST' });
     const j = await r.json();
     taskId = j.task_id;
     if (!taskId) throw new Error('no task_id');

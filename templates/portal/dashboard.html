@@ -7,15 +7,28 @@
     <h1 class="text-2xl font-semibold text-slate-900">Reports overview</h1>
     <p class="mt-1 text-sm text-slate-500">Your monthly Reddit content deliverables.</p>
   </div>
-  <!-- View toggle: By Month (default) | By Brand -->
-  <div class="inline-flex rounded-lg border border-slate-200 bg-white p-0.5" role="tablist" aria-label="Dashboard view">
-    <button id="view-tab-month" type="button" onclick="switchView('month')"
-            class="px-3 py-1.5 text-sm rounded-md font-medium transition"
-            style="background:#0f172a;color:white;" aria-selected="true">By Month</button>
-    <button id="view-tab-brand" type="button" onclick="switchView('brand')"
-            class="px-3 py-1.5 text-sm rounded-md font-medium transition text-slate-600 hover:text-slate-900"
-            aria-selected="false">By Brand</button>
+  <div class="flex items-center gap-2 flex-wrap">
+    <!-- Global live-check: runs across every brand and every month
+         the client has reports in. Brand-scoped checks live on the
+         brand overview page. -->
+    <button id="global-check-btn" type="button" onclick="runGlobalCheckLive()" class="btn-ghost">
+      🔄 Update status for all brands
+    </button>
+    <!-- View toggle: By Month (default) | By Brand -->
+    <div class="inline-flex rounded-lg border border-slate-200 bg-white p-0.5" role="tablist" aria-label="Dashboard view">
+      <button id="view-tab-month" type="button" onclick="switchView('month')"
+              class="px-3 py-1.5 text-sm rounded-md font-medium transition"
+              style="background:#0f172a;color:white;" aria-selected="true">By Month</button>
+      <button id="view-tab-brand" type="button" onclick="switchView('brand')"
+              class="px-3 py-1.5 text-sm rounded-md font-medium transition text-slate-600 hover:text-slate-900"
+              aria-selected="false">By Brand</button>
+    </div>
   </div>
+</div>
+
+<div id="global-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
+  <span class="font-medium">Refreshing status across all brands…</span>
+  <span id="global-check-progress"></span>
 </div>
 
 <!-- ============= By Month view ============= -->
@@ -294,5 +307,56 @@ function renderBrandCards() {
   try { v = localStorage.getItem('portal_dash_view') || 'month'; } catch(_) {}
   switchView(v === 'brand' ? 'brand' : 'month');
 })();
+
+// ----- Global live-check (all brands, all months) -----
+async function runGlobalCheckLive() {
+  const btn = document.getElementById('global-check-btn');
+  const status = document.getElementById('global-check-status');
+  const progress = document.getElementById('global-check-progress');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  status.classList.remove('hidden');
+  progress.textContent = '';
+  let taskId;
+  try {
+    const qs = ASCID ? ('?as=' + ASCID) : '';
+    const r = await fetch('/portal/check-live-all' + qs, { method: 'POST' });
+    const j = await r.json();
+    taskId = j.task_id;
+    if (!taskId) throw new Error('no task_id');
+  } catch (e) {
+    progress.textContent = ' Failed to start: ' + (e.message || e);
+    btn.disabled = false; btn.textContent = '🔄 Update status for all brands';
+    return;
+  }
+  const polledQs = ASCID ? ('?as=' + ASCID) : '';
+  const poll = setInterval(async () => {
+    try {
+      const t = await (await fetch('/api/tasks/' + taskId + polledQs)).json();
+      if (t && t.progress && t.status === 'running') {
+        const p = t.progress;
+        const pct = p.total ? Math.floor((p.checked / p.total) * 100) : 0;
+        const parts = [`${p.checked || 0} of ${p.total || 0}`];
+        if (p.live) parts.push(`<span style="color:#0d9488">${p.live} live</span>`);
+        if (p.dead) parts.push(`<span style="color:#b45309">${p.dead} removed</span>`);
+        if (p.restored) parts.push(`<span style="color:#0d9488">${p.restored} restored</span>`);
+        if (p.errors) parts.push(`<span style="color:#b91c1c">${p.errors} errors</span>`);
+        progress.innerHTML = ` · ${parts.join(' · ')}` + (p.total ? ` (${pct}%)` : '');
+      }
+      if (t.status === 'complete' || t.status === 'error') {
+        clearInterval(poll);
+        if (t.status === 'complete') {
+          progress.textContent = ' done — reloading…';
+          setTimeout(() => window.location.reload(), 800);
+        } else {
+          progress.textContent = ' failed: ' + (t.error || 'unknown error');
+          btn.disabled = false; btn.textContent = '🔄 Update status for all brands';
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }, 1500);
+}
 </script>
 {% endblock %}

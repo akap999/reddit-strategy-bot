@@ -10702,92 +10702,59 @@ async function submitMarkReportedAllPosts() {
 }
 
 async function showReportThisPostModal(postId) {
-    // Cache fast-path (Comments tab populated _lsubsCommentsCache).
-    // Otherwise hit the per-post endpoint — paginated /api/all-comments
-    // would lose the post entirely if its comments fall past offset 200
-    // of the global Live Subs stream.
-    let postComments = (_lsubsCommentsCache || []).filter(c => c.p_id === postId);
+    // Single-comment-per-post report model: the only comment ever
+    // flipped to 'report' is the deployed HQ root (one anchor on
+    // Reddit per post). The modal just asks for a month — no
+    // checkbox list, no per-comment selection.
     let postMeta = null;
-    if (!postComments.length) {
-        try {
-            const tree = await api(`/api/posts/${postId}/comments`);
-            // /api/posts/<pid>/comments returns a tree (top-level array
-            // with nested .replies). Flatten in place so the filters
-            // below see every comment under the post regardless of depth.
-            const flat = [];
-            const walk = (node) => {
-                if (!node) return;
-                flat.push(node);
-                for (const child of (node.replies || [])) walk(child);
-            };
-            for (const root of (Array.isArray(tree) ? tree : [])) walk(root);
-            postComments = flat;
-        } catch (e) {}
-        // Pull a minimal post header (title + subreddit) since the
-        // flat list doesn't carry them.
-        try {
-            postMeta = await api(`/api/posts/${postId}`);
-        } catch (e) {}
-    }
-    const eligible = postComments.filter(c => c.status === 'deployed' || c.status === 'paid');
-    // Note: a post with zero eligible comments is STILL reportable —
-    // the user wants the post itself in 'report' state. The backend
-    // accepts the request and flips post.status; it just won't have
-    // any comments to flip alongside.
-    const postTitle = postMeta?.title || postComments[0]?.post_title || '';
-    const subreddit = postMeta?.subreddit_name || postComments[0]?.subreddit_name || '';
-    // The HQ root anchors the Mention Link on the client dashboard.
-    // We always include it in the report so the dashboard row carries
-    // a valid Mention Link — the user can't uncheck it.
-    const isHqRoot = (c) => c.comment_type === 'hq' && !c.parent_comment_id;
-    const checkboxes = eligible.map((c, idx) => {
-        const required = isHqRoot(c);
-        const cbAttrs = `class="rep-post-cmt" data-cid="${c.id}" checked${required ? ' data-required="1" disabled' : ''}`;
-        return `
-        <label class="flex items-start gap-2 p-2 rounded hover:bg-gray-800" style="cursor:${required ? 'default' : 'pointer'}">
-            <input type="checkbox" ${cbAttrs} style="margin-top:3px">
-            <div class="flex-1 text-xs" style="min-width:0">
-                <div class="flex items-center gap-1 mb-0.5">
-                    <span class="badge badge-${c.status}" style="font-size:9px">${c.status}</span>
-                    ${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : ''}
-                    ${c.comment_type === 'hq' ? '<span class="badge" style="background:#0e2a3d;color:#60a5fa;font-size:9px">HQ</span>' : ''}
-                    ${required ? '<span class="badge" style="background:#0d3d3a;color:#9efbe0;font-size:9px" title="Always included so the Mention Link on the client dashboard points to a reported comment">Mention anchor</span>' : ''}
-                </div>
-                <div class="text-gray-300" style="line-height:1.3">${(c.body || '').substring(0, 140)}${(c.body || '').length > 140 ? '…' : ''}</div>
-            </div>
-        </label>`;
-    }).join('');
-    // The list body changes shape if there are no eligible comments —
-    // the post is still reportable; we just say so plainly.
-    const listBlock = eligible.length ? `
-        <div class="mb-2 flex items-center gap-2">
-            <span class="text-xs text-gray-400">${eligible.length} eligible comment${eligible.length === 1 ? '' : 's'}</span>
-            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => cb.checked = true)">All</button>
-            <button type="button" class="text-xs text-teal-400 hover:text-teal-200 underline-offset-2 hover:underline" onclick="document.querySelectorAll('.rep-post-cmt').forEach(cb => { if (!cb.dataset.required) cb.checked = false; })">None</button>
-        </div>
-        <div style="max-height:280px; overflow-y:auto; border:1px solid #343536; border-radius:6px; padding:4px">
-            ${checkboxes}
+    try { postMeta = await api(`/api/posts/${postId}`); }
+    catch (e) {}
+    // Best-effort HQ-root preview so the admin sees whether one
+    // will actually be reported, or whether the post will be
+    // recorded as Removed because no HQ root is deployed yet.
+    let hqRoot = null;
+    try {
+        const tree = await api(`/api/posts/${postId}/comments`);
+        const flat = [];
+        const walk = (node) => {
+            if (!node) return;
+            flat.push(node);
+            for (const child of (node.replies || [])) walk(child);
+        };
+        for (const root of (Array.isArray(tree) ? tree : [])) walk(root);
+        hqRoot = flat.find(c =>
+            c.comment_type === 'hq'
+            && !c.parent_comment_id
+            && (c.reddit_comment_url || '').trim() !== ''
+            && (c.status === 'deployed' || c.status === 'paid')
+        );
+    } catch (e) {}
+    const postTitle = postMeta?.title || '';
+    const subreddit = postMeta?.subreddit_name || '';
+    const previewBlock = hqRoot ? `
+        <div class="mb-2 p-3 rounded" style="background:#0d3d3a;color:#9efbe0;border:1px solid #1a5a55">
+            <div class="text-xs font-medium mb-1">HQ root will anchor this report</div>
+            <div class="text-xs" style="opacity:0.85">Comment #${hqRoot.id}${hqRoot.account_id ? ` · u/${hqRoot.account_id}` : ''}</div>
+            <div class="text-xs mt-1" style="opacity:0.75">${(hqRoot.body || '').substring(0, 140)}${(hqRoot.body || '').length > 140 ? '…' : ''}</div>
         </div>
     ` : `
-        <div class="mb-2 p-3 rounded" style="background:#0e2a3d;color:#9ec4ff;border:1px solid #1a3d5a">
-            <div class="text-xs font-medium mb-1">No deployed/paid comments to attach.</div>
-            <div class="text-xs" style="opacity:0.85">The post itself will be flipped to <code>report</code> for the chosen month. If you deploy an HQ comment under it later, you can re-run Report to attach it.</div>
+        <div class="mb-2 p-3 rounded" style="background:#3a2a0e;color:#ffd7a3;border:1px solid #5a3f1c">
+            <div class="text-xs font-medium mb-1">No deployed HQ comment yet</div>
+            <div class="text-xs" style="opacity:0.85">The post will be flipped to <code>report</code> but will show as Removed on the client dashboard until an HQ root is deployed. Re-run Report after deploying to attach it.</div>
         </div>
     `;
-    const ctaLabel = eligible.length ? 'Report selected' : 'Report post';
     showModal(`
         <h3 class="text-xl font-bold mb-1">Report this post</h3>
         <p class="text-xs text-gray-400 mb-3">
             <span class="font-bold text-gray-300">${postTitle.substring(0, 90)}</span>
             ${subreddit ? `<span class="ml-1">· r/${subreddit}</span>` : ''}
-            ${eligible.length ? '<br>Pick the comments to include — only the checked ones will appear on the client dashboard.' : ''}
         </p>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-post-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
         <div id="rep-post-brand-section"></div>
-        ${listBlock}
+        ${previewBlock}
         <div class="flex gap-2 mt-4">
-            <button class="btn btn-primary btn-sm" onclick="submitReportThisPost(${postId})">${ctaLabel}</button>
+            <button class="btn btn-primary btn-sm" onclick="submitReportThisPost(${postId})">Report post</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
@@ -10800,12 +10767,13 @@ async function submitReportThisPost(postId) {
     // anchors) ARE still :checked since `disabled` doesn't strip the
     // checked attribute. Backend re-validates and ensures HQ root
     // inclusion as defense-in-depth.
-    const commentIds = Array.from(document.querySelectorAll('.rep-post-cmt:checked'))
-        .map(cb => parseInt(cb.dataset.cid))
-        .filter(Boolean);
+    // No per-comment selection in the new model — the backend
+    // automatically reports only the deployed HQ root (or no comment
+    // if none is deployed). Brand override stays in case the HQ root
+    // is unbranded.
     const brandSel = document.getElementById('rep-post-brand');
     const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;
-    const body = { report_month: month, comment_ids: commentIds };
+    const body = { report_month: month };
     if (brandId) body.brand_id = brandId;
     try {
         const res = await fetch(`/api/posts/${postId}/to-report`, {

@@ -1339,6 +1339,51 @@ class Database:
             self.conn.commit()
             self.meta_set("report_status_repair_v1", "1")
 
+        # One-shot cleanup: the report model is now "1 post = 1 HQ
+        # root comment reported". Earlier flows could flip every
+        # deployed/paid comment under a reported post (including HQ
+        # replies + organics) to status='report' — those are extras
+        # under the new model. For every comment in status='report'
+        # whose parent post is also in status='report', revert it
+        # back to its prev_status UNLESS it's the deployed HQ root.
+        # Idempotent via meta gate.
+        if not self.meta_get("report_extras_cleanup_v1"):
+            extras = self.conn.execute(
+                """SELECT c.id, c.prev_status, c.paid_at
+                     FROM comments c
+                     JOIN posts p ON c.post_id = p.id
+                    WHERE c.status = 'report'
+                      AND p.status = 'report'
+                      AND NOT (
+                          c.comment_type = 'hq'
+                          AND c.parent_comment_id IS NULL
+                          AND TRIM(COALESCE(c.reddit_comment_url, '')) != ''
+                      )"""
+            ).fetchall()
+            reverted = 0
+            for r in extras:
+                # Restore the comment to its previous lifecycle step.
+                # prev_status was preserved when move_comment_to_report
+                # ran; fall back to 'paid' if it's NULL AND paid_at
+                # is set, else 'deployed'.
+                restore = r["prev_status"]
+                if not restore:
+                    restore = "paid" if r["paid_at"] else "deployed"
+                self.conn.execute(
+                    """UPDATE comments
+                          SET status = ?,
+                              prev_status = NULL,
+                              report_month = NULL,
+                              report_added_at = NULL
+                        WHERE id = ?""",
+                    (restore, r["id"])
+                )
+                reverted += 1
+            if reverted:
+                self.conn.commit()
+                print(f"[migrations] report_extras_cleanup_v1: reverted {reverted} non-HQ-root reported comments", flush=True)
+            self.meta_set("report_extras_cleanup_v1", "1")
+
         # Subreddit scrutiny cache (comment removal rate + gate penalty)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS subreddit_scrutiny (
@@ -3233,17 +3278,24 @@ class Database:
     def move_post_to_report(self, post_id, *, report_month,
                              actor_email=None, brand_id_override=None,
                              comment_ids=None):
-        """Flip a post to status='report' and propagate to its comments.
+        """Flip a post to status='report'. Each reported post anchors
+        exactly **one** comment on Reddit — the deployed HQ root (the
+        cluster head that carries the brand mention).
 
-        - If `comment_ids` is supplied, only those (plus any deployed
-          HQ root not already in the list) are flipped to report.
-        - If `comment_ids` is None, every deployed/paid comment under
-          the post is flipped.
+        Behavior:
+          - If a deployed HQ root exists under this post (comment_type=
+            'hq', parent_comment_id IS NULL, reddit_comment_url set,
+            status in deployed/paid), flip that single comment to
+            'report'. Other comments under the post are left alone.
+          - If no deployed HQ root exists, just flip the post —
+            the dashboard's derived_status will mark it 'removed'
+            because Mention Link is empty (= nothing to point at on
+            Reddit).
+          - `comment_ids` is accepted for backwards compatibility but
+            ignored — the report always corresponds to at most the
+            HQ root.
 
         Returns counts: {comments_updated, brand_required, post_flipped}.
-        Idempotent: calling on a post that's already in 'report' state
-        just refreshes report_month + retries comment flips for any
-        deployed/paid stragglers.
         """
         if not report_month or not post_id:
             return {"comments_updated": 0, "brand_required": 0, "post_flipped": False}
@@ -3253,22 +3305,24 @@ class Database:
         ).fetchone()
         if not post_row:
             return {"comments_updated": 0, "brand_required": 0, "post_flipped": False}
-        # Gather candidate comments. Always include the deployed HQ
-        # root so the dashboard's Mention Link resolves.
-        all_cmts = self.conn.execute(
-            """SELECT id, status, comment_type, parent_comment_id, reddit_comment_url
-                 FROM comments WHERE post_id = ?""",
+        # Find the deployed HQ root. There's typically zero or one —
+        # if more than one (unusual: multiple HQ threads under the
+        # same post), pick the earliest-posted so the Mention Link
+        # is stable.
+        hq_row = self.conn.execute(
+            """SELECT id FROM comments
+                WHERE post_id = ?
+                  AND comment_type = 'hq'
+                  AND parent_comment_id IS NULL
+                  AND TRIM(COALESCE(reddit_comment_url, '')) != ''
+                  AND status IN ('deployed', 'paid')
+                ORDER BY COALESCE(posted_at, deployed_at, created_at)
+                LIMIT 1""",
             (post_id,)
-        ).fetchall()
-        eligible = {}  # id → row
-        for c in all_cmts:
-            if c["status"] in ("deployed", "paid"):
-                if comment_ids is None or c["id"] in comment_ids:
-                    eligible[c["id"]] = c
-                # HQ root anchor — always include if deployed.
-                if (c["comment_type"] == "hq" and not c["parent_comment_id"]
-                        and (c["reddit_comment_url"] or '').strip()):
-                    eligible[c["id"]] = c
+        ).fetchone()
+        eligible = {}  # id → marker row
+        if hq_row:
+            eligible[hq_row["id"]] = True
         # Flip each comment via the existing helper (handles brand
         # resolution + audit logging).
         comments_updated = 0

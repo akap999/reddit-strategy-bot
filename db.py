@@ -3429,13 +3429,17 @@ class Database:
         params_c = brand_ids * 3
         params_sc = brand_ids * 2
         # q_hq: one row per (month, post_id). is_removed = 1 iff the
-        # post itself is removed OR any reported comment under it is
-        # removed. We aggregate to per-month counts in Python.
+        # post itself is removed OR any reported comment is removed
+        # OR any reported comment has no Reddit URL (= never actually
+        # posted, can't be live). Mirrors the derived_status rule used
+        # by the month-page chip — keep these two in sync.
         q_hq = f"""
             SELECT c.report_month AS month,
                    c.post_id AS post_id,
                    MAX(CASE WHEN p.status = 'removed' THEN 1
                             WHEN c.status = 'removed' THEN 1
+                            WHEN c.status = 'report'
+                                 AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
                             ELSE 0 END) AS is_removed
               FROM comments c
               JOIN posts p ON c.post_id = p.id
@@ -3540,9 +3544,9 @@ class Database:
             return []
         ph = ",".join("?" * len(brand_ids))
         # HQ Mentions: one row per (resolved_brand, month, post_id)
-        # with an is_removed flag derived from post.status + any
-        # reported comment status. Python collapses to per-(brand,
-        # month) counts below.
+        # with an is_removed flag derived from post.status + comment
+        # status + URL presence (matches derived_status used by the
+        # month-page chip — keep these two in sync).
         q_hq = f"""
             SELECT
               CASE
@@ -3554,6 +3558,8 @@ class Database:
               c.post_id AS post_id,
               MAX(CASE WHEN p.status = 'removed' THEN 1
                        WHEN c.status = 'removed' THEN 1
+                       WHEN c.status = 'report'
+                            AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
                        ELSE 0 END) AS is_removed
             FROM comments c
             JOIN posts p ON c.post_id = p.id

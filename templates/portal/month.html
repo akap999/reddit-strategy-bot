@@ -148,13 +148,18 @@
           {% else %}<span class="text-slate-300">—</span>{% endif %}
         </td>
         <td data-label="Status">
-          {# Hover the chip to see WHY the rule classified the row —
-             helps debug 'why is this live?' on the dashboard. #}
+          {# title= tooltip on the chip (best on desktop). Add
+             ?debug=1 to the URL to render the reason as visible
+             text alongside the chip — handy when the tooltip is
+             unreliable (touch devices, some screen-readers, etc.). #}
           {% set reason = post.derived_status_reason or '' %}
           {% if derived == 'live' %}
             <span class="chip chip-live" title="{{ reason }}">Live</span>
           {% else %}
             <span class="chip chip-removed" title="{{ reason }}">Removed</span>
+          {% endif %}
+          {% if request.args.get('debug') %}
+          <div class="text-[10px] text-slate-400 mt-1" style="max-width:260px; white-space:normal; line-height:1.3">{{ reason }}</div>
           {% endif %}
         </td>
       </tr>

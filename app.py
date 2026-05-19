@@ -1795,9 +1795,16 @@ def api_global_all_comments():
         db.close()
 
 
-def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
+def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
     """Shared live-check logic for a batch of comments.
     Each item must have: id, reddit_comment_url, source ('comment' or 'search_comment').
+
+    `task_id` (optional) — when provided, the function writes
+    incremental progress to the `tasks.progress` column after each
+    item is processed. The portal's polling loop reads this so the
+    'Update status & stats' UI can show 'Processing X of Y…' as
+    work progresses instead of hanging on a single 'Refreshing…'.
+
     Returns dict with checked/live/dead/errors counts and error_details breakdown.
     """
     import time as _time
@@ -1811,6 +1818,25 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
 
     restored = 0
     changes = []
+
+    total = len(deployed)
+
+    def _emit_progress():
+        """Best-effort progress write. Failure is silent — the live-
+        check work itself is more important than the progress UI."""
+        if not task_id:
+            return
+        try:
+            db.update_task_progress(task_id, {
+                "checked": checked, "total": total,
+                "live": live, "dead": dead,
+                "restored": restored, "errors": errors,
+            })
+        except Exception as e:
+            print(f"[{log_prefix}] progress update failed: {e}", flush=True)
+
+    # Initial progress so the UI shows '0 of N' immediately.
+    _emit_progress()
 
     def _mark_dead(item):
         src = item.get("source", "comment")
@@ -1970,6 +1996,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 _mark_dead(item)
                 dead += 1
                 handled_ids.add(item["id"])
+                _emit_progress()
                 continue
             body = (d.get("body") or "").strip().lower()
             author = (d.get("author") or "").strip().lower()
@@ -1999,6 +2026,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                 except Exception as stats_err:
                     print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
             handled_ids.add(item["id"])
+            _emit_progress()
 
         # Post-side piggy-back (posted_at + post-liveness) — once per
         # post instead of once per comment. Same logic as the per-item
@@ -2065,9 +2093,15 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         raw_url = item["reddit_comment_url"]
         src = item.get("source", "comment")
         if not raw_url:
-            print(f"[{log_prefix}] Skipping #{item['id']} ({src}): no URL", flush=True)
-            errors += 1
-            error_details["bad_url"] += 1
+            # A comment without a Reddit URL can't have been posted —
+            # treat it as not-live so the dashboard's derived_status
+            # rule flips its parent HQ Mention to 'removed'. Without
+            # this the row would silently stay in 'report' (= live)
+            # forever even though there's no actual mention on Reddit.
+            print(f"[{log_prefix}] #{item['id']} ({src}): no URL — marking removed", flush=True)
+            _mark_dead(item)
+            dead += 1
+            _emit_progress()
             continue
 
         # Clean URL: strip query params, trailing slash
@@ -2305,6 +2339,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             print(f"[{log_prefix}] #{item['id']} ({src}) error: {e}", flush=True)
             errors += 1
             error_details["exception"] += 1
+        _emit_progress()
         # End-of-iteration pacing. The proxy already handles per-IP
         # rate limiting and _reddit_get retries 429/5xx automatically,
         # so we don't need the full 3s gap between successful fetches.
@@ -2312,6 +2347,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
         # already use 3s/5s).
         _time.sleep(1)
 
+    # Final progress write so the polling UI sees a clean 'N of N'
+    # state right before the task completes.
+    _emit_progress()
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
             "restored": restored, "changes": changes, "error_details": error_details}
 
@@ -7275,11 +7313,15 @@ def portal_month_check_live(month):
         return abort(404)
     cid, _ = _acting_client_id()
 
-    def task():
+    def task(_task_id=None):
         bg = Database(DB_PATH)
         bg.connect(); bg.initialize()
         try:
             rows = bg.get_comments_for_client_month(cid, month)
+            # Include ALL reported comments — even ones without a
+            # Reddit URL. The batch will mark URL-less reported
+            # comments as removed so the HQ Mention's derived_status
+            # correctly reflects 'not live'.
             items = [
                 {"id": r["id"], "source": r.get("source", "comment"),
                  "reddit_comment_url": r.get("reddit_comment_url"),
@@ -7287,14 +7329,18 @@ def portal_month_check_live(month):
                  "account_id": r.get("account_id"),
                  "brand_name": r.get("brand_name"),
                  "subreddit": r.get("subreddit_name")}
-                for r in rows if r.get("reddit_comment_url")
+                for r in rows
             ]
-            return _check_live_batch(items, bg, log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month}")
+            return _check_live_batch(
+                items, bg,
+                log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month}",
+                task_id=_task_id,
+            )
         finally:
             try: bg.close()
             except Exception: pass
 
-    tid = start_task('portal-check-live', task)
+    tid = start_task('portal-check-live', task, pass_task_id=True)
     return jsonify({"task_id": tid})
 
 

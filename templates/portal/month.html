@@ -399,6 +399,19 @@ async function runLiveCheck() {
   const poll = setInterval(async () => {
     try {
       const t = await (await fetch('/api/tasks/' + taskId + ASQS)).json();
+      // Surface incremental progress while the task runs. The backend
+      // writes {checked, total, live, dead, restored, errors} into
+      // tasks.progress after each comment is processed.
+      if (t && t.progress && t.status === 'running') {
+        const p = t.progress;
+        const pct = p.total ? Math.floor((p.checked / p.total) * 100) : 0;
+        const parts = [`${p.checked || 0} of ${p.total || 0}`];
+        if (p.live) parts.push(`<span style="color:#0d9488">${p.live} live</span>`);
+        if (p.dead) parts.push(`<span style="color:#b45309">${p.dead} removed</span>`);
+        if (p.restored) parts.push(`<span style="color:#0d9488">${p.restored} restored</span>`);
+        if (p.errors) parts.push(`<span style="color:#b91c1c">${p.errors} errors</span>`);
+        progress.innerHTML = ` · ${parts.join(' · ')}` + (p.total ? ` (${pct}%)` : '');
+      }
       if (t.status === 'complete' || t.status === 'error') {
         clearInterval(poll);
         if (t.status === 'complete') {
@@ -412,7 +425,7 @@ async function runLiveCheck() {
     } catch (e) {
       console.warn(e);
     }
-  }, 2000);
+  }, 1500);
 }
 </script>
 {% endblock %}

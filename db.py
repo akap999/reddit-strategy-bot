@@ -3527,6 +3527,10 @@ class Database:
              GROUP BY sc.report_month
         """
         agg = {}
+        # Per-post seen set keyed by (month, post_id) so the post-
+        # only query below doesn't double-count a post that already
+        # showed up via its reported comments.
+        seen_posts = set()
         for r in self.conn.execute(q_hq, params_c).fetchall():
             m = r["month"]
             if not m:
@@ -3537,10 +3541,38 @@ class Database:
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
             })
             bucket["hq_total"] += 1
+            seen_posts.add((m, r["post_id"]))
             if r["is_removed"]:
                 bucket["hq_removed"] += 1
             else:
                 bucket["hq_live"] += 1
+        # Post-only reports: posts.status='report' WITHOUT any
+        # reported comments. The new single-action flow lands here
+        # whenever no HQ root is deployed at report time. These are
+        # always 'removed' on the dashboard (no Mention Link anchor).
+        q_hq_post_only = f"""
+            SELECT p.report_month AS month,
+                   p.id AS post_id
+              FROM posts p
+             WHERE p.status = 'report'
+               AND p.report_month IS NOT NULL
+               AND (
+                 p.brand_id IN ({ph})
+                 OR p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))
+               )
+        """
+        for r in self.conn.execute(q_hq_post_only, brand_ids * 2).fetchall():
+            m = r["month"]
+            if not m or (m, r["post_id"]) in seen_posts:
+                continue
+            bucket = agg.setdefault(m, {
+                "month": m,
+                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+            })
+            bucket["hq_total"] += 1
+            bucket["hq_removed"] += 1
+            seen_posts.add((m, r["post_id"]))
         for r in self.conn.execute(q_mentions, params_sc).fetchall():
             m = r["month"]
             if not m:
@@ -3663,6 +3695,9 @@ class Database:
             GROUP BY resolved_brand_id, sc.report_month, sc.status
         """
         cells = {}
+        # Per-(brand, month, post_id) seen set so the post-only
+        # follow-up query below doesn't double-count.
+        seen_posts = set()
         def _cell(bid, month):
             key = (bid, month)
             return cells.setdefault(key, {
@@ -3672,10 +3707,39 @@ class Database:
         for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["hq_total"] += 1
+            seen_posts.add((r["resolved_brand_id"], r["month"], r["post_id"]))
             if r["is_removed"]:
                 slot["hq_removed"] += 1
             else:
                 slot["hq_live"] += 1
+        # Post-only reports — posts.status='report' but no reported
+        # comments under them (no HQ root was deployed at report
+        # time). Always count as Removed because there's no Mention
+        # Link anchor.
+        q_hq_post_only = f"""
+            SELECT
+              CASE
+                WHEN p.brand_id IS NOT NULL THEN p.brand_id
+                ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
+              END AS resolved_brand_id,
+              p.report_month AS month,
+              p.id AS post_id
+            FROM posts p
+            WHERE p.status = 'report'
+              AND p.report_month IS NOT NULL
+              AND (
+                p.brand_id IN ({ph})
+                OR p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))
+              )
+        """
+        for r in self.conn.execute(q_hq_post_only, brand_ids * 2).fetchall():
+            key = (r["resolved_brand_id"], r["month"], r["post_id"])
+            if key in seen_posts:
+                continue
+            slot = _cell(r["resolved_brand_id"], r["month"])
+            slot["hq_total"] += 1
+            slot["hq_removed"] += 1
+            seen_posts.add(key)
         for r in self.conn.execute(q_mentions, brand_ids * 2).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["mentions_total"] += r["cnt"]
@@ -3737,28 +3801,43 @@ class Database:
         flat = self.get_comments_for_client_month(client_id, month)
         # Live Search comments stay flat — they have no Live Subs post.
         search_comments = [r for r in flat if r.get("source") == "search_comment"]
-        # Live Subs comments → group by their parent post id (`p_id`
-        # isn't in the row dict; we need to enrich). The flat query
-        # selected from `comments c JOIN posts p` — fetch the post
-        # rows in one shot.
         live_comments = [r for r in flat if r.get("source") == "comment"]
-        if not live_comments:
-            return {"posts": [], "search_comments": search_comments}
-        # Pull each row's post_id via a single round-trip query so we
-        # don't add a JOIN to the comment select (which would change
-        # the shape get_comments_for_client_month returns).
+        # Map every reported Live Subs comment to its parent post id.
         cmt_ids = [int(c["id"]) for c in live_comments if c.get("id") is not None]
-        if not cmt_ids:
+        cid_to_pid = {}
+        if cmt_ids:
+            ph = ",".join("?" * len(cmt_ids))
+            for r in self.conn.execute(
+                f"SELECT id, post_id FROM comments WHERE id IN ({ph})",
+                cmt_ids
+            ).fetchall():
+                cid_to_pid[r["id"]] = r["post_id"]
+
+        # Also include posts in status='report' for this month that
+        # have NO reported comments — the new single-action report
+        # flow flips just the post (no comments) when no HQ root is
+        # deployed. Those should still appear on the client report
+        # so the admin sees the deliverable, marked Removed.
+        brand_ids = self.client_brand_ids(client_id)
+        post_only_ids = []
+        if brand_ids:
+            bph = ",".join("?" * len(brand_ids))
+            for r in self.conn.execute(
+                f"""SELECT p.id FROM posts p
+                     WHERE p.status = 'report'
+                       AND p.report_month = ?
+                       AND (
+                         p.brand_id IN ({bph})
+                         OR p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({bph}))
+                       )""",
+                [month] + brand_ids + brand_ids
+            ).fetchall():
+                post_only_ids.append(r["id"])
+
+        all_post_ids = sorted(set(cid_to_pid.values()) | set(post_only_ids))
+        if not all_post_ids:
             return {"posts": [], "search_comments": search_comments}
-        ph = ",".join("?" * len(cmt_ids))
-        post_id_rows = self.conn.execute(
-            f"SELECT id, post_id FROM comments WHERE id IN ({ph})",
-            cmt_ids
-        ).fetchall()
-        cid_to_pid = {r["id"]: r["post_id"] for r in post_id_rows}
-        post_ids = sorted(set(cid_to_pid.values()))
-        if not post_ids:
-            return {"posts": [], "search_comments": search_comments}
+        post_ids = all_post_ids
         php = ",".join("?" * len(post_ids))
         post_rows = self.conn.execute(
             f"""SELECT p.id, p.title, p.status, p.posted_at,

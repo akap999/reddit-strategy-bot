@@ -2387,10 +2387,13 @@ function renderPostsFromCache() {
 
 async function showPostDetail(pid) {
     const post = await api(`/api/posts/${pid}`);
+    const isReported = post.status === 'report';
+    const canReport = post.status === 'published' || post.status === 'paid';
     showModal(`
         <h3 class="text-lg font-bold mb-1">${post.title}</h3>
         <div class="flex gap-2 mb-3 flex-wrap">
             <span class="badge badge-${post.status}">${post.status === 'published' ? 'deployed' : post.status}</span>
+            ${post.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0">report ${post.report_month}</span>` : ''}
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
             ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
             <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
@@ -2399,8 +2402,10 @@ async function showPostDetail(pid) {
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
         ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3 break-all">Reddit: ${post.reddit_url}</p>` : ''}
         <p class="text-xs text-gray-500">${post.comment_count} comments</p>
-        <div class="flex gap-2 mt-4">
+        <div class="flex gap-2 mt-4 flex-wrap">
             ${post.reddit_url ? `<a href="${post.reddit_url}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">View on Reddit ↗</a>` : ''}
+            ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
+            ${isReported ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="closeModal(); undoReportThisPost(${post.id})">↺ Undo report</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
         </div>
     `);

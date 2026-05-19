@@ -2027,29 +2027,73 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
                     )
                 except Exception as stats_err:
                     print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
-                # Piggy-back posts.posted_at backfill for Live Subs
-                # comments — the JSON we just parsed includes the
-                # parent post listing at data[0]. Free Reddit-side
-                # publish timestamp for the post; the client portal
-                # renders this as 'Published Date'. NULL-safe + only
-                # writes when the post's posted_at is still NULL
-                # (see set_post_posted_at).
+                # Piggy-back the post-side checks on the comment JSON
+                # we already fetched (data[0] is the post listing).
+                # For Live Subs comments only — search_comments have
+                # no Live Subs post container.
                 if src == "comment":
                     try:
                         post_children = (data[0] or {}).get("data", {}).get("children", [])
-                        if post_children:
+                        post_data = (post_children[0] or {}).get("data", {}) if post_children else {}
+                        # Resolve parent post id once.
+                        pid_row = db.conn.execute(
+                            "SELECT post_id FROM comments WHERE id = ?",
+                            (item["id"],)
+                        ).fetchone()
+                        parent_post_id = pid_row["post_id"] if pid_row else None
+
+                        # 1. posted_at backfill (free Reddit-side
+                        #    publish timestamp for the post — the
+                        #    client portal renders this as Published
+                        #    Date). NULL-safe + only writes when
+                        #    posts.posted_at is still NULL.
+                        if post_data:
                             from bulk_deploy import _utc_seconds_to_iso
-                            cu = (post_children[0] or {}).get("data", {}).get("created_utc")
+                            cu = post_data.get("created_utc")
                             iso = _utc_seconds_to_iso(cu) if cu else None
-                            if iso:
-                                pid_row = db.conn.execute(
-                                    "SELECT post_id FROM comments WHERE id = ?",
-                                    (item["id"],)
-                                ).fetchone()
-                                if pid_row and pid_row["post_id"]:
-                                    db.set_post_posted_at(pid_row["post_id"], iso)
+                            if iso and parent_post_id:
+                                db.set_post_posted_at(parent_post_id, iso)
+
+                        # 2. Post-liveness check. The client portal's
+                        #    "Update status & stats" used to verify
+                        #    comments but never the parent post — so
+                        #    a post mods removed on Reddit kept
+                        #    showing 'Live' on the dashboard. Now we
+                        #    inspect the post listing: empty children,
+                        #    [removed]/[deleted] selftext, or
+                        #    author='[deleted]' all flip the post to
+                        #    status='removed' (preserving prev_status
+                        #    via mark_post_removed). The HQ Mentions
+                        #    derived_status will then read 'removed'
+                        #    on next portal render.
+                        if parent_post_id:
+                            post_is_dead = False
+                            if not post_children:
+                                post_is_dead = True
+                            elif post_data:
+                                stxt = (post_data.get("selftext") or "").strip().lower()
+                                author = (post_data.get("author") or "").strip().lower()
+                                if (post_data.get("removed") is True
+                                        or stxt in ("[removed]", "[deleted]")
+                                        or author in ("[deleted]", "[removed]")):
+                                    post_is_dead = True
+                            cur_post = db.conn.execute(
+                                "SELECT status FROM posts WHERE id = ?",
+                                (parent_post_id,)
+                            ).fetchone()
+                            cur_status = cur_post["status"] if cur_post else None
+                            if post_is_dead and cur_status not in ("removed", None):
+                                # Reuse the existing helper — flips
+                                # status='removed' + saves
+                                # prev_status. Idempotent.
+                                db.conn.execute(
+                                    "UPDATE posts SET status='removed', prev_status=? WHERE id=? AND status != 'removed'",
+                                    (cur_status, parent_post_id),
+                                )
+                                db.conn.commit()
+                                print(f"[{log_prefix}] post #{parent_post_id} marked removed (Reddit shows it gone)", flush=True)
                     except Exception as pp_err:
-                        print(f"[{log_prefix}] #{item['id']} posted_at piggy-back failed: {pp_err}", flush=True)
+                        print(f"[{log_prefix}] #{item['id']} post-side piggy-back failed: {pp_err}", flush=True)
 
         except (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError) as e:
             print(f"[{log_prefix}] #{item['id']} ({src}) {type(e).__name__}: {e}", flush=True)

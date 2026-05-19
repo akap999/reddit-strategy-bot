@@ -6874,16 +6874,20 @@ def portal_brand(brand_id):
         # Reuse the existing aggregate query — already scoped to the
         # client's brands — and filter to this one brand. The aggregate
         # returns a flat (brand, month) grid; collapse to per-month.
+        # Keep the per-pipeline counts so the template can render
+        # Mentions and HQ Mentions separately.
         agg = db.get_report_aggregate_for_client(cid)
+        keys = ("mentions_total", "mentions_live", "mentions_removed",
+                "hq_total", "hq_live", "hq_removed",
+                "total", "live", "removed")
         per_month = {}
         for r in agg:
             if r['brand_id'] != brand_id:
                 continue
             m = r['month']
-            slot = per_month.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
-            slot["total"] += r.get("total") or 0
-            slot["live"] += r.get("live") or 0
-            slot["removed"] += r.get("removed") or 0
+            slot = per_month.setdefault(m, {"month": m, **{k: 0 for k in keys}})
+            for k in keys:
+                slot[k] += r.get(k) or 0
         months = sorted(per_month.values(), key=lambda r: r["month"], reverse=True)
         return render_template(
             'portal/brand.html',

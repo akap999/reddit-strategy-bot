@@ -30,24 +30,43 @@
       </div>
       <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
     </div>
-    <div class="flex items-baseline gap-2 mb-3">
-      <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
-      <span class="text-sm text-slate-500">live / {{ m.total }} total</span>
-      {% if client.monthly_target %}
-      <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+    <!-- Per-pipeline split. Each row only renders if the brand has
+         deliverables in that pipeline this month. -->
+    <div class="space-y-2 mb-3">
+      {% if m.mentions_total %}
+      <div class="flex items-baseline justify-between gap-2">
+        <div class="flex items-baseline gap-2">
+          <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
+          <span class="text-xs text-slate-500">Mentions</span>
+        </div>
+        <div class="flex items-center gap-1 text-[11px]">
+          <span class="chip chip-live">{{ m.mentions_live }} live</span>
+          {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
+        </div>
+      </div>
+      {% endif %}
+      {% if m.hq_total %}
+      <div class="flex items-baseline justify-between gap-2">
+        <div class="flex items-baseline gap-2">
+          <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
+          <span class="text-xs text-slate-500">HQ Mentions</span>
+        </div>
+        <div class="flex items-center gap-1 text-[11px]">
+          <span class="chip chip-live">{{ m.hq_live }} live</span>
+          {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
+        </div>
+      </div>
       {% endif %}
     </div>
     {% if client.monthly_target %}
+    <div class="flex items-center gap-2 text-xs text-slate-500 mb-1">
+      <span>target {{ client.monthly_target }}</span>
+      <span class="ml-auto">{{ m.live }}/{{ client.monthly_target }}</span>
+    </div>
     <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
       <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
     </div>
     {% endif %}
-    <div class="flex items-center gap-3 mt-3 text-xs">
-      <span class="chip chip-live">{{ m.live }} live</span>
-      {% if m.removed %}
-      <span class="chip chip-removed">{{ m.removed }} removed</span>
-      {% endif %}
-    </div>
   </a>
   {% endfor %}
 </div>

@@ -3386,18 +3386,28 @@ class Database:
                 "skipped": skipped}
 
     def get_report_months_for_client(self, client_id):
-        """Distinct report_month values for a client's comments, with
-        per-month counts. Used by the portal dashboard.
+        """Distinct report_month values for a client's deliverables,
+        split per pipeline. Used by the portal dashboard's By Month
+        view.
 
-        Visibility is purely brand-based: a comment is visible to a
-        client iff its `brand_id` is in `client_brands` for that
-        client. For unbranded comments we fall back to the parent
-        post's brand (single-brand posts) or the `post_brands`
-        junction (multi-brand legacy posts).
+        Each row carries Mentions (search_comments) and HQ Mentions
+        (Live Subs posts) counters separately. HQ Mentions are
+        counted at POST level (1 post = 1 HQ Mention regardless of
+        how many of its comments are reported); Mentions are counted
+        at comment level (1 search_comment = 1 Mention).
 
-        This is the natural model — a brand can serve any number of
-        clients, so the same comment shows up on every linked
-        client's dashboard with no per-row plumbing.
+        Returns: [{
+            month: 'YYYY-MM',
+            mentions_total, mentions_live, mentions_removed,
+            hq_total, hq_live, hq_removed,
+            # back-compat aggregates (sum of both pipelines):
+            total, live, removed,
+        }, ...]
+
+        `live` vs `removed` for HQ Mentions follows the derived rule
+        we use elsewhere: a post is removed iff `posts.status =
+        'removed'` OR any of its reported comments has
+        `status = 'removed'`. Otherwise live.
         """
         brand_ids = self.client_brand_ids(client_id)
         if not brand_ids:
@@ -3418,43 +3428,68 @@ class Database:
         )
         params_c = brand_ids * 3
         params_sc = brand_ids * 2
-        q1 = f"""SELECT c.report_month AS month,
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN c.status = 'report' THEN 1 ELSE 0 END) AS live,
-                        SUM(CASE WHEN c.status = 'removed' THEN 1 ELSE 0 END) AS removed
-                 FROM comments c
-                 JOIN posts p ON c.post_id = p.id
-                 WHERE {match_c}
-                   AND c.report_month IS NOT NULL
-                   AND c.status IN ('report', 'removed')
-                 GROUP BY c.report_month"""
-        q2 = f"""SELECT sc.report_month AS month,
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
-                        SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed
-                 FROM search_comments sc
-                 JOIN search_posts sp ON sc.search_post_id = sp.id
-                 WHERE {match_sc}
-                   AND sc.report_month IS NOT NULL
-                   AND sc.status IN ('report', 'removed')
-                 GROUP BY sc.report_month"""
+        # q_hq: one row per (month, post_id). is_removed = 1 iff the
+        # post itself is removed OR any reported comment under it is
+        # removed. We aggregate to per-month counts in Python.
+        q_hq = f"""
+            SELECT c.report_month AS month,
+                   c.post_id AS post_id,
+                   MAX(CASE WHEN p.status = 'removed' THEN 1
+                            WHEN c.status = 'removed' THEN 1
+                            ELSE 0 END) AS is_removed
+              FROM comments c
+              JOIN posts p ON c.post_id = p.id
+             WHERE {match_c}
+               AND c.report_month IS NOT NULL
+               AND c.status IN ('report', 'removed')
+             GROUP BY c.report_month, c.post_id
+        """
+        q_mentions = f"""
+            SELECT sc.report_month AS month,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
+                   SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed
+              FROM search_comments sc
+              JOIN search_posts sp ON sc.search_post_id = sp.id
+             WHERE {match_sc}
+               AND sc.report_month IS NOT NULL
+               AND sc.status IN ('report', 'removed')
+             GROUP BY sc.report_month
+        """
         agg = {}
-        for r in self.conn.execute(q1, params_c).fetchall():
+        for r in self.conn.execute(q_hq, params_c).fetchall():
             m = r["month"]
             if not m:
                 continue
-            bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
-            bucket["total"] += r["total"] or 0
-            bucket["live"] += r["live"] or 0
-            bucket["removed"] += r["removed"] or 0
-        for r in self.conn.execute(q2, params_sc).fetchall():
+            bucket = agg.setdefault(m, {
+                "month": m,
+                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+            })
+            bucket["hq_total"] += 1
+            if r["is_removed"]:
+                bucket["hq_removed"] += 1
+            else:
+                bucket["hq_live"] += 1
+        for r in self.conn.execute(q_mentions, params_sc).fetchall():
             m = r["month"]
             if not m:
                 continue
-            bucket = agg.setdefault(m, {"month": m, "total": 0, "live": 0, "removed": 0})
-            bucket["total"] += r["total"] or 0
-            bucket["live"] += r["live"] or 0
-            bucket["removed"] += r["removed"] or 0
+            bucket = agg.setdefault(m, {
+                "month": m,
+                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+            })
+            bucket["mentions_total"] += r["total"] or 0
+            bucket["mentions_live"] += r["live"] or 0
+            bucket["mentions_removed"] += r["removed"] or 0
+        # Back-compat aggregates so callers that read .total / .live
+        # / .removed (older callsites + the brand overview page) keep
+        # working without churn.
+        for b in agg.values():
+            b["total"] = b["mentions_total"] + b["hq_total"]
+            b["live"] = b["mentions_live"] + b["hq_live"]
+            b["removed"] = b["mentions_removed"] + b["hq_removed"]
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
     def update_live_stats(self, comment_id, source, upvotes, num_replies):
@@ -3482,25 +3517,33 @@ class Database:
             print(f"[live-stats] persist failed cid={comment_id} src={source}: {e}", flush=True)
 
     def get_report_aggregate_for_client(self, client_id):
-        """Flat per-(brand, month, status) aggregate for the client.
-        The portal dashboard renders the "By Brand" tab by slicing
-        this in JS — month/status filters on each brand card just
-        re-aggregate the same rows.
+        """Flat per-(brand, month) aggregate, split per pipeline.
 
-        Returns: [{brand_id, brand_name, month, total, live, removed}, ...]
+        Drives the dashboard's By Brand cards — JS slices these rows
+        by brand + month + status to keep the cards interactive
+        without re-hitting the server.
 
-        Uses the same brand-resolution chain as
-        `get_comments_for_client_month`. Counts a comment under its
-        resolved brand (own → post.brand_id → post_brands single
-        row → search_posts.brand_id).
+        Returns: [{
+            brand_id, brand_name, month,
+            mentions_total, mentions_live, mentions_removed,
+            hq_total, hq_live, hq_removed,
+            total, live, removed,    # back-compat aggregates
+        }, ...]
+
+        Brand resolution chain matches
+        `get_comments_for_client_month`. HQ Mentions are counted at
+        POST level (1 post = 1 HQ Mention regardless of how many of
+        its comments are reported).
         """
         brand_ids = self.client_brand_ids(client_id)
         if not brand_ids:
             return []
         ph = ",".join("?" * len(brand_ids))
-        # The resolved brand for each row, expressed as a CASE so
-        # we can GROUP BY it without re-walking the chain in code.
-        q1 = f"""
+        # HQ Mentions: one row per (resolved_brand, month, post_id)
+        # with an is_removed flag derived from post.status + any
+        # reported comment status. Python collapses to per-(brand,
+        # month) counts below.
+        q_hq = f"""
             SELECT
               CASE
                 WHEN c.brand_id IS NOT NULL THEN c.brand_id
@@ -3508,8 +3551,10 @@ class Database:
                 ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
               END AS resolved_brand_id,
               c.report_month AS month,
-              c.status AS status,
-              COUNT(*) AS cnt
+              c.post_id AS post_id,
+              MAX(CASE WHEN p.status = 'removed' THEN 1
+                       WHEN c.status = 'removed' THEN 1
+                       ELSE 0 END) AS is_removed
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             WHERE c.report_month IS NOT NULL
@@ -3519,9 +3564,9 @@ class Database:
                 OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
                 OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))
               )
-            GROUP BY resolved_brand_id, c.report_month, c.status
+            GROUP BY resolved_brand_id, c.report_month, c.post_id
         """
-        q2 = f"""
+        q_mentions = f"""
             SELECT
               COALESCE(sc.brand_id, sp.brand_id) AS resolved_brand_id,
               sc.report_month AS month,
@@ -3537,25 +3582,27 @@ class Database:
               )
             GROUP BY resolved_brand_id, sc.report_month, sc.status
         """
-        # Cell map keyed on (brand_id, month) — accumulate totals
-        # from both tables and split live/removed per row's status.
         cells = {}
-        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
-            key = (r["resolved_brand_id"], r["month"])
-            slot = cells.setdefault(key, {"total": 0, "live": 0, "removed": 0})
-            slot["total"] += r["cnt"]
+        def _cell(bid, month):
+            key = (bid, month)
+            return cells.setdefault(key, {
+                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+            })
+        for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
+            slot = _cell(r["resolved_brand_id"], r["month"])
+            slot["hq_total"] += 1
+            if r["is_removed"]:
+                slot["hq_removed"] += 1
+            else:
+                slot["hq_live"] += 1
+        for r in self.conn.execute(q_mentions, brand_ids * 2).fetchall():
+            slot = _cell(r["resolved_brand_id"], r["month"])
+            slot["mentions_total"] += r["cnt"]
             if r["status"] == "report":
-                slot["live"] += r["cnt"]
+                slot["mentions_live"] += r["cnt"]
             elif r["status"] == "removed":
-                slot["removed"] += r["cnt"]
-        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
-            key = (r["resolved_brand_id"], r["month"])
-            slot = cells.setdefault(key, {"total": 0, "live": 0, "removed": 0})
-            slot["total"] += r["cnt"]
-            if r["status"] == "report":
-                slot["live"] += r["cnt"]
-            elif r["status"] == "removed":
-                slot["removed"] += r["cnt"]
+                slot["mentions_removed"] += r["cnt"]
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
         names = {}
@@ -3568,14 +3615,23 @@ class Database:
                 names[r["id"]] = r["name"]
         out = []
         for (bid, month), slot in cells.items():
-            out.append({
+            row = {
                 "brand_id": bid,
                 "brand_name": names.get(bid) or "(unbranded)",
                 "month": month,
-                "total": slot["total"],
-                "live": slot["live"],
-                "removed": slot["removed"],
-            })
+                "mentions_total": slot["mentions_total"],
+                "mentions_live": slot["mentions_live"],
+                "mentions_removed": slot["mentions_removed"],
+                "hq_total": slot["hq_total"],
+                "hq_live": slot["hq_live"],
+                "hq_removed": slot["hq_removed"],
+            }
+            # Back-compat aggregates so JS that still reads .total /
+            # .live / .removed (or any older caller) keeps working.
+            row["total"] = row["mentions_total"] + row["hq_total"]
+            row["live"] = row["mentions_live"] + row["hq_live"]
+            row["removed"] = row["mentions_removed"] + row["hq_removed"]
+            out.append(row)
         # Stable sort: brand name asc, month desc.
         out.sort(key=lambda r: (r["brand_name"].lower(), -1 * int((r["month"] or "0000-00").replace("-", ""))))
         return out

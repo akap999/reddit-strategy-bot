@@ -38,24 +38,43 @@
         </div>
         <div class="text-slate-400 group-hover:text-teal-600 transition">→</div>
       </div>
-      <div class="flex items-baseline gap-2 mb-3">
-        <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.live }}</span>
-        <span class="text-sm text-slate-500">live / {{ m.total }} total</span>
-        {% if client.monthly_target %}
-        <span class="text-xs text-slate-400 ml-auto">target: {{ client.monthly_target }}</span>
+      <!-- Two-pipeline split. Show each pipeline only if it has
+           any deliverables in this month. -->
+      <div class="space-y-2 mb-3">
+        {% if m.mentions_total %}
+        <div class="flex items-baseline justify-between gap-2">
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
+            <span class="text-xs text-slate-500">Mentions</span>
+          </div>
+          <div class="flex items-center gap-1 text-[11px]">
+            <span class="chip chip-live">{{ m.mentions_live }} live</span>
+            {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+        {% if m.hq_total %}
+        <div class="flex items-baseline justify-between gap-2">
+          <div class="flex items-baseline gap-2">
+            <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
+            <span class="text-xs text-slate-500">HQ Mentions</span>
+          </div>
+          <div class="flex items-center gap-1 text-[11px]">
+            <span class="chip chip-live">{{ m.hq_live }} live</span>
+            {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
+          </div>
+        </div>
         {% endif %}
       </div>
       {% if client.monthly_target %}
+      <div class="flex items-center gap-2 text-xs text-slate-500 mb-1">
+        <span>target {{ client.monthly_target }}</span>
+        <span class="ml-auto">{{ m.live }}/{{ client.monthly_target }}</span>
+      </div>
       <div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
         <div class="h-full bg-teal-500 transition-all" style="width: {{ pct if pct <= 100 else 100 }}%"></div>
       </div>
       {% endif %}
-      <div class="flex items-center gap-3 mt-3 text-xs">
-        <span class="chip chip-live">{{ m.live }} live</span>
-        {% if m.removed %}
-        <span class="chip chip-removed">{{ m.removed }} removed</span>
-        {% endif %}
-      </div>
     </a>
     {% endfor %}
   </div>
@@ -127,20 +146,35 @@ function _allMonths(rows) {
 }
 
 function _aggregate(rows, monthFilter, statusFilter) {
-  let total = 0, live = 0, removed = 0;
+  // Per-pipeline aggregates, applied after the month/status filters.
+  let mTotal = 0, mLive = 0, mRemoved = 0;
+  let hqTotal = 0, hqLive = 0, hqRemoved = 0;
   for (const r of rows) {
     if (monthFilter && r.month !== monthFilter) continue;
-    total += r.total || 0;
-    live += r.live || 0;
-    removed += r.removed || 0;
+    mTotal += r.mentions_total || 0;
+    mLive += r.mentions_live || 0;
+    mRemoved += r.mentions_removed || 0;
+    hqTotal += r.hq_total || 0;
+    hqLive += r.hq_live || 0;
+    hqRemoved += r.hq_removed || 0;
   }
-  // Status filter: which number to highlight as the headline count.
-  if (statusFilter === 'live') return { headline: live, total, live, removed, label: 'live' };
-  if (statusFilter === 'removed') return { headline: removed, total, live, removed, label: 'removed' };
-  // 'all' (default) shows the grand total of reports — the user
-  // wants the picker to actually flip the headline number when
-  // they move off 'Live' or 'Removed'.
-  return { headline: total, total, live, removed, label: 'total' };
+  // Status filter narrows the "headline" number for each pipeline:
+  // when 'live' / 'removed' is picked, the headline shifts to that
+  // partition; 'all' shows the pipeline's total.
+  const pickHeadline = (live, removed, total) =>
+    statusFilter === 'live'    ? live :
+    statusFilter === 'removed' ? removed :
+                                 total;
+  return {
+    mentions: {
+      total: mTotal, live: mLive, removed: mRemoved,
+      headline: pickHeadline(mLive, mRemoved, mTotal),
+    },
+    hq: {
+      total: hqTotal, live: hqLive, removed: hqRemoved,
+      headline: pickHeadline(hqLive, hqRemoved, hqTotal),
+    },
+  };
 }
 
 function _brandHref(brandId, month, status) {
@@ -167,6 +201,35 @@ function _brandHref(brandId, month, status) {
   // No month → brand overview page.
   const qs = ASCID ? ('?as=' + ASCID) : '';
   return `/portal/brand/${brandId}${qs}`;
+}
+
+function _statusLabel(status) {
+  if (status === 'live') return 'live';
+  if (status === 'removed') return 'removed';
+  return 'total';
+}
+
+// Render the two per-pipeline rows inside a brand card.
+// Hidden entirely when the pipeline has zero deliverables under the
+// active filters — clients with only one pipeline see one row.
+function _renderCardBody(agg, status) {
+  const label = _statusLabel(status);
+  const row = (kind, p) => p.total === 0 ? '' : `
+    <div data-pipe="${kind}" class="flex items-baseline justify-between gap-2 py-1">
+      <div class="flex items-baseline gap-2">
+        <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;" data-headline>${p.headline}</span>
+        <span class="text-xs text-slate-500" data-kind>${kind === 'mentions' ? 'Mentions' : 'HQ Mentions'}</span>
+        <span class="text-[11px] text-slate-400" data-label>${label}</span>
+      </div>
+      <div class="flex items-center gap-1 text-[11px]" data-chips>
+        <span class="chip chip-live"><span data-live>${p.live}</span> live</span>
+        ${p.removed ? `<span class="chip chip-removed"><span data-removed>${p.removed}</span> removed</span>` : ''}
+      </div>
+    </div>
+  `;
+  return row('mentions', agg.mentions) + row('hq', agg.hq) || `
+    <div class="py-3 text-xs text-slate-400">No deliverables in this filter.</div>
+  `;
 }
 
 function renderBrandCards() {
@@ -200,15 +263,7 @@ function renderBrandCards() {
             </select>
           </div>
         </div>
-        <div class="flex items-baseline gap-2 mb-2">
-          <span class="text-3xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;" data-card-headline>${agg0.headline}</span>
-          <span class="text-sm text-slate-500" data-card-label>${agg0.label}</span>
-        </div>
-        <div class="flex items-center gap-2 text-xs">
-          <span class="chip chip-live"><span data-card-live>${agg0.live}</span> live</span>
-          <span class="chip chip-removed"><span data-card-removed>${agg0.removed}</span> removed</span>
-          <span class="text-slate-400 ml-auto" data-card-total>${agg0.total} total</span>
-        </div>
+        <div data-card-body class="divide-y divide-slate-100">${_renderCardBody(agg0, 'all')}</div>
       </div>
     `;
   }).join('');
@@ -222,11 +277,8 @@ function renderBrandCards() {
       const month = monthSel.value;
       const status = statusSel.value;
       const a = _aggregate(b.rows, month, status);
-      card.querySelector('[data-card-headline]').textContent = a.headline;
-      card.querySelector('[data-card-label]').textContent = a.label;
-      card.querySelector('[data-card-live]').textContent = a.live;
-      card.querySelector('[data-card-removed]').textContent = a.removed;
-      card.querySelector('[data-card-total]').textContent = a.total + ' total';
+      const body = card.querySelector('[data-card-body]');
+      if (body) body.innerHTML = _renderCardBody(a, status);
       // Update the "View →" link to honor the filters.
       const link = card.querySelector('a.text-xs');
       if (link) link.setAttribute('href', _brandHref(b.brand_id, month, status));

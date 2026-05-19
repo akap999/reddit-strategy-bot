@@ -3768,20 +3768,28 @@ class Database:
                 reason = f"comment #{no_url_cmt.get('id')} status='report' but reddit_comment_url is empty"
             elif not cmts:
                 reason = "no reported comments under this post"
+            # Always render a per-comment listing in the reason so
+            # the admin can see EXACTLY which comments are driving
+            # the verdict. Format: "post.status=X | cmt #ID status=Y
+            # url=<set|empty>".
+            def _cmt_brief(c):
+                cid = c.get("id")
+                cst = (c.get("status") or "").lower()
+                u = (c.get("reddit_comment_url") or "").strip()
+                return f"#{cid} {cst}{' (no URL)' if not u else ''}"
+            cmts_str = (", ".join(_cmt_brief(c) for c in cmts)
+                        if cmts else "(none)")
             if reason:
                 post["derived_status"] = "removed"
-                post["derived_status_reason"] = reason
+                post["derived_status_reason"] = (
+                    f"{reason} | post.status={post_status!r} | "
+                    f"comments: {cmts_str}"
+                )
             else:
                 post["derived_status"] = "live"
-                # Helpful tooltip for the live case too — shows the
-                # exact comment count + sample id so the admin can
-                # cross-check against Reddit.
-                sample = cmts[0] if cmts else None
                 post["derived_status_reason"] = (
-                    f"post.status={post_status!r}; "
-                    f"{len(cmts)} reported comment(s), "
-                    f"all status='report' with URL"
-                    + (f" (sample cid={sample.get('id')})" if sample else "")
+                    f"all clear | post.status={post_status!r} | "
+                    f"{len(cmts)} reported comment(s): {cmts_str}"
                 )
         # Posts sorted newest-first by the actual Reddit publish
         # timestamp where we have it, falling back to deployed_at /

@@ -3733,42 +3733,56 @@ class Database:
             post["comments"].sort(
                 key=lambda r: (r.get("posted_at") or r.get("deployed_at") or "")
             )
-        # Derived HQ Mentions status for each post. "Live" means the
-        # whole mention is actually visible on Reddit — that
-        # requires:
-        #   - The post itself isn't removed,
-        #   - Every reported comment under the post has a Reddit
-        #     URL AND is itself in status='report' (not removed).
-        # Any of the following flip it to "removed":
+        # Derived HQ Mentions status for each post. "Live" requires:
+        #   - posts.status != 'removed'
+        #   - every reported comment is status='report' (NOT
+        #     'removed') AND has a Reddit URL.
+        # Any of the following flips it to "removed":
         #   - posts.status = 'removed'
         #   - ANY reported comment is status='removed'
-        #   - ANY reported comment has no reddit_comment_url (we
-        #     never actually posted it, so it can't be live)
-        #   - The post has NO reported comments at all — there's
-        #     nothing to verify as live on Reddit.
+        #   - ANY reported comment is status='report' but has no
+        #     reddit_comment_url (never actually posted to Reddit)
+        #   - The post has no reported comments at all.
+        # We also stash `derived_status_reason` so the UI can show
+        # the exact trigger in a tooltip — makes "why is this live?"
+        # questions debuggable from the dashboard.
         for post in posts.values():
             post_status = (post.get("status") or "").lower()
             cmts = post["comments"]
-            no_comments = not cmts
-            any_cmt_removed = any(
-                (c.get("status") or "").lower() == "removed"
-                for c in cmts
+            removed_cmt = next(
+                (c for c in cmts if (c.get("status") or "").lower() == "removed"),
+                None,
             )
-            any_cmt_no_url = any(
-                (c.get("status") or "").lower() == "report"
-                and not (c.get("reddit_comment_url") or "").strip()
-                for c in cmts
+            no_url_cmt = next(
+                (c for c in cmts
+                 if (c.get("status") or "").lower() == "report"
+                 and not (c.get("reddit_comment_url") or "").strip()),
+                None,
             )
-            post["derived_status"] = (
-                "removed"
-                if (
-                    post_status == "removed"
-                    or any_cmt_removed
-                    or any_cmt_no_url
-                    or no_comments
+            reason = None
+            if post_status == "removed":
+                reason = f"post.status='removed' (prev_status={post.get('prev_status')!r})"
+            elif removed_cmt is not None:
+                reason = f"comment #{removed_cmt.get('id')} status='removed'"
+            elif no_url_cmt is not None:
+                reason = f"comment #{no_url_cmt.get('id')} status='report' but reddit_comment_url is empty"
+            elif not cmts:
+                reason = "no reported comments under this post"
+            if reason:
+                post["derived_status"] = "removed"
+                post["derived_status_reason"] = reason
+            else:
+                post["derived_status"] = "live"
+                # Helpful tooltip for the live case too — shows the
+                # exact comment count + sample id so the admin can
+                # cross-check against Reddit.
+                sample = cmts[0] if cmts else None
+                post["derived_status_reason"] = (
+                    f"post.status={post_status!r}; "
+                    f"{len(cmts)} reported comment(s), "
+                    f"all status='report' with URL"
+                    + (f" (sample cid={sample.get('id')})" if sample else "")
                 )
-                else "live"
-            )
         # Posts sorted newest-first by the actual Reddit publish
         # timestamp where we have it, falling back to deployed_at /
         # paid_at / created_at for legacy rows that haven't had

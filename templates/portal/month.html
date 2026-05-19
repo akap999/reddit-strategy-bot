@@ -148,10 +148,13 @@
           {% else %}<span class="text-slate-300">—</span>{% endif %}
         </td>
         <td data-label="Status">
+          {# Hover the chip to see WHY the rule classified the row —
+             helps debug 'why is this live?' on the dashboard. #}
+          {% set reason = post.derived_status_reason or '' %}
           {% if derived == 'live' %}
-            <span class="chip chip-live">Live</span>
+            <span class="chip chip-live" title="{{ reason }}">Live</span>
           {% else %}
-            <span class="chip chip-removed">Removed</span>
+            <span class="chip chip-removed" title="{{ reason }}">Removed</span>
           {% endif %}
         </td>
       </tr>

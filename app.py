@@ -1858,7 +1858,209 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             else:
                 db.set_search_comment_live_check(item["id"])
 
+    # =====================================================================
+    # Bulk pre-pass for Live Subs comments. Many HQ threads have 4-8
+    # comments under a single post; the per-item loop below would issue
+    # one Reddit fetch per comment (= 4-8x more network + 3s pacing
+    # between each = minutes for a moderate batch). The post's
+    # /comments/<id>.json endpoint already returns the entire comment
+    # tree in one response, so we can mark every Live Subs comment under
+    # a given post from a single fetch.
+    #
+    # Items handled in this pre-pass are added to `handled_ids` and
+    # skipped in the per-item loop below. Search comments (which have
+    # no parent post container in this app's data model) and /s/ short
+    # URLs (which need resolving before classification) stay on the
+    # per-item path.
+    # =====================================================================
+    handled_ids = set()
+    import re as _re_grp
+    from urllib.parse import urlparse as _urlparse_grp
+
+    def _parse_comment_url(u):
+        """Return (post_url, comment_id) or (None, None)."""
+        if not u or "/s/" in u:
+            return (None, None)
+        u_clean = u.strip().split("?")[0].rstrip("/")
+        m = _re_grp.search(
+            r"(/r/[^/]+/comments/[^/]+(?:/[^/]+)?)(?:/([A-Za-z0-9]{4,12}))?$",
+            u_clean,
+        )
+        if not m:
+            return (None, None)
+        # Reconstruct the post URL on the same host as the original.
+        post_path = m.group(1)
+        comment_id = (m.group(2) or "").lower()
+        try:
+            parsed = _urlparse_grp(u_clean)
+            host = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else "https://www.reddit.com"
+        except Exception:
+            host = "https://www.reddit.com"
+        return (f"{host}{post_path}", comment_id)
+
+    # Group Live Subs items by parent post URL.
+    post_groups = {}  # post_url → [(item, comment_id)]
     for item in deployed:
+        if item.get("source", "comment") != "comment":
+            continue
+        raw_url = (item.get("reddit_comment_url") or "").strip()
+        if not raw_url:
+            continue
+        post_url, comment_id = _parse_comment_url(raw_url)
+        if not post_url or not comment_id:
+            continue
+        post_groups.setdefault(post_url, []).append((item, comment_id))
+
+    # Only bother with the bulk path when grouping actually saves
+    # fetches (≥2 items share a post). Singletons still go through
+    # the per-item loop — same network cost, simpler code path.
+    def _walk_comment_tree(node, out):
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind == "Listing":
+                for child in (node.get("data") or {}).get("children", []) or []:
+                    _walk_comment_tree(child, out)
+            elif kind == "t1":
+                d = node.get("data") or {}
+                cid = (d.get("id") or "").lower()
+                if cid:
+                    out[cid] = d
+                replies = d.get("replies")
+                if isinstance(replies, dict):
+                    _walk_comment_tree(replies, out)
+        elif isinstance(node, list):
+            for el in node:
+                _walk_comment_tree(el, out)
+
+    for post_url, group in post_groups.items():
+        if len(group) < 2:
+            continue  # singleton — per-item path handles it
+        try:
+            parsed = _urlparse_grp(post_url)
+            path = parsed.path.rstrip("/") + ".json"
+            if not path.startswith("/"):
+                continue
+            resp = _reddit_get(path, timeout=15)
+        except Exception as e:
+            print(f"[{log_prefix}] bulk fetch failed for {post_url}: {e}", flush=True)
+            continue
+        if resp.status_code != 200:
+            # Don't mark anything here — let the per-item loop retry
+            # each item so transient 403/429 per-item retries still run.
+            continue
+        try:
+            data = resp.json()
+        except Exception:
+            continue
+        if not isinstance(data, list) or len(data) < 2:
+            continue
+
+        # Map comment_id → comment-data so the per-item lookups are O(1).
+        cid_map = {}
+        _walk_comment_tree(data[1], cid_map)
+
+        # Mark each item in this group from the cached tree.
+        for item, comment_id in group:
+            checked += 1
+            d = cid_map.get(comment_id)
+            if not d:
+                # Comment id not present in the tree → Reddit dropped
+                # it (deleted or hidden behind a "more comments" stub
+                # we can't follow). Treat as dead.
+                _mark_dead(item)
+                dead += 1
+                handled_ids.add(item["id"])
+                continue
+            body = (d.get("body") or "").strip().lower()
+            author = (d.get("author") or "").strip().lower()
+            is_removed = (
+                body in ("[deleted]", "[removed]")
+                or "removed by reddit" in body
+                or "removed by moderator" in body
+                or d.get("removed") is True
+                or author in ("[deleted]", "[removed]")
+            )
+            if is_removed:
+                _mark_dead(item)
+                dead += 1
+            else:
+                _mark_live(item)
+                live += 1
+                # Persist engagement stats from this same JSON.
+                try:
+                    replies_obj = d.get("replies", "")
+                    num_replies = 0
+                    if isinstance(replies_obj, dict):
+                        num_replies = len(replies_obj.get("data", {}).get("children", []))
+                    db.update_live_stats_by_id_url(
+                        item["id"], item.get("reddit_comment_url", ""),
+                        d.get("score"), num_replies,
+                    )
+                except Exception as stats_err:
+                    print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
+            handled_ids.add(item["id"])
+
+        # Post-side piggy-back (posted_at + post-liveness) — once per
+        # post instead of once per comment. Same logic as the per-item
+        # path uses.
+        try:
+            post_children = (data[0] or {}).get("data", {}).get("children", [])
+            post_data = (post_children[0] or {}).get("data", {}) if post_children else {}
+            first_item = group[0][0]
+            pid_row = db.conn.execute(
+                "SELECT post_id FROM comments WHERE id = ?",
+                (first_item["id"],)
+            ).fetchone()
+            parent_post_id = pid_row["post_id"] if pid_row else None
+            if parent_post_id:
+                # posted_at backfill.
+                if post_data:
+                    from bulk_deploy import _utc_seconds_to_iso
+                    cu = post_data.get("created_utc")
+                    iso = _utc_seconds_to_iso(cu) if cu else None
+                    if iso:
+                        db.set_post_posted_at(parent_post_id, iso)
+                # Post-liveness.
+                post_is_dead = False
+                if not post_children:
+                    post_is_dead = True
+                elif post_data:
+                    stxt = (post_data.get("selftext") or "").strip().lower()
+                    pauthor = (post_data.get("author") or "").strip().lower()
+                    if (post_data.get("removed") is True
+                            or stxt in ("[removed]", "[deleted]")
+                            or pauthor in ("[deleted]", "[removed]")):
+                        post_is_dead = True
+                if post_is_dead:
+                    cur_post = db.conn.execute(
+                        "SELECT status FROM posts WHERE id = ?",
+                        (parent_post_id,)
+                    ).fetchone()
+                    cur_status = cur_post["status"] if cur_post else None
+                    if cur_status and cur_status != "removed":
+                        db.conn.execute(
+                            "UPDATE posts SET status='removed', prev_status=? WHERE id=? AND status != 'removed'",
+                            (cur_status, parent_post_id),
+                        )
+                        db.conn.commit()
+                        print(f"[{log_prefix}] post #{parent_post_id} marked removed (bulk pass)", flush=True)
+        except Exception as pp_err:
+            print(f"[{log_prefix}] bulk post-side piggy-back failed for {post_url}: {pp_err}", flush=True)
+
+        # Modest pacing between distinct posts — far less than the
+        # per-comment 3s sleep below since we're issuing 1 request
+        # per post instead of N.
+        _time.sleep(1)
+
+    # =====================================================================
+    # Per-item loop: handles search_comments, /s/ short URLs, singleton
+    # Live Subs items, and any items whose bulk fetch failed. Sleep
+    # between iterations stays at 3s for safety because individual
+    # comment URLs are more likely to trip Reddit's anti-bot defenses.
+    # =====================================================================
+    for item in deployed:
+        if item["id"] in handled_ids:
+            continue
         checked += 1
         raw_url = item["reddit_comment_url"]
         src = item.get("source", "comment")
@@ -2103,7 +2305,12 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE"):
             print(f"[{log_prefix}] #{item['id']} ({src}) error: {e}", flush=True)
             errors += 1
             error_details["exception"] += 1
-        _time.sleep(3)
+        # End-of-iteration pacing. The proxy already handles per-IP
+        # rate limiting and _reddit_get retries 429/5xx automatically,
+        # so we don't need the full 3s gap between successful fetches.
+        # Reserve heavier sleeps for the error branches above (which
+        # already use 3s/5s).
+        _time.sleep(1)
 
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
             "restored": restored, "changes": changes, "error_details": error_details}

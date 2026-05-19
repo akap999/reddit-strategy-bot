@@ -3428,11 +3428,16 @@ class Database:
         )
         params_c = brand_ids * 3
         params_sc = brand_ids * 2
-        # q_hq: one row per (month, post_id). is_removed = 1 iff the
-        # post itself is removed OR any reported comment is removed
-        # OR any reported comment has no Reddit URL (= never actually
-        # posted, can't be live). Mirrors the derived_status rule used
-        # by the month-page chip — keep these two in sync.
+        # q_hq: one row per (month, post_id). is_removed = 1 iff
+        # ANY of:
+        #   - post.status = 'removed'
+        #   - any reported comment is status='removed'
+        #   - any reported comment is status='report' but has no
+        #     Reddit URL (= never actually posted)
+        #   - the post has no deployed HQ root (no Mention Link
+        #     anchor on Reddit)
+        # Mirrors derived_status used by the month-page chip — keep
+        # these two in sync.
         q_hq = f"""
             SELECT c.report_month AS month,
                    c.post_id AS post_id,
@@ -3440,6 +3445,13 @@ class Database:
                             WHEN c.status = 'removed' THEN 1
                             WHEN c.status = 'report'
                                  AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
+                            WHEN NOT EXISTS (
+                                SELECT 1 FROM comments hq
+                                 WHERE hq.post_id = c.post_id
+                                   AND hq.comment_type = 'hq'
+                                   AND hq.parent_comment_id IS NULL
+                                   AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                            ) THEN 1
                             ELSE 0 END) AS is_removed
               FROM comments c
               JOIN posts p ON c.post_id = p.id
@@ -3545,8 +3557,9 @@ class Database:
         ph = ",".join("?" * len(brand_ids))
         # HQ Mentions: one row per (resolved_brand, month, post_id)
         # with an is_removed flag derived from post.status + comment
-        # status + URL presence (matches derived_status used by the
-        # month-page chip — keep these two in sync).
+        # status + URL presence + HQ-root existence (matches the
+        # derived_status rule used by the month-page chip — keep
+        # these two in sync).
         q_hq = f"""
             SELECT
               CASE
@@ -3560,6 +3573,13 @@ class Database:
                        WHEN c.status = 'removed' THEN 1
                        WHEN c.status = 'report'
                             AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
+                       WHEN NOT EXISTS (
+                           SELECT 1 FROM comments hq
+                            WHERE hq.post_id = c.post_id
+                              AND hq.comment_type = 'hq'
+                              AND hq.parent_comment_id IS NULL
+                              AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                       ) THEN 1
                        ELSE 0 END) AS is_removed
             FROM comments c
             JOIN posts p ON c.post_id = p.id
@@ -3768,6 +3788,11 @@ class Database:
                 reason = f"comment #{no_url_cmt.get('id')} status='report' but reddit_comment_url is empty"
             elif not cmts:
                 reason = "no reported comments under this post"
+            elif not (post.get("mention_link") or "").strip():
+                # No deployed HQ root → no Mention Link to point at.
+                # The HQ Mention has nothing actually anchored on
+                # Reddit, even if other reported comments are live.
+                reason = "no deployed HQ root comment (Mention Link is empty)"
             # Always render a per-comment listing in the reason so
             # the admin can see EXACTLY which comments are driving
             # the verdict. Format: "post.status=X | cmt #ID status=Y

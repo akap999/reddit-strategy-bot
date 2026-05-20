@@ -386,10 +386,36 @@ class ClaudeClient:
                 print(f"    Rate limited (attempt {attempt + 1}/{max_retries}), waiting {wait}s: {e}", flush=True)
                 time.sleep(wait)
             except anthropic.APIError as e:
-                self.last_error = f"API error: {e}"
-                print(f"    API error (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                # Map common 4xx auth/quota errors to a clearer
+                # actionable message instead of dumping the raw
+                # exception. The user's most common 401/429/402
+                # paths now read as 'fix this knob' rather than
+                # 'go look up an error code'.
+                emsg = str(e).lower()
+                if "invalid x-api-key" in emsg or "authentication_error" in emsg or "401" in emsg:
+                    self.last_error = (
+                        "Anthropic API key is invalid or unset. "
+                        "Set ANTHROPIC_API_KEY in the environment "
+                        "(or .env) to a valid key from "
+                        "https://console.anthropic.com/settings/keys "
+                        "and restart the app."
+                    )
+                    # Auth errors don't recover on retry — bail.
+                    print(f"    {self.last_error} (raw: {e})", flush=True)
+                    return None
+                elif "credit balance" in emsg or "402" in emsg or "insufficient" in emsg:
+                    self.last_error = (
+                        "Anthropic credit balance is too low to "
+                        "complete this request. Top up the account "
+                        "at https://console.anthropic.com/settings/billing."
+                    )
+                    print(f"    {self.last_error} (raw: {e})", flush=True)
+                    return None
+                else:
+                    self.last_error = f"API error: {e}"
+                    print(f"    API error (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
             except Exception as e:
                 # Auth errors, network, etc. — previously bubbled up
                 # uncaught and the caller saw a generic

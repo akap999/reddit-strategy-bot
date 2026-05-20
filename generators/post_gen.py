@@ -254,12 +254,23 @@ will use the user's input verbatim):
     "intent": "commercial | comparison | informational"
 }}"""
 
-        result = self.claude.call(prompt, max_tokens=2500, temperature=0.85)
-        if not result or "body" not in result:
+        # Capture the LLM result + log diagnostics on every failure
+        # mode so 'Topic generation failed' on the UI side becomes
+        # debuggable from stdout instead of an opaque None.
+        try:
+            result = self.claude.call(prompt, max_tokens=2500, temperature=0.85)
+        except Exception as e:
+            print(f"[generate_post_from_topic] LLM exception: {type(e).__name__}: {e}", flush=True)
             return None
-
+        if result is None:
+            print(f"[generate_post_from_topic] LLM returned None — see ClaudeClient.call retry logs above. title={final_title!r}", flush=True)
+            return None
+        if "body" not in result:
+            print(f"[generate_post_from_topic] LLM response missing 'body' key. Keys: {list(result.keys())}. title={final_title!r}", flush=True)
+            return None
         body = (result.get("body") or "").strip()
         if not body:
+            print(f"[generate_post_from_topic] LLM returned empty body. title={final_title!r}", flush=True)
             return None
 
         storyline = result.get("storyline") or "question"

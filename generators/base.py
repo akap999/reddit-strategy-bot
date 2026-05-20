@@ -337,9 +337,17 @@ class ClaudeClient:
         self.model = DEFAULT_MODEL
 
     def call(self, prompt, max_tokens=1024, max_retries=3, temperature=None, system_prompt=None):
-        """Make API call to Claude with retries. Returns parsed JSON or None."""
+        """Make API call to Claude with retries. Returns parsed JSON or None.
+
+        On every retry failure we now stash the last exception text on
+        `self.last_error` so callers can surface it (the previous
+        behaviour silently returned None after retries, making
+        downstream 'generation failed' errors opaque).
+        """
         default_system = "You are an analytical assistant. Always respond with valid JSON only. No markdown formatting, no code blocks, no explanations — just the raw JSON object."
         system = system_prompt or default_system
+        self.last_error = None
+        last_raw_content = None
 
         for attempt in range(max_retries):
             try:
@@ -354,6 +362,7 @@ class ClaudeClient:
 
                 message = self.client.messages.create(**create_kwargs)
                 content = message.content[0].text.strip()
+                last_raw_content = content
 
                 # Clean any accidental code block markers
                 if content.startswith("```json"):
@@ -366,15 +375,27 @@ class ClaudeClient:
                 return json.loads(content.strip())
 
             except json.JSONDecodeError as e:
-                print(f"    JSON parse error (attempt {attempt + 1}/{max_retries}): {e}")
+                self.last_error = f"JSON parse error: {e}"
+                preview = (last_raw_content or "")[:200].replace("\n", " ")
+                print(f"    JSON parse error (attempt {attempt + 1}/{max_retries}): {e} | body[:200]={preview!r}", flush=True)
                 if attempt < max_retries - 1:
                     time.sleep(1)
-            except anthropic.RateLimitError:
+            except anthropic.RateLimitError as e:
+                self.last_error = f"Rate limit: {e}"
                 wait = min(2 ** attempt * 5, 60)
-                print(f"    Rate limited, waiting {wait}s...")
+                print(f"    Rate limited (attempt {attempt + 1}/{max_retries}), waiting {wait}s: {e}", flush=True)
                 time.sleep(wait)
             except anthropic.APIError as e:
-                print(f"    API error (attempt {attempt + 1}/{max_retries}): {e}")
+                self.last_error = f"API error: {e}"
+                print(f"    API error (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+            except Exception as e:
+                # Auth errors, network, etc. — previously bubbled up
+                # uncaught and the caller saw a generic
+                # 'Topic generation failed' downstream.
+                self.last_error = f"{type(e).__name__}: {e}"
+                print(f"    unexpected error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}", flush=True)
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
 

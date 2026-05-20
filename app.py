@@ -3685,7 +3685,15 @@ def api_live_posts_custom():
             existing = db.get_all_post_titles_for_brand(brand_full["name"])
             draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing)
             if not draft:
-                raise ValueError("Topic generation failed")
+                # Bubble up the Claude client's last error so the
+                # task result (and the UI toast) says WHY instead of
+                # the opaque 'Topic generation failed' — common
+                # causes: rate limit, missing API key, JSON parse on
+                # the model's response, model returned no body.
+                last_err = getattr(claude, "last_error", None)
+                if last_err:
+                    raise ValueError(f"Topic generation failed: {last_err}")
+                raise ValueError("Topic generation failed: LLM returned no usable body — see server logs")
 
             # Live-Reddit dedup before saving
             hit = _live_reddit_dup(sub_name, draft["title"])

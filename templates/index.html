@@ -7292,7 +7292,12 @@ async function lsubsGeneratePosts(force = false) {
                 _removeBgTask(tid);
                 _lsubsLastResult = t.result || {};
                 lsubsRenderResult(_lsubsLastResult);
-                toast(`Generated ${(_lsubsLastResult.kept || []).length} post(s); ${(_lsubsLastResult.skipped || []).length} flagged as live duplicates`, 'success');
+                // Duplicate titles across subs are explicitly allowed now,
+                // so the backend never populates `skipped`. We still count
+                // soft-warning matches inside `kept` for the toast.
+                const _keptArr = _lsubsLastResult.kept || [];
+                const _softDups = _keptArr.filter(p => p && p.matched_existing).length;
+                toast(`Generated ${_keptArr.length} post(s)${_softDups ? ` (${_softDups} also live on Reddit — soft hint, not skipped)` : ''}`, 'success');
                 lsubsLoadTable();
             } else if (t.status === 'error') {
                 clearInterval(poll);
@@ -7409,23 +7414,22 @@ async function lsubsSubmitCustom(force) {
                 clearInterval(poll);
                 _removeBgTask(tid);
                 const r = t.result || {};
+                // Live-Reddit duplicate detection used to pop a blocking
+                // modal here; duplicate titles across (and within) subs
+                // are now explicitly allowed, so the backend always
+                // saves and never returns `duplicate:true`. If it
+                // somehow still does (older deploys), surface as an
+                // info toast and continue rendering the result.
                 if (r.duplicate) {
-                    // Live-Reddit duplicate — show conflict modal so user can rephrase or force
-                    const m = r.matched_existing || {};
-                    showModal(`
-                        <h3 class="text-xl font-bold mb-3" style="color:#fb923c">⚠ Duplicate found on r/${sub}</h3>
-                        <p class="text-sm mb-3">Generated title:</p>
-                        <p class="text-sm mb-3" style="color:#0079D3">${r.draft.title}</p>
-                        <p class="text-sm mb-2">Already exists on Reddit (similarity ${m.similarity}, score ${m.score}):</p>
-                        <p class="text-sm mb-3"><a href="${m.url}" target="_blank" style="color:#fb923c">${m.title}</a></p>
-                        <div class="flex gap-2 mt-4 justify-end">
-                            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                            <button class="btn btn-primary" onclick="closeModal();lsubsShowCustomModal()">Rephrase &amp; retry</button>
-                        </div>
-                    `);
-                    return;
+                    toast(`Saved anyway — a similar title already lives on r/${sub}`, 'info');
+                    r.post = r.draft;
                 }
-                toast(`Custom post saved: "${r.post.title.substring(0, 60)}…"`, 'success');
+                const _m = (r.post && r.post.matched_existing) || null;
+                if (_m) {
+                    toast(`Custom post saved (also live on r/${sub} — soft hint only): "${r.post.title.substring(0, 60)}…"`, 'success');
+                } else {
+                    toast(`Custom post saved: "${r.post.title.substring(0, 60)}…"`, 'success');
+                }
                 _lsubsLastResult = { subreddit_name: r.subreddit_name, kept: [r.post], skipped: [] };
                 lsubsRenderResult(_lsubsLastResult);
                 lsubsLoadTable();

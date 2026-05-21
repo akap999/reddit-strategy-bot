@@ -52,10 +52,19 @@ class PostGenerator:
         primary_brand = brands[0]
         per_intent = count // 3  # 1, 2, or 3
 
-        # Existing titles for dedup (shared across all intent calls)
+        # Existing titles for dedup (shared across all intent calls).
+        # Scoped to THIS subreddit only — we intentionally allow the
+        # same title to be reused in a different subreddit, since
+        # cross-sub reposts are a valid strategy. Within the same sub
+        # we still block duplicates (Reddit rejects exact-title reposts
+        # in many subs).
         existing_titles = set()
         for b in brands:
-            existing_titles.update(self.db.get_all_post_titles_for_brand(b["name"]))
+            existing_titles.update(
+                self.db.get_post_titles_for_brand_in_subreddit(
+                    b["name"], subreddit["id"]
+                )
+            )
         existing_titles = list(existing_titles)
 
         # Existing post count → day offset

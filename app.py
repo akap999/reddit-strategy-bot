@@ -3630,18 +3630,24 @@ def api_live_posts_generate():
             if not brand_full:
                 raise ValueError("Brand vanished")
 
-            # Generate the full intent-balanced batch first; then live-Reddit-dedup.
+            # Generate the full intent-balanced batch.
             posts = post_gen.generate_posts(sub, [brand_full], count)
 
-            # Live-Reddit dedup pass — flag matches; we don't delete (the post is
-            # already saved, but it surfaces as a "skipped" hint in the response
-            # so the user can manually delete or edit).
+            # Live-Reddit dedup pass is now informational only — we no
+            # longer split into kept/skipped because duplicate titles
+            # across (and even within) subreddits are explicitly
+            # allowed. Every generated post is kept; if a live-Reddit
+            # match exists we still attach `matched_existing` so the UI
+            # can surface a soft hint, but nothing gets dropped.
             skipped = []
             kept = []
             for p in posts:
-                hit = _live_reddit_dup(sub_name, p["title"])
+                try:
+                    hit = _live_reddit_dup(sub_name, p["title"])
+                except Exception:
+                    hit = None
                 if hit:
-                    skipped.append({**p, "matched_existing": hit})
+                    kept.append({**p, "matched_existing": hit})
                 else:
                     kept.append(p)
             return {
@@ -3649,15 +3655,18 @@ def api_live_posts_generate():
                 "subreddit_name": sub["name"],
                 "kept": [
                     {"id": p["id"], "title": p["title"], "intent": p.get("intent"),
-                     "storyline": p.get("storyline")}
+                     "storyline": p.get("storyline"),
+                     # Optional soft-warning payload — populated only
+                     # when the live-Reddit dedup pass found a match.
+                     # UI may show a small hint but should NOT skip.
+                     **({"matched_existing": p["matched_existing"]}
+                        if p.get("matched_existing") else {})}
                     for p in kept
                 ],
-                "skipped": [
-                    {"id": p["id"], "title": p["title"], "intent": p.get("intent"),
-                     "storyline": p.get("storyline"),
-                     "matched_existing": p["matched_existing"]}
-                    for p in skipped
-                ],
+                # Always empty now (duplicates are no longer skipped);
+                # kept in the response shape for backward compat with
+                # the UI's render code.
+                "skipped": [],
             }
         finally:
             db.close()
@@ -3710,7 +3719,11 @@ def api_live_posts_custom():
             brand_full = db.get_brand(bid)
             if not brand_full:
                 raise ValueError("Brand vanished")
-            existing = db.get_all_post_titles_for_brand(brand_full["name"])
+            # Scope dedup to THIS subreddit only so the same title
+            # can be reused across different subs (valid strategy).
+            existing = db.get_post_titles_for_brand_in_subreddit(
+                brand_full["name"], sub["id"]
+            )
             draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing)
             if not draft:
                 # Bubble up the Claude client's last error so the
@@ -3723,14 +3736,14 @@ def api_live_posts_custom():
                     raise ValueError(f"Topic generation failed: {last_err}")
                 raise ValueError("Topic generation failed: LLM returned no usable body — see server logs")
 
-            # Live-Reddit dedup before saving
-            hit = _live_reddit_dup(sub_name, draft["title"])
-            if hit and not data.get("force_save"):
-                return {
-                    "duplicate": True,
-                    "draft": draft,
-                    "matched_existing": hit,
-                }
+            # Live-Reddit dedup is now informational only — duplicate
+            # titles across (and within) subreddits are explicitly
+            # allowed, so we never block the save. We still attach the
+            # match payload so the UI can show a soft hint if it wants.
+            try:
+                hit = _live_reddit_dup(sub_name, draft["title"])
+            except Exception:
+                hit = None
 
             # Save with is_custom=1
             from config import PROMPT_VERSION
@@ -3760,6 +3773,8 @@ def api_live_posts_custom():
                     "body": draft["body"],
                     "intent": draft.get("intent"),
                     "storyline": draft.get("storyline"),
+                    # Soft hint only — not a blocker.
+                    **({"matched_existing": hit} if hit else {}),
                 },
             }
         finally:

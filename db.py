@@ -636,13 +636,40 @@ class Database:
         return {r["storyline"]: r["cnt"] for r in rows}
 
     def get_all_post_titles_for_brand(self, brand_name):
-        """Returns all post titles across ALL subreddits for any brand with this name."""
+        """Returns all post titles across ALL subreddits for any brand with this name.
+
+        NOTE: Used for analytics/aggregate counts only. For title-dedup
+        during post generation, use `get_post_titles_for_brand_in_subreddit`
+        — we intentionally ALLOW the same title to be reused across
+        different subreddits.
+        """
         rows = self.conn.execute(
             """SELECT DISTINCT p.title FROM posts p
                JOIN post_brands pb ON pb.post_id = p.id
                JOIN brands b ON pb.brand_id = b.id
                WHERE LOWER(b.name) = LOWER(?)""",
             (brand_name,)
+        ).fetchall()
+        return [r["title"] for r in rows]
+
+    def get_post_titles_for_brand_in_subreddit(self, brand_name, subreddit_id):
+        """Titles already used by this brand WITHIN a single subreddit.
+
+        Drives title dedup during post generation. Scoping by subreddit
+        means the same title can be reused in a different subreddit —
+        which is what we want, since cross-sub reposts are valid
+        strategy. Within the same subreddit we still block duplicates
+        because Reddit rejects exact-title reposts in many subs.
+        """
+        if subreddit_id is None:
+            return self.get_all_post_titles_for_brand(brand_name)
+        rows = self.conn.execute(
+            """SELECT DISTINCT p.title FROM posts p
+               JOIN post_brands pb ON pb.post_id = p.id
+               JOIN brands b ON pb.brand_id = b.id
+               WHERE LOWER(b.name) = LOWER(?)
+                 AND p.subreddit_id = ?""",
+            (brand_name, subreddit_id)
         ).fetchall()
         return [r["title"] for r in rows]
 

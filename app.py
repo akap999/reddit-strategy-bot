@@ -2569,6 +2569,21 @@ def api_check_live_start():
 
             for row in rows:
                 url = row["url"]
+                # If extract_reddit_rows flagged this row as
+                # un-checkable (empty Comment Link cell, non-Reddit
+                # URL, etc.) emit a 'missing' result row right away
+                # so the total matches the sheet's row count and the
+                # operator can see exactly which rows were skipped
+                # and why.
+                if row.get("skip_reason") or not url:
+                    bg.add_check_live_result(
+                        run_id, url=(url or ""),
+                        comment_id=row.get("comment_id"),
+                        post_id=None,
+                        liveness="missing",
+                        detail=row.get("skip_reason") or "no URL in Comment Link cell",
+                    )
+                    continue
                 # 1. Resolve /s/ short URLs to their canonical form.
                 #    Bulk Deploy does this; we were silently skipping
                 #    it, causing every /s/ row to come back 'missing'.

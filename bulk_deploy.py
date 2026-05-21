@@ -184,13 +184,33 @@ def _extract_url_from_cell(cell):
 
     Accepts /comments/<post_id>... URLs AND /s/<token> share links.
     Cells may be a bare URL, a Google-Sheets `=HYPERLINK(...)` formula,
-    a URL wrapped in quotes, or have surrounding whitespace. Returns the
-    URL with its query string stripped and trailing slash removed, or
-    None if nothing matches.
+    a URL wrapped in quotes, or have surrounding whitespace. Also
+    unwraps social-media link-tracker redirects (e.g. Instagram's
+    `https://l.instagram.com/?u=<urlencoded-reddit-url>&e=...`,
+    Facebook's `l.facebook.com`) — the inner Reddit URL is what the
+    operator actually wants checked. Returns the URL with its query
+    string stripped and trailing slash removed, or None if nothing
+    matches.
     """
     if not cell:
         return None
-    m = _REDDIT_URL_RE.search(str(cell))
+    s = str(cell)
+    # Unwrap social-media tracker redirects. They carry the real URL
+    # inside a `u=` query param (urlencoded). The regex below won't
+    # find a Reddit URL in the wrapper itself because the host is
+    # l.instagram.com / l.facebook.com / etc., not reddit.com.
+    if "l.instagram.com" in s or "l.facebook.com" in s or "lm.facebook.com" in s:
+        from urllib.parse import urlparse, parse_qs, unquote
+        try:
+            qs = parse_qs(urlparse(s.strip()).query)
+            inner = (qs.get("u") or [None])[0]
+            if inner:
+                inner = unquote(inner)
+                if "reddit.com" in inner:
+                    s = inner
+        except Exception:
+            pass
+    m = _REDDIT_URL_RE.search(s)
     if not m:
         return None
     url = m.group(0).rstrip(".,;)")
@@ -221,12 +241,17 @@ def extract_reddit_rows(csv_text: str) -> list[dict]:
     so callers (Check Live) can preserve the operator's own comment
     IDs from the sheet rather than rederiving them from the URL.
 
-    Returns: [{"url": str, "comment_id": str | None}, ...]
-    **NOT** deduped — one entry per sheet row so the operator's
-    expected count matches (a sheet with 176 rows yields 176 entries
-    even if two rows share a URL; the duplicate work is cheap and
-    the user expects 1:1 row mapping). Raises ValueError when the
-    Comment Link column is missing.
+    Returns: [{"url": str | None, "comment_id": str | None,
+               "skip_reason": str | None}, ...]
+    **NOT** deduped — one entry per non-empty sheet row so the
+    operator's expected count matches the sheet length. Rows that
+    don't contain a Reddit URL still produce an entry with
+    `url=None` + a `skip_reason` so the caller (Check Live) can
+    emit a result row explaining why ('Comment Link cell is empty',
+    'Comment Link is a non-Reddit URL', etc.) — that way the
+    Check Live total matches the sheet's row count instead of
+    silently dropping rows. Raises ValueError when the Comment Link
+    column is missing entirely.
     """
     if not csv_text:
         return []
@@ -247,15 +272,29 @@ def extract_reddit_rows(csv_text: str) -> list[dict]:
     id_idx = _find_comment_id_column(headers)
     out = []
     for row in reader:
-        if not row or url_idx >= len(row):
-            continue
-        url = _extract_url_from_cell(row[url_idx])
-        if not url:
+        # Skip a row that's truly empty (no cells at all). Anything
+        # with cells goes into the result — even if the Comment Link
+        # column itself is blank, we surface it as a skip_reason so
+        # the operator can see exactly which rows didn't get checked.
+        if not row or not any((c or "").strip() for c in row):
             continue
         sheet_cid = None
         if id_idx is not None and id_idx < len(row):
             sheet_cid = (row[id_idx] or "").strip() or None
-        out.append({"url": url, "comment_id": sheet_cid})
+        # No URL cell at all (too few columns).
+        if url_idx >= len(row):
+            out.append({"url": None, "comment_id": sheet_cid,
+                        "skip_reason": "Row has fewer columns than expected — Comment Link cell missing"})
+            continue
+        raw = (row[url_idx] or "").strip()
+        url = _extract_url_from_cell(raw)
+        if not url:
+            reason = ("Comment Link cell is empty" if not raw
+                      else f"Comment Link is not a Reddit URL: {raw[:80]}")
+            out.append({"url": None, "comment_id": sheet_cid,
+                        "skip_reason": reason})
+            continue
+        out.append({"url": url, "comment_id": sheet_cid, "skip_reason": None})
     return out
 
 

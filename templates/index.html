@@ -10322,6 +10322,58 @@ async function showCheckLiveRunDetail(runId) {
     try { run = await api(`/api/check-live/runs/${runId}`); }
     catch (e) { closeModal(); toast('Failed to load run: ' + (e.message || e), 'error'); return; }
     const rows = run.results || [];
+    // Bucket results by liveness so each status's IDs can be copied
+    // independently — that's what the user wants to share forward.
+    const byStatus = { live: [], removed: [], missing: [], error: [] };
+    for (const r of rows) {
+        const k = (r.liveness || 'error').toLowerCase();
+        if (byStatus[k]) byStatus[k].push(r);
+        else byStatus.error.push(r);
+    }
+    // Render one "ID-list card" per status — each has a Copy button
+    // that copies just the comment IDs (one per line), and a
+    // "Copy with URLs" variant when the user wants the URL alongside.
+    const card = (key, label, color) => {
+        const items = byStatus[key] || [];
+        if (!items.length) return '';
+        // Prefer sheet-supplied comment_id; fall back to the URL when
+        // the sheet didn't carry one.
+        const ids = items.map(r => (r.comment_id || '').toString().trim() || r.url || '');
+        const idsBlock = ids.join('\n');
+        const withUrls = items.map(r => {
+            const cid = (r.comment_id || '').toString().trim();
+            const url = r.url || '';
+            return cid ? `${cid}\t${url}` : url;
+        }).join('\n');
+        // Inline preview shows first 8 IDs; full list is in the
+        // textarea below + the Copy button copies everything.
+        const preview = ids.slice(0, 8).map(id => `<code class="text-xs" style="background:#2a2a2b;padding:1px 5px;border-radius:3px;margin:1px 2px;display:inline-block">${id}</code>`).join('');
+        const moreNote = ids.length > 8 ? `<span class="text-xs text-gray-500">+${ids.length - 8} more</span>` : '';
+        const taId = `ck-ids-${key}-${runId}`;
+        const taUrlId = `ck-urls-${key}-${runId}`;
+        return `
+        <div class="card p-3 mb-2" style="border:1px solid #343536">
+            <div class="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                <div class="flex items-center gap-2">
+                    <span class="badge" style="${color}">${label}</span>
+                    <span class="text-sm font-bold">${ids.length}</span>
+                </div>
+                <div class="flex items-center gap-1">
+                    <button class="btn btn-sm btn-secondary" onclick="_ckCopy('${taId}', this)" title="Copy IDs only, one per line">Copy IDs</button>
+                    <button class="btn btn-sm btn-secondary" onclick="_ckCopy('${taUrlId}', this)" title="Copy IDs + URLs, tab-separated">Copy IDs + URLs</button>
+                </div>
+            </div>
+            <div style="line-height:1.7">${preview}${moreNote}</div>
+            <textarea id="${taId}" readonly class="w-full mt-2 text-xs" style="height:80px;background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:4px;padding:4px 6px;font-family:Menlo,monospace">${idsBlock}</textarea>
+            <textarea id="${taUrlId}" class="hidden">${withUrls}</textarea>
+        </div>`;
+    };
+    const idCards = [
+        card('live',    'Live',    'background:#0e3d1c;color:#9efbb4'),
+        card('removed', 'Removed', 'background:#4a1a2a;color:#ff6b9b'),
+        card('missing', 'Missing', 'background:#3a3a3a;color:#a0a0a0'),
+        card('error',   'Error',   'background:#3a1a1a;color:#ff8b8b'),
+    ].filter(Boolean).join('');
     const livenessChip = (v) => {
         const colorMap = {
             'live':    'background:#0e3d1c;color:#9efbb4',
@@ -10348,7 +10400,11 @@ async function showCheckLiveRunDetail(runId) {
             <td class="text-xs text-gray-500">${r.detail || ''}</td>
         </tr>
     `).join('');
+    // Use a wider modal layout so the ID-list cards have room. The
+    // default modal box is narrow; we override with an inline style
+    // on the container we already render.
     showModal(`
+        <div style="min-width:min(900px, 92vw)">
         <h3 class="text-xl font-bold mb-1">${run.name}</h3>
         <p class="text-xs text-gray-400 mb-3">
             <span class="badge badge-${run.status === 'complete' ? 'deployed' : (run.status === 'error' ? 'removed' : 'draft')}">${run.status}</span>
@@ -10358,16 +10414,53 @@ async function showCheckLiveRunDetail(runId) {
         </p>
         ${run.error_detail ? `<div class="text-xs text-red-400 mb-2">${run.error_detail}</div>` : ''}
         ${summary}
-        <div style="max-height:50vh; overflow-y:auto; border:1px solid #343536; border-radius:6px">
-            <table>
-                <thead><tr><th>Comment ID</th><th>URL</th><th>Status</th><th>Detail</th></tr></thead>
-                <tbody>${tableRows || '<tr><td colspan="4" class="text-gray-500 text-center py-4">No results yet.</td></tr>'}</tbody>
-            </table>
-        </div>
+        ${idCards ? `
+        <div class="mb-3">
+            <div class="text-xs text-gray-400 mb-2">Comment IDs by status — copy and share:</div>
+            ${idCards}
+        </div>` : ''}
+        <details class="mb-2">
+            <summary class="text-xs text-gray-400 cursor-pointer">Full per-URL detail ↓</summary>
+            <div style="max-height:40vh; overflow-y:auto; border:1px solid #343536; border-radius:6px; margin-top:6px">
+                <table>
+                    <thead><tr><th>Comment ID</th><th>URL</th><th>Status</th><th>Detail</th></tr></thead>
+                    <tbody>${tableRows || '<tr><td colspan="4" class="text-gray-500 text-center py-4">No results yet.</td></tr>'}</tbody>
+                </table>
+            </div>
+        </details>
         <div class="flex gap-2 mt-3">
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
         </div>
+        </div>
     `);
+}
+
+// Copy a textarea's contents to the clipboard + flash the button.
+// Handles both visible and `hidden` textareas (used by the
+// "Copy IDs + URLs" variant which keeps its source off-screen).
+async function _ckCopy(textareaId, btn) {
+    const el = document.getElementById(textareaId);
+    if (!el) return;
+    const text = el.value || el.textContent || '';
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            // Fallback for non-https contexts: temporarily un-hide,
+            // select, execCommand('copy'), re-hide.
+            const wasHidden = el.classList.contains('hidden');
+            if (wasHidden) el.classList.remove('hidden');
+            el.select();
+            document.execCommand('copy');
+            if (wasHidden) el.classList.add('hidden');
+            window.getSelection().removeAllRanges();
+        }
+        const original = btn.textContent;
+        btn.textContent = 'Copied ✓';
+        setTimeout(() => { btn.textContent = original; }, 1200);
+    } catch (e) {
+        toast('Copy failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function _checkLiveDeleteRun(runId, name) {

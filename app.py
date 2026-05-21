@@ -2594,33 +2594,46 @@ def api_check_live_start():
                 )
                 post_id = (classified or {}).get("post_id") if classified else None
 
-                liveness = 'missing'
-                detail = None
-
-                if not classified:
-                    liveness = 'missing'
-                    detail = 'URL did not match Reddit comment/post pattern'
-                elif classified.get('kind') == 'comment' and comment_id:
-                    # Real comment URL → fetch + walk for the target id.
-                    try:
-                        meta = fetch_reddit_comment_meta(
-                            resolved, reddit_get=_reddit_get_json,
-                        )
-                        liveness = classify_liveness(meta)
-                        if liveness == 'missing':
-                            detail = "comment id not found in Reddit JSON response"
-                    except Exception as e:
-                        liveness = 'error'
-                        detail = str(e)
-                else:
-                    # POST URL — no comment_id. Check the post itself.
+                def _probe():
+                    """One classification pass for the resolved URL.
+                    Returned tuple: (liveness, detail). Pulled out so
+                    we can re-run on transient 'missing' verdicts."""
+                    if not classified:
+                        return 'missing', 'URL did not match Reddit comment/post pattern'
+                    if classified.get('kind') == 'comment' and comment_id:
+                        try:
+                            meta = fetch_reddit_comment_meta(
+                                resolved, reddit_get=_reddit_get_json,
+                            )
+                            lv = classify_liveness(meta)
+                            if lv == 'missing':
+                                return lv, "comment id not found in Reddit JSON response (likely transient — Reddit didn't return the target comment in the thread tree, or fetch hit rate-limit/proxy hiccup)"
+                            return lv, None
+                        except Exception as e:
+                            return 'error', str(e)
                     try:
                         from urllib.parse import urlparse
                         path = urlparse(resolved).path.rstrip('/') + '.json'
-                        liveness, detail = _classify_post_url(path)
+                        return _classify_post_url(path)
                     except Exception as e:
-                        liveness = 'error'
-                        detail = str(e)
+                        return 'error', str(e)
+
+                liveness, detail = _probe()
+                # Most 'missing' verdicts are transient — Reddit
+                # randomly fails to return a specific comment in the
+                # thread tree, the proxy hiccups, or we hit a soft
+                # rate-limit. Retry once after a longer pause before
+                # marking the row missing for real.
+                if liveness == 'missing':
+                    _time.sleep(4)
+                    retry_lv, retry_detail = _probe()
+                    if retry_lv != 'missing':
+                        liveness, detail = retry_lv, retry_detail
+                    else:
+                        # Append the retry note so the operator can
+                        # tell apart 'truly missing both attempts'
+                        # from a first-pass blip.
+                        detail = (detail or '') + ' (retried once, still missing)'
 
                 # Annotate detail with the resolved URL when we
                 # rewrote it — helps the user spot /s/ inputs.

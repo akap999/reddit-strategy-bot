@@ -10374,6 +10374,23 @@ async function showCheckLiveRunDetail(runId) {
         card('missing', 'Missing', 'background:#3a3a3a;color:#a0a0a0'),
         card('error',   'Error',   'background:#3a1a1a;color:#ff8b8b'),
     ].filter(Boolean).join('');
+    // Plain-English explainer for the 'Missing' bucket — the user
+    // shouldn't have to dig into per-row detail to understand what
+    // it means / why it's not zero.
+    const missingHelp = (byStatus.missing || []).length ? `
+        <div class="text-xs text-gray-400 mb-2 p-2 rounded" style="background:#1a2530;border:1px solid #2a3a4a;line-height:1.5">
+            <b style="color:#a0a0a0">What does Missing mean?</b> Reddit didn't return the
+            target comment in its JSON response — typically because the proxy / Reddit
+            rate-limited that specific fetch, or the comment is buried under a
+            "more comments" stub the API doesn't expand. We retry once after a 4s
+            pause; rows still missing after the retry are either truly inaccessible
+            from the proxy IP this run, or were removed without the standard
+            <code>[removed]</code> body marker.
+            <br><br>
+            Re-run the check — most Missing rows resolve to <span style="color:#9efbb4">Live</span>
+            on a second pass.
+        </div>
+    ` : '';
     const livenessChip = (v) => {
         const colorMap = {
             'live':    'background:#0e3d1c;color:#9efbb4',
@@ -10417,6 +10434,7 @@ async function showCheckLiveRunDetail(runId) {
         ${idCards ? `
         <div class="mb-3">
             <div class="text-xs text-gray-400 mb-2">Comment IDs by status — copy and share:</div>
+            ${missingHelp}
             ${idCards}
         </div>` : ''}
         <details class="mb-2">

@@ -222,8 +222,11 @@ def extract_reddit_rows(csv_text: str) -> list[dict]:
     IDs from the sheet rather than rederiving them from the URL.
 
     Returns: [{"url": str, "comment_id": str | None}, ...]
-    Deduped on `url` while preserving sheet order. Raises ValueError
-    when the Comment Link column is missing.
+    **NOT** deduped — one entry per sheet row so the operator's
+    expected count matches (a sheet with 176 rows yields 176 entries
+    even if two rows share a URL; the duplicate work is cheap and
+    the user expects 1:1 row mapping). Raises ValueError when the
+    Comment Link column is missing.
     """
     if not csv_text:
         return []
@@ -243,17 +246,15 @@ def extract_reddit_rows(csv_text: str) -> list[dict]:
         )
     id_idx = _find_comment_id_column(headers)
     out = []
-    seen = set()
     for row in reader:
         if not row or url_idx >= len(row):
             continue
         url = _extract_url_from_cell(row[url_idx])
-        if not url or url in seen:
+        if not url:
             continue
         sheet_cid = None
         if id_idx is not None and id_idx < len(row):
             sheet_cid = (row[id_idx] or "").strip() or None
-        seen.add(url)
         out.append({"url": url, "comment_id": sheet_cid})
     return out
 

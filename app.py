@@ -1841,17 +1841,19 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
     def _backfill_posted_at_if_missing(item):
         """If the comment row's posted_at is NULL but we have a Reddit
         URL, fetch metadata once and patch the row before we decide
-        between 'replace' and 'removed'. Best-effort: any failure
-        leaves posted_at as-is (the chooser then defaults to
-        'removed', which is the safe fallback)."""
+        between 'replace' and 'removed'. Works for both the Live Subs
+        `comments` table and the Live Search `search_comments` table.
+        Best-effort: any failure leaves posted_at as-is (the chooser
+        then defaults to 'removed', which is the safe fallback).
+        """
         url = (item.get("reddit_comment_url") or "").strip()
         src = item.get("source", "comment")
-        if not url or src != "comment":
+        if not url or src not in ("comment", "search_comment"):
             return
+        table = "comments" if src == "comment" else "search_comments"
         try:
-            # Skip if the row already has posted_at.
             row = db.conn.execute(
-                "SELECT posted_at FROM comments WHERE id = ?",
+                f"SELECT posted_at FROM {table} WHERE id = ?",
                 (item["id"],)
             ).fetchone()
             if row and row["posted_at"]:
@@ -1863,10 +1865,10 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
             posted_at = meta.get("posted_at") if meta else None
             if posted_at:
-                db.update_posted_at(item["id"], "comment", posted_at)
+                db.update_posted_at(item["id"], src, posted_at)
         except Exception as e:
             print(f"[{log_prefix}] posted_at backfill failed for "
-                  f"#{item['id']}: {e}", flush=True)
+                  f"#{item['id']} ({src}): {e}", flush=True)
 
     def _mark_dead(item):
         src = item.get("source", "comment")
@@ -1905,7 +1907,17 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                     db.mark_comment_deleted(item["id"])
                     new_status = "deleted"
         else:
-            db.mark_search_comment_removed(item["id"])
+            # search_comment: same 14-day 'replace' rule as the
+            # comments table. We backfill posted_at from Reddit
+            # when NULL (the auto-detection path is what populates
+            # it for Live Search rows that were saved without it).
+            if (item.get("reddit_comment_url") or "").strip():
+                _backfill_posted_at_if_missing(item)
+                chosen = db.mark_search_comment_removed_or_replace(item["id"])
+                new_status = chosen or "removed"
+            else:
+                db.mark_search_comment_removed(item["id"])
+                new_status = "removed"
         db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
                           "marked_dead", prev, new_status,
                           item.get("account_id"), item.get("subreddit"), item.get("brand_name"))

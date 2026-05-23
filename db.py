@@ -2497,15 +2497,24 @@ class Database:
                 )
                 self.conn.commit()
                 return old_status
+            # Write URL + posted_at first so the chooser sees the
+            # freshly-supplied timestamp before deciding 'replace'
+            # vs 'removed'. Mirrors the `comments` branch above.
             self.conn.execute(
                 """UPDATE search_comments
                    SET reddit_comment_url = ?,
-                       posted_at = COALESCE(?, posted_at),
-                       status = 'removed', prev_status = ?,
+                       posted_at = COALESCE(?, posted_at)
+                   WHERE id = ?""",
+                (reddit_url, posted_at, comment_id)
+            )
+            new_status = self._choose_removed_status_search(comment_id)
+            self.conn.execute(
+                """UPDATE search_comments
+                   SET status = ?, prev_status = ?,
                        deleted_at = datetime('now'),
                        paid_at = NULL
                    WHERE id = ?""",
-                (reddit_url, posted_at, old_status, comment_id)
+                (new_status, old_status, comment_id)
             )
             self.conn.commit()
             return old_status
@@ -6513,7 +6522,14 @@ class Database:
         self.conn.commit()
 
     def mark_search_comment_removed(self, comment_id):
-        """Mark a search comment as removed/deleted on Reddit (allowed for any status)."""
+        """Mark a search comment as removed/deleted on Reddit (allowed for any status).
+
+        Manual / forced path — always sets status='removed' regardless
+        of how recently the comment was published. The auto-detection
+        path (Check Live) should use
+        `mark_search_comment_removed_or_replace` instead so the 14-day
+        'replace' window can apply.
+        """
         row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
         if old_status == 'removed':
@@ -6523,15 +6539,91 @@ class Database:
             (old_status, comment_id))
         self.conn.commit()
 
-    def unremove_search_comment(self, comment_id):
-        """Revert a removed search comment back to its previous status (fallback to deployed)."""
+    def _choose_removed_status_search(self, comment_id, days=None):
+        """Search-comments variant of `_choose_removed_status`. Reads
+        `search_comments.posted_at` and picks 'replace' if within
+        `days` days of now, else 'removed'. NULL posted_at falls
+        through to 'removed' (callers that can backfill from Reddit
+        should do so via `update_posted_at` before calling).
+        """
+        if days is None:
+            days = self.REPLACE_WINDOW_DAYS
         row = self.conn.execute(
-            "SELECT prev_status FROM search_comments WHERE id = ? AND status = 'removed'",
+            "SELECT posted_at FROM search_comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if not row:
+            return "removed"
+        posted = row["posted_at"]
+        if not posted:
+            return "removed"
+        try:
+            s = str(posted).replace("T", " ").split(".")[0].strip()
+            ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "removed"
+        delta = datetime.utcnow() - ts
+        if delta.total_seconds() < 0:
+            return "replace"
+        if delta.days < days:
+            return "replace"
+        return "removed"
+
+    def mark_search_comment_removed_or_replace(self, comment_id,
+                                                posted_at_hint=None,
+                                                days=None):
+        """Auto-detection variant of `mark_search_comment_removed`.
+
+        Mirror of `mark_comment_removed_or_replace` for the
+        `search_comments` table. Writes `posted_at_hint` first when
+        the row's posted_at is empty, then picks 'replace' (within
+        14 days of publish) or 'removed'. Preserves prev_status and
+        clears paid_at; sets deleted_at for parity with the manual
+        path. Idempotent.
+
+        Returns the chosen status ('replace' | 'removed'), or None
+        if the row didn't exist.
+        """
+        row = self.conn.execute(
+            "SELECT status, posted_at FROM search_comments WHERE id = ?",
             (comment_id,)
         ).fetchone()
-        restore_to = (row["prev_status"] if row and row["prev_status"] else 'deployed')
+        if not row:
+            return None
+        old_status = row["status"]
+        if old_status in ("removed", "replace"):
+            return old_status
+        if posted_at_hint and not row["posted_at"]:
+            self.conn.execute(
+                "UPDATE search_comments SET posted_at = ? WHERE id = ?",
+                (posted_at_hint, comment_id)
+            )
+        new_status = self._choose_removed_status_search(comment_id, days=days)
         self.conn.execute(
-            "UPDATE search_comments SET status = ?, prev_status = NULL WHERE id = ? AND status = 'removed'",
+            "UPDATE search_comments "
+            "SET status = ?, prev_status = ?, deleted_at = datetime('now'), paid_at = NULL "
+            "WHERE id = ?",
+            (new_status, old_status, comment_id)
+        )
+        self.conn.commit()
+        return new_status
+
+    def unremove_search_comment(self, comment_id):
+        """Revert a removed-or-replace search comment back to its
+        previous status (fallback to deployed). Accepts both
+        'removed' and 'replace' as undo-able starting states —
+        'replace' is just a sub-state of removed.
+        """
+        row = self.conn.execute(
+            "SELECT prev_status FROM search_comments WHERE id = ? "
+            "AND status IN ('removed', 'replace')",
+            (comment_id,)
+        ).fetchone()
+        if not row:
+            return None
+        restore_to = row["prev_status"] if row["prev_status"] else 'deployed'
+        self.conn.execute(
+            "UPDATE search_comments SET status = ?, prev_status = NULL "
+            "WHERE id = ? AND status IN ('removed', 'replace')",
             (restore_to, comment_id))
         self.conn.commit()
         return restore_to

@@ -28,6 +28,12 @@
         .badge-paid { background: #004d33; color: #00A86B; }
         .badge-deleted { background: #4a1a1a; color: #ff6b6b; text-decoration: line-through; }
         .badge-removed { background: #4a1a2a; color: #ff6b9b; }
+        /* `replace` = auto-detected removal within 14 days of publish.
+           Amber/orange signals "needs action — still eligible to
+           redeploy" so the admin can spot recent removals at a glance
+           and re-deploy under another account before the campaign
+           takes a hit. */
+        .badge-replace { background: #3a2a0e; color: #ffb86b; }
         .badge-archived { background: #2a2a3a; color: #8888aa; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
         .brand-tab { color: #818384; border-bottom: 2px solid transparent; cursor: pointer; }
@@ -1723,6 +1729,7 @@ function renderBrandDetail(data) {
                         <option value="deployed">Deployed</option>
                         <option value="paid">Paid</option>
                         <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
@@ -2947,6 +2954,7 @@ async function renderCommentTreeTab(container) {
                 <option value="deployed">Deployed</option>
                 <option value="paid">Paid</option>
                 <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="comments-sort-filter" onchange="loadCommentTree()" class="w-36"><!-- sort change needs refetch -->
@@ -4516,6 +4524,7 @@ async function renderCommentManagementTab(container) {
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
                 <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="mgmt-brand-filter" onchange="loadManagedComments()" class="w-40">
@@ -4946,6 +4955,7 @@ function renderAccountCommentsPanel(username, cell, allComments) {
                     <option value="informed" ${currentFilter==='informed' ? 'selected' : ''}>Informed</option>
                     <option value="deployed" ${currentFilter==='deployed' ? 'selected' : ''}>Deployed</option>
                     <option value="removed" ${currentFilter==='removed' ? 'selected' : ''}>Removed</option>
+                    <option value="replace" ${currentFilter==='replace' ? 'selected' : ''}>Replace</option>
                     <option value="complete" ${currentFilter==='complete' ? 'selected' : ''}>Complete</option>
                     <option value="deleted" ${currentFilter==='deleted' ? 'selected' : ''}>Deleted</option>
                 </select>
@@ -5157,6 +5167,7 @@ async function renderAllComments(el) {
                     <option value="deployed">Deployed</option>
                     <option value="paid">Paid</option>
                     <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                     <option value="archived">Archived</option>
                 </select>
             </div>
@@ -6786,6 +6797,7 @@ async function renderExport(el) {
                         <option value="informed">Informed</option>
                         <option value="deployed">Deployed</option>
                         <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="export-cmt-brand" class="w-40">
@@ -7487,6 +7499,7 @@ async function renderLsubsPosts(c) {
                     <option value="informed">Informed</option>
                     <option value="report">Reported</option>
                     <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -8019,6 +8032,7 @@ async function renderLsubsComments(c) {
                     <option value="deployed">Deployed</option>
                     <option value="paid">Paid</option>
                     <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -9372,6 +9386,7 @@ async function renderLsComments(c) {
                 <option value="paid">Paid</option>
                 <option value="report">Reported</option>
                 <option value="removed">Removed</option>
+                <option value="replace">Replace</option>
                 <option value="archived">Archived</option>
             </select>
             <select id="ls-cf-month" onchange="lsFilterComments()" class="w-40"
@@ -9922,6 +9937,7 @@ async function _bulkDeployPoll(taskId) {
                     summaryEl.innerHTML = `
                         <span class="text-green-400">Deployed: ${s.deployed || 0}</span> ·
                         <span style="color:#ff8b60">Marked removed: ${s.marked_removed || 0}</span> ·
+                        ${s.marked_replace ? `<span style="color:#ffb86b">Marked replace: ${s.marked_replace}</span> · ` : ''}
                         <span class="text-gray-400">Already: ${(s.already_deployed || 0) + (s.already_removed || 0)}</span> ·
                         <span class="text-yellow-400">No match: ${s.no_match || 0}</span> ·
                         <span class="text-red-400">Error: ${s.error || 0}</span>
@@ -10008,6 +10024,9 @@ function _bulkDeployRenderResults(results) {
         deployed:           '#9efbb4',
         already_deployed:   '#9ec4ff',
         marked_removed:     '#ff8b60',
+        // Recent-removal sub-state — lighter amber to distinguish at
+        // a glance from the regular removed bucket.
+        marked_replace:     '#ffb86b',
         already_removed:    '#ffb088',
         no_match:           '#ffd166',
         error:              '#ff8b8b',

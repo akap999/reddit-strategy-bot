@@ -2316,7 +2316,14 @@ class Database:
         self.conn.commit()
 
     def mark_comment_removed(self, comment_id):
-        """Mark a comment as removed/deleted on Reddit (allowed for any status)."""
+        """Mark a comment as removed/deleted on Reddit (allowed for any status).
+
+        Manual / forced path — always sets status = 'removed' regardless
+        of how recently the comment was published. The auto-detection
+        path (Check Live, bulk-deploy verification) should use
+        `mark_comment_removed_or_replace` instead so the 14-day
+        'replace' window can apply.
+        """
         row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
         old_status = row["status"] if row else None
         if old_status == 'removed':
@@ -2326,6 +2333,98 @@ class Database:
             (old_status, comment_id)
         )
         self.conn.commit()
+
+    # --- 'replace' window helpers --------------------------------------
+    #
+    # `replace` is a sub-state of `removed` produced ONLY by the
+    # auto-detection paths (Check Live, bulk-deploy verification) when
+    # the Reddit publish timestamp (`posted_at`) is within the last
+    # REPLACE_WINDOW_DAYS days. It signals "removed recently — still
+    # eligible to redeploy under another account" without burying the
+    # row in the regular Removed bucket. For dashboard / KPI counting
+    # `replace` rolls up under Removed (see
+    # `get_report_months_for_client` / `get_report_aggregate_for_client`).
+
+    REPLACE_WINDOW_DAYS = 14
+
+    def _choose_removed_status(self, comment_id, days=None):
+        """Pick 'replace' vs 'removed' for an auto-detected removal.
+
+        Returns one of:
+          - 'replace' : posted_at is non-NULL and within `days` days
+                        of the current time.
+          - 'removed' : posted_at is NULL, in the future, or older
+                        than the window. (NULL is treated as "outside
+                        the window" — callers that can backfill
+                        `posted_at` from Reddit should do so BEFORE
+                        calling this method so the row has a real
+                        timestamp to compare.)
+        """
+        if days is None:
+            days = self.REPLACE_WINDOW_DAYS
+        row = self.conn.execute(
+            "SELECT posted_at FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if not row:
+            return "removed"
+        posted = row["posted_at"]
+        if not posted:
+            return "removed"
+        try:
+            # posted_at is written as "YYYY-MM-DD HH:MM:SS" UTC (see
+            # deploy_comment / mark_removed_with_url). Parse loosely so
+            # legacy rows with milliseconds or `T` separators still work.
+            s = str(posted).replace("T", " ").split(".")[0].strip()
+            ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "removed"
+        delta = datetime.utcnow() - ts
+        if delta.total_seconds() < 0:
+            # Clock skew / future-dated row — be conservative, treat as
+            # within window.
+            return "replace"
+        if delta.days < days:
+            return "replace"
+        return "removed"
+
+    def mark_comment_removed_or_replace(self, comment_id, posted_at_hint=None,
+                                        days=None):
+        """Auto-detection variant of `mark_comment_removed`.
+
+        Writes `posted_at_hint` first (if provided and the row's
+        posted_at is empty), then picks 'replace' or 'removed' via
+        `_choose_removed_status` and updates the row. Preserves
+        `prev_status` and clears `paid_at` to mirror
+        `mark_comment_removed`.
+
+        Returns the chosen status ('replace' | 'removed'), or None if
+        the row didn't exist. Idempotent: a row already in 'removed'
+        or 'replace' is left alone (the rule is one-shot at detection
+        time; later re-detections shouldn't move 'replace' → 'removed'
+        as the 14-day window slides past).
+        """
+        row = self.conn.execute(
+            "SELECT status, posted_at FROM comments WHERE id = ?",
+            (comment_id,)
+        ).fetchone()
+        if not row:
+            return None
+        old_status = row["status"]
+        if old_status in ("removed", "replace"):
+            return old_status
+        if posted_at_hint and not row["posted_at"]:
+            self.conn.execute(
+                "UPDATE comments SET posted_at = ? WHERE id = ?",
+                (posted_at_hint, comment_id)
+            )
+            # No commit yet — the status flip below shares the txn.
+        new_status = self._choose_removed_status(comment_id, days=days)
+        self.conn.execute(
+            "UPDATE comments SET status = ?, prev_status = ?, paid_at = NULL WHERE id = ?",
+            (new_status, old_status, comment_id)
+        )
+        self.conn.commit()
+        return new_status
 
     def mark_removed_with_url(self, comment_id, kind, reddit_url, posted_at=None):
         """Attach a Reddit URL to a comment row AND mark it removed.
@@ -2361,14 +2460,23 @@ class Database:
                 )
                 self.conn.commit()
                 return old_status
+            # Write URL + posted_at first so the chooser sees the
+            # freshly-supplied timestamp when deciding 'replace' vs
+            # 'removed'. We then re-update with the chosen status.
             self.conn.execute(
                 """UPDATE comments
                    SET reddit_comment_url = ?,
-                       posted_at = COALESCE(?, posted_at),
-                       status = 'removed', prev_status = ?,
+                       posted_at = COALESCE(?, posted_at)
+                   WHERE id = ?""",
+                (reddit_url, posted_at, comment_id)
+            )
+            new_status = self._choose_removed_status(comment_id)
+            self.conn.execute(
+                """UPDATE comments
+                   SET status = ?, prev_status = ?,
                        paid_at = NULL
                    WHERE id = ?""",
-                (reddit_url, posted_at, old_status, comment_id)
+                (new_status, old_status, comment_id)
             )
             self.conn.commit()
             return old_status
@@ -2404,14 +2512,22 @@ class Database:
         return None
 
     def unremove_comment(self, comment_id):
-        """Revert a removed comment back to its previous status (fallback to deployed)."""
+        """Revert a removed-or-replace comment back to its previous
+        status (fallback to deployed). Accepts both 'removed' and
+        'replace' as undo-able starting states — 'replace' is just a
+        sub-state of removed.
+        """
         row = self.conn.execute(
-            "SELECT prev_status FROM comments WHERE id = ? AND status = 'removed'",
+            "SELECT prev_status FROM comments WHERE id = ? "
+            "AND status IN ('removed', 'replace')",
             (comment_id,)
         ).fetchone()
-        restore_to = (row["prev_status"] if row and row["prev_status"] else 'deployed')
+        if not row:
+            return None
+        restore_to = row["prev_status"] if row["prev_status"] else 'deployed'
         self.conn.execute(
-            "UPDATE comments SET status = ?, prev_status = NULL WHERE id = ? AND status = 'removed'",
+            "UPDATE comments SET status = ?, prev_status = NULL "
+            "WHERE id = ? AND status IN ('removed', 'replace')",
             (restore_to, comment_id)
         )
         self.conn.commit()
@@ -3524,6 +3640,7 @@ class Database:
                    c.post_id AS post_id,
                    MAX(CASE WHEN p.status = 'removed' THEN 1
                             WHEN c.status = 'removed' THEN 1
+                            WHEN c.status = 'replace' THEN 1
                             WHEN c.status = 'report'
                                  AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
                             WHEN NOT EXISTS (
@@ -3538,19 +3655,19 @@ class Database:
               JOIN posts p ON c.post_id = p.id
              WHERE {match_c}
                AND c.report_month IS NOT NULL
-               AND c.status IN ('report', 'removed')
+               AND c.status IN ('report', 'removed', 'replace')
              GROUP BY c.report_month, c.post_id
         """
         q_mentions = f"""
             SELECT sc.report_month AS month,
                    COUNT(*) AS total,
                    SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
-                   SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed
+                   SUM(CASE WHEN sc.status IN ('removed', 'replace') THEN 1 ELSE 0 END) AS removed
               FROM search_comments sc
               JOIN search_posts sp ON sc.search_post_id = sp.id
              WHERE {match_sc}
                AND sc.report_month IS NOT NULL
-               AND sc.status IN ('report', 'removed')
+               AND sc.status IN ('report', 'removed', 'replace')
              GROUP BY sc.report_month
         """
         agg = {}
@@ -3684,6 +3801,7 @@ class Database:
               c.post_id AS post_id,
               MAX(CASE WHEN p.status = 'removed' THEN 1
                        WHEN c.status = 'removed' THEN 1
+                       WHEN c.status = 'replace' THEN 1
                        WHEN c.status = 'report'
                             AND TRIM(COALESCE(c.reddit_comment_url, '')) = '' THEN 1
                        WHEN NOT EXISTS (
@@ -3697,7 +3815,7 @@ class Database:
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             WHERE c.report_month IS NOT NULL
-              AND c.status IN ('report', 'removed')
+              AND c.status IN ('report', 'removed', 'replace')
               AND (
                 c.brand_id IN ({ph})
                 OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
@@ -3714,7 +3832,7 @@ class Database:
             FROM search_comments sc
             JOIN search_posts sp ON sc.search_post_id = sp.id
             WHERE sc.report_month IS NOT NULL
-              AND sc.status IN ('report', 'removed')
+              AND sc.status IN ('report', 'removed', 'replace')
               AND (
                 sc.brand_id IN ({ph})
                 OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))
@@ -3772,7 +3890,10 @@ class Database:
             slot["mentions_total"] += r["cnt"]
             if r["status"] == "report":
                 slot["mentions_live"] += r["cnt"]
-            elif r["status"] == "removed":
+            elif r["status"] in ("removed", "replace"):
+                # `replace` rolls up under Removed for KPI counting
+                # (per user decision). Only the row chip shows the
+                # distinct label.
                 slot["mentions_removed"] += r["cnt"]
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
@@ -3933,6 +4054,14 @@ class Database:
                 (c for c in cmts if (c.get("status") or "").lower() == "removed"),
                 None,
             )
+            # 'replace' is a recent-removal sub-state — still drives
+            # the post to derived 'removed' on the dashboard, but the
+            # reason text labels it distinctly so the admin knows it
+            # is eligible for redeploy.
+            replace_cmt = next(
+                (c for c in cmts if (c.get("status") or "").lower() == "replace"),
+                None,
+            )
             no_url_cmt = next(
                 (c for c in cmts
                  if (c.get("status") or "").lower() == "report"
@@ -3944,6 +4073,9 @@ class Database:
                 reason = f"post.status='removed' (prev_status={post.get('prev_status')!r})"
             elif removed_cmt is not None:
                 reason = f"comment #{removed_cmt.get('id')} status='removed'"
+            elif replace_cmt is not None:
+                reason = (f"comment #{replace_cmt.get('id')} status='replace' "
+                          f"(recent removal — eligible for redeploy)")
             elif no_url_cmt is not None:
                 reason = f"comment #{no_url_cmt.get('id')} status='report' but reddit_comment_url is empty"
             elif not cmts:
@@ -3965,7 +4097,24 @@ class Database:
             cmts_str = (", ".join(_cmt_brief(c) for c in cmts)
                         if cmts else "(none)")
             if reason:
-                post["derived_status"] = "removed"
+                # 'replace' is its own derived value ONLY when the
+                # sole trigger is a 'replace' status comment — i.e.
+                # the post would otherwise be live and the recent
+                # removal is the only blocker. Templates render this
+                # with a distinct amber chip while still filtering it
+                # under Removed (data-status='removed' on the row).
+                # Any hard 'removed' trigger (post.status='removed',
+                # a comment with status='removed', missing URL, etc.)
+                # wins and renders as plain Removed.
+                if (replace_cmt is not None
+                        and post_status != "removed"
+                        and removed_cmt is None
+                        and no_url_cmt is None
+                        and cmts
+                        and (post.get("mention_link") or "").strip()):
+                    post["derived_status"] = "replace"
+                else:
+                    post["derived_status"] = "removed"
                 post["derived_status_reason"] = (
                     f"{reason} | post.status={post_status!r} | "
                     f"comments: {cmts_str}"
@@ -4030,7 +4179,7 @@ class Database:
                  LEFT JOIN brands pb ON p.brand_id = pb.id
                  WHERE {match_c}
                    AND c.report_month = ?
-                   AND c.status IN ('report', 'removed')"""
+                   AND c.status IN ('report', 'removed', 'replace')"""
         params_q2 = (brand_ids * 2) + [month]
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
@@ -4047,7 +4196,7 @@ class Database:
                  LEFT JOIN brands spb ON sp.brand_id = spb.id
                  WHERE {match_sc}
                    AND sc.report_month = ?
-                   AND sc.status IN ('report', 'removed')"""
+                   AND sc.status IN ('report', 'removed', 'replace')"""
         rows = []
         rows.extend(dict(r) for r in self.conn.execute(q1, params_q1).fetchall())
         rows.extend(dict(r) for r in self.conn.execute(q2, params_q2).fetchall())

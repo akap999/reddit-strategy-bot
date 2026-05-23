@@ -664,8 +664,12 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
             "action": "already_removed",
         }
 
-    # Reddit says the comment is gone — attach URL, flip to 'removed',
-    # log the event.
+    # Reddit says the comment is gone — attach URL, flip to
+    # 'removed' or 'replace' (the chooser inside
+    # `mark_removed_with_url` picks 'replace' when posted_at is
+    # within the 14-day window), then log the event with the actual
+    # new status so audit traces show which bucket each row landed
+    # in.
     if liveness == "removed":
         try:
             prev = db.mark_removed_with_url(rid, source, url, posted_at=posted_at)
@@ -674,11 +678,24 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
                 "source": source, "id": rid,
                 "action": "error", "reason": str(e),
             }
+        # Re-read the row to learn whether the chooser picked
+        # 'replace' or 'removed'. (search_comments doesn't currently
+        # support 'replace' — that branch always lands in 'removed'.)
+        new_status = "removed"
+        try:
+            table = "comments" if source == "comment" else "search_comments"
+            row = db.conn.execute(
+                f"SELECT status FROM {table} WHERE id = ?", (rid,)
+            ).fetchone()
+            if row and row["status"]:
+                new_status = row["status"]
+        except Exception:
+            pass
         _log_bulk_event(db, rid, source, url,
-                        "bulk_marked_removed", prev, "removed")
+                        "bulk_marked_removed", prev, new_status)
         return {
             "source": source, "id": rid,
-            "action": "marked_removed",
+            "action": "marked_replace" if new_status == "replace" else "marked_removed",
         }
 
     # liveness in {"live", "missing"} — deploy.
@@ -707,6 +724,10 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
 _TIER1_PRIORITY = [
     "error",
     "deployed",
+    # `marked_replace` and `marked_removed` are equally informative
+    # (both are detection-time terminal states); rank them adjacent
+    # so the rollup picks whichever happened.
+    "marked_replace",
     "marked_removed",
     "already_removed",
     "already_deployed",
@@ -834,7 +855,7 @@ def match_and_deploy_comment(db, classified: dict, *,
         # see in Live Search) is still 'assigned' / 'informed' with no
         # URL attached. Falling through to Tier-2 lets the body matcher
         # find it. Errors also short-circuit so we don't double-process.
-        _ACTIONABLE = {"deployed", "marked_removed", "error"}
+        _ACTIONABLE = {"deployed", "marked_removed", "marked_replace", "error"}
         if any(r["action"] in _ACTIONABLE for r in tier1_results):
             return _rollup_tier1(url, tier1_results, liveness, posted_at)
         # Else: all Tier-1 matches were terminal. Continue to Tier-2.
@@ -940,14 +961,26 @@ def match_and_deploy_comment(db, classified: dict, *,
                     "action": "error", "reason": str(e),
                     "liveness": liveness,
                 }
+            # Re-read the row to learn whether the chooser picked
+            # 'replace' (14-day window) or 'removed'.
+            new_status = "removed"
+            try:
+                table = "comments" if cand_kind == "comment" else "search_comments"
+                row = db.conn.execute(
+                    f"SELECT status FROM {table} WHERE id = ?", (cand["id"],)
+                ).fetchone()
+                if row and row["status"]:
+                    new_status = row["status"]
+            except Exception:
+                pass
             _log_bulk_event(
                 db, cand["id"], cand_kind, url,
-                "bulk_marked_removed", prev, "removed",
+                "bulk_marked_removed", prev, new_status,
             )
             out = {
                 "url": url, "kind": "comment", "tier": "removed_singleton",
                 "source": cand_kind, "id": cand["id"],
-                "action": "marked_removed",
+                "action": "marked_replace" if new_status == "replace" else "marked_removed",
                 "liveness": liveness, "posted_at": posted_at,
             }
             if tier1_results:
@@ -1280,6 +1313,11 @@ def _summarise(results: list[dict]) -> dict:
     counts = {
         "deployed": 0,
         "marked_removed": 0,
+        # Recent-removal sub-bucket: comments removed within the
+        # 14-day post-publish window. Roll up under Removed for top-
+        # line counts but expose the breakdown so the user knows how
+        # many are eligible for redeploy.
+        "marked_replace": 0,
         "already_deployed": 0,
         "already_removed": 0,
         "no_match": 0,

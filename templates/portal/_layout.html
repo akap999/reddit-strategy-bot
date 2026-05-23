@@ -31,6 +31,11 @@
   .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500; white-space: nowrap; }
   .chip-live      { background: #ecfdf5; color: #047857; }
   .chip-removed   { background: #fef3c7; color: #92400e; }
+  /* `replace` = auto-detected removal within 14 days of publish.
+     Amber/orange signals "still eligible to redeploy". Rolls up
+     under Removed for KPI counting; only the per-row chip is
+     distinct. */
+  .chip-replace   { background: #fff4e5; color: #c2410c; border: 1px solid #fed7aa; }
   .chip-brand     { background: #eff6ff; color: #1d4ed8; }
   .chip-sub       { background: #f1f5f9; color: #475569; }
   .btn-primary    { background: var(--accent); color: white; padding: 10px 16px; border-radius: 8px; font-weight: 500; font-size: 14px; transition: background 0.15s; }

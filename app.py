@@ -1838,35 +1838,89 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
     # Initial progress so the UI shows '0 of N' immediately.
     _emit_progress()
 
+    def _backfill_posted_at_if_missing(item):
+        """If the comment row's posted_at is NULL but we have a Reddit
+        URL, fetch metadata once and patch the row before we decide
+        between 'replace' and 'removed'. Best-effort: any failure
+        leaves posted_at as-is (the chooser then defaults to
+        'removed', which is the safe fallback)."""
+        url = (item.get("reddit_comment_url") or "").strip()
+        src = item.get("source", "comment")
+        if not url or src != "comment":
+            return
+        try:
+            # Skip if the row already has posted_at.
+            row = db.conn.execute(
+                "SELECT posted_at FROM comments WHERE id = ?",
+                (item["id"],)
+            ).fetchone()
+            if row and row["posted_at"]:
+                return
+        except Exception:
+            pass
+        try:
+            from bulk_deploy import fetch_reddit_comment_meta
+            meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+            posted_at = meta.get("posted_at") if meta else None
+            if posted_at:
+                db.update_posted_at(item["id"], "comment", posted_at)
+        except Exception as e:
+            print(f"[{log_prefix}] posted_at backfill failed for "
+                  f"#{item['id']}: {e}", flush=True)
+
     def _mark_dead(item):
         src = item.get("source", "comment")
         prev = item.get("status", "")
         print(f"[{log_prefix}] _mark_dead #{item['id']} ({src}) prev_status={prev}", flush=True)
+        new_status = "removed"
         if src == "comment":
             # Reported comments that vanish on Reddit should land in
             # 'removed' (with report_month preserved) so the client
             # dashboard still shows them — just under the "Removed"
             # chip instead of "Live". Falling back to mark_comment_deleted
             # would set status='deleted' and drop them off the dashboard
-            # query (which filters status IN ('report','removed')).
+            # query (which filters status IN ('report','removed','replace')).
+            #
+            # NEW: auto-detection routes through
+            # `mark_comment_removed_or_replace`, which picks 'replace'
+            # when posted_at is within the last 14 days. We backfill
+            # posted_at first so the rule has something to compare.
             if prev == "report":
-                db.mark_comment_removed(item["id"])
+                _backfill_posted_at_if_missing(item)
+                chosen = db.mark_comment_removed_or_replace(item["id"])
+                new_status = chosen or "removed"
             else:
-                db.mark_comment_deleted(item["id"])
+                # Non-reported deployed/paid/etc. comments: same rule
+                # applies — we treat any auto-detected removal as
+                # eligible for the 14-day 'replace' window provided
+                # we have a Reddit URL to anchor it.
+                if (item.get("reddit_comment_url") or "").strip():
+                    _backfill_posted_at_if_missing(item)
+                    chosen = db.mark_comment_removed_or_replace(item["id"])
+                    new_status = chosen or "removed"
+                else:
+                    # No Reddit URL — fall back to the legacy
+                    # mark_comment_deleted semantic for truly-local
+                    # cleanup of never-deployed rows.
+                    db.mark_comment_deleted(item["id"])
+                    new_status = "deleted"
         else:
             db.mark_search_comment_removed(item["id"])
         db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
-                          "marked_dead", prev, "removed",
+                          "marked_dead", prev, new_status,
                           item.get("account_id"), item.get("subreddit"), item.get("brand_name"))
         changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
-                        "action": "marked_dead", "prev_status": prev, "new_status": "removed"})
+                        "action": "marked_dead", "prev_status": prev, "new_status": new_status})
 
     def _mark_live(item):
         nonlocal restored
         src = item.get("source", "comment")
         cur_status = item.get("status", "")
-        # If comment was removed/deleted but is actually live → restore to deployed
-        if cur_status in ("removed", "deleted"):
+        # If comment was removed/replace/deleted but is actually live → restore to deployed.
+        # 'replace' is the recent-removal sub-state — if Reddit now
+        # shows the comment alive (e.g. mod approved, OP undeleted),
+        # treat it identically to a restored 'removed' row.
+        if cur_status in ("removed", "replace", "deleted"):
             if src == "comment":
                 db.restore_comment_to_deployed(item["id"])
             else:
@@ -3841,7 +3895,11 @@ def api_gen_comments():
 @app.route("/api/generate/hq-comment", methods=["POST"])
 def api_gen_hq_comment():
     data = request.json
-    ai_crawl = bool(data.get("ai_crawl", False))
+    # Default True to match the UI checkbox (`lsubs-hq-aicrawl`) which
+    # is `checked` by default. The toggle gates both the per-comment
+    # AI-CRAWL prompt block AND the HQ-MAIN OVERRIDE on the root —
+    # OFF produces a Live-Search-style root comment.
+    ai_crawl = bool(data.get("ai_crawl", True))
     num_replies = int(data.get("num_replies", 5))
 
     def task():
@@ -7317,7 +7375,15 @@ def portal_month_export(month):
                 or post.get('created_at')
             )
             derived = (post.get('derived_status') or 'live').lower()
-            status_label = 'Removed' if derived == 'removed' else 'Live'
+            # 'replace' is the recent-removal sub-state — surface it
+            # distinctly in the export so the client team can spot
+            # rows that are eligible for redeploy.
+            if derived == 'replace':
+                status_label = 'Replace'
+            elif derived == 'removed':
+                status_label = 'Removed'
+            else:
+                status_label = 'Live'
             w.writerow([
                 sub,
                 published,
@@ -7338,9 +7404,15 @@ def portal_month_export(month):
         for c in search_list:
             sub = f"r/{c.get('subreddit_name')}" if c.get('subreddit_name') else ''
             published = fmt_date(c.get('posted_at') or c.get('deployed_at'))
-            status_label = 'Live' if c.get('status') == 'report' else (
-                'Removed' if c.get('status') == 'removed' else (c.get('status') or '')
-            )
+            _st = c.get('status') or ''
+            if _st == 'report':
+                status_label = 'Live'
+            elif _st == 'replace':
+                status_label = 'Replace'
+            elif _st == 'removed':
+                status_label = 'Removed'
+            else:
+                status_label = _st
             w.writerow([
                 sub,
                 published,

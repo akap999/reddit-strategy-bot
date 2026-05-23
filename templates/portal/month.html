@@ -5,7 +5,9 @@
 {% set hq_count = posts | length %}
 {% set mention_count = search_comments | length %}
 {% set live_mentions = search_comments | selectattr('status', 'equalto', 'report') | list | length %}
-{% set removed_mentions = search_comments | selectattr('status', 'equalto', 'removed') | list | length %}
+{# `replace` rolls up under Removed for KPI counting (only the row
+   chip is visually distinct). #}
+{% set removed_mentions = (search_comments | selectattr('status', 'equalto', 'removed') | list | length) + (search_comments | selectattr('status', 'equalto', 'replace') | list | length) %}
 {% set total_all = hq_count + mention_count %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
@@ -126,6 +128,10 @@
       {% set post_date = post.posted_at or post.deployed_at or post.paid_at or post.created_at or '' %}
       {% set post_short_date = post_date[:10] %}
       {% set derived = post.derived_status or 'live' %}
+      {# `data-status` only takes two values for filter purposes —
+         'report' (Live) or 'removed'. The 'replace' derived state
+         rolls up under 'removed' for filter / KPI counting per
+         product decision; only the chip rendering is distinct. #}
       <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}" data-status="{{ 'report' if derived == 'live' else 'removed' }}">
         <td data-label="Subreddit">
           {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% else %}—{% endif %}
@@ -155,6 +161,8 @@
           {% set reason = post.derived_status_reason or '' %}
           {% if derived == 'live' %}
             <span class="chip chip-live" title="{{ reason }}">Live</span>
+          {% elif derived == 'replace' %}
+            <span class="chip chip-replace" title="{{ reason }}">Replace</span>
           {% else %}
             <span class="chip chip-removed" title="{{ reason }}">Removed</span>
           {% endif %}
@@ -193,7 +201,10 @@
       {% set published = r.posted_at or r.deployed_at or '' %}
       {% set short_date = published[:10] if published else '' %}
       {% set body = (r.body or '') %}
-      <tr data-row data-kind="mention" data-brand="{{ r.brand_name or '' }}" data-status="{{ r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ published[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
+      {# Normalise `replace` to `removed` for filter / KPI counting
+         (same product decision as HQ rows). Chip rendering below
+         still uses the raw r.status to pick the distinct visual. #}
+      <tr data-row data-kind="mention" data-brand="{{ r.brand_name or '' }}" data-status="{{ 'removed' if r.status == 'replace' else r.status }}" data-sub="{{ r.subreddit_name or '' }}" data-date="{{ published[:19] }}" data-upvotes="{{ r.upvotes if r.upvotes is not none else -1 }}" data-replies="{{ r.num_replies if r.num_replies is not none else -1 }}">
         <td data-label="Subreddit">
           {% if r.subreddit_name %}<span class="chip chip-sub">r/{{ r.subreddit_name }}</span>{% else %}—{% endif %}
           {% if r.brand_name %}<span class="chip chip-brand ml-1">{{ r.brand_name }}</span>{% endif %}
@@ -216,6 +227,8 @@
         <td data-label="Status">
           {% if r.status == 'report' %}
             <span class="chip chip-live">Live</span>
+          {% elif r.status == 'replace' %}
+            <span class="chip chip-replace">Replace</span>
           {% else %}
             <span class="chip chip-removed">Removed</span>
           {% endif %}

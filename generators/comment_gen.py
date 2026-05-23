@@ -2792,12 +2792,31 @@ Return JSON only:
             best_angle = ""
             slot_overrides = None
             if is_main_local:
-                best_angle = (
-                    f"Recommend {brand['name']} confidently as a direct "
-                    "answer to the OP's question. Open with what "
-                    f"{brand['name']} is and what it does for their "
-                    "use-case. Tight 50-90 words, no anecdote."
-                )
+                # Two best-angle modes for the HQ root, gated by the
+                # AI-crawl toggle:
+                #   ai_crawl=True  → today's hard-recommendation
+                #     framing (lead with brand, tight 50-90 words,
+                #     no anecdote). Pairs with the HQ-MAIN OVERRIDE
+                #     and AI-CRAWL prompt blocks for AI-retriever-
+                #     shaped output.
+                #   ai_crawl=False → conversational Live-Search-style
+                #     framing. Root still mentions the brand once
+                #     (mention_flags[0]=True is independent of this),
+                #     but in passing — no extractable-answer pattern.
+                if ai_crawl:
+                    best_angle = (
+                        f"Recommend {brand['name']} confidently as a direct "
+                        "answer to the OP's question. Open with what "
+                        f"{brand['name']} is and what it does for their "
+                        "use-case. Tight 50-90 words, no anecdote."
+                    )
+                else:
+                    best_angle = (
+                        f"Share a relevant observation that mentions "
+                        f"{brand['name']} naturally in passing. "
+                        "Conversational, no hard recommendation framing — "
+                        "talk like a real Reddit commenter chiming in."
+                    )
             else:
                 # idx 0 is main; replies are 1..nr — map to 0-indexed shape array.
                 shape = reply_shapes[idx - 1] if 0 <= idx - 1 < len(reply_shapes) else _pick_reply_shape()
@@ -2838,9 +2857,16 @@ Return JSON only:
                     },
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
-                    # HQ-MAIN-OVERRIDE: only the brand-mention parent gets the
-                    # decisive recommendation framing. Replies stay conversational.
-                    hq_main=is_main_local,
+                    # HQ-MAIN-OVERRIDE is now gated by the AI-crawl
+                    # toggle: when OFF the root falls through the
+                    # regular generate_comments path (no hard
+                    # "lead with the recommendation" framing),
+                    # producing a Live-Search-style comment that
+                    # still mentions the brand (mention_flags drives
+                    # that, not hq_main). When ON, behavior is
+                    # identical to before — the HQ-MAIN block layers
+                    # on top of the AI-CRAWL block for the root.
+                    hq_main=is_main_local and ai_crawl,
                     # Replies use the slim prompt to skip ~1500 tokens of
                     # few-shot anti-pattern examples — meaningful speedup
                     # since each reply is its own API call.

@@ -7473,7 +7473,14 @@ def portal_month_check_live(month):
         bg = Database(DB_PATH)
         bg.connect(); bg.initialize()
         try:
-            rows = bg.get_comments_for_client_month(cid, month)
+            # Superset query: reported comments + every HQ root for
+            # reported posts (even if the HQ root is still in
+            # 'deployed' / 'paid' status). Without the HQ-root
+            # extras, the dashboard would keep showing Live for
+            # posts whose HQ comment is removed on Reddit but
+            # never got refreshed because move_post_to_report
+            # didn't flip its status.
+            rows = bg.get_check_live_items_for_client_month(cid, month)
             items = _build_check_live_items(rows, brand_filter)
             return _check_live_batch(
                 items, bg,
@@ -7523,7 +7530,11 @@ def portal_brand_check_live(bid):
             month_list = bg.get_report_months_for_client(cid)
             items = []
             for m in month_list:
-                rows = bg.get_comments_for_client_month(cid, m["month"])
+                # Superset: reported comments + HQ roots tied to
+                # reported posts. See note in
+                # `portal_month_check_live` for why this is the
+                # right scope.
+                rows = bg.get_check_live_items_for_client_month(cid, m["month"])
                 items.extend(_build_check_live_items(rows, brand_name))
             return _check_live_batch(
                 items, bg,
@@ -7553,7 +7564,8 @@ def portal_check_live_all():
             month_list = bg.get_report_months_for_client(cid)
             items = []
             for m in month_list:
-                rows = bg.get_comments_for_client_month(cid, m["month"])
+                # Superset query — see `portal_month_check_live`.
+                rows = bg.get_check_live_items_for_client_month(cid, m["month"])
                 items.extend(_build_check_live_items(rows))
             return _check_live_batch(
                 items, bg,

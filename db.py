@@ -4246,6 +4246,108 @@ class Database:
         rows.sort(key=lambda r: (r.get("posted_at") or r.get("deployed_at") or ""), reverse=True)
         return rows
 
+    def get_check_live_items_for_client_month(self, client_id, month):
+        """Return every comment that should get a liveness check for
+        the client's reports in this month.
+
+        Superset of `get_comments_for_client_month`:
+          - All reported comments (status IN report/removed/replace),
+            from both `comments` (HQ pipeline) and `search_comments`
+            (Mentions pipeline) — same set the dashboard renders.
+          - Plus every HQ ROOT comment (comment_type='hq' AND
+            parent_comment_id IS NULL, with a Reddit URL) attached
+            to a post that's part of this month's HQ reports, EVEN
+            IF the HQ root itself is still in a non-reported status
+            like 'deployed' / 'paid'. The "1 post = 1 HQ Mention"
+            flow flips just the parent post to 'report' and leaves
+            the HQ root in its prior status — without including
+            those rows here, Check Live never refreshes them, so
+            their derived_status stays Live forever on the dashboard
+            even when Reddit has removed the comment.
+
+        Deduplicates by (source, id). Brand-resolution chain matches
+        `get_comments_for_client_month`.
+        """
+        brand_ids = self.client_brand_ids(client_id)
+        if not brand_ids:
+            return []
+        # Step 1: reported comments — identical select shape to
+        # `get_comments_for_client_month` so callers can reuse
+        # `_build_check_live_items` without branching.
+        reported = self.get_comments_for_client_month(client_id, month)
+        seen = {(r.get("source", "comment"), r["id"]) for r in reported}
+
+        # Step 2: extra HQ roots tied to reported posts.
+        ph = ",".join("?" * len(brand_ids))
+        # Find all post IDs that are part of this month's HQ reports.
+        # Two sources: (a) any comment with c.report_month = month
+        # (via the standard brand-resolution chain), and (b) post
+        # itself in status='report' with report_month = month (the
+        # post-only single-action report flow).
+        post_ids_rows = self.conn.execute(
+            f"""SELECT DISTINCT post_id FROM (
+                  SELECT c.post_id AS post_id
+                    FROM comments c
+                    JOIN posts p ON c.post_id = p.id
+                   WHERE c.report_month = ?
+                     AND (
+                       c.brand_id IN ({ph})
+                       OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                       OR (c.brand_id IS NULL AND p.id IN (
+                             SELECT post_id FROM post_brands
+                              WHERE brand_id IN ({ph})))
+                     )
+                  UNION
+                  SELECT p.id AS post_id
+                    FROM posts p
+                   WHERE p.status = 'report'
+                     AND p.report_month = ?
+                     AND (
+                       p.brand_id IN ({ph})
+                       OR p.id IN (SELECT post_id FROM post_brands
+                                    WHERE brand_id IN ({ph}))
+                     )
+                )""",
+            [month] + brand_ids * 3 + [month] + brand_ids * 2
+        ).fetchall()
+        post_ids = [r["post_id"] for r in post_ids_rows]
+        if not post_ids:
+            return reported
+        pph = ",".join("?" * len(post_ids))
+        # Pull every HQ root for those posts that has a Reddit URL.
+        # We DON'T filter by status here — that's the whole point:
+        # a 'deployed' HQ root under a reported post is exactly the
+        # row that's slipping through the dashboard verdict today.
+        extra_rows = self.conn.execute(
+            f"""SELECT c.id, c.body, c.status, c.account_id, c.brand_id,
+                       c.reddit_comment_url, c.posted_at, c.deployed_at,
+                       c.report_month, c.report_added_at,
+                       c.created_at, c.is_reply, c.comment_type,
+                       c.upvotes, c.num_replies, c.last_stats_at,
+                       'comment' AS source,
+                       s.name AS subreddit_name,
+                       COALESCE(b.name, pb.name) AS brand_name,
+                       COALESCE(c.brand_id, p.brand_id) AS resolved_brand_id
+                  FROM comments c
+                  JOIN posts p ON c.post_id = p.id
+             LEFT JOIN subreddits s ON p.subreddit_id = s.id
+             LEFT JOIN brands b ON c.brand_id = b.id
+             LEFT JOIN brands pb ON p.brand_id = pb.id
+                 WHERE c.post_id IN ({pph})
+                   AND c.comment_type = 'hq'
+                   AND c.parent_comment_id IS NULL
+                   AND TRIM(COALESCE(c.reddit_comment_url, '')) != ''""",
+            post_ids
+        ).fetchall()
+        out = list(reported)
+        for r in extra_rows:
+            key = ("comment", r["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(dict(r))
+        return out
+
     def get_deployed_comment_urls(self, subreddit_id):
         """Get deployed comments with their Reddit URLs for live checking."""
         rows = self.conn.execute(

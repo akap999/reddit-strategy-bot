@@ -3635,31 +3635,22 @@ class Database:
         #     anchor on Reddit)
         # Mirrors derived_status used by the month-page chip — keep
         # these two in sync.
-        # is_removed is scoped to the HQ ROOT only — the cluster
-        # head that drives `mention_link`. Other reported comments
-        # under the post (legacy replies / siblings) do not drive
-        # the verdict. Mirrors `get_posts_for_client_month`'s
-        # per-row helper — keep these two in sync.
+        # is_removed mirrors `get_posts_for_client_month`'s per-row
+        # helper — keep these two in sync. A post is "live" iff it
+        # has at least ONE HQ root (comment_type='hq' AND
+        # parent_comment_id IS NULL) with a Reddit URL whose status
+        # is not 'removed' / 'replace'. Otherwise it's removed.
+        # Non-HQ-root reported comments don't gate the verdict.
         q_hq = f"""
             SELECT c.report_month AS month,
                    c.post_id AS post_id,
                    MAX(CASE WHEN p.status = 'removed' THEN 1
-                            WHEN EXISTS (
-                                SELECT 1 FROM comments hq
-                                 WHERE hq.post_id = c.post_id
-                                   AND hq.comment_type = 'hq'
-                                   AND hq.parent_comment_id IS NULL
-                                   AND (
-                                     hq.status IN ('removed', 'replace')
-                                     OR (hq.status = 'report'
-                                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) = '')
-                                   )
-                            ) THEN 1
                             WHEN NOT EXISTS (
                                 SELECT 1 FROM comments hq
                                  WHERE hq.post_id = c.post_id
                                    AND hq.comment_type = 'hq'
                                    AND hq.parent_comment_id IS NULL
+                                   AND hq.status NOT IN ('removed', 'replace')
                                    AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                             ) THEN 1
                             ELSE 0 END) AS is_removed
@@ -3812,22 +3803,12 @@ class Database:
               c.report_month AS month,
               c.post_id AS post_id,
               MAX(CASE WHEN p.status = 'removed' THEN 1
-                       WHEN EXISTS (
-                           SELECT 1 FROM comments hq
-                            WHERE hq.post_id = c.post_id
-                              AND hq.comment_type = 'hq'
-                              AND hq.parent_comment_id IS NULL
-                              AND (
-                                hq.status IN ('removed', 'replace')
-                                OR (hq.status = 'report'
-                                    AND TRIM(COALESCE(hq.reddit_comment_url, '')) = '')
-                              )
-                       ) THEN 1
                        WHEN NOT EXISTS (
                            SELECT 1 FROM comments hq
                             WHERE hq.post_id = c.post_id
                               AND hq.comment_type = 'hq'
                               AND hq.parent_comment_id IS NULL
+                              AND hq.status NOT IN ('removed', 'replace')
                               AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                        ) THEN 1
                        ELSE 0 END) AS is_removed
@@ -4020,18 +4001,18 @@ class Database:
         ).fetchall()
         posts = {r["id"]: dict(r) for r in post_rows}
         # Mention Link: the URL of the HQ root comment under each post
-        # — i.e. the cluster head where the brand mention lives. The
+        # — the cluster head where the brand mention lives. The
         # client report uses this as the deliverable's primary
-        # engagement link. If a post has multiple HQ threads, take the
-        # earliest-posted root; if it has no HQ comment, leave NULL.
+        # engagement link. If a post has multiple HQ threads, take
+        # the earliest-posted root that has a URL.
         #
-        # We also pull the HQ root's `id` and `status` here so the
-        # derived_status helper below can base its verdict on the
-        # HQ root alone (NOT on every reported comment under the
-        # post). This matters for legacy posts that had multiple
-        # comments reported in the old multi-comment-report flow:
-        # a removed reply must NOT drag the whole post to Removed
-        # when the HQ root mention link is live.
+        # We also gather the FULL list of HQ roots per post so the
+        # derived_status helper below can decide Live vs Removed
+        # based on whether ANY HQ root is currently live on Reddit:
+        # one removed HQ + one redeployed HQ should still read as
+        # Live (the brand IS live, the removed row is just history).
+        # Non-HQ-root reported comments (legacy replies / siblings)
+        # never gate the verdict.
         mention_rows = self.conn.execute(
             f"""SELECT post_id, id AS hq_id, reddit_comment_url, status
                   FROM comments
@@ -4042,20 +4023,18 @@ class Database:
             post_ids
         ).fetchall()
         mention_by_post = {}        # pid -> URL (earliest HQ with a URL)
-        hq_root_by_post = {}        # pid -> {"id", "status", "url"}
+        hq_roots_by_post = {}       # pid -> list of {"id","status","url"}
         for r in mention_rows:
-            # Earliest match per post wins (ORDER BY above).
-            if r["post_id"] not in hq_root_by_post:
-                hq_root_by_post[r["post_id"]] = {
-                    "id": r["hq_id"],
-                    "status": (r["status"] or "").lower(),
-                    "url": (r["reddit_comment_url"] or "").strip(),
-                }
+            hq_roots_by_post.setdefault(r["post_id"], []).append({
+                "id": r["hq_id"],
+                "status": (r["status"] or "").lower(),
+                "url": (r["reddit_comment_url"] or "").strip(),
+            })
             if (r["reddit_comment_url"] and r["post_id"] not in mention_by_post):
                 mention_by_post[r["post_id"]] = r["reddit_comment_url"]
         for pid, post in posts.items():
             post["mention_link"] = mention_by_post.get(pid)
-            post["_hq_root"] = hq_root_by_post.get(pid)
+            post["_hq_roots"] = hq_roots_by_post.get(pid) or []
         # Attach comments to their posts.
         for post in posts.values():
             post["comments"] = []
@@ -4071,52 +4050,90 @@ class Database:
             )
         # Derived HQ Mentions status for each post.
         #
-        # Verdict is driven by the **HQ root comment** alone (the
-        # cluster head with comment_type='hq' AND parent_comment_id
-        # IS NULL — same row that drives `mention_link`). Other
+        # Verdict is driven by the post's HQ ROOT comments (rows with
+        # comment_type='hq' AND parent_comment_id IS NULL). Other
         # reported comments under the post (replies, siblings from
-        # the legacy multi-comment-report flow) do NOT drive the
-        # verdict — only the HQ root, because that's the single
-        # deliverable in the "1 post = 1 HQ Mention" model.
+        # the legacy multi-comment-report flow) do NOT gate the
+        # verdict.
         #
-        # Triggers, in priority order:
-        #   1. post.status = 'removed'              → removed
-        #   2. no HQ root exists                    → removed
-        #   3. HQ root URL is empty                 → removed
-        #   4. HQ root status = 'removed'           → removed
-        #   5. HQ root status = 'replace'           → replace
-        #   else                                    → live
+        # Across the HQ root rows we pick the BEST classification:
         #
-        # `derived_status_reason` carries the trigger label + a
-        # full per-comment listing so the admin can see EXACTLY
-        # which row drove the verdict via the ?debug=1 tooltip.
+        #   live    : at least one HQ root has a Reddit URL AND its
+        #             status is not 'removed'/'replace'. (status of
+        #             'report' / 'deployed' / 'paid' all count as
+        #             live as long as the URL is set — the comment
+        #             IS on Reddit.)
+        #   replace : no live HQ root, but at least one HQ root has
+        #             status='replace' (recent removal — eligible
+        #             for redeploy). Chip is amber; rolls up under
+        #             Removed for KPI counting.
+        #   removed : no live HQ root AND no replace HQ root. Either
+        #             no HQ root at all, or every HQ root is removed
+        #             / has no URL.
+        #
+        # `post.status == 'removed'` always wins regardless of HQ
+        # state — the post itself was reported as removed.
         for post in posts.values():
             post_status = (post.get("status") or "").lower()
             cmts = post["comments"]
-            hq_root = post.get("_hq_root")  # set above; may be None
+            hq_roots = post.get("_hq_roots") or []
+
+            # Classify each HQ root for the reason text + verdict
+            # selection.
+            live_hq = next(
+                (h for h in hq_roots
+                 if h["url"] and h["status"] not in ("removed", "replace")),
+                None,
+            )
+            replace_hq = next(
+                (h for h in hq_roots if h["status"] == "replace"),
+                None,
+            )
+
             reason = None
             is_replace = False
             if post_status == "removed":
                 reason = (f"post.status='removed' "
                           f"(prev_status={post.get('prev_status')!r})")
-            elif hq_root is None:
-                reason = ("no deployed HQ root comment under this post "
-                          "(no comment_type='hq' AND parent_comment_id IS NULL)")
-            elif not hq_root["url"]:
-                reason = (f"HQ root comment #{hq_root['id']} has empty "
-                          f"reddit_comment_url (never actually posted)")
-            elif hq_root["status"] == "removed":
-                reason = (f"HQ root comment #{hq_root['id']} "
-                          f"status='removed'")
-            elif hq_root["status"] == "replace":
-                reason = (f"HQ root comment #{hq_root['id']} "
-                          f"status='replace' (recent removal — eligible "
-                          f"for redeploy)")
+            elif live_hq is not None:
+                # Healthy path — no verdict reason; falls through
+                # to the "all clear" branch below.
+                pass
+            elif replace_hq is not None:
+                reason = (f"HQ root comment #{replace_hq['id']} "
+                          f"status='replace' (recent removal — "
+                          f"eligible for redeploy); no other HQ "
+                          f"root is currently live")
                 is_replace = True
+            elif not hq_roots:
+                reason = ("no deployed HQ root comment under this post "
+                          "(no comment_type='hq' AND parent_comment_id "
+                          "IS NULL)")
+            else:
+                # At least one HQ root exists but none are live (and
+                # none are 'replace'). Surface the worst row for
+                # context.
+                bad = next(
+                    (h for h in hq_roots if h["status"] == "removed"),
+                    None,
+                ) or next(
+                    (h for h in hq_roots if not h["url"]),
+                    None,
+                ) or hq_roots[0]
+                if bad["status"] == "removed":
+                    reason = (f"HQ root comment #{bad['id']} "
+                              f"status='removed'; no other HQ root is "
+                              f"currently live")
+                elif not bad["url"]:
+                    reason = (f"HQ root comment #{bad['id']} has empty "
+                              f"reddit_comment_url (never actually posted)")
+                else:
+                    reason = (f"HQ root comment #{bad['id']} status="
+                              f"{bad['status']!r} — not in a live state")
 
-            # Always render a per-comment listing in the reason so
-            # the admin can see EXACTLY which comments live under
-            # this post. Format: "#ID status[ (no URL)]".
+            # Render a per-comment listing in the reason so the
+            # admin can see EXACTLY which comments live under this
+            # post. Also list every HQ root row + its state.
             def _cmt_brief(c):
                 cid = c.get("id")
                 cst = (c.get("status") or "").lower()
@@ -4125,27 +4142,32 @@ class Database:
             cmts_str = (", ".join(_cmt_brief(c) for c in cmts)
                         if cmts else "(none)")
             hq_brief = (
-                f"hq_root=#{hq_root['id']} status={hq_root['status']!r} "
-                f"url={'set' if hq_root['url'] else 'empty'}"
-                if hq_root else "hq_root=None"
+                ", ".join(
+                    f"#{h['id']} status={h['status']!r} "
+                    f"url={'set' if h['url'] else 'empty'}"
+                    for h in hq_roots
+                ) if hq_roots else "(no HQ root)"
             )
             if reason:
                 post["derived_status"] = "replace" if is_replace else "removed"
                 post["derived_status_reason"] = (
                     f"{reason} | post.status={post_status!r} | "
-                    f"{hq_brief} | reported comments: {cmts_str}"
+                    f"hq_roots: [{hq_brief}] | reported comments: "
+                    f"{cmts_str}"
                 )
             else:
                 post["derived_status"] = "live"
                 post["derived_status_reason"] = (
-                    f"all clear | post.status={post_status!r} | "
-                    f"{hq_brief} | {len(cmts)} reported comment(s): "
-                    f"{cmts_str}"
+                    f"all clear — live HQ root #{live_hq['id']} "
+                    f"status={live_hq['status']!r} url=set | "
+                    f"post.status={post_status!r} | "
+                    f"hq_roots: [{hq_brief}] | "
+                    f"{len(cmts)} reported comment(s): {cmts_str}"
                 )
             # Internal hint — strip before returning so JSON
             # serialization stays clean and the template doesn't
             # see it as a row attribute.
-            post.pop("_hq_root", None)
+            post.pop("_hq_roots", None)
         # Posts sorted newest-first by the actual Reddit publish
         # timestamp where we have it, falling back to deployed_at /
         # paid_at / created_at for legacy rows that haven't had

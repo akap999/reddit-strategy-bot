@@ -3700,11 +3700,17 @@ class Database:
                AND c.status IN ('report', 'removed', 'replace')
              GROUP BY c.report_month, c.post_id
         """
+        # Counts are mutually exclusive — a single row is either
+        # live, removed, or replace (never two at once). This was a
+        # confusing UX before when `removed` included replace and
+        # the dashboard showed "12 removed · 4 replace" looking like
+        # 16 not-live rows when it was really 12 (4 of which are
+        # eligible for redeploy).
         q_mentions = f"""
             SELECT sc.report_month AS month,
                    COUNT(*) AS total,
                    SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
-                   SUM(CASE WHEN sc.status IN ('removed', 'replace') THEN 1 ELSE 0 END) AS removed,
+                   SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed,
                    SUM(CASE WHEN sc.status = 'replace' THEN 1 ELSE 0 END) AS replace_cnt
               FROM search_comments sc
               JOIN search_posts sp ON sc.search_post_id = sp.id
@@ -3731,13 +3737,14 @@ class Database:
             })
             bucket["hq_total"] += 1
             seen_posts.add((m, r["post_id"]))
-            if r["is_removed"]:
+            # Mutually exclusive buckets: a post is in EXACTLY ONE of
+            # live / removed / replace. is_removed=1 + is_replace=1
+            # means the verdict is 'replace'; is_removed=1 alone
+            # means strict 'removed'.
+            if r["is_replace"]:
+                bucket["hq_replace"] += 1
+            elif r["is_removed"]:
                 bucket["hq_removed"] += 1
-                # `is_replace` is a sub-count of `is_removed` — every
-                # replace row is also counted under removed, so the
-                # tile totals don't double-count.
-                if r["is_replace"]:
-                    bucket["hq_replace"] += 1
             else:
                 bucket["hq_live"] += 1
         # Post-only reports: posts.status='report' WITHOUT any
@@ -3931,10 +3938,12 @@ class Database:
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["hq_total"] += 1
             seen_posts.add((r["resolved_brand_id"], r["month"], r["post_id"]))
-            if r["is_removed"]:
+            # Mutually exclusive buckets — same rule as the months
+            # aggregate.
+            if r["is_replace"]:
+                slot["hq_replace"] += 1
+            elif r["is_removed"]:
                 slot["hq_removed"] += 1
-                if r["is_replace"]:
-                    slot["hq_replace"] += 1
             else:
                 slot["hq_live"] += 1
         # Post-only reports — posts.status='report' but no reported
@@ -3968,15 +3977,14 @@ class Database:
         for r in self.conn.execute(q_mentions, brand_ids * 2).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["mentions_total"] += r["cnt"]
+            # Mutually exclusive counts — no double-counting across
+            # the three buckets.
             if r["status"] == "report":
                 slot["mentions_live"] += r["cnt"]
-            elif r["status"] in ("removed", "replace"):
-                # `replace` rolls up under Removed for KPI counting
-                # (per user decision). Only the row chip shows the
-                # distinct label.
+            elif r["status"] == "removed":
                 slot["mentions_removed"] += r["cnt"]
-                if r["status"] == "replace":
-                    slot["mentions_replace"] += r["cnt"]
+            elif r["status"] == "replace":
+                slot["mentions_replace"] += r["cnt"]
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
         names = {}

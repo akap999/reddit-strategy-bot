@@ -6,8 +6,14 @@
 {% set mention_count = search_comments | length %}
 {% set live_mentions = search_comments | selectattr('status', 'equalto', 'report') | list | length %}
 {# `replace` rolls up under Removed for KPI counting (only the row
-   chip is visually distinct). #}
-{% set removed_mentions = (search_comments | selectattr('status', 'equalto', 'removed') | list | length) + (search_comments | selectattr('status', 'equalto', 'replace') | list | length) %}
+   chip is visually distinct). `replace_mentions` is a sub-count
+   surfaced on the KPI tile so the admin can see how many of the
+   removed deliverables are eligible for redeploy. #}
+{% set replace_mentions = search_comments | selectattr('status', 'equalto', 'replace') | list | length %}
+{% set removed_mentions = (search_comments | selectattr('status', 'equalto', 'removed') | list | length) + replace_mentions %}
+{# HQ counts derived from posts.derived_status — already includes the
+   replace bucket. We pull the sub-count out for the KPI subtitle. #}
+{% set replace_hq = posts | selectattr('derived_status', 'equalto', 'replace') | list | length %}
 {% set total_all = hq_count + mention_count %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
@@ -31,12 +37,12 @@
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">HQ Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-hq">{{ hq_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5">posts</div>
+    <div class="text-xs text-slate-400 mt-0.5">posts{% if replace_hq %} · {{ replace_hq }} replace{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-mentions">{{ mention_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}</div>
+    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}{% if replace_mentions %} · {{ replace_mentions }} replace{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>

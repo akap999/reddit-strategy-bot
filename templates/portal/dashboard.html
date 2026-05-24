@@ -63,6 +63,10 @@
           <div class="flex items-center gap-1 text-[11px]">
             <span class="chip chip-live">{{ m.mentions_live }} live</span>
             {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
+            {# Replace is a sub-set of Removed — already counted in
+               mentions_removed. Surface it separately so the admin
+               can see how many are eligible for redeploy. #}
+            {% if m.mentions_replace %}<span class="chip chip-replace">{{ m.mentions_replace }} replace</span>{% endif %}
           </div>
         </div>
         {% endif %}
@@ -75,6 +79,7 @@
           <div class="flex items-center gap-1 text-[11px]">
             <span class="chip chip-live">{{ m.hq_live }} live</span>
             {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
+            {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
           </div>
         </div>
         {% endif %}
@@ -160,16 +165,21 @@ function _allMonths(rows) {
 
 function _aggregate(rows, monthFilter, statusFilter) {
   // Per-pipeline aggregates, applied after the month/status filters.
-  let mTotal = 0, mLive = 0, mRemoved = 0;
-  let hqTotal = 0, hqLive = 0, hqRemoved = 0;
+  // `replace` is a sub-count of `removed` — every replace row is
+  // also counted under removed. The chip is rendered separately so
+  // the admin sees how many "removed" rows are eligible for redeploy.
+  let mTotal = 0, mLive = 0, mRemoved = 0, mReplace = 0;
+  let hqTotal = 0, hqLive = 0, hqRemoved = 0, hqReplace = 0;
   for (const r of rows) {
     if (monthFilter && r.month !== monthFilter) continue;
     mTotal += r.mentions_total || 0;
     mLive += r.mentions_live || 0;
     mRemoved += r.mentions_removed || 0;
+    mReplace += r.mentions_replace || 0;
     hqTotal += r.hq_total || 0;
     hqLive += r.hq_live || 0;
     hqRemoved += r.hq_removed || 0;
+    hqReplace += r.hq_replace || 0;
   }
   // Status filter narrows the "headline" number for each pipeline:
   // when 'live' / 'removed' is picked, the headline shifts to that
@@ -180,11 +190,11 @@ function _aggregate(rows, monthFilter, statusFilter) {
                                  total;
   return {
     mentions: {
-      total: mTotal, live: mLive, removed: mRemoved,
+      total: mTotal, live: mLive, removed: mRemoved, replace: mReplace,
       headline: pickHeadline(mLive, mRemoved, mTotal),
     },
     hq: {
-      total: hqTotal, live: hqLive, removed: hqRemoved,
+      total: hqTotal, live: hqLive, removed: hqRemoved, replace: hqReplace,
       headline: pickHeadline(hqLive, hqRemoved, hqTotal),
     },
   };
@@ -237,6 +247,7 @@ function _renderCardBody(agg, status) {
       <div class="flex items-center gap-1 text-[11px]" data-chips>
         <span class="chip chip-live"><span data-live>${p.live}</span> live</span>
         ${p.removed ? `<span class="chip chip-removed"><span data-removed>${p.removed}</span> removed</span>` : ''}
+        ${p.replace ? `<span class="chip chip-replace"><span data-replace>${p.replace}</span> replace</span>` : ''}
       </div>
     </div>
   `;

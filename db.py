@@ -3666,7 +3666,33 @@ class Database:
                                    AND hq.status NOT IN ('removed', 'replace')
                                    AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                             ) THEN 1
-                            ELSE 0 END) AS is_removed
+                            ELSE 0 END) AS is_removed,
+                   -- `is_replace` is a sub-count of `is_removed`:
+                   -- post is removed AND the verdict is driven by a
+                   -- 'replace' HQ root (rather than a hard removal or
+                   -- missing HQ). Surfaced as a separate chip on the
+                   -- dashboard cards so the admin can see how many of
+                   -- the "removed" deliverables are still eligible for
+                   -- redeploy.
+                   MAX(CASE
+                       WHEN p.status = 'removed' THEN 0
+                       WHEN EXISTS (
+                           SELECT 1 FROM comments hq
+                            WHERE hq.post_id = c.post_id
+                              AND hq.comment_type = 'hq'
+                              AND hq.parent_comment_id IS NULL
+                              AND hq.status NOT IN ('removed', 'replace')
+                              AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                       ) THEN 0
+                       WHEN EXISTS (
+                           SELECT 1 FROM comments hq
+                            WHERE hq.post_id = c.post_id
+                              AND hq.comment_type = 'hq'
+                              AND hq.parent_comment_id IS NULL
+                              AND hq.status = 'replace'
+                       ) THEN 1
+                       ELSE 0
+                   END) AS is_replace
               FROM comments c
               JOIN posts p ON c.post_id = p.id
              WHERE {match_c}
@@ -3678,7 +3704,8 @@ class Database:
             SELECT sc.report_month AS month,
                    COUNT(*) AS total,
                    SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
-                   SUM(CASE WHEN sc.status IN ('removed', 'replace') THEN 1 ELSE 0 END) AS removed
+                   SUM(CASE WHEN sc.status IN ('removed', 'replace') THEN 1 ELSE 0 END) AS removed,
+                   SUM(CASE WHEN sc.status = 'replace' THEN 1 ELSE 0 END) AS replace_cnt
               FROM search_comments sc
               JOIN search_posts sp ON sc.search_post_id = sp.id
              WHERE {match_sc}
@@ -3698,12 +3725,19 @@ class Database:
             bucket = agg.setdefault(m, {
                 "month": m,
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "mentions_replace": 0,
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+                "hq_replace": 0,
             })
             bucket["hq_total"] += 1
             seen_posts.add((m, r["post_id"]))
             if r["is_removed"]:
                 bucket["hq_removed"] += 1
+                # `is_replace` is a sub-count of `is_removed` — every
+                # replace row is also counted under removed, so the
+                # tile totals don't double-count.
+                if r["is_replace"]:
+                    bucket["hq_replace"] += 1
             else:
                 bucket["hq_live"] += 1
         # Post-only reports: posts.status='report' WITHOUT any
@@ -3728,7 +3762,9 @@ class Database:
             bucket = agg.setdefault(m, {
                 "month": m,
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "mentions_replace": 0,
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+                "hq_replace": 0,
             })
             bucket["hq_total"] += 1
             bucket["hq_removed"] += 1
@@ -3740,11 +3776,14 @@ class Database:
             bucket = agg.setdefault(m, {
                 "month": m,
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "mentions_replace": 0,
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+                "hq_replace": 0,
             })
             bucket["mentions_total"] += r["total"] or 0
             bucket["mentions_live"] += r["live"] or 0
             bucket["mentions_removed"] += r["removed"] or 0
+            bucket["mentions_replace"] += r["replace_cnt"] or 0
         # Back-compat aggregates so callers that read .total / .live
         # / .removed (older callsites + the brand overview page) keep
         # working without churn.
@@ -3752,6 +3791,7 @@ class Database:
             b["total"] = b["mentions_total"] + b["hq_total"]
             b["live"] = b["mentions_live"] + b["hq_live"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
+            b["replace"] = b["mentions_replace"] + b["hq_replace"]
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
     def update_live_stats(self, comment_id, source, upvotes, num_replies):
@@ -3824,7 +3864,30 @@ class Database:
                               AND hq.status NOT IN ('removed', 'replace')
                               AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                        ) THEN 1
-                       ELSE 0 END) AS is_removed
+                       ELSE 0 END) AS is_removed,
+              -- is_replace is a sub-count of is_removed (same logic as
+              -- the months aggregate). Surfaced separately so the
+              -- brand-card UI can show a Replace chip alongside Live /
+              -- Removed without changing the totals.
+              MAX(CASE
+                  WHEN p.status = 'removed' THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = c.post_id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status NOT IN ('removed', 'replace')
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = c.post_id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status = 'replace'
+                  ) THEN 1
+                  ELSE 0
+              END) AS is_replace
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             WHERE c.report_month IS NOT NULL
@@ -3860,7 +3923,9 @@ class Database:
             key = (bid, month)
             return cells.setdefault(key, {
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "mentions_replace": 0,
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+                "hq_replace": 0,
             })
         for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])
@@ -3868,6 +3933,8 @@ class Database:
             seen_posts.add((r["resolved_brand_id"], r["month"], r["post_id"]))
             if r["is_removed"]:
                 slot["hq_removed"] += 1
+                if r["is_replace"]:
+                    slot["hq_replace"] += 1
             else:
                 slot["hq_live"] += 1
         # Post-only reports — posts.status='report' but no reported
@@ -3908,6 +3975,8 @@ class Database:
                 # (per user decision). Only the row chip shows the
                 # distinct label.
                 slot["mentions_removed"] += r["cnt"]
+                if r["status"] == "replace":
+                    slot["mentions_replace"] += r["cnt"]
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
         names = {}
@@ -3927,15 +3996,18 @@ class Database:
                 "mentions_total": slot["mentions_total"],
                 "mentions_live": slot["mentions_live"],
                 "mentions_removed": slot["mentions_removed"],
+                "mentions_replace": slot["mentions_replace"],
                 "hq_total": slot["hq_total"],
                 "hq_live": slot["hq_live"],
                 "hq_removed": slot["hq_removed"],
+                "hq_replace": slot["hq_replace"],
             }
             # Back-compat aggregates so JS that still reads .total /
             # .live / .removed (or any older caller) keeps working.
             row["total"] = row["mentions_total"] + row["hq_total"]
             row["live"] = row["mentions_live"] + row["hq_live"]
             row["removed"] = row["mentions_removed"] + row["hq_removed"]
+            row["replace"] = row["mentions_replace"] + row["hq_replace"]
             out.append(row)
         # Stable sort: brand name asc, month desc.
         out.sort(key=lambda r: (r["brand_name"].lower(), -1 * int((r["month"] or "0000-00").replace("-", ""))))

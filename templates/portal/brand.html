@@ -52,6 +52,9 @@
         <div class="flex items-center gap-1 text-[11px]">
           <span class="chip chip-live">{{ m.mentions_live }} live</span>
           {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
+          {# Replace is already counted under Removed — surfaced
+             separately so the admin sees redeploy-eligible rows. #}
+          {% if m.mentions_replace %}<span class="chip chip-replace">{{ m.mentions_replace }} replace</span>{% endif %}
         </div>
       </div>
       {% endif %}
@@ -64,6 +67,7 @@
         <div class="flex items-center gap-1 text-[11px]">
           <span class="chip chip-live">{{ m.hq_live }} live</span>
           {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
+          {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
         </div>
       </div>
       {% endif %}

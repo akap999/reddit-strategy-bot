@@ -9457,15 +9457,25 @@ function _lsPreFilteredSubsInComments() {
     if (postId) pool = pool.filter(c => c.search_post_id == postId);
     if (brandName) pool = pool.filter(c => c.brand_name === brandName);
     if (status && status !== 'archived') {
-        const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, removed: 7 };
-        const postMaxStatus = {};
-        pool.forEach(c => {
-            const pid = c.search_post_id;
-            const rank = LS_STATUS_RANK[c.status] ?? -1;
-            if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
-        });
-        const targetRank = LS_STATUS_RANK[status] ?? -1;
-        pool = pool.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+        // For terminal-ish statuses (including 'replace') we want a
+        // DIRECT match — same logic as lsFilterComments. Otherwise
+        // we'd compute postMaxStatus and pick by rank, which silently
+        // hides 'replace' posts (rank lookup returns undefined and
+        // the filter matches no rows).
+        const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8 };
+        const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace']);
+        if (DIRECT_STATUSES.has(status)) {
+            pool = pool.filter(c => c.status === status);
+        } else {
+            const postMaxStatus = {};
+            pool.forEach(c => {
+                const pid = c.search_post_id;
+                const rank = LS_STATUS_RANK[c.status] ?? -1;
+                if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
+            });
+            const targetRank = LS_STATUS_RANK[status] ?? -1;
+            pool = pool.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+        }
     }
     return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
 }
@@ -9596,8 +9606,10 @@ function lsFilterComments() {
     //  - For earlier-stage statuses (draft/assigned/informed/deployed)
     //    we keep the post-max-status behaviour so the UI shows posts
     //    currently AT that stage of the pipeline rather than past it.
-    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, removed: 7 };
-    const DIRECT_STATUSES = new Set(['paid', 'report', 'removed']);
+    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8 };
+    // `replace` is a terminal-ish state (auto-detected recent removal),
+    // so we filter directly on c.status — same treatment as removed.
+    const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace']);
     if (status && status !== 'archived') {
         if (DIRECT_STATUSES.has(status)) {
             filtered = filtered.filter(c => c.status === status);

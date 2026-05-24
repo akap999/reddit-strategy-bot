@@ -7103,6 +7103,20 @@ function renderLsubsGenerate(c) {
                         <option value="9">9 (3-3-3)</option>
                     </select>
                 </label>
+                <!-- Inline "Also generate HQ" toggle so the user can
+                     spawn an HQ thread for every freshly-generated post
+                     in one click (no need to come back later via the
+                     Posts tab's per-row Gen HQ). When checked, the
+                     post-gen task is followed by N HQ-gen tasks (one
+                     per kept post) automatically. -->
+                <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" title="After posts generate, automatically spawn an HQ thread (1 main + replies) for each one — same flow as the Posts tab's Gen HQ button">
+                    <input type="checkbox" id="lsubs-gen-with-hq" onchange="document.getElementById('lsubs-gen-hq-replies-wrap').style.display = this.checked ? '' : 'none'">
+                    Also Gen HQ per post
+                </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1" id="lsubs-gen-hq-replies-wrap" style="display:none">
+                    HQ replies
+                    <input type="number" id="lsubs-gen-hq-replies" value="5" min="1" max="15" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px;width:60px">
+                </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
                 <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
                 <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
@@ -7378,7 +7392,7 @@ async function lsubsGeneratePosts(force = false) {
     const tid = res.task_id;
     toast(`Generating ${count} post${count > 1 ? 's' : ''} for r/${sub}…`, 'info');
     _addBgTask(tid, 'Live Posts');
-    const poll = setInterval(async () => {
+    const poll = setInterval(async () => {  // async callback so the auto-HQ branch below can await
         try {
             const t = await api(`/api/tasks/${tid}`);
             if (t.status === 'complete') {
@@ -7393,6 +7407,35 @@ async function lsubsGeneratePosts(force = false) {
                 const _softDups = _keptArr.filter(p => p && p.matched_existing).length;
                 toast(`Generated ${_keptArr.length} post(s)${_softDups ? ` (${_softDups} also live on Reddit — soft hint, not skipped)` : ''}`, 'success');
                 lsubsLoadTable();
+                // If the inline "Also Gen HQ per post" checkbox is
+                // ticked, fire an HQ generation task for every kept
+                // post automatically. Reuses the existing /api/generate/
+                // hq-comment endpoint and the lsubsLookupPostBrand
+                // helper so behavior matches the per-row Gen HQ button
+                // on the Posts tab.
+                const autoHq = !!document.getElementById('lsubs-gen-with-hq')?.checked;
+                if (autoHq && _keptArr.length) {
+                    const nr = parseInt(document.getElementById('lsubs-gen-hq-replies')?.value) || 5;
+                    let started = 0;
+                    for (const p of _keptArr) {
+                        try {
+                            const bid = await _lsubsLookupPostBrand(p.id);
+                            if (!bid) continue;
+                            const { task_id } = await api('/api/generate/hq-comment', {
+                                method: 'POST',
+                                body: { post_id: p.id, brand_id: bid, ai_crawl: true, num_replies: nr },
+                            });
+                            _addBgTask(task_id, `Live HQ #${p.id}`);
+                            _pollTask(task_id, `Live HQ #${p.id}`, () => {
+                                if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+                            });
+                            started++;
+                        } catch (err) {
+                            console.warn(`Auto HQ failed for post ${p.id}:`, err);
+                        }
+                    }
+                    toast(`Auto-started HQ generation for ${started}/${_keptArr.length} post(s)`, 'info');
+                }
             } else if (t.status === 'error') {
                 clearInterval(poll);
                 _removeBgTask(tid);

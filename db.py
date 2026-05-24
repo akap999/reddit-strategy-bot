@@ -2207,11 +2207,17 @@ class Database:
 
         `kind` is "comment" (queries `comments`/post_id) or
         "search_comment" (queries `search_comments`/search_post_id).
-        We deliberately include 'removed' and 'deleted' rows: a row may
+        We deliberately include 'removed' and 'replace' rows: a row may
         have been auto-marked dead by the live-check job before the user
         ran bulk-deploy, but the user is now telling us "no, it was
         actually deployed here". Letting bulk-deploy match those rows
         and restore them mirrors the existing restore_to_deployed path.
+
+        We EXCLUDE 'report' (and 'deployed' / 'paid' / 'archived')
+        because those are user-driven terminal states. Body-matching
+        a 'report' row into the candidate pool would let a sheet re-
+        upload silently flip it back to 'deployed' — the bulk-deploy
+        rollback bug that prompted this guard.
         """
         if kind == "comment":
             rows = self.conn.execute(
@@ -2219,7 +2225,7 @@ class Database:
                           account_id
                    FROM comments
                    WHERE post_id = ?
-                     AND status NOT IN ('deployed', 'paid', 'archived')""",
+                     AND status NOT IN ('deployed', 'paid', 'archived', 'report')""",
                 (post_id,)
             ).fetchall()
         elif kind == "search_comment":
@@ -2228,7 +2234,7 @@ class Database:
                           account_id
                    FROM search_comments
                    WHERE search_post_id = ?
-                     AND status NOT IN ('deployed', 'paid', 'archived')""",
+                     AND status NOT IN ('deployed', 'paid', 'archived', 'report')""",
                 (post_id,)
             ).fetchall()
         else:

@@ -566,8 +566,14 @@ def fetch_reddit_comment_body(comment_url: str, *, reddit_get: Callable,
 # Per-URL matcher
 # ---------------------------------------------------------------------------
 
-# Statuses that count as "already finished" — no need to re-deploy.
-_DONE_STATUSES = {"deployed", "paid", "archived"}
+# Statuses that count as "already finished" — bulk-deploy must not
+# overwrite these. 'report' was missing before, which let a sheet
+# re-upload silently roll a reported comment back to 'deployed'
+# (deploy_comment hard-sets status='deployed' without looking at the
+# prior state). Same risk applies to 'paid' / 'archived' / 'deleted':
+# the user explicitly moved them out of the deploy pipeline; bulk
+# matching shouldn't undo that.
+_DONE_STATUSES = {"deployed", "paid", "archived", "report", "deleted"}
 
 
 def _row_context(db, comment_id, kind):

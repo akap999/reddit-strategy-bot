@@ -816,6 +816,17 @@ def api_get_post(pid):
         post["comment_count"] = db.conn.execute(
             "SELECT COUNT(*) FROM comments WHERE post_id = ?", (pid,)
         ).fetchone()[0]
+        # Subreddit name for the post-detail modal's r/<sub> ↗ link.
+        # `posts.subreddit_id` is the FK; the frontend wants the name.
+        try:
+            sid = post.get("subreddit_id")
+            if sid:
+                sr = db.conn.execute(
+                    "SELECT name FROM subreddits WHERE id = ?", (sid,)
+                ).fetchone()
+                post["subreddit_name"] = sr["name"] if sr else None
+        except Exception:
+            post["subreddit_name"] = None
         brands = db.get_brands_for_post(pid)
         post["brands"] = [{"id": b["id"], "name": b["name"]} for b in brands]
         post["brand_names"] = ", ".join(b["name"] for b in brands) if brands else ""
@@ -3640,13 +3651,46 @@ def _live_reddit_dup(sub_name, candidate_title, sim_threshold=0.85, min_score=3)
 def api_brand_live_subreddits(bid):
     """Return the brand's saved Live Search subreddit list (the
     search_subreddits JSON column, already populated by the LS Save-to-brand
-    button or the Edit Brand modal)."""
+    button or the Edit Brand modal).
+
+    Also returns `counts`: a {subreddit_name: {deployed, reported}} map
+    so the Live Subs Generate-tab dropdown can label each option with
+    its deployed + reported post counts at a glance. Counts are scoped
+    to live posts for THIS brand (matches the brand-id filter the rest
+    of the lsubs flow uses).
+    """
     db = get_db()
     try:
         brand = db.get_brand(bid)
         if not brand:
             return jsonify({"error": "Brand not found"}), 404
-        return jsonify({"brand_id": bid, "subreddits": _brand_search_subs(brand)})
+        subs = _brand_search_subs(brand)
+        # `deployed` here means posts.status='published' — that's the
+        # actual on-Reddit live state for Live Subs posts. We
+        # additionally surface 'paid' under deployed (it's a post-
+        # publish admin state, still live on Reddit).
+        # `reported` covers posts.status='report' so the dropdown
+        # can hint how many posts for this brand × sub have been
+        # pushed into a monthly client report.
+        rows = db.conn.execute(
+            """SELECT LOWER(s.name) AS sub_lc,
+                      SUM(CASE WHEN p.status IN ('published','paid') THEN 1 ELSE 0 END) AS deployed,
+                      SUM(CASE WHEN p.status = 'report' THEN 1 ELSE 0 END) AS reported
+                 FROM posts p
+                 JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN post_brands pb ON pb.post_id = p.id
+                WHERE COALESCE(s.is_live, 0) = 1
+                  AND (p.brand_id = ? OR pb.brand_id = ?)
+                GROUP BY LOWER(s.name)""",
+            (bid, bid)
+        ).fetchall()
+        counts = {}
+        for r in rows:
+            counts[r["sub_lc"]] = {
+                "deployed": r["deployed"] or 0,
+                "reported": r["reported"] or 0,
+            }
+        return jsonify({"brand_id": bid, "subreddits": subs, "counts": counts})
     finally:
         db.close()
 

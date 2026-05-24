@@ -2449,9 +2449,18 @@ async function showPostDetail(pid) {
     const post = await api(`/api/posts/${pid}`);
     const isReported = post.status === 'report';
     const canReport = post.status === 'published' || post.status === 'paid';
+    // Subreddit name comes back as `subreddit_name` on /api/posts/<id>.
+    // Surface it as a clickable r/<sub> ↗ link so the user can open
+    // the subreddit on Reddit straight from the detail modal — same
+    // affordance as the Live Search expanded post view.
+    const subName = post.subreddit_name || '';
+    const subLink = subName
+        ? `<a href="https://www.reddit.com/r/${subName}" target="_blank" rel="noopener" class="text-xs hover:underline" style="color:#FF8b60" title="Open r/${subName} on Reddit">r/${subName} ↗</a>`
+        : '';
     showModal(`
         <h3 class="text-lg font-bold mb-1">${post.title}</h3>
-        <div class="flex gap-2 mb-3 flex-wrap">
+        <div class="flex gap-2 mb-3 flex-wrap items-center">
+            ${subLink}
             <span class="badge badge-${post.status}">${post.status === 'published' ? 'deployed' : post.status}</span>
             ${post.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0">report ${post.report_month}</span>` : ''}
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
@@ -2464,6 +2473,11 @@ async function showPostDetail(pid) {
         <p class="text-xs text-gray-500">${post.comment_count} comments</p>
         <div class="flex gap-2 mt-4 flex-wrap">
             ${post.reddit_url ? `<a href="${post.reddit_url}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">View on Reddit ↗</a>` : ''}
+            <!-- Gen HQ entry point reachable from any post-detail modal
+                 — so the option is one click away regardless of which
+                 list the user clicked the title from (Posts tab,
+                 Generate tab result panel, Comments tab card, etc.). -->
+            <button class="btn btn-sm btn-accent" onclick="closeModal(); lsubsGenHqForPost(${post.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
             ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
             ${isReported ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="closeModal(); undoReportThisPost(${post.id})">↺ Undo report</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
@@ -7024,6 +7038,7 @@ function lsKeywordBadges(keywords) {
 // =========================================================================
 let _lsubsBrands = [];
 let _lsubsSubreddits = [];   // current brand's saved sub list
+let _lsubsSubCounts = {};    // {sub_lc: {deployed, reported}} from /api/brands/<id>/live-subreddits
 let _lsubsLastResult = null; // last generate response (for the skipped accordion)
 
 let _lsubsTab = 'generate';   // 'generate' | 'posts' | 'comments'
@@ -7204,6 +7219,11 @@ function lsubsOnBrandChange() {
     if (addBtn) addBtn.disabled = false;
     api(`/api/brands/${bid}/live-subreddits`).then(res => {
         _lsubsSubreddits = res.subreddits || [];
+        // Stash per-sub deployed / reported counts so the option
+        // labels can show them at a glance — and so other UI
+        // surfaces (e.g. the Posts tab filter, if it adds one
+        // later) can reuse them without re-fetching.
+        _lsubsSubCounts = res.counts || {};
         if (!_lsubsSubreddits.length) {
             subEl.disabled = true;
             subEl.innerHTML = '<option value="">No saved subreddits</option>';
@@ -7221,7 +7241,18 @@ function lsubsOnBrandChange() {
         // pick a specific sub (since we need a destination for
         // newly-generated posts).
         const allOpt = '<option value="__ALL__">All subreddits</option>';
-        const subOpts = _lsubsSubreddits.map(s => `<option value="${s}">r/${s}</option>`).join('');
+        // Annotate each option with " (D deployed · R reported)"
+        // when those counts are non-zero, so the user can see at
+        // a glance which subs have the most activity for this brand.
+        const subOpts = _lsubsSubreddits.map(s => {
+            const c = _lsubsSubCounts[(s || '').toLowerCase()] || {};
+            const dep = c.deployed || 0, rep = c.reported || 0;
+            const parts = [];
+            if (dep) parts.push(`${dep} deployed`);
+            if (rep) parts.push(`${rep} reported`);
+            const label = parts.length ? `r/${s}  (${parts.join(' · ')})` : `r/${s}`;
+            return `<option value="${s}">${label}</option>`;
+        }).join('');
         subEl.innerHTML = allOpt + subOpts;
         subEl.value = '__ALL__';
         subEl.onchange = () => {
@@ -7318,6 +7349,12 @@ function lsubsRenderTable(posts) {
                         </span>
                     </td>
                     <td><div class="flex gap-1 flex-nowrap" style="white-space:nowrap">
+                        <!-- Live Subs Generate-tab table used to omit the Gen
+                             Cmts / Gen HQ affordances, forcing the user to
+                             jump to the Posts tab. Now both buttons sit on
+                             every row so the workflow stays in one place. -->
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenCommentsForPost(${p.id})" title="Generate comments (AI-crawl optimized)">Gen Cmts</button>
+                        <button class="btn btn-sm btn-accent" onclick="lsubsGenHqForPost(${p.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
                         ${p.owner_account ? `<button class="btn btn-sm btn-accent" onclick="copyPostMessage(${p.id})">Copy</button>${p.status !== 'informed' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informPost(${p.id})">Inform</button>` : ''}<button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Reassign</button><button class="btn btn-sm btn-secondary" onclick="unassignPostOwner(${p.id})">Unassign</button>` : `<button class="btn btn-sm btn-primary" onclick="autoAssignPost(${p.id})">Auto</button><button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${p.id})">Assign</button>`}
                         ${p.status === 'removed'
                             ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoPostRemoved(${p.id})" title="Revert to previous status">Undo removed</button>`

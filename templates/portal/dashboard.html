@@ -53,14 +53,14 @@
       </div>
       <!-- Two-pipeline split. Show each pipeline only if it has
            any deliverables in this month. -->
-      <div class="space-y-2 mb-3">
+      <div class="space-y-2.5 mb-3">
         {% if m.mentions_total %}
-        <div class="flex items-baseline justify-between gap-2">
+        <div class="flex items-baseline justify-between gap-3">
           <div class="flex items-baseline gap-2">
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
             <span class="text-xs text-slate-500">Mentions</span>
           </div>
-          <div class="flex items-center gap-1 text-[11px]">
+          <div class="flex items-center gap-1.5 text-[11px]">
             <span class="chip chip-live">{{ m.mentions_live }} live</span>
             {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
             {# Replace is a sub-set of Removed — already counted in
@@ -71,12 +71,12 @@
         </div>
         {% endif %}
         {% if m.hq_total %}
-        <div class="flex items-baseline justify-between gap-2">
+        <div class="flex items-baseline justify-between gap-3">
           <div class="flex items-baseline gap-2">
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
             <span class="text-xs text-slate-500">HQ Mentions</span>
           </div>
-          <div class="flex items-center gap-1 text-[11px]">
+          <div class="flex items-center gap-1.5 text-[11px]">
             <span class="chip chip-live">{{ m.hq_live }} live</span>
             {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
             {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
@@ -227,9 +227,14 @@ function _brandHref(brandId, month, status) {
 }
 
 function _statusLabel(status) {
+  // Only annotate the headline number when the status filter is
+  // narrowing it ('live'/'removed'). For the default 'all' view the
+  // number IS the pipeline total — adding a stray "total" tag next
+  // to the label clutters the card. Returning empty string drops
+  // the chip cleanly via the conditional render below.
   if (status === 'live') return 'live';
   if (status === 'removed') return 'removed';
-  return 'total';
+  return '';
 }
 
 // Render the two per-pipeline rows inside a brand card.
@@ -238,13 +243,13 @@ function _statusLabel(status) {
 function _renderCardBody(agg, status) {
   const label = _statusLabel(status);
   const row = (kind, p) => p.total === 0 ? '' : `
-    <div data-pipe="${kind}" class="flex items-baseline justify-between gap-2 py-1">
+    <div data-pipe="${kind}" class="flex items-baseline justify-between gap-3 py-1.5">
       <div class="flex items-baseline gap-2">
         <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;" data-headline>${p.headline}</span>
         <span class="text-xs text-slate-500" data-kind>${kind === 'mentions' ? 'Mentions' : 'HQ Mentions'}</span>
-        <span class="text-[11px] text-slate-400" data-label>${label}</span>
+        ${label ? `<span class="text-[11px] text-slate-400" data-label>${label}</span>` : ''}
       </div>
-      <div class="flex items-center gap-1 text-[11px]" data-chips>
+      <div class="flex items-center gap-1.5 text-[11px]" data-chips>
         <span class="chip chip-live"><span data-live>${p.live}</span> live</span>
         ${p.removed ? `<span class="chip chip-removed"><span data-removed>${p.removed}</span> removed</span>` : ''}
         ${p.replace ? `<span class="chip chip-replace"><span data-replace>${p.replace}</span> replace</span>` : ''}

@@ -225,6 +225,7 @@ function toast(msg, type = 'info', duration = null) {
     actionsEl.appendChild(close);
     el.appendChild(actionsEl);
     container.appendChild(el);
+    _updateClearAllToast();
 }
 
 // Sticky toast — stays visible until the user clicks ×. Used for
@@ -269,8 +270,60 @@ function persistentToast(msg, type = 'info', actions = null) {
     actionsEl.appendChild(close);
     el.appendChild(actionsEl);
     container.appendChild(el);
+    _updateClearAllToast();
     return el;
 }
+
+// Render (or hide) a sticky "Clear all (N)" pill above the toast
+// stack. Lets the user dismiss every persistent notification in one
+// click instead of × × × ×. Hidden when fewer than 2 notifications
+// are visible — a single toast is faster to dismiss with its own ×.
+function _updateClearAllToast() {
+    const container = document.getElementById('toasts');
+    if (!container) return;
+    const toasts = container.querySelectorAll('.toast');
+    let bar = document.getElementById('toast-clear-all');
+    if (toasts.length < 2) {
+        if (bar) bar.remove();
+        return;
+    }
+    if (!bar) {
+        bar = document.createElement('button');
+        bar.id = 'toast-clear-all';
+        bar.type = 'button';
+        bar.style.cssText = 'align-self:flex-end;background:#1a1a1b;color:#d7dadc;border:1px solid #343536;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;opacity:0.85;';
+        bar.onmouseenter = () => { bar.style.opacity = '1'; };
+        bar.onmouseleave = () => { bar.style.opacity = '0.85'; };
+        bar.onclick = () => {
+            // Remove every toast in one pass. Note: this is for
+            // visible-only dismissal — does not cancel running
+            // background tasks (which live in _bgTasks). The user
+            // can still see in-flight work via the task-bar.
+            container.querySelectorAll('.toast').forEach(t => t.remove());
+            bar.remove();
+        };
+        container.insertBefore(bar, container.firstChild);
+    }
+    bar.textContent = `Clear all (${toasts.length}) ×`;
+}
+
+// Hook MutationObserver to the toast container so manual × clicks
+// also trigger a re-evaluation of the Clear-all pill. Without this
+// the pill stays visible after the user dismisses individual toasts
+// until the next time we add or remove a toast programmatically.
+(function _watchToastsForClearAll() {
+    const start = () => {
+        const c = document.getElementById('toasts');
+        if (!c) { setTimeout(start, 50); return; }
+        const obs = new MutationObserver(_updateClearAllToast);
+        obs.observe(c, { childList: true });
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start);
+    } else {
+        start();
+    }
+})();
 
 // =========================================================================
 // Modal
@@ -7021,9 +7074,14 @@ function renderLsubsGenerate(c) {
                 </div>
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Subreddit <span class="text-gray-600">(from this brand's saved list, or type a new one below)</span></label>
-                    <select id="lsubs-sub" disabled style="width:100%">
+                    <select id="lsubs-sub" onchange="lsubsUpdateSubLink()" disabled style="width:100%">
                         <option value="">Pick a brand first…</option>
                     </select>
+                    <!-- Subreddit link surfaces here once a sub is picked
+                         so the user can pop the subreddit in a new tab
+                         (rules / mods / vibe-check) without having to
+                         type the URL by hand. -->
+                    <div id="lsubs-sub-link" class="text-xs mt-1" style="display:none"></div>
                     <div class="flex gap-1 mt-2">
                         <input id="lsubs-sub-new" placeholder="Or type a new subreddit name (e.g. AskReddit)"
                                class="flex-1 text-xs"
@@ -7097,6 +7155,8 @@ async function lsubsAddCustomSubreddit() {
             if (genBtn) genBtn.disabled = false;
             if (customBtn) customBtn.disabled = false;
             if (fillerBtn) fillerBtn.disabled = false;
+            // Surface the sub link now that a specific sub is picked.
+            lsubsUpdateSubLink();
         }
         const emptyEl = document.getElementById('lsubs-sub-empty');
         if (emptyEl) emptyEl.style.display = 'none';
@@ -7157,8 +7217,13 @@ function lsubsOnBrandChange() {
             if (genBtn) genBtn.disabled = isAll;
             if (customBtn) customBtn.disabled = isAll;
             if (fillerBtn) fillerBtn.disabled = isAll;
+            lsubsUpdateSubLink();
             lsubsLoadTable();
         };
+        // Refresh the "Open r/<sub> ↗" link for the default 'All'
+        // selection (hides it) — keeps state consistent on brand
+        // switch.
+        lsubsUpdateSubLink();
         // Default 'All' → generation buttons disabled; existing-post
         // table loads brand-wide.
         if (genBtn) genBtn.disabled = true;
@@ -7260,6 +7325,22 @@ function lsubsContext() {
     return { bid, sub };
 }
 
+// Refresh the "Open r/<sub> ↗" link below the subreddit picker
+// whenever the picked sub changes. Hidden for the "All subreddits"
+// pseudo-option and when nothing is selected.
+function lsubsUpdateSubLink() {
+    const link = document.getElementById('lsubs-sub-link');
+    if (!link) return;
+    const sub = (document.getElementById('lsubs-sub')?.value || '').trim();
+    if (!sub || sub === '__ALL__') {
+        link.style.display = 'none';
+        link.innerHTML = '';
+        return;
+    }
+    link.style.display = '';
+    link.innerHTML = `<a href="https://www.reddit.com/r/${sub}" target="_blank" rel="noopener" style="color:#FF8b60" class="hover:underline">Open r/${sub} ↗</a>`;
+}
+
 async function lsubsGeneratePosts(force = false) {
     const { bid, sub } = lsubsContext();
     if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
@@ -7349,10 +7430,19 @@ function lsubsRenderResult(res) {
     if (!out) return;
     const kept = res.kept || [];
     const skipped = res.skipped || [];
+    // Per-post Gen HQ button so the user can spawn an HQ thread for
+    // any freshly-generated post without leaving the Generate panel
+    // (mirrors the Posts tab's per-row "Gen HQ" affordance). The
+    // batch button below operates over all kept posts at once.
+    const _hqBtn = (p) =>
+        `<button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa;margin-left:6px" onclick="event.stopPropagation();lsubsGenHqForPost(${p.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>`;
     out.innerHTML = `
         <div class="card p-4 mb-3" style="background:#0e1a14;border:1px solid #1f3329">
-            <div class="font-bold mb-2" style="color:#46d160">Generated ${kept.length} post${kept.length === 1 ? '' : 's'} for r/${res.subreddit_name}</div>
-            ${kept.length ? `<ul class="text-sm space-y-1">${kept.map(p => `<li>· <span class="badge badge-${(p.intent || 'draft')}">${p.intent || '—'}</span> <a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.title}</a></li>`).join('')}</ul>` : '<p class="text-sm text-gray-400">No posts kept after dedup.</p>'}
+            <div class="flex items-center justify-between mb-2">
+                <div class="font-bold" style="color:#46d160">Generated ${kept.length} post${kept.length === 1 ? '' : 's'} for r/${res.subreddit_name}</div>
+                ${kept.length ? `<button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsGenHqForKept()" title="Generate an HQ thread for every post above">Gen HQ for all ${kept.length}</button>` : ''}
+            </div>
+            ${kept.length ? `<ul class="text-sm space-y-1">${kept.map(p => `<li class="flex items-center"><span class="flex-1">· <span class="badge badge-${(p.intent || 'draft')}">${p.intent || '—'}</span> <a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.title}</a></span>${_hqBtn(p)}</li>`).join('')}</ul>` : '<p class="text-sm text-gray-400">No posts kept after dedup.</p>'}
         </div>
     `;
     if (skipped.length && skipEl) {
@@ -7527,9 +7617,42 @@ async function renderLsubsPosts(c) {
                 <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllPostsModal()" title="Push every currently-filtered published/paid post (plus its eligible comments) into a monthly report">📊 Mark Reported All</button>
             </div>
         </div>
+        <!-- Status-wise count pills for the loaded posts — mirrors the
+             Live Search comments tab so the admin sees at a glance
+             how many posts sit at each pipeline stage. -->
+        <div id="lsubs-posts-counts" class="mb-3 flex flex-wrap gap-2" style="font-size:0.7rem"></div>
         <div id="lsubs-posts-table"></div>
     `;
     lsubsLoadPosts();
+}
+
+// Render status pills for the Live Subs Posts tab. Counts are by
+// p.status across the currently-loaded posts (so they reflect any
+// active brand / intent / status filter).
+function lsubsRenderPostCounts(posts) {
+    const el = document.getElementById('lsubs-posts-counts');
+    if (!el) return;
+    if (!Array.isArray(posts) || !posts.length) { el.innerHTML = ''; return; }
+    // Buckets cover every post lifecycle status. 'published' aliases
+    // to 'deployed' in the UI to match the row badge.
+    const counts = { draft:0, complete:0, published:0, paid:0, informed:0, report:0, removed:0, replace:0, archived:0 };
+    posts.forEach(p => {
+        const k = (p.status === 'published') ? 'deployed' : p.status;
+        if (counts[p.status] !== undefined) counts[p.status]++;
+    });
+    const pill = (label, n, bg, fg) =>
+        `<span class="badge" style="background:${bg};color:${fg}">${label}: ${n}</span>`;
+    const parts = [pill('Posts', posts.length, '#343536', '#d7dadc')];
+    if (counts.draft)     parts.push(pill('Draft',    counts.draft,    '#343536', '#818384'));
+    if (counts.complete)  parts.push(pill('Complete', counts.complete, '#1a3a4a', '#46d160'));
+    if (counts.published) parts.push(pill('Deployed', counts.published, '#1a3320', '#46d160'));
+    if (counts.paid)      parts.push(pill('Paid',     counts.paid,     '#00A86B', '#ffffff'));
+    if (counts.informed)  parts.push(pill('Informed', counts.informed, '#4a2a00', '#FF8b60'));
+    if (counts.report)    parts.push(pill('Reported', counts.report,   '#0d3d3a', '#9efbe0'));
+    if (counts.removed)   parts.push(pill('Removed',  counts.removed,  '#3a1a1a', '#ff6b6b'));
+    if (counts.replace)   parts.push(pill('Replace',  counts.replace,  '#3a2a0e', '#ffb86b'));
+    if (counts.archived)  parts.push(pill('Archived', counts.archived, '#2a2a3a', '#8888aa'));
+    el.innerHTML = parts.join('');
 }
 
 function lsubsToggleSelectAll(on) {
@@ -7557,6 +7680,9 @@ async function lsubsLoadPosts(silent = false) {
         let posts = await api('/api/posts/all?' + params.toString());
         const intent = document.getElementById('lsubs-posts-intent')?.value || '';
         if (intent) posts = posts.filter(p => (p.intent || '') === intent);
+        // Render status pills before the empty-state short-circuit so
+        // they update even when the current filter has no matches.
+        lsubsRenderPostCounts(posts);
         if (!posts.length) {
             tableEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No live posts match these filters. Use the Generate tab to create some.</p>';
             return;
@@ -7817,6 +7943,62 @@ async function _lsubsRunGenHq(pid) {
     } catch (e) { toast(`Failed to start HQ generation: ${e.message}`, 'error'); }
 }
 
+// Spawn an HQ thread for every kept post in the last
+// lsubsRenderResult render. Same prompt-once-then-loop shape as
+// lsubsBatchGenerate but skips selection — operates on
+// _lsubsLastResult.kept (the freshly-generated posts shown in the
+// Generate panel).
+async function lsubsGenHqForKept() {
+    const kept = (_lsubsLastResult && _lsubsLastResult.kept) || [];
+    if (!kept.length) { toast('No posts available', 'error'); return; }
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Generate HQ Threads for ${kept.length} post${kept.length === 1 ? '' : 's'}</h3>
+        <p class="text-xs text-gray-400 mb-3">An HQ thread is 1 main brand-mention top-level reply + N nested replies that respond to it.</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Number of replies per post</label>
+                <input type="number" id="lsubs-hq-batch-replies" value="5" min="1" max="15" class="w-full">
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-hq-batch-aicrawl" checked>
+                <span>AI-crawl optimized
+                    <span class="text-xs text-gray-500 block ml-6">Substance + brand domain vocabulary + long-tail query phrasing.</span>
+                </span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunGenHqForKept()">Generate</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunGenHqForKept() {
+    const kept = (_lsubsLastResult && _lsubsLastResult.kept) || [];
+    const replies = parseInt(document.getElementById('lsubs-hq-batch-replies')?.value) || 5;
+    const aiCrawl = !!document.getElementById('lsubs-hq-batch-aicrawl')?.checked;
+    closeModal();
+    let started = 0;
+    for (const p of kept) {
+        const bid = await _lsubsLookupPostBrand(p.id);
+        if (!bid) continue;
+        try {
+            const { task_id } = await api('/api/generate/hq-comment', {
+                method: 'POST',
+                body: { post_id: p.id, brand_id: bid, ai_crawl: aiCrawl, num_replies: replies },
+            });
+            _addBgTask(task_id, `Live HQ #${p.id}`);
+            _pollTask(task_id, `Live HQ #${p.id}`, () => {
+                if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+            });
+            started++;
+        } catch (e) {
+            console.warn(`HQ gen failed for post ${p.id}:`, e);
+        }
+    }
+    toast(`Started HQ generation for ${started}/${kept.length} post(s)`, 'info');
+}
+
 // Batch generate prompts once for count/replies + ai_crawl, then loops
 // through selected posts using those values directly (skips the per-post modal).
 async function lsubsBatchGenerate(mode) {
@@ -8049,9 +8231,44 @@ async function renderLsubsComments(c) {
             <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesubs')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
         </div>
+        <!-- Status-wise count pills, HQ comments only (per user
+             request — non-HQ replies shouldn't inflate the deliverable
+             totals admins reason about). Pills update on every
+             cache refresh / filter change. -->
+        <div id="lsubs-cmt-counts" class="mb-3 flex flex-wrap gap-2" style="font-size:0.7rem"></div>
         <div id="lsubs-cmt-list"></div>
     `;
     lsubsLoadComments();
+}
+
+// Render status pills for the Live Subs Comments tab. Counted set
+// is restricted to comment_type='hq' (the brand-mention root +
+// HQ-thread replies — i.e. the actual deliverables). Non-HQ
+// auto-generated replies are excluded from the totals so a brand
+// with 5 HQ deliverables doesn't show "Comments: 47" because of
+// the supporting thread chatter.
+function lsubsRenderCommentCounts(comments) {
+    const el = document.getElementById('lsubs-cmt-counts');
+    if (!el) return;
+    if (!Array.isArray(comments)) { el.innerHTML = ''; return; }
+    const hq = comments.filter(c => c.comment_type === 'hq');
+    if (!hq.length) { el.innerHTML = ''; return; }
+    const counts = { draft:0, complete:0, assigned:0, informed:0, deployed:0, paid:0, report:0, removed:0, replace:0, archived:0 };
+    hq.forEach(c => { if (counts[c.status] !== undefined) counts[c.status]++; });
+    const pill = (label, n, bg, fg) =>
+        `<span class="badge" style="background:${bg};color:${fg}">${label}: ${n}</span>`;
+    const parts = [pill('HQ Comments', hq.length, '#343536', '#d7dadc')];
+    if (counts.draft)    parts.push(pill('Draft',    counts.draft,    '#343536', '#818384'));
+    if (counts.complete) parts.push(pill('Complete', counts.complete, '#1a3a4a', '#46d160'));
+    if (counts.assigned) parts.push(pill('Assigned', counts.assigned, '#0b3a5a', '#4fc3f7'));
+    if (counts.informed) parts.push(pill('Informed', counts.informed, '#4a2a00', '#FF8b60'));
+    if (counts.deployed) parts.push(pill('Deployed', counts.deployed, '#1a3320', '#46d160'));
+    if (counts.paid)     parts.push(pill('Paid',     counts.paid,     '#00A86B', '#ffffff'));
+    if (counts.report)   parts.push(pill('Reported', counts.report,   '#0d3d3a', '#9efbe0'));
+    if (counts.removed)  parts.push(pill('Removed',  counts.removed,  '#3a1a1a', '#ff6b6b'));
+    if (counts.replace)  parts.push(pill('Replace',  counts.replace,  '#3a2a0e', '#ffb86b'));
+    if (counts.archived) parts.push(pill('Archived', counts.archived, '#2a2a3a', '#8888aa'));
+    el.innerHTML = parts.join('');
 }
 
 function lsubsClearCmtFilters() {
@@ -8152,6 +8369,12 @@ function _lsubsRenderComments() {
     const listEl = document.getElementById('lsubs-cmt-list');
     if (!listEl) return;
     const comments = _lsubsCommentsCache;
+    // Render the HQ-only status pills on every pass so they update
+    // when the user changes the brand filter (which triggers a
+    // re-fetch + re-render). The pills themselves count across the
+    // full cache irrespective of the in-page status/date filter so
+    // the admin always sees the deliverable totals.
+    lsubsRenderCommentCounts(comments);
     if (!comments.length) {
         listEl.innerHTML = '<p class="text-sm text-gray-500 mt-2">No comments yet on live posts. Generate or save comments from the Live Subreddits Generate tab → post detail → comments.</p>';
         return;
@@ -9485,14 +9708,39 @@ function lsBuildSubList() {
     // selection and auto-re-selecting all subs. Treat _lsSelectedSubs === null
     // as "all selected" (default).
     const subs = _lsPreFilteredSubsInComments();
+    // Count of DEPLOYED comments per subreddit across the full
+    // comment cache. Shown next to each checkbox so the user can
+    // spot which subs are pulling weight without leaving the
+    // filter panel. We count distinct post IDs (search_post_id)
+    // among deployed-or-better comments — that's the closest
+    // proxy to "deployed posts" available client-side.
+    const POSTED_STATUSES = new Set(['deployed', 'paid', 'report', 'replace']);
+    const deployedPostsBySub = {};
+    if (Array.isArray(_lsComments)) {
+        const seenPosts = {};  // sub -> Set(post_id)
+        for (const c of _lsComments) {
+            if (!POSTED_STATUSES.has(c.status)) continue;
+            const sub = c.post_subreddit || '';
+            if (!sub) continue;
+            if (!seenPosts[sub]) seenPosts[sub] = new Set();
+            if (c.search_post_id != null) seenPosts[sub].add(c.search_post_id);
+        }
+        for (const sub of Object.keys(seenPosts)) {
+            deployedPostsBySub[sub] = seenPosts[sub].size;
+        }
+    }
     const list = document.getElementById('ls-cf-sub-list');
     if (list) {
-        list.innerHTML = subs.map(s => `
+        list.innerHTML = subs.map(s => {
+            const cnt = deployedPostsBySub[s] || 0;
+            return `
             <label class="flex items-center gap-2 py-1" style="cursor:pointer">
                 <input type="checkbox" ${(_lsSelectedSubs === null || _lsSelectedSubs.has(s)) ? 'checked' : ''} onchange="lsToggleSub('${s.replace(/'/g,"\\'")}')">
-                <span class="text-sm">r/${s}</span>
+                <span class="text-sm flex-1">r/${s}</span>
+                ${cnt ? `<span class="text-[10px]" style="color:#818384" title="${cnt} deployed post(s) in this subreddit">${cnt}</span>` : ''}
             </label>
-        `).join('') || '<span class="text-xs text-gray-500">No subreddits</span>';
+            `;
+        }).join('') || '<span class="text-xs text-gray-500">No subreddits</span>';
     }
     lsUpdateSubCountBadge();
 }
@@ -9684,7 +9932,7 @@ function lsFilterComments() {
                 <div class="flex items-center gap-2">
                     <input type="checkbox" class="ls-cg-check" data-post-id="${pid}" title="Select post for bulk delete">
                     <a href="${g.url}" target="_blank" class="font-bold hover:underline" style="color:#0079D3">${(g.title||'').substring(0,80)}</a>
-                    <span class="text-xs text-gray-500 ml-2">r/${g.subreddit}</span>
+                    <a href="https://www.reddit.com/r/${g.subreddit}" target="_blank" rel="noopener" class="text-xs text-gray-500 ml-2 hover:underline hover:text-orange-300" title="Open r/${g.subreddit} on Reddit">r/${g.subreddit} ↗</a>
                     ${g.postDate ? `<span class="text-xs text-gray-500">${g.postDate.slice(0,10)}</span>` : ''}
                     ${g.brand ? `<span class="badge badge-brand ml-2">${g.brand}</span>` : ''}
                     <span class="badge badge-${_postStatus}" style="font-size:10px">${_postStatus}</span>

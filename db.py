@@ -4,7 +4,7 @@ import sqlite3
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class Database:
@@ -2356,38 +2356,36 @@ class Database:
     def _choose_removed_status(self, comment_id, days=None):
         """Pick 'replace' vs 'removed' for an auto-detected removal.
 
-        Returns one of:
-          - 'replace' : posted_at is non-NULL and within `days` days
-                        of the current time.
-          - 'removed' : posted_at is NULL, in the future, or older
-                        than the window. (NULL is treated as "outside
-                        the window" — callers that can backfill
-                        `posted_at` from Reddit should do so BEFORE
-                        calling this method so the row has a real
-                        timestamp to compare.)
+        Anchor is preferred in this order:
+          1. `posted_at`  — real Reddit publish timestamp (created_utc).
+          2. `deployed_at` — bot bookkeeping time. Usually within
+             minutes/hours of posted_at; falling back here lets the
+             14-day rule still fire when Reddit can't return a
+             timestamp (rate-limit, comment fully scrubbed from the
+             tree, etc.).
+
+        Returns 'replace' if the chosen anchor is within `days` days
+        of now, else 'removed'. If both anchors are NULL/unparseable
+        we default to 'removed' — the safe, conservative pick.
         """
         if days is None:
             days = self.REPLACE_WINDOW_DAYS
         row = self.conn.execute(
-            "SELECT posted_at FROM comments WHERE id = ?", (comment_id,)
+            "SELECT posted_at, deployed_at FROM comments WHERE id = ?",
+            (comment_id,)
         ).fetchone()
         if not row:
             return "removed"
-        posted = row["posted_at"]
-        if not posted:
+        anchor = row["posted_at"] or row["deployed_at"]
+        if not anchor:
             return "removed"
         try:
-            # posted_at is written as "YYYY-MM-DD HH:MM:SS" UTC (see
-            # deploy_comment / mark_removed_with_url). Parse loosely so
-            # legacy rows with milliseconds or `T` separators still work.
-            s = str(posted).replace("T", " ").split(".")[0].strip()
+            s = str(anchor).replace("T", " ").split(".")[0].strip()
             ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
         except Exception:
             return "removed"
         delta = datetime.utcnow() - ts
         if delta.total_seconds() < 0:
-            # Clock skew / future-dated row — be conservative, treat as
-            # within window.
             return "replace"
         if delta.days < days:
             return "replace"
@@ -4362,6 +4360,72 @@ class Database:
             seen.add(key)
             out.append(dict(r))
         return out
+
+    def reconcile_replace_window(self, days=None):
+        """One-shot migration: walk every 'removed' row in `comments`
+        and `search_comments` whose anchor timestamp falls inside the
+        14-day window and flip it to 'replace'.
+
+        Useful when the 'replace' state was introduced after some
+        comments were already auto-marked 'removed' — those rows
+        otherwise stay in 'removed' forever, since the chooser only
+        runs at detection time. The anchor follows the same
+        posted_at → deployed_at fallback as the per-row chooser.
+
+        Returns `{"comments": <int>, "search_comments": <int>}` with
+        the number of rows promoted in each table.
+        """
+        if days is None:
+            days = self.REPLACE_WINDOW_DAYS
+        # SQLite stores the timestamps as ISO-like strings; the
+        # COALESCE picks posted_at first, then deployed_at. We
+        # compute the cutoff in UTC to match how those columns are
+        # written everywhere else in the codebase.
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        promoted = {"comments": 0, "search_comments": 0}
+
+        # comments
+        rows = self.conn.execute(
+            """SELECT id FROM comments
+                WHERE status = 'removed'
+                  AND COALESCE(posted_at, deployed_at) IS NOT NULL
+                  AND COALESCE(posted_at, deployed_at) >= ?""",
+            (cutoff,)
+        ).fetchall()
+        for r in rows:
+            # Preserve prev_status if it's already set (from the
+            # original removed flip); otherwise stash 'removed' so
+            # an Unremove later still has somewhere sensible to
+            # restore to.
+            self.conn.execute(
+                """UPDATE comments
+                      SET status = 'replace',
+                          prev_status = COALESCE(prev_status, 'deployed')
+                    WHERE id = ? AND status = 'removed'""",
+                (r["id"],)
+            )
+            promoted["comments"] += 1
+
+        # search_comments
+        rows = self.conn.execute(
+            """SELECT id FROM search_comments
+                WHERE status = 'removed'
+                  AND COALESCE(posted_at, deployed_at) IS NOT NULL
+                  AND COALESCE(posted_at, deployed_at) >= ?""",
+            (cutoff,)
+        ).fetchall()
+        for r in rows:
+            self.conn.execute(
+                """UPDATE search_comments
+                      SET status = 'replace',
+                          prev_status = COALESCE(prev_status, 'deployed')
+                    WHERE id = ? AND status = 'removed'""",
+                (r["id"],)
+            )
+            promoted["search_comments"] += 1
+
+        self.conn.commit()
+        return promoted
 
     def get_deployed_comment_urls(self, subreddit_id):
         """Get deployed comments with their Reddit URLs for live checking."""
@@ -6546,24 +6610,24 @@ class Database:
         self.conn.commit()
 
     def _choose_removed_status_search(self, comment_id, days=None):
-        """Search-comments variant of `_choose_removed_status`. Reads
-        `search_comments.posted_at` and picks 'replace' if within
-        `days` days of now, else 'removed'. NULL posted_at falls
-        through to 'removed' (callers that can backfill from Reddit
-        should do so via `update_posted_at` before calling).
+        """Search-comments variant of `_choose_removed_status`. Same
+        posted_at → deployed_at fallback chain as the comments-table
+        variant: if Reddit can't give us a timestamp, deployed_at is
+        a fine proxy for the 14-day rule.
         """
         if days is None:
             days = self.REPLACE_WINDOW_DAYS
         row = self.conn.execute(
-            "SELECT posted_at FROM search_comments WHERE id = ?", (comment_id,)
+            "SELECT posted_at, deployed_at FROM search_comments WHERE id = ?",
+            (comment_id,)
         ).fetchone()
         if not row:
             return "removed"
-        posted = row["posted_at"]
-        if not posted:
+        anchor = row["posted_at"] or row["deployed_at"]
+        if not anchor:
             return "removed"
         try:
-            s = str(posted).replace("T", " ").split(".")[0].strip()
+            s = str(anchor).replace("T", " ").split(".")[0].strip()
             ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
         except Exception:
             return "removed"

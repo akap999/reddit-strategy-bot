@@ -1870,50 +1870,54 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             print(f"[{log_prefix}] posted_at backfill failed for "
                   f"#{item['id']} ({src}): {e}", flush=True)
 
-    def _mark_dead(item):
+    def _mark_dead(item, posted_at_hint=None):
+        """Flip a comment to 'removed' or 'replace' via the 14-day
+        chooser. `posted_at_hint` is the Reddit-side publish timestamp
+        ("YYYY-MM-DD HH:MM:SS" UTC) extracted from the JSON we already
+        fetched at the detection site — passing it through here avoids
+        a second Reddit round trip that can fail under rate-limit and
+        prevents the chooser from defaulting to 'removed' just because
+        we never persisted posted_at.
+        """
         src = item.get("source", "comment")
         prev = item.get("status", "")
-        print(f"[{log_prefix}] _mark_dead #{item['id']} ({src}) prev_status={prev}", flush=True)
+        print(f"[{log_prefix}] _mark_dead #{item['id']} ({src}) prev_status={prev} hint={posted_at_hint!r}", flush=True)
         new_status = "removed"
         if src == "comment":
             # Reported comments that vanish on Reddit should land in
-            # 'removed' (with report_month preserved) so the client
-            # dashboard still shows them — just under the "Removed"
-            # chip instead of "Live". Falling back to mark_comment_deleted
-            # would set status='deleted' and drop them off the dashboard
-            # query (which filters status IN ('report','removed','replace')).
-            #
-            # NEW: auto-detection routes through
-            # `mark_comment_removed_or_replace`, which picks 'replace'
-            # when posted_at is within the last 14 days. We backfill
-            # posted_at first so the rule has something to compare.
+            # 'removed' or 'replace' (with report_month preserved) so
+            # the client dashboard still shows them — just under the
+            # "Removed" / "Replace" chip instead of "Live". The chooser
+            # inside mark_comment_removed_or_replace decides which
+            # based on the 14-day window.
             if prev == "report":
-                _backfill_posted_at_if_missing(item)
-                chosen = db.mark_comment_removed_or_replace(item["id"])
+                if not posted_at_hint:
+                    _backfill_posted_at_if_missing(item)
+                chosen = db.mark_comment_removed_or_replace(
+                    item["id"], posted_at_hint=posted_at_hint)
                 new_status = chosen or "removed"
             else:
                 # Non-reported deployed/paid/etc. comments: same rule
-                # applies — we treat any auto-detected removal as
-                # eligible for the 14-day 'replace' window provided
-                # we have a Reddit URL to anchor it.
+                # — auto-detected removal within 14 days → 'replace'.
                 if (item.get("reddit_comment_url") or "").strip():
-                    _backfill_posted_at_if_missing(item)
-                    chosen = db.mark_comment_removed_or_replace(item["id"])
+                    if not posted_at_hint:
+                        _backfill_posted_at_if_missing(item)
+                    chosen = db.mark_comment_removed_or_replace(
+                        item["id"], posted_at_hint=posted_at_hint)
                     new_status = chosen or "removed"
                 else:
-                    # No Reddit URL — fall back to the legacy
-                    # mark_comment_deleted semantic for truly-local
-                    # cleanup of never-deployed rows.
+                    # No Reddit URL — legacy mark_comment_deleted
+                    # semantic for truly-local cleanup of never-
+                    # deployed rows.
                     db.mark_comment_deleted(item["id"])
                     new_status = "deleted"
         else:
-            # search_comment: same 14-day 'replace' rule as the
-            # comments table. We backfill posted_at from Reddit
-            # when NULL (the auto-detection path is what populates
-            # it for Live Search rows that were saved without it).
+            # search_comment: same 14-day 'replace' rule.
             if (item.get("reddit_comment_url") or "").strip():
-                _backfill_posted_at_if_missing(item)
-                chosen = db.mark_search_comment_removed_or_replace(item["id"])
+                if not posted_at_hint:
+                    _backfill_posted_at_if_missing(item)
+                chosen = db.mark_search_comment_removed_or_replace(
+                    item["id"], posted_at_hint=posted_at_hint)
                 new_status = chosen or "removed"
             else:
                 db.mark_search_comment_removed(item["id"])
@@ -2058,7 +2062,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             if not d:
                 # Comment id not present in the tree → Reddit dropped
                 # it (deleted or hidden behind a "more comments" stub
-                # we can't follow). Treat as dead.
+                # we can't follow). Treat as dead. No JSON in hand,
+                # so no posted_at hint — _mark_dead will try to
+                # backfill from Reddit or fall back to deployed_at.
                 _mark_dead(item)
                 dead += 1
                 handled_ids.add(item["id"])
@@ -2074,7 +2080,15 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                 or author in ("[deleted]", "[removed]")
             )
             if is_removed:
-                _mark_dead(item)
+                # Extract created_utc from the tree node we already
+                # have — saves a second Reddit fetch inside the
+                # chooser and ensures the 14-day rule fires even on
+                # heavily-rate-limited runs. Reddit preserves
+                # created_utc on '[removed]' comments, so this works
+                # for both mod-removed and user-deleted bodies.
+                from bulk_deploy import _utc_seconds_to_iso as _utc_iso
+                posted_hint = _utc_iso(d.get("created_utc")) or None
+                _mark_dead(item, posted_at_hint=posted_hint)
                 dead += 1
             else:
                 _mark_live(item)
@@ -2291,6 +2305,12 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             author = comment.get("author", "")
             removed_flag = comment.get("removed", False)
             collapsed_reason = comment.get("collapsed_reason_code", "")
+            # Reddit-side publish timestamp from the JSON we just
+            # fetched. Pass to _mark_dead so the 14-day chooser has
+            # something to compare even when our DB column is NULL —
+            # no second Reddit round trip needed.
+            from bulk_deploy import _utc_seconds_to_iso as _utc_iso_per
+            posted_hint_per_item = _utc_iso_per(comment.get("created_utc")) or None
 
             body_stripped = body.strip().lower()
             is_removed = (
@@ -2302,11 +2322,11 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             )
             if is_removed:
                 print(f"[{log_prefix}] #{item['id']} ({src}) DEAD body={body[:60]!r} author={author} removed={removed_flag}", flush=True)
-                _mark_dead(item)
+                _mark_dead(item, posted_at_hint=posted_hint_per_item)
                 dead += 1
             elif not body.strip() and not author:
                 print(f"[{log_prefix}] #{item['id']} ({src}) DEAD empty body+author", flush=True)
-                _mark_dead(item)
+                _mark_dead(item, posted_at_hint=posted_hint_per_item)
                 dead += 1
             else:
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE author={author} body={body[:40]!r}", flush=True)
@@ -3082,6 +3102,29 @@ def api_comments_live_stats():
 
     tid = start_task("live-stats", task)
     return jsonify({"task_id": tid})
+
+
+@app.route("/api/comments/reconcile-replace-window", methods=["POST"])
+def api_reconcile_replace_window():
+    """One-shot: walk every 'removed' row whose anchor timestamp
+    (posted_at, falling back to deployed_at) falls inside the
+    14-day replace window and flip it to 'replace'.
+
+    Useful when 'replace' was introduced after some comments were
+    already auto-marked 'removed' — those rows otherwise stay in
+    'removed' forever since the chooser only runs at detection time.
+
+    Body: optional {"days": <int>} to override the default window.
+    Returns counts per table.
+    """
+    data = request.get_json(silent=True) or {}
+    days = int(data["days"]) if data.get("days") else None
+    db = get_db()
+    try:
+        promoted = db.reconcile_replace_window(days=days)
+    finally:
+        db.close()
+    return jsonify({"ok": True, "promoted": promoted})
 
 
 @app.route("/api/comments/backfill-posted-at", methods=["POST"])

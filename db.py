@@ -3747,13 +3747,55 @@ class Database:
                 bucket["hq_removed"] += 1
             else:
                 bucket["hq_live"] += 1
-        # Post-only reports: posts.status='report' WITHOUT any
-        # reported comments. The new single-action flow lands here
-        # whenever no HQ root is deployed at report time. These are
-        # always 'removed' on the dashboard (no Mention Link anchor).
+        # Post-only follow-up: posts.status='report' that the main
+        # q_hq query missed because NO comment under the post is in
+        # ('report','removed','replace'). Two real cases land here:
+        #
+        #   (a) The new "1 post = 1 HQ Mention" flow flipped the
+        #       parent post to 'report' but the HQ root is still in
+        #       'deployed' / 'paid' (move_post_to_report doesn't
+        #       always touch the HQ comment). The HQ comment IS live
+        #       on Reddit with a URL — so the per-row helper marks
+        #       the post 'live', but the aggregate used to mark it
+        #       'removed' because it never inspected the HQ root.
+        #       That's the bug behind "8 live / 3 removed in tile
+        #       vs 9 live / 2 removed in detail".
+        #
+        #   (b) No HQ root exists at all (post was reported without
+        #       any HQ thread deployed). Correctly 'removed' because
+        #       there's no Mention Link to anchor to.
+        #
+        # Apply the same live / replace / removed classification used
+        # by q_hq above so the two queries agree.
         q_hq_post_only = f"""
             SELECT p.report_month AS month,
-                   p.id AS post_id
+                   p.id AS post_id,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM comments hq
+                        WHERE hq.post_id = p.id
+                          AND hq.comment_type = 'hq'
+                          AND hq.parent_comment_id IS NULL
+                          AND hq.status NOT IN ('removed', 'replace')
+                          AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                   ) THEN 0 ELSE 1 END AS is_removed,
+                   CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM comments hq
+                            WHERE hq.post_id = p.id
+                              AND hq.comment_type = 'hq'
+                              AND hq.parent_comment_id IS NULL
+                              AND hq.status NOT IN ('removed', 'replace')
+                              AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                       ) THEN 0
+                       WHEN EXISTS (
+                           SELECT 1 FROM comments hq
+                            WHERE hq.post_id = p.id
+                              AND hq.comment_type = 'hq'
+                              AND hq.parent_comment_id IS NULL
+                              AND hq.status = 'replace'
+                       ) THEN 1
+                       ELSE 0
+                   END AS is_replace
               FROM posts p
              WHERE p.status = 'report'
                AND p.report_month IS NOT NULL
@@ -3774,7 +3816,13 @@ class Database:
                 "hq_replace": 0,
             })
             bucket["hq_total"] += 1
-            bucket["hq_removed"] += 1
+            # Mutually exclusive buckets — same priority as q_hq.
+            if r["is_replace"]:
+                bucket["hq_replace"] += 1
+            elif r["is_removed"]:
+                bucket["hq_removed"] += 1
+            else:
+                bucket["hq_live"] += 1
             seen_posts.add((m, r["post_id"]))
         for r in self.conn.execute(q_mentions, params_sc).fetchall():
             m = r["month"]
@@ -3946,10 +3994,12 @@ class Database:
                 slot["hq_removed"] += 1
             else:
                 slot["hq_live"] += 1
-        # Post-only reports — posts.status='report' but no reported
-        # comments under them (no HQ root was deployed at report
-        # time). Always count as Removed because there's no Mention
-        # Link anchor.
+        # Post-only follow-up — same scope as the months-aggregate
+        # version above. Apply the live / replace / removed
+        # classification by inspecting the HQ root directly so we
+        # don't over-count 'removed' for posts whose HQ comment is
+        # still 'deployed'/'paid' but live on Reddit (legacy flow
+        # where move_post_to_report didn't flip the HQ status).
         q_hq_post_only = f"""
             SELECT
               CASE
@@ -3957,7 +4007,33 @@ class Database:
                 ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
               END AS resolved_brand_id,
               p.report_month AS month,
-              p.id AS post_id
+              p.id AS post_id,
+              CASE WHEN EXISTS (
+                  SELECT 1 FROM comments hq
+                   WHERE hq.post_id = p.id
+                     AND hq.comment_type = 'hq'
+                     AND hq.parent_comment_id IS NULL
+                     AND hq.status NOT IN ('removed', 'replace')
+                     AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+              ) THEN 0 ELSE 1 END AS is_removed,
+              CASE
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = p.id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status NOT IN ('removed', 'replace')
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = p.id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status = 'replace'
+                  ) THEN 1
+                  ELSE 0
+              END AS is_replace
             FROM posts p
             WHERE p.status = 'report'
               AND p.report_month IS NOT NULL
@@ -3972,7 +4048,12 @@ class Database:
                 continue
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["hq_total"] += 1
-            slot["hq_removed"] += 1
+            if r["is_replace"]:
+                slot["hq_replace"] += 1
+            elif r["is_removed"]:
+                slot["hq_removed"] += 1
+            else:
+                slot["hq_live"] += 1
             seen_posts.add(key)
         for r in self.conn.execute(q_mentions, brand_ids * 2).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])

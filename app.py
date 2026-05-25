@@ -3138,6 +3138,125 @@ def api_reconcile_replace_window():
     return jsonify({"ok": True, "promoted": promoted})
 
 
+@app.route("/api/comments/replace-window-diagnose", methods=["GET"])
+def api_replace_window_diagnose():
+    """Diagnostic: list every 'removed' comment + the timestamps the
+    chooser would inspect, plus days-since-publish and what the
+    chooser WOULD pick if re-run right now. Use this when an admin
+    thinks a removed row should be Replace but reconcile didn't
+    promote it — the row's posted_at / deployed_at / created_at
+    will reveal why.
+
+    Query params:
+      ?source=comment|search_comment  (default: comment — HQ pipeline)
+      ?days=<int>                     (default: 14)
+      ?limit=<int>                    (default: 50)
+    """
+    from datetime import datetime, timedelta
+    src = (request.args.get("source") or "comment").strip().lower()
+    if src not in ("comment", "search_comment"):
+        return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+    days = int(request.args.get("days") or 14)
+    limit = int(request.args.get("limit") or 50)
+    table = "comments" if src == "comment" else "search_comments"
+    db = get_db()
+    try:
+        rows = db.conn.execute(
+            f"""SELECT id, status, posted_at, deployed_at, created_at,
+                       reddit_comment_url
+                  FROM {table}
+                 WHERE status = 'removed'
+                 ORDER BY id DESC
+                 LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        now = datetime.utcnow()
+        out = []
+        for r in rows:
+            anchor = r["posted_at"] or r["deployed_at"]
+            anchor_days = None
+            chooser_pick = "removed"
+            if anchor:
+                try:
+                    s = str(anchor).replace("T", " ").split(".")[0].strip()
+                    ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+                    delta = now - ts
+                    anchor_days = round(delta.total_seconds() / 86400.0, 2)
+                    if delta.total_seconds() < 0 or delta.days < days:
+                        chooser_pick = "replace"
+                except Exception:
+                    pass
+            out.append({
+                "id": r["id"],
+                "url": r["reddit_comment_url"],
+                "posted_at": r["posted_at"],
+                "deployed_at": r["deployed_at"],
+                "created_at": r["created_at"],
+                "anchor_used": "posted_at" if r["posted_at"] else ("deployed_at" if r["deployed_at"] else None),
+                "days_since_anchor": anchor_days,
+                "chooser_would_pick": chooser_pick,
+            })
+        return jsonify({
+            "ok": True,
+            "source": src,
+            "window_days": days,
+            "count": len(out),
+            "rows": out,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/comments/refresh-replace-window", methods=["POST"])
+def api_refresh_replace_window():
+    """One-shot: backfill posted_at from Reddit for every 'removed'
+    row that's missing it (and has a Reddit URL), then run reconcile.
+
+    This is the "stronger" version of reconcile-replace-window — it
+    closes the gap where a comment is genuinely within 14 days of
+    publish on Reddit but our DB never persisted posted_at (so the
+    chooser fell back to deployed_at or defaulted to 'removed').
+
+    Body: optional {"days": <int>, "limit": <int>} — limit caps the
+    Reddit fetch fan-out (default 200) to keep one run bounded.
+    Returns counts per table.
+    """
+    from bulk_deploy import fetch_reddit_comment_meta
+    data = request.get_json(silent=True) or {}
+    days = int(data["days"]) if data.get("days") else None
+    limit = int(data.get("limit", 200))
+    db = get_db()
+    backfilled = {"comments": 0, "search_comments": 0}
+    try:
+        for table, key in [("comments", "comments"),
+                           ("search_comments", "search_comments")]:
+            rows = db.conn.execute(
+                f"""SELECT id, reddit_comment_url FROM {table}
+                     WHERE status = 'removed'
+                       AND posted_at IS NULL
+                       AND TRIM(COALESCE(reddit_comment_url, '')) != ''
+                     ORDER BY id DESC
+                     LIMIT ?""",
+                (limit,)
+            ).fetchall()
+            for r in rows:
+                try:
+                    meta = fetch_reddit_comment_meta(
+                        r["reddit_comment_url"], reddit_get=_reddit_get_json
+                    )
+                    posted_at = meta.get("posted_at") if meta else None
+                    if posted_at:
+                        db.update_posted_at(r["id"], key, posted_at)
+                        backfilled[key] += 1
+                except Exception as e:
+                    print(f"[refresh-replace] {key} #{r['id']}: backfill failed: {e}", flush=True)
+                    continue
+        promoted = db.reconcile_replace_window(days=days)
+    finally:
+        db.close()
+    return jsonify({"ok": True, "backfilled": backfilled, "promoted": promoted})
+
+
 @app.route("/api/comments/backfill-posted-at", methods=["POST"])
 def api_backfill_posted_at():
     """Walk deployed comments missing `posted_at` and fetch Reddit's

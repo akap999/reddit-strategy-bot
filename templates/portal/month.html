@@ -26,7 +26,11 @@
     <button id="live-check-btn" onclick="runLiveCheck()" class="btn-ghost">
       🔄 Update status &amp; stats
     </button>
-    <a href="/portal/month/{{ month }}/export.csv{% if is_admin_view %}?as={{ client.id }}{% endif %}" class="btn-primary">
+    <!-- Build the export URL on click so it reflects the CURRENT
+         filter bar selection (brand, sub, status). Without this the
+         CSV always exported the full month and ignored what the
+         admin had filtered down to. -->
+    <a href="#" onclick="return exportFilteredCsv(event)" class="btn-primary">
       ⬇ Export CSV
     </a>
   </div>
@@ -398,6 +402,28 @@ function resetFilters() {
   _fState.brand = _fState.sub = _fState.status = '';
   _fState.sort = 'date-desc';
   applyFilters();
+}
+
+// Build the Export CSV URL with the current filter bar state so the
+// downloaded file matches what the admin sees on screen. Brand /
+// sub / status are passed as query params; the backend honours the
+// same predicates the in-page renderer uses.
+function exportFilteredCsv(ev) {
+  if (ev && ev.preventDefault) ev.preventDefault();
+  const month = {{ month | tojson }};
+  const params = new URLSearchParams();
+  if (_fState.brand)  params.set('brand', _fState.brand);
+  if (_fState.sub)    params.set('sub', _fState.sub);
+  if (_fState.status) params.set('status', _fState.status);
+  {% if is_admin_view %}
+  // Preserve the admin's "view as client" context through the
+  // export request so it lands the right cid on the server.
+  params.set('as', {{ client.id | tojson }});
+  {% endif %}
+  const qs = params.toString();
+  const url = `/portal/month/${encodeURIComponent(month)}/export.csv${qs ? '?' + qs : ''}`;
+  window.location.href = url;
+  return false;
 }
 
 (function initFilters() {

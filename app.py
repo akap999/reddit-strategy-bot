@@ -7430,11 +7430,57 @@ def portal_month_export(month):
     if not _valid_report_month(month):
         return abort(404)
     cid, _ = _acting_client_id()
+    # Optional filters propagated from the in-page filter bar. The
+    # frontend rebuilds the export URL on click to include whatever
+    # is currently active, so the CSV mirrors what the user sees in
+    # the table. All four params are case-insensitive and optional;
+    # empty / missing = "all".
+    #
+    # `status` accepts 'report' (= Live, matches data-status on the
+    # HQ row + search_comments.status='report'), 'removed', or
+    # 'replace'. We normalise 'live' → 'report' for convenience so
+    # external callers can use either label.
+    brand_f = (request.args.get('brand') or '').strip()
+    sub_f = (request.args.get('sub') or '').strip()
+    status_f = (request.args.get('status') or '').strip().lower()
+    if status_f == 'live':
+        status_f = 'report'
     db = get_db()
     try:
         grouped = db.get_posts_for_client_month(cid, month)
     finally:
         db.close()
+
+    # Apply the same filter predicates the in-page renderer uses
+    # (templates/portal/month.html → applyFilters). Keeps the
+    # exported rows in lockstep with what's visible on screen.
+    def _post_passes(post):
+        if brand_f and (post.get('brand_name') or '') != brand_f:
+            return False
+        if sub_f and (post.get('subreddit_name') or '') != sub_f:
+            return False
+        if status_f:
+            derived = (post.get('derived_status') or 'live').lower()
+            # data-status on HQ rows maps live→'report',
+            # removed→'removed', replace→'replace'.
+            row_status = 'report' if derived == 'live' else derived
+            if row_status != status_f:
+                return False
+        return True
+
+    def _mention_passes(c):
+        if brand_f and (c.get('brand_name') or '') != brand_f:
+            return False
+        if sub_f and (c.get('subreddit_name') or '') != sub_f:
+            return False
+        if status_f and (c.get('status') or '') != status_f:
+            return False
+        return True
+
+    grouped = {
+        "posts": [p for p in (grouped.get("posts") or []) if _post_passes(p)],
+        "search_comments": [c for c in (grouped.get("search_comments") or []) if _mention_passes(c)],
+    }
 
     # Sectioned single-file CSV — mirrors the HTML layout:
     #   === HQ Mentions ===       (Live Subs posts, one row each)

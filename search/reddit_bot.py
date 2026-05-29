@@ -103,6 +103,16 @@ class RedditSearchBot:
         self.retry_delay = retry_delay
         self.current_api = None
         self._lock = threading.Lock()
+        # Per-instance "Reddit is hard-blocking us" sticky flag. Once
+        # _make_request exhausts every fallback (all UAs + both hosts
+        # return 403 / HTML), set this and short-circuit subsequent
+        # Reddit-leg calls. Critical for multi-keyword × multi-sub
+        # searches: without it, every (keyword, sub) pair burns
+        # ~30-60s on a doomed Reddit retry chain before the cascade
+        # can move on to Pullpush. With it, the first ~30s is the
+        # only Reddit cost.
+        self._reddit_dead = False
+        self._reddit_dead_reason = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -213,6 +223,24 @@ class RedditSearchBot:
                         print(f"(error: {fb_err})", end=" ", flush=True)
                         continue
 
+        # Mark the Reddit leg as dead so the rest of this bot's
+        # lifetime skips it. Only flip when the failure looks
+        # IP/host-wide (403/HTML), not when it's a one-shot 404 or
+        # query-specific empty.
+        if (last_response is not None
+                and last_response.status_code in (403, 429)
+                and last_response.text.lstrip()[:1] == "<"):
+            with self._lock:
+                if not self._reddit_dead:
+                    self._reddit_dead = True
+                    self._reddit_dead_reason = (
+                        f"www.reddit.com + old.reddit.com both returned "
+                        f"{last_response.status_code} HTML across "
+                        f"{len(self._FALLBACK_UAS)} UA variants"
+                    )
+                    print(f"\n    🚫 Marking Reddit leg dead for this bot: "
+                          f"{self._reddit_dead_reason}", flush=True)
+
         if last_response is not None:
             return last_response
         if last_error is not None:
@@ -253,6 +281,12 @@ class RedditSearchBot:
 
     def _search_reddit_native(self, keyword, subreddit_path, sort, time_filter, limit):
         """Reddit JSON API with cursor-based pagination (up to ~1 000 results)."""
+        # Hard short-circuit when this bot already discovered Reddit
+        # is blocking it. Saves the per-call ~30-60s retry chain that
+        # would otherwise be paid by every keyword × subreddit
+        # combination in a multi-search run.
+        if self._reddit_dead:
+            return []
         url = (
             f"{self.apis['reddit']}/r/{subreddit_path}/search.json"
             if subreddit_path
@@ -574,6 +608,14 @@ class RedditSearchBot:
             # Stop early if we already have enough results
             if len(filtered) >= limit:
                 break
+
+            # Skip the Reddit leg entirely if a prior call on this
+            # bot already proved it's hard-blocking. Avoids spinning
+            # up the multi-sub fan-out just to have every thread
+            # return [] (fast but pointless).
+            if api_name == "reddit" and self._reddit_dead:
+                print(f"    Skipping reddit API (marked dead: {self._reddit_dead_reason})", flush=True)
+                continue
 
             # Adaptive over-fetch: 5x when filters are active (they reject
             # 60-80% of raw posts), 2x otherwise.

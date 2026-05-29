@@ -113,6 +113,16 @@ class RedditSearchBot:
         # only Reddit cost.
         self._reddit_dead = False
         self._reddit_dead_reason = None
+        # Optional opt-out: if `REDDIT_API_DISABLED=1` is set in the
+        # environment, pre-latch the dead flag so the bot never even
+        # tries the Reddit leg on this instance. Avoids the ~30s
+        # discovery cost on every search task when the operator
+        # already knows Reddit blocks their egress (Railway / Cloudflare
+        # Workers / most cloud providers). Pullpush + Arctic still
+        # serve the cascade normally.
+        if os.environ.get("REDDIT_API_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            self._reddit_dead = True
+            self._reddit_dead_reason = "REDDIT_API_DISABLED env var is set"
 
     # ------------------------------------------------------------------
     # Internal helpers

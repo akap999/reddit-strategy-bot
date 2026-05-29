@@ -108,20 +108,35 @@ class RedditSearchBot:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # UA variants tried in order during the fallback rotation. Reddit
+    # tightens bot-detection per-UA periodically; rotating gives us a
+    # decent chance of finding one that still serves JSON. The first
+    # is the script-style UA the bot was constructed with; the next
+    # two are alternative shapes Reddit has historically been more
+    # lenient with (mod-tool/script formats).
+    _FALLBACK_UAS = [
+        "python:reddit-strategy:v1 (search bot)",
+        "RedditBot/1.0 (compatible)",
+        "Mozilla/5.0 (compatible; redditbot/1.0)",
+    ]
+
     def _make_request(self, url, params, timeout=30):
-        """GET request that mirrors `app.py:_reddit_get` resilience:
-          - Retries on 429 / 403 / 500 / 502 / 503 / 504 with
-            exponential backoff.
-          - Detects when the response body starts with '<' (Reddit
-            served an HTML interstitial / login wall instead of JSON,
-            usually a bot-challenge or proxy worker hiccup) and
-            retries.
-          - After retries are exhausted, if the proxy was used AND
-            the last response is still HTML, falls back to
-            `https://old.reddit.com<path>` (which serves JSON to
-            cloud egress more reliably than www.reddit.com).
-        Returns the final Response object. Raises only on connection
-        errors that never resolved within `retry_attempts`.
+        """Hardened Reddit GET. Handles three failure modes:
+
+        1. Transient HTTP errors (429/403/500/502/503/504) — retry
+           with exponential backoff.
+        2. HTML body where we expected JSON (Reddit's bot-challenge
+           wall) — retry, then fall through to fallback chain.
+        3. Persistent block on www.reddit.com — try EVERY UA in
+           `_FALLBACK_UAS` against `old.reddit.com` (which Reddit
+           serves more leniently). Fallback runs whether or not a
+           proxy was configured — the previous version only tried
+           old.reddit.com when using_proxy=True, which left direct
+           callers stuck on 0 results when www.reddit.com was hard-
+           walling their UA.
+
+        Returns the final Response. Raises only when every attempt
+        plus every fallback failed with a connection-level error.
         """
         last_error = None
         last_response = None
@@ -138,10 +153,7 @@ class RedditSearchBot:
                         time.sleep(wait)
                         last_response = response
                         continue
-                # HTML where we expected JSON — almost always a
-                # proxy-passed bot-challenge page. Retry; on final
-                # attempt fall through to the old.reddit.com fallback
-                # below.
+                # HTML where we expected JSON — bot-challenge page.
                 if response.status_code == 200 and response.text.lstrip()[:1] == "<":
                     if attempt < self.retry_attempts - 1:
                         wait = self.retry_delay * (2 ** attempt)
@@ -156,35 +168,50 @@ class RedditSearchBot:
                 if attempt < self.retry_attempts - 1:
                     time.sleep(self.retry_delay * (2 ** attempt))
                     continue
-                # No more retries — try the old.reddit.com fallback
-                # below if the request was through the proxy.
                 break
 
-        # Fallback: if we were going through the proxy and the proxy
-        # kept returning HTML (or we exhausted connection errors),
-        # try old.reddit.com directly. Cloud egress generally still
-        # gets JSON from old.reddit.com even when www.reddit.com is
-        # serving challenge pages.
-        if self.using_proxy:
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(url)
-                path = parsed.path  # e.g. /r/sub/search.json
-                fallback_url = f"https://old.reddit.com{path}"
-                print(f"\n    🔁 Falling back to old.reddit.com{path}...", end=" ", flush=True)
-                fb_resp = requests.get(
-                    fallback_url, params=params, headers=self.headers, timeout=timeout
+        # ------------------------------------------------------------------
+        # Fallback chain — runs unconditionally (not gated on proxy).
+        # ------------------------------------------------------------------
+        # Reddit periodically hard-blocks specific UAs on
+        # www.reddit.com but keeps old.reddit.com accessible. Try
+        # every UA variant against old.reddit.com (and as a last
+        # resort, www.reddit.com under a different UA).
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            path = parsed.path  # e.g. /r/sub/search.json
+        except Exception:
+            path = None
+
+        if path:
+            for host in ("https://old.reddit.com", "https://www.reddit.com"):
+                # Skip the host we just exhausted with the default UA.
+                same_host_default_ua = (
+                    host in (url or "") and self.headers.get("User-Agent") in self._FALLBACK_UAS[:1]
                 )
-                if fb_resp.status_code == 200 and fb_resp.text.lstrip()[:1] != "<":
-                    return fb_resp
-                print(f"(fallback status={fb_resp.status_code}, html={fb_resp.text.lstrip()[:1] == '<'})", end=" ", flush=True)
-                # Even if fallback also returned HTML/error, surface
-                # the response so the diagnostic block in
-                # _search_reddit_native can log details.
-                if last_response is None:
-                    last_response = fb_resp
-            except Exception as fb_err:
-                print(f"\n    ❌ old.reddit.com fallback error: {fb_err}", flush=True)
+                for ua in self._FALLBACK_UAS:
+                    if same_host_default_ua and ua == self._FALLBACK_UAS[0]:
+                        continue
+                    fb_url = f"{host}{path}"
+                    try:
+                        print(f"\n    🔁 Fallback: {host}{path} as UA={ua[:40]!r}...", end=" ", flush=True)
+                        fb_resp = requests.get(
+                            fb_url, params=params,
+                            headers={**self.headers, "User-Agent": ua},
+                            timeout=timeout,
+                        )
+                        if (fb_resp.status_code == 200
+                                and fb_resp.text.lstrip()[:1] != "<"):
+                            print("✓", end=" ", flush=True)
+                            return fb_resp
+                        print(f"(status={fb_resp.status_code}, html={fb_resp.text.lstrip()[:1] == '<'})",
+                              end=" ", flush=True)
+                        if last_response is None or last_response.status_code != 200:
+                            last_response = fb_resp
+                    except Exception as fb_err:
+                        print(f"(error: {fb_err})", end=" ", flush=True)
+                        continue
 
         if last_response is not None:
             return last_response

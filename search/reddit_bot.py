@@ -744,32 +744,48 @@ class RedditSearchBot:
                 else:
                     batch = []
 
-                # Apply all filters inline — only count posts that pass
+                # Apply all filters inline — only count posts that pass.
+                # Per-filter rejection counters so we can surface which
+                # filter is killing results when new_count==0 despite
+                # batch_total>0. Mirrors what's actually in the loop.
                 new_count = 0
+                rej = {
+                    "dup_or_no_id": 0, "min_comments": 0, "min_score": 0,
+                    "too_old": 0, "excluded_sub": 0, "nsfw": 0,
+                    "min_upvote_ratio": 0,
+                }
                 for post in batch:
                     pid = post.get("id", "")
                     if not pid or pid in seen_ids:
+                        rej["dup_or_no_id"] += 1
                         continue
                     if post["comments"] < min_comments:
+                        rej["min_comments"] += 1
                         continue
                     if post["score"] < min_score:
+                        rej["min_score"] += 1
                         continue
                     if cutoff_date and post["timestamp"]:
                         try:
                             if datetime.utcfromtimestamp(post["timestamp"]) < cutoff_date:
+                                rej["too_old"] += 1
                                 continue
                         except (OSError, OverflowError, ValueError):
                             pass
                     if excluded_set and post.get("subreddit", "").lower() in excluded_set:
+                        rej["excluded_sub"] += 1
                         continue
                     if nsfw is True and not post.get("over_18"):
+                        rej["nsfw"] += 1
                         continue
                     if nsfw is False and post.get("over_18"):
+                        rej["nsfw"] += 1
                         continue
                     if (
                         min_upvote_ratio is not None
                         and post.get("upvote_ratio", 0) < min_upvote_ratio
                     ):
+                        rej["min_upvote_ratio"] += 1
                         continue
                     # Post passed all filters
                     seen_ids.add(pid)
@@ -786,7 +802,30 @@ class RedditSearchBot:
                           f"{pass_rate:.0f}% pass rate)")
                     self.current_api = api_name
                 else:
-                    print(f"No new results ({batch_total} raw, all filtered out)")
+                    # When 100% are filtered out, surface the per-
+                    # filter rejection counts so the operator can see
+                    # exactly which knob is too strict.
+                    reasons = ", ".join(
+                        f"{k}={v}" for k, v in rej.items() if v
+                    ) or "no posts in batch"
+                    print(f"No new results ({batch_total} raw, all filtered out): {reasons}")
+                    # Early-termination guard: if a leg returns ≥100
+                    # posts and EVERY one is rejected by the same
+                    # filter, paging further is hopeless — the filter
+                    # is structurally incompatible with this query.
+                    # Bail out so the next API leg isn't blocked and
+                    # the cascade doesn't spend minutes on doomed
+                    # fetches (e.g. min_score set higher than any
+                    # post in the subreddit). Threshold ≥100 avoids
+                    # false-positives on small first batches.
+                    if batch_total >= 100:
+                        dominant = max(rej.items(), key=lambda kv: kv[1], default=(None, 0))
+                        if dominant[1] == batch_total and dominant[0] != "dup_or_no_id":
+                            print(f"    ⛔ Bailing on {api_name}: filter "
+                                  f"`{dominant[0]}` rejected 100% of "
+                                  f"{batch_total} posts. Loosen this "
+                                  f"filter and retry.")
+                            continue
 
             except Exception as e:
                 print(f"✗ ({str(e)[:60]})")
@@ -834,6 +873,18 @@ class RedditSearchBot:
     _SUB_CACHE_TTL = 3600  # 1 hour
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
+        # Reddit API is the only data source for subscriber counts.
+        # If we already know it's blocked, every fetch is going to
+        # time out / return HTML, wasting ~8s per sub. Skip the
+        # filter entirely so the cascade isn't blocked by doomed
+        # network calls. Posts pass through unfiltered (sub_subscribers
+        # left None on each result).
+        if self._reddit_dead:
+            print(f"    Subscriber filter skipped (Reddit leg dead): "
+                  f"keeping {len(results)} posts unfiltered", flush=True)
+            for r in results:
+                r["sub_subscribers"] = None
+            return results
         """Filter results to posts from subs within [min_subscribers, max_subscribers].
 
         Fetches subscriber counts for each unique subreddit via Reddit API.
@@ -1038,6 +1089,19 @@ class RedditSearchBot:
         instance from a different thread will raise and cache writes will fail.
         """
         if not results:
+            return results
+
+        # Reddit is the data source for scrutiny signals (rules,
+        # submit_text, comment removal rate). If it's blocked, every
+        # sub fetch returns HTML/403 — the function would otherwise
+        # spend ~24s per sub on three timed-out requests. Skip
+        # entirely so the cascade isn't blocked. Posts pass through
+        # with scrutiny_score=None (no max_scrutiny filtering possible).
+        if self._reddit_dead:
+            print(f"    Scrutiny filter skipped (Reddit leg dead): "
+                  f"keeping {len(results)} posts unfiltered", flush=True)
+            for r in results:
+                r.setdefault("scrutiny_score", None)
             return results
 
         # If we only have a db_path (thread-safe case), open a fresh connection

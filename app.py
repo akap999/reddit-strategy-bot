@@ -4939,6 +4939,67 @@ def api_check_subreddit():
         return jsonify({"exists": None, "error": str(e)})
 
 
+@app.route("/api/search/reddit/diagnose", methods=["GET"])
+def api_search_reddit_diagnose():
+    """Diagnostic: run a single-keyword search through each API leg
+    (reddit, pullpush, arctic) IN ISOLATION and report per-leg raw
+    count + any exception. Strips every filter so the only signal is
+    "did this leg return anything from upstream".
+
+    Use this when the regular search returns 0 results to figure out
+    which leg(s) are actually broken vs all-of-them-fine-but-filters-
+    are-too-tight.
+
+    Query params:
+      ?keyword=mattress             (required)
+      ?subreddit=Mattress           (optional)
+      ?limit=10                     (default 10 — keep small)
+    """
+    from search.reddit_bot import RedditSearchBot
+    keyword = (request.args.get("keyword") or "").strip()
+    if not keyword:
+        return jsonify({"error": "?keyword=... required"}), 400
+    subreddit = (request.args.get("subreddit") or "").strip() or None
+    limit = min(int(request.args.get("limit") or 10), 50)
+
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    bot = RedditSearchBot(
+        reddit_base=proxy.rstrip("/") if proxy else None,
+        script_user_agent=REDDIT_USER_AGENT,
+        retry_attempts=2,  # fail fast for diagnostics
+    )
+
+    legs = {}
+    for leg in ("reddit", "pullpush", "arctic"):
+        try:
+            # Bypass scrutiny / subscriber filters — we want raw API
+            # output, not filtered. Also drop the date window so a
+            # leg that paginates time-based doesn't return empty
+            # because of a too-narrow window.
+            results = bot.search(
+                keyword=keyword,
+                subreddit=subreddit,
+                sort_by="relevance",
+                limit=limit,
+                api=leg,
+            )
+            legs[leg] = {
+                "ok": True,
+                "count": len(results),
+                "sample_titles": [r.get("title", "")[:80] for r in results[:3]],
+            }
+        except Exception as e:
+            legs[leg] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    return jsonify({
+        "keyword": keyword,
+        "subreddit": subreddit,
+        "proxy_set": bool(proxy),
+        "user_agent": REDDIT_USER_AGENT,
+        "legs": legs,
+    })
+
+
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
     """Run a Reddit keyword search via RedditSearchBot (background task).

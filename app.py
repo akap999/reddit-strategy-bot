@@ -5209,8 +5209,43 @@ def api_check_live_debug_comment():
     url = (request.args.get("url") or "").strip()
     if not url:
         return jsonify({"error": "?url=<comment url> required"}), 400
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    share_trace = {}
     resolved = url
     if "/s/" in url:
+        # Trace every /s/ resolution strategy through the worker so we
+        # can see which one actually expands the share link.
+        import requests as _rq2, re as _re2
+        s_path = _re2.sub(r'^https?://[^/]+', '', url)
+        base_w = proxy.rstrip("/") if proxy else ""
+        def _r(label, fn):
+            try:
+                share_trace[label] = fn()
+            except Exception as e:
+                share_trace[label] = f"err: {type(e).__name__}: {e}"
+        if base_w:
+            def _via_resolve():
+                r = _rq2.get(f"{base_w}/resolve{s_path}", timeout=20,
+                             proxies={"http": None, "https": None})
+                body = (r.text or "")[:120].replace("\n", " ")
+                try:
+                    j = r.json(); u2 = (j or {}).get("url", "")
+                except Exception:
+                    u2 = ""
+                return {"status": r.status_code, "url_field": u2, "body": body}
+            _r("worker_resolve", _via_resolve)
+            def _via_redirect():
+                r = _rq2.get(f"{base_w}{s_path}", timeout=20, allow_redirects=True,
+                             proxies={"http": None, "https": None})
+                return {"status": r.status_code, "final_url": (r.url or "")}
+            _r("worker_redirect", _via_redirect)
+            def _via_json():
+                r = _rq2.get(f"{base_w}{s_path}.json", timeout=20,
+                             proxies={"http": None, "https": None})
+                kind = "json" if (r.text or "").lstrip()[:1] in "[{" else "non-json"
+                return {"status": r.status_code, "kind": kind,
+                        "body": (r.text or "")[:120].replace("\n", " ")}
+            _r("worker_json", _via_json)
         try:
             rr = _resolve_reddit_share_url_proxy(url)
             if rr and "/comments/" in rr:
@@ -5233,7 +5268,12 @@ def api_check_live_debug_comment():
         return re.sub(r"://[^/@]+@", "://***:***@", u or "")
 
     out = {"input": url, "resolved": resolved, "parsed": parsed,
-           "proxy_base": _redact(base), "methods": {}}
+           "proxy_base": _redact(base),
+           "share_resolution": {k: ({**v, "url_field": _redact(v.get("url_field", "")),
+                                      "final_url": _redact(v.get("final_url", ""))}
+                                     if isinstance(v, dict) else v)
+                                for k, v in share_trace.items()},
+           "methods": {}}
 
     def classify(t):
         s = (t or "").lstrip()

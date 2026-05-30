@@ -4939,6 +4939,93 @@ def api_check_subreddit():
         return jsonify({"exists": None, "error": str(e)})
 
 
+@app.route("/api/search/reddit/raw-probe", methods=["GET"])
+def api_search_reddit_raw_probe():
+    """Ground-truth probe: hit every Reddit endpoint DIRECTLY from
+    this server's egress IP (no bot cascade, no fallbacks) and report
+    exactly what comes back — status code, content-type, whether the
+    body is JSON / XML / HTML, and a short preview.
+
+    Reddit's bot detection is IP-sensitive: an endpoint that 403s from
+    one network may serve clean JSON from another. This tells us what
+    the PRODUCTION IP actually gets, instead of guessing from a dev
+    sandbox.
+
+    Query params:
+      ?sub=Mattress   (subreddit to test against; default Mattress)
+      ?q=mattress     (search keyword; default mattress)
+    """
+    import requests as _rq
+    sub = (request.args.get("sub") or "Mattress").strip()
+    q = (request.args.get("q") or "mattress").strip()
+
+    # UAs to try per endpoint — Reddit allow-lists vary by UA shape.
+    uas = {
+        "script": "python:reddit-strategy:v1 (by /u/strategy_bot_admin)",
+        "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "configured": REDDIT_USER_AGENT,
+    }
+
+    # (label, url, params) — covers JSON, RSS, and OAuth-less probes.
+    targets = [
+        ("www_json_search", f"https://www.reddit.com/r/{sub}/search.json",
+         {"q": q, "restrict_sr": "on", "limit": 3}),
+        ("old_json_search", f"https://old.reddit.com/r/{sub}/search.json",
+         {"q": q, "restrict_sr": "on", "limit": 3}),
+        ("www_json_listing", f"https://www.reddit.com/r/{sub}.json", {"limit": 3}),
+        ("www_json_new", f"https://www.reddit.com/r/{sub}/new.json", {"limit": 3}),
+        ("www_rss_search", f"https://www.reddit.com/r/{sub}/search.rss",
+         {"q": q, "restrict_sr": "on", "limit": 3}),
+        ("www_rss_new", f"https://www.reddit.com/r/{sub}/new.rss", {"limit": 3}),
+        ("proxy_json_search", None, {"q": q, "restrict_sr": "on", "limit": 3}),
+    ]
+
+    def classify(text):
+        s = (text or "").lstrip()
+        if not s:
+            return "empty"
+        if s[0] in "{[":
+            return "json"
+        if s.startswith("<?xml") or s[:20].lower().startswith("<?xml"):
+            return "xml"
+        if s[0] == "<":
+            return "html"
+        return "other"
+
+    results = {}
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    for label, url, params in targets:
+        if label == "proxy_json_search":
+            if not proxy:
+                results[label] = {"skipped": "no REDDIT_PROXY_URL configured"}
+                continue
+            url = f"{proxy.rstrip('/')}/r/{sub}/search.json"
+        per_ua = {}
+        for ua_label, ua in uas.items():
+            try:
+                r = _rq.get(url, params=params,
+                            headers={"User-Agent": ua, "Accept": "*/*"},
+                            timeout=12)
+                body = r.text or ""
+                per_ua[ua_label] = {
+                    "status": r.status_code,
+                    "content_type": r.headers.get("Content-Type", ""),
+                    "body_kind": classify(body),
+                    "len": len(body),
+                    "preview": body[:120].replace("\n", " "),
+                }
+            except Exception as e:
+                per_ua[ua_label] = {"error": f"{type(e).__name__}: {e}"}
+        results[label] = per_ua
+
+    return jsonify({
+        "sub": sub, "q": q,
+        "proxy_configured": bool(proxy),
+        "egress_note": "These results reflect THIS server's IP, not a dev sandbox.",
+        "targets": results,
+    })
+
+
 @app.route("/api/search/reddit/diagnose", methods=["GET"])
 def api_search_reddit_diagnose():
     """Diagnostic: run a single-keyword search through each API leg

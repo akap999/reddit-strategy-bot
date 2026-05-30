@@ -517,8 +517,20 @@ class RedditSearchBot:
         #                                       (when keyword is empty,
         #                                       for the tight-window
         #                                       fast path)
+        # Route RSS through the configured proxy when present. Reddit
+        # blocks datacenter IPs (Railway, etc.) for direct anonymous
+        # access — including RSS — but a proxy whose egress IP isn't
+        # on the block list serves RSS cleanly (proven via the
+        # proxy-health probe: proxy → /r/<sub>/new.rss returns 200
+        # Atom XML even when both JSON and direct-RSS return 403).
+        # When no proxy is set (local dev), hit www.reddit.com direct.
+        rss_base = (self.apis.get("reddit") or "https://www.reddit.com").rstrip("/")
+        # If the proxy base accidentally points at an api path, fall
+        # back to the canonical host so we don't build a broken URL.
+        if "reddit.com" not in rss_base and "://" not in rss_base:
+            rss_base = "https://www.reddit.com"
         if subreddit_path and keyword:
-            url = f"https://www.reddit.com/r/{subreddit_path}/search.rss"
+            url = f"{rss_base}/r/{subreddit_path}/search.rss"
             params = {
                 "q": keyword,
                 "restrict_sr": "on",
@@ -527,10 +539,10 @@ class RedditSearchBot:
                 "limit": min(limit, 100),
             }
         elif subreddit_path:
-            url = f"https://www.reddit.com/r/{subreddit_path}/new.rss"
+            url = f"{rss_base}/r/{subreddit_path}/new.rss"
             params = {"limit": min(limit, 100)}
         else:
-            url = "https://www.reddit.com/search.rss"
+            url = f"{rss_base}/search.rss"
             params = {
                 "q": keyword,
                 "sort": sort or "new",

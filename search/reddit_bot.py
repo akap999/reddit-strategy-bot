@@ -191,20 +191,30 @@ class RedditSearchBot:
                 break
 
         # ------------------------------------------------------------------
-        # Fallback chain — runs unconditionally (not gated on proxy).
+        # Fallback chain — Reddit-only. Pullpush / Arctic don't share
+        # paths with reddit.com so blindly retrying their URLs against
+        # old.reddit.com produced nonsense 404s and burned ~10s per
+        # retry per UA per host. Only run the fallback when the
+        # original URL was a Reddit host AND the bot hasn't already
+        # latched _reddit_dead (in which case fallbacks are pointless).
         # ------------------------------------------------------------------
-        # Reddit periodically hard-blocks specific UAs on
-        # www.reddit.com but keeps old.reddit.com accessible. Try
-        # every UA variant against old.reddit.com (and as a last
-        # resort, www.reddit.com under a different UA).
         from urllib.parse import urlparse
         try:
             parsed = urlparse(url)
-            path = parsed.path  # e.g. /r/sub/search.json
+            host_lc = (parsed.netloc or "").lower()
+            path = parsed.path
         except Exception:
-            path = None
+            host_lc, path = "", None
 
-        if path:
+        # Is this a Reddit URL? Match any reddit.com subdomain AND
+        # the configured proxy (if any) — the proxy is acting as
+        # Reddit so its responses share Reddit's failure modes.
+        is_reddit_url = (
+            "reddit.com" in host_lc
+            or (self.using_proxy and self.apis["reddit"] in (url or ""))
+        )
+
+        if path and is_reddit_url and not self._reddit_dead:
             for host in ("https://old.reddit.com", "https://www.reddit.com"):
                 # Skip the host we just exhausted with the default UA.
                 same_host_default_ua = (
@@ -235,9 +245,10 @@ class RedditSearchBot:
 
         # Mark the Reddit leg as dead so the rest of this bot's
         # lifetime skips it. Only flip when the failure looks
-        # IP/host-wide (403/HTML), not when it's a one-shot 404 or
-        # query-specific empty.
-        if (last_response is not None
+        # IP/host-wide (403/HTML on a Reddit URL — Pullpush/Arctic
+        # failures don't say anything about Reddit's state).
+        if (is_reddit_url
+                and last_response is not None
                 and last_response.status_code in (403, 429)
                 and last_response.text.lstrip()[:1] == "<"):
             with self._lock:

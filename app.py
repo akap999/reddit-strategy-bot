@@ -5003,34 +5003,72 @@ def api_search_reddit_test_http_proxy():
             return "html"
         return "other"
 
-    def probe(url, params=None):
-        try:
-            r = _rq.get(url, params=params, proxies=proxies, timeout=25,
-                        headers={"User-Agent": ua, "Accept": "application/json"})
-            body = r.text or ""
-            return {
-                "status": r.status_code,
-                "content_type": r.headers.get("Content-Type", ""),
-                "body_kind": classify(body),
-                "len": len(body),
-                "preview": body[:120].replace("\n", " "),
-            }
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+    # A realistic desktop-Chrome header set. Reddit's anti-bot
+    # challenge keys off UA + sec-fetch/sec-ch-ua headers, not just IP —
+    # a bot UA gets the 403 challenge page even from a clean residential
+    # IP. These mimic a real browser navigation.
+    BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Referer": f"https://www.reddit.com/r/{sub}/",
+    }
+
+    def probe(url, params=None, headers=None, retries=1):
+        last = None
+        for _ in range(retries):
+            try:
+                r = _rq.get(url, params=params, proxies=proxies, timeout=25,
+                            headers=headers or {"User-Agent": ua, "Accept": "application/json"})
+                body = r.text or ""
+                last = {
+                    "status": r.status_code,
+                    "content_type": r.headers.get("Content-Type", ""),
+                    "body_kind": classify(body),
+                    "len": len(body),
+                    "preview": body[:120].replace("\n", " "),
+                }
+                if last["body_kind"] in ("json", "xml"):
+                    return last  # success — stop retrying
+            except Exception as e:
+                last = {"error": f"{type(e).__name__}: {e}"}
+        return last
 
     out = {
-        "json_search": probe(f"https://www.reddit.com/r/{sub}/search.json",
-                             {"q": q, "restrict_sr": "on", "limit": 3}),
-        "json_listing": probe(f"https://www.reddit.com/r/{sub}.json", {"limit": 3}),
-        "json_comments": probe(f"https://www.reddit.com/r/{sub}/new.json", {"limit": 1}),
+        # Original bot-UA probe (baseline — expected to 403).
+        "botUA_www_json": probe(f"https://www.reddit.com/r/{sub}.json", {"limit": 3}),
+        # Browser-headers probes — the combo that usually clears the
+        # anti-bot challenge on a residential IP.
+        "browser_www_json_listing": probe(f"https://www.reddit.com/r/{sub}.json",
+                                          {"limit": 3, "raw_json": 1}, headers=BROWSER_HEADERS),
+        "browser_www_json_search": probe(f"https://www.reddit.com/r/{sub}/search.json",
+                                         {"q": q, "restrict_sr": "on", "limit": 3, "raw_json": 1},
+                                         headers=BROWSER_HEADERS),
+        "browser_old_json_listing": probe(f"https://old.reddit.com/r/{sub}.json",
+                                          {"limit": 3, "raw_json": 1}, headers=BROWSER_HEADERS),
+        # Retry 4× to ride IPRoyal's IP rotation — a burned IP this
+        # request may be a clean one next request.
+        "browser_www_json_retry4": probe(f"https://www.reddit.com/r/{sub}.json",
+                                         {"limit": 3, "raw_json": 1},
+                                         headers=BROWSER_HEADERS, retries=4),
+        # RSS through residential (parity check — should at least work).
+        "rss_www_new": probe(f"https://www.reddit.com/r/{sub}/new.rss", {"limit": 3},
+                             headers=BROWSER_HEADERS),
         "proxy_egress_ip": probe("https://httpbin.org/ip"),
     }
     return jsonify({
         "proxy_active": True,
-        "note": ("If json_* show body_kind=json, the residential proxy "
-                 "unblocks Reddit's JSON API — tell me and I'll flip "
-                 "comment-fetching + the search leg back to JSON. "
-                 "proxy_egress_ip shows the residential IP being used."),
+        "note": ("Looking for ANY browser_* probe with body_kind=json. "
+                 "If found, residential+browser-headers unblocks JSON and "
+                 "I'll wire the bot to use that exact combo. botUA_* is the "
+                 "baseline (bot UA, expected 403)."),
         "probes": out,
     })
 

@@ -5026,6 +5026,85 @@ def api_search_reddit_raw_probe():
     })
 
 
+@app.route("/api/search/reddit/proxy-health", methods=["GET"])
+def api_search_reddit_proxy_health():
+    """Distinguish 'proxy IP is blocked by Reddit' from 'proxy logic is
+    broken' from 'proxy egress IP is fine but my Railway IP is blocked'.
+
+    Runs four probes and reports each:
+      1. proxy → a NON-Reddit URL (httpbin /ip) — proves the proxy
+         forwards at all AND reveals the proxy's egress IP.
+      2. proxy → Reddit RSS new feed.
+      3. proxy → Reddit JSON listing.
+      4. direct (no proxy) → httpbin /ip — reveals THIS server's IP
+         for comparison.
+
+    Interpreting results:
+      - If probe 1 succeeds (kind=json, shows an IP) but 2 & 3 return
+        Reddit's block HTML → the proxy WORKS, but its egress IP is on
+        Reddit's block list. A different proxy IP (residential) would
+        fix it.
+      - If probe 1 fails too → the proxy itself is misconfigured.
+      - Compare the IP in probe 1 (proxy egress) vs probe 4 (Railway
+        egress): if they differ, the proxy is routing through a
+        different IP — useful to know which one Reddit is blocking.
+    """
+    import requests as _rq
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    if not proxy:
+        return jsonify({"error": "No REDDIT_PROXY_URL configured"}), 400
+    base = proxy.rstrip("/")
+
+    def classify(text):
+        s = (text or "").lstrip()
+        if not s:
+            return "empty"
+        if s[0] in "{[":
+            return "json"
+        if s[:6].lower().startswith("<?xml"):
+            return "xml"
+        if s[0] == "<":
+            return "html"
+        return "other"
+
+    def probe(url, **kw):
+        try:
+            r = _rq.get(url, timeout=12,
+                        headers={"User-Agent": "python:reddit-strategy:v1 (proxy-health)"},
+                        **kw)
+            body = r.text or ""
+            return {
+                "status": r.status_code,
+                "content_type": r.headers.get("Content-Type", ""),
+                "body_kind": classify(body),
+                "preview": body[:160].replace("\n", " "),
+            }
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    out = {}
+    # 1. Can the proxy reach a non-Reddit URL? Most proxies that just
+    #    rewrite the path to reddit.com won't forward arbitrary hosts,
+    #    so this may 404 — that's fine, it still tells us the worker
+    #    is alive. We also try the worker root.
+    out["proxy_root"] = probe(base + "/")
+    # 2. proxy → Reddit RSS
+    out["proxy_rss_new"] = probe(base + "/r/Mattress/new.rss", params={"limit": 3})
+    # 3. proxy → Reddit JSON listing
+    out["proxy_json_listing"] = probe(base + "/r/Mattress.json", params={"limit": 3})
+    # 4. Direct from this server → httpbin to reveal Railway egress IP
+    out["direct_httpbin_ip"] = probe("https://httpbin.org/ip")
+
+    return jsonify({
+        "proxy_url": base,
+        "note": ("If proxy_rss_new / proxy_json_listing show body_kind=html "
+                 "(Reddit block page) the proxy's egress IP is blocked by "
+                 "Reddit. A residential-IP proxy would be needed. "
+                 "direct_httpbin_ip shows this server's own egress IP."),
+        "probes": out,
+    })
+
+
 @app.route("/api/search/reddit/diagnose", methods=["GET"])
 def api_search_reddit_diagnose():
     """Diagnostic: run a single-keyword search through each API leg

@@ -526,16 +526,30 @@ class RedditSearchBot:
         }
         results = []
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=20)
+            # Retry transient 429 (rate limit) up to 2× with backoff
+            # BEFORE giving up. A 429 on one sub during a 20-sub fan-out
+            # is a momentary throughput spike, NOT a permanent block —
+            # we must NOT latch _reddit_dead on it or one slow sub kills
+            # the whole RSS leg for the run. Only a 403 (hard block)
+            # latches dead.
+            resp = None
+            for rss_attempt in range(3):
+                resp = requests.get(url, params=params, headers=headers, timeout=20)
+                if resp.status_code == 429 and rss_attempt < 2:
+                    wait = 2 * (rss_attempt + 1)
+                    print(f"\n    ⏳ RSS 429 on {url} — retry {rss_attempt+1}/2 in {wait}s", flush=True)
+                    time.sleep(wait)
+                    continue
+                break
             if resp.status_code != 200:
                 print(f"\n    ⚠ Reddit RSS returned {resp.status_code} for {url}", flush=True)
-                # 403/429 on RSS is rare but if it happens the wall has
-                # expanded — latch _reddit_dead so we stop trying.
-                if resp.status_code in (403, 429):
+                # Only a persistent 403 means the wall expanded to RSS.
+                # 429 is transient throughput — never latch dead on it.
+                if resp.status_code == 403:
                     with self._lock:
                         if not self._reddit_dead:
                             self._reddit_dead = True
-                            self._reddit_dead_reason = f"RSS returned {resp.status_code}"
+                            self._reddit_dead_reason = "RSS returned 403 (hard block)"
                             print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_dead_reason}", flush=True)
                 return []
             # Parse Atom XML.
@@ -969,12 +983,19 @@ class RedditSearchBot:
                     if not pid or pid in seen_ids:
                         rej["dup_or_no_id"] += 1
                         continue
-                    if post["comments"] < min_comments:
-                        rej["min_comments"] += 1
-                        continue
-                    if post["score"] < min_score:
-                        rej["min_score"] += 1
-                        continue
+                    # RSS-sourced posts carry no score / num_comments /
+                    # upvote_ratio / over_18 (Reddit's RSS omits them →
+                    # 0/False). Skip those four filters for RSS posts so
+                    # a min_comments=1 default doesn't reject 100% of
+                    # them. Pullpush/Arctic posts keep full filtering.
+                    is_rss = post.get("_source") == "reddit_rss"
+                    if not is_rss:
+                        if post["comments"] < min_comments:
+                            rej["min_comments"] += 1
+                            continue
+                        if post["score"] < min_score:
+                            rej["min_score"] += 1
+                            continue
                     if cutoff_date and post["timestamp"]:
                         try:
                             if datetime.utcfromtimestamp(post["timestamp"]) < cutoff_date:
@@ -985,18 +1006,19 @@ class RedditSearchBot:
                     if excluded_set and post.get("subreddit", "").lower() in excluded_set:
                         rej["excluded_sub"] += 1
                         continue
-                    if nsfw is True and not post.get("over_18"):
-                        rej["nsfw"] += 1
-                        continue
-                    if nsfw is False and post.get("over_18"):
-                        rej["nsfw"] += 1
-                        continue
-                    if (
-                        min_upvote_ratio is not None
-                        and post.get("upvote_ratio", 0) < min_upvote_ratio
-                    ):
-                        rej["min_upvote_ratio"] += 1
-                        continue
+                    if not is_rss:
+                        if nsfw is True and not post.get("over_18"):
+                            rej["nsfw"] += 1
+                            continue
+                        if nsfw is False and post.get("over_18"):
+                            rej["nsfw"] += 1
+                            continue
+                        if (
+                            min_upvote_ratio is not None
+                            and post.get("upvote_ratio", 0) < min_upvote_ratio
+                        ):
+                            rej["min_upvote_ratio"] += 1
+                            continue
                     # Post passed all filters
                     seen_ids.add(pid)
                     filtered.append(post)
@@ -1586,24 +1608,35 @@ class RedditSearchBot:
             if ts and ts < cutoff_ts:
                 rej["too_old"] += 1
                 continue
-            if p.get("comments", 0) < min_comments:
-                rej["min_comments"] += 1
-                continue
-            if p.get("score", 0) < min_score:
-                rej["min_score"] += 1
-                continue
+            # CRITICAL: RSS-sourced posts have no score / num_comments /
+            # upvote_ratio / over_18 (Reddit's RSS feed omits them, so
+            # they come back as 0/False). Applying min_comments / min_score
+            # / nsfw / min_upvote_ratio to them would reject 100%
+            # unconditionally — a min_comments=1 default silently kills
+            # every RSS result. So skip those four filters for RSS posts;
+            # they're no-ops when the data isn't present. Posts from
+            # Pullpush/Arctic (which DO carry the fields) are still
+            # filtered normally.
+            is_rss = p.get("_source") == "reddit_rss"
+            if not is_rss:
+                if p.get("comments", 0) < min_comments:
+                    rej["min_comments"] += 1
+                    continue
+                if p.get("score", 0) < min_score:
+                    rej["min_score"] += 1
+                    continue
+                if nsfw is True and not p.get("over_18"):
+                    rej["nsfw"] += 1
+                    continue
+                if nsfw is False and p.get("over_18"):
+                    rej["nsfw"] += 1
+                    continue
+                if (min_upvote_ratio is not None
+                        and p.get("upvote_ratio", 0) < min_upvote_ratio):
+                    rej["min_upvote_ratio"] += 1
+                    continue
             if excluded_set and p.get("subreddit", "").lower() in excluded_set:
                 rej["excluded_sub"] += 1
-                continue
-            if nsfw is True and not p.get("over_18"):
-                rej["nsfw"] += 1
-                continue
-            if nsfw is False and p.get("over_18"):
-                rej["nsfw"] += 1
-                continue
-            if (min_upvote_ratio is not None
-                    and p.get("upvote_ratio", 0) < min_upvote_ratio):
-                rej["min_upvote_ratio"] += 1
                 continue
             p["matched_keywords"] = hit_kw
             matched.append(p)

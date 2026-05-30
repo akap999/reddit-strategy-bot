@@ -498,10 +498,54 @@ function _batchGenComplete(result) {
     const generated = result.results.filter(r => r.generated);
     const skipped = result.results.filter(r => r.skipped);
     const errored = result.results.filter(r => r.error);
-    let msg = `Generation complete: ${generated.length} post${generated.length!==1?'s':''} generated`;
-    if (skipped.length) msg += `, ${skipped.length} skipped (low relevancy)`;
-    if (errored.length) msg += `, ${errored.length} failed`;
-    toast(msg, generated.length ? 'success' : 'info', 8000);
+
+    // Break skips/errors down by CAUSE so it's clear whether posts were
+    // dropped for genuine low relevance vs a comment-fetch problem.
+    // - relevance skips with a healthy comment count = real low relevance
+    // - relevance skips with thin comments (<3) = relevance hurt by sparse context
+    // - errors mentioning "No comments could be fetched" = fetch failure
+    const thinSkips = skipped.filter(r => (r.comments_fetched || 0) < 3);
+    const realSkips = skipped.length - thinSkips.length;
+    const fetchFails = errored.filter(r => /No comments could be fetched|fetch/i.test(r.error || ''));
+    const otherErrors = errored.length - fetchFails.length;
+
+    let msg = `Generation complete: ${generated.length} generated`;
+    if (skipped.length) {
+        msg += `, ${skipped.length} skipped`;
+        const parts = [];
+        if (realSkips) parts.push(`${realSkips} genuine low-relevance`);
+        if (thinSkips.length) parts.push(`${thinSkips.length} low-relevance w/ thin comments`);
+        if (parts.length) msg += ` (${parts.join(', ')})`;
+    }
+    if (errored.length) {
+        msg += `, ${errored.length} failed`;
+        const parts = [];
+        if (fetchFails.length) parts.push(`${fetchFails.length} no-comments-fetched`);
+        if (otherErrors) parts.push(`${otherErrors} other`);
+        if (parts.length) msg += ` (${parts.join(', ')})`;
+    }
+    toast(msg, generated.length ? 'success' : 'info', 12000);
+
+    // Full per-post breakdown to the console for deeper inspection —
+    // shows relevance score, comment count, and source per skipped post.
+    try {
+        const rows = result.results.map(r => ({
+            pid: r.pid,
+            outcome: r.generated ? 'generated' : (r.skipped ? 'skipped' : 'error'),
+            relevance: r.relevance_score,
+            comments: r.comments_fetched,
+            source: r.comments_source,
+            detail: r.reason || r.error || '',
+        }));
+        console.log('=== Gen-all breakdown (verify skip causes) ===');
+        console.table(rows);
+        const srcCounts = {};
+        result.results.forEach(r => {
+            const s = r.comments_source || (r.error ? '(error)' : '?');
+            srcCounts[s] = (srcCounts[s] || 0) + 1;
+        });
+        console.log('Comment-fetch source distribution:', srcCounts);
+    } catch (e) {}
 }
 
 // =========================================================================

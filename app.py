@@ -12,6 +12,27 @@ from functools import wraps
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ---------------------------------------------------------------------------
+# Strip standard forward-proxy env vars at startup.
+#
+# `requests` (and httpx, used by the Anthropic SDK) automatically route
+# through HTTP_PROXY / HTTPS_PROXY / ALL_PROXY env vars if set. A leftover
+# residential-proxy var (e.g. from an IPRoyal experiment) that's since
+# gone stale makes EVERY outbound call return 407 Proxy Authentication
+# Required — silently breaking Reddit RSS, Check Live, and even Claude.
+#
+# This app never needs a forward proxy for outbound traffic (the Reddit
+# Cloudflare worker is a URL-rewrite proxy fetched directly, not a tunnel;
+# Pullpush/Arctic/Claude are hit directly). So we proactively clear these
+# vars so a stray one can't hijack the process. The residential proxy, if
+# ever wanted, is honored explicitly via REDDIT_HTTP_PROXY + proxies=,
+# never via these globals.
+for _pv in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "all_proxy"):
+    if os.environ.pop(_pv, None):
+        print(f"[startup] cleared forward-proxy env var {_pv} "
+              f"(prevents 407 hijack of outbound calls)", flush=True)
+
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session
 from authlib.integrations.flask_client import OAuth
 from config import (
@@ -191,7 +212,10 @@ def _reddit_http_proxies():
     """
     p = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
     if not p:
-        return None
+        # Explicit no-proxy dict (NOT None). Passing this to requests
+        # disables any HTTP_PROXY/HTTPS_PROXY env-var hijack for the
+        # call. (None would let requests fall back to env proxies.)
+        return {"http": None, "https": None}
     return {"http": p, "https": p}
 
 
@@ -246,7 +270,8 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
         "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
     }
     try:
-        r = _requests.get(rss_url, headers=headers, timeout=timeout)
+        r = _requests.get(rss_url, headers=headers, timeout=timeout,
+                          proxies={"http": None, "https": None})
         if r.status_code != 200:
             return None
         body = r.text or ""
@@ -290,7 +315,8 @@ def _post_liveness_via_rss(post_url, timeout=15):
         "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
     }
     try:
-        r = _requests.get(rss_url, params={"limit": 5}, headers=headers, timeout=timeout)
+        r = _requests.get(rss_url, params={"limit": 5}, headers=headers, timeout=timeout,
+                          proxies={"http": None, "https": None})
         if r.status_code == 404:
             return "removed"
         if r.status_code != 200 or not (r.text or "").lstrip().startswith("<?xml"):

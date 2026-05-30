@@ -2233,137 +2233,64 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             for el in node:
                 _walk_comment_tree(el, out)
 
+    import xml.etree.ElementTree as _ET_grp
+    _proxy_grp = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    _rss_base_grp = _proxy_grp.rstrip("/") if _proxy_grp else "https://www.reddit.com"
     for post_url, group in post_groups.items():
         if len(group) < 2:
             continue  # singleton — per-item path handles it
+        # Bulk pre-pass via the POST-LEVEL comment RSS. Reddit's JSON
+        # API is auth-gated for cloud IPs (403), so the old
+        # /comments/<id>.json fetch always failed and wasted ~12s of
+        # retries per post before falling to the per-item loop. The
+        # post's .rss feed returns up to ~50 comments in one call and
+        # IS served through the proxy. We use it to mark LIVE in bulk;
+        # any comment NOT found in the feed is left UNHANDLED so the
+        # per-item permalink-RSS check (definitive — distinguishes
+        # 'beyond the 50-cap' from 'actually removed') decides it.
+        present_ids = set()
+        feed_ok = False
         try:
-            parsed = _urlparse_grp(post_url)
-            path = parsed.path.rstrip("/") + ".json"
-            if not path.startswith("/"):
-                continue
-            resp = _reddit_get(path, timeout=15)
+            pm = _re_grp.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, _re_grp.IGNORECASE)
+            if pm:
+                rss_url = f"{_rss_base_grp}{pm.group(1)}/.rss"
+                resp = _requests.get(
+                    rss_url, params={"limit": 100},
+                    headers={"User-Agent": REDDIT_USER_AGENT,
+                             "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
+                    timeout=15, proxies={"http": None, "https": None},
+                )
+                if resp.status_code == 200 and (resp.text or "").lstrip().startswith("<?xml"):
+                    feed_ok = True
+                    root = _ET_grp.fromstring(resp.text)
+                    ns = {"atom": "http://www.w3.org/2005/Atom"}
+                    for e in root.findall("atom:entry", ns):
+                        m2 = _re_grp.search(r"t1_(\w+)", (e.find("atom:id", ns).text or ""))
+                        if m2:
+                            present_ids.add(m2.group(1).lower())
         except Exception as e:
-            print(f"[{log_prefix}] bulk fetch failed for {post_url}: {e}", flush=True)
-            continue
-        if resp.status_code != 200:
-            # Don't mark anything here — let the per-item loop retry
-            # each item so transient 403/429 per-item retries still run.
-            continue
-        try:
-            data = resp.json()
-        except Exception:
-            continue
-        if not isinstance(data, list) or len(data) < 2:
+            print(f"[{log_prefix}] bulk RSS fetch failed for {post_url}: {e}", flush=True)
+            feed_ok = False
+
+        if not feed_ok:
+            # Couldn't read the post feed — leave the whole group to the
+            # per-item loop (which RSS-checks each comment individually).
             continue
 
-        # Map comment_id → comment-data so the per-item lookups are O(1).
-        cid_map = {}
-        _walk_comment_tree(data[1], cid_map)
-
-        # Mark each item in this group from the cached tree.
+        # Mark each comment present in the feed as LIVE. Absent ones
+        # are left unhandled (per-item permalink RSS will decide
+        # live/removed definitively).
         for item, comment_id in group:
-            checked += 1
-            d = cid_map.get(comment_id)
-            if not d:
-                # Comment id not present in the tree → Reddit dropped
-                # it (deleted or hidden behind a "more comments" stub
-                # we can't follow). Treat as dead. No JSON in hand,
-                # so no posted_at hint — _mark_dead will try to
-                # backfill from Reddit or fall back to deployed_at.
-                _mark_dead(item)
-                dead += 1
-                handled_ids.add(item["id"])
-                _emit_progress()
-                continue
-            body = (d.get("body") or "").strip().lower()
-            author = (d.get("author") or "").strip().lower()
-            is_removed = (
-                body in ("[deleted]", "[removed]")
-                or "removed by reddit" in body
-                or "removed by moderator" in body
-                or d.get("removed") is True
-                or author in ("[deleted]", "[removed]")
-            )
-            if is_removed:
-                # Extract created_utc from the tree node we already
-                # have — saves a second Reddit fetch inside the
-                # chooser and ensures the 14-day rule fires even on
-                # heavily-rate-limited runs. Reddit preserves
-                # created_utc on '[removed]' comments, so this works
-                # for both mod-removed and user-deleted bodies.
-                from bulk_deploy import _utc_seconds_to_iso as _utc_iso
-                posted_hint = _utc_iso(d.get("created_utc")) or None
-                _mark_dead(item, posted_at_hint=posted_hint)
-                dead += 1
-            else:
+            if comment_id in present_ids:
+                checked += 1
                 _mark_live(item)
                 live += 1
-                # Persist engagement stats from this same JSON.
-                try:
-                    replies_obj = d.get("replies", "")
-                    num_replies = 0
-                    if isinstance(replies_obj, dict):
-                        num_replies = len(replies_obj.get("data", {}).get("children", []))
-                    db.update_live_stats_by_id_url(
-                        item["id"], item.get("reddit_comment_url", ""),
-                        d.get("score"), num_replies,
-                    )
-                except Exception as stats_err:
-                    print(f"[{log_prefix}] #{item['id']} stats persist failed: {stats_err}", flush=True)
-            handled_ids.add(item["id"])
-            _emit_progress()
+                handled_ids.add(item["id"])
+                _emit_progress()
+            # else: not in top-100 feed — could be removed OR just
+            # nested/low-ranked. Leave for the per-item permalink check.
 
-        # Post-side piggy-back (posted_at + post-liveness) — once per
-        # post instead of once per comment. Same logic as the per-item
-        # path uses.
-        try:
-            post_children = (data[0] or {}).get("data", {}).get("children", [])
-            post_data = (post_children[0] or {}).get("data", {}) if post_children else {}
-            first_item = group[0][0]
-            pid_row = db.conn.execute(
-                "SELECT post_id FROM comments WHERE id = ?",
-                (first_item["id"],)
-            ).fetchone()
-            parent_post_id = pid_row["post_id"] if pid_row else None
-            if parent_post_id:
-                # posted_at backfill.
-                if post_data:
-                    from bulk_deploy import _utc_seconds_to_iso
-                    cu = post_data.get("created_utc")
-                    iso = _utc_seconds_to_iso(cu) if cu else None
-                    if iso:
-                        db.set_post_posted_at(parent_post_id, iso)
-                # Post-liveness.
-                post_is_dead = False
-                if not post_children:
-                    post_is_dead = True
-                elif post_data:
-                    stxt = (post_data.get("selftext") or "").strip().lower()
-                    pauthor = (post_data.get("author") or "").strip().lower()
-                    if (post_data.get("removed") is True
-                            or stxt in ("[removed]", "[deleted]")
-                            or pauthor in ("[deleted]", "[removed]")):
-                        post_is_dead = True
-                if post_is_dead:
-                    cur_post = db.conn.execute(
-                        "SELECT status FROM posts WHERE id = ?",
-                        (parent_post_id,)
-                    ).fetchone()
-                    cur_status = cur_post["status"] if cur_post else None
-                    if cur_status and cur_status != "removed":
-                        db.conn.execute(
-                            "UPDATE posts SET status='removed', prev_status=? WHERE id=? AND status != 'removed'",
-                            (cur_status, parent_post_id),
-                        )
-                        db.conn.commit()
-                        print(f"[{log_prefix}] post #{parent_post_id} marked removed (bulk pass)", flush=True)
-        except Exception as pp_err:
-            print(f"[{log_prefix}] bulk post-side piggy-back failed for {post_url}: {pp_err}", flush=True)
-
-        # Modest pacing between distinct posts — far less than the
-        # per-comment 3s sleep below since we're issuing 1 request
-        # per post instead of N.
-        _time.sleep(1)
+        _time.sleep(0.5)
 
     # =====================================================================
     # Per-item loop: handles search_comments, /s/ short URLs, singleton

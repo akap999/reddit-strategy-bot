@@ -113,18 +113,31 @@ class RedditSearchBot:
         # ~30-60s on a doomed Reddit retry chain before the cascade
         # can move on to Pullpush. With it, the first ~30s is the
         # only Reddit cost.
+        # `_reddit_dead` gates the legacy JSON API path
+        # (_search_reddit_native + _make_request fallbacks). That path
+        # is blocked for cloud egress IPs, so the REDDIT_API_DISABLED
+        # env var pre-latches it to skip the ~30s discovery cost.
         self._reddit_dead = False
         self._reddit_dead_reason = None
-        # Optional opt-out: if `REDDIT_API_DISABLED=1` is set in the
-        # environment, pre-latch the dead flag so the bot never even
-        # tries the Reddit leg on this instance. Avoids the ~30s
-        # discovery cost on every search task when the operator
-        # already knows Reddit blocks their egress (Railway / Cloudflare
-        # Workers / most cloud providers). Pullpush + Arctic still
-        # serve the cascade normally.
+        # `_reddit_rss_dead` is SEPARATE — it gates the RSS / Atom
+        # path (_search_reddit_rss), which is the actual working
+        # Reddit data source. RSS is NOT blocked the way JSON is, so
+        # it must keep working even when the operator sets
+        # REDDIT_API_DISABLED to silence the dead JSON leg. Only a
+        # real 403 from an RSS endpoint latches this.
+        self._reddit_rss_dead = False
+        self._reddit_rss_dead_reason = None
+        # Optional opt-out: REDDIT_API_DISABLED=1 pre-latches the JSON
+        # leg dead (it's blocked anyway). It deliberately does NOT
+        # touch _reddit_rss_dead — RSS is the bypass and should stay
+        # live. To also kill RSS (rarely needed), set
+        # REDDIT_RSS_DISABLED=1.
         if os.environ.get("REDDIT_API_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             self._reddit_dead = True
             self._reddit_dead_reason = "REDDIT_API_DISABLED env var is set"
+        if os.environ.get("REDDIT_RSS_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            self._reddit_rss_dead = True
+            self._reddit_rss_dead_reason = "REDDIT_RSS_DISABLED env var is set"
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -487,11 +500,11 @@ class RedditSearchBot:
         is supported via the `restrict_sr=on` flag.
 
         Returns a list of post dicts in the same shape `_search_reddit_native`
-        returns. Hard short-circuits to [] if `_reddit_dead` (we use
-        that flag to signal the operator forced REDDIT_API_DISABLED;
-        RSS is still Reddit-hosted, so respect that opt-out).
+        returns. Short-circuits to [] only if `_reddit_rss_dead` —
+        which is set by REDDIT_RSS_DISABLED or a real RSS 403, NOT by
+        the REDDIT_API_DISABLED (JSON-leg) opt-out.
         """
-        if self._reddit_dead:
+        if self._reddit_rss_dead:
             return []
         # Three URL shapes:
         #   - /r/<sub>/search.rss?q=KEYWORD  → keyword search within sub
@@ -547,10 +560,10 @@ class RedditSearchBot:
                 # 429 is transient throughput — never latch dead on it.
                 if resp.status_code == 403:
                     with self._lock:
-                        if not self._reddit_dead:
-                            self._reddit_dead = True
-                            self._reddit_dead_reason = "RSS returned 403 (hard block)"
-                            print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_dead_reason}", flush=True)
+                        if not self._reddit_rss_dead:
+                            self._reddit_rss_dead = True
+                            self._reddit_rss_dead_reason = "RSS returned 403 (hard block)"
+                            print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_rss_dead_reason}", flush=True)
                 return []
             # Parse Atom XML.
             try:
@@ -825,12 +838,12 @@ class RedditSearchBot:
             if len(filtered) >= limit:
                 break
 
-            # Skip the Reddit leg entirely if a prior call on this
-            # bot already proved it's hard-blocking. Avoids spinning
-            # up the multi-sub fan-out just to have every thread
-            # return [] (fast but pointless).
-            if api_name == "reddit" and self._reddit_dead:
-                print(f"    Skipping reddit API (marked dead: {self._reddit_dead_reason})", flush=True)
+            # The 'reddit' leg now means RSS (the JSON path is dead for
+            # cloud IPs). Skip it only when the RSS path itself is dead
+            # — NOT when _reddit_dead is set (that only reflects the
+            # JSON-leg opt-out / block, which RSS bypasses).
+            if api_name == "reddit" and self._reddit_rss_dead:
+                print(f"    Skipping reddit RSS API (marked dead: {self._reddit_rss_dead_reason})", flush=True)
                 continue
 
             # Adaptive over-fetch: 5x when filters are active (they reject
@@ -1539,9 +1552,10 @@ class RedditSearchBot:
         # Pick the data source. Reddit RSS (/r/<sub>/new.rss) is the
         # best option when reachable — real-time recent posts with no
         # rate limit and no search-index lag. Falls back to Pullpush
-        # only when Reddit RSS is marked dead (operator opted out via
-        # REDDIT_API_DISABLED or the RSS endpoint hard-blocked us).
-        use_rss = not self._reddit_dead
+        # only when the RSS path is dead (REDDIT_RSS_DISABLED or a real
+        # RSS 403). Note: this checks _reddit_rss_dead, NOT _reddit_dead
+        # — the JSON-leg opt-out must not disable RSS.
+        use_rss = not self._reddit_rss_dead
         # Map period of `max_days_old` to a Reddit `t` window. RSS
         # also accepts `t=day/week/month/year/all` for the listings
         # path but not for /new (which is purely chronological).

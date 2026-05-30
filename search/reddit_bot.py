@@ -22,8 +22,10 @@ Improvements over v1:
 
 import os
 import re
+import html as _html
 from collections import Counter
 import requests
+import xml.etree.ElementTree as _ET
 from datetime import datetime, timedelta
 import json
 import csv
@@ -387,6 +389,179 @@ class RedditSearchBot:
 
         return results
 
+    # Reddit's RSS feeds (Atom XML) — the only Reddit-hosted endpoint
+    # that Reddit's bot detection currently allows cloud IPs to hit.
+    # Routes:
+    #   /r/<sub>/search.rss?q=KEYWORD&restrict_sr=on&sort=...&t=...&limit=N
+    #   /r/<sub>/new.rss?limit=N
+    #   /search.rss?q=KEYWORD&sort=...&t=...&limit=N         (global)
+    # Returns Atom XML with <entry> nodes containing id (t3_xxx),
+    # title, link, updated (ISO timestamp), author, content (HTML
+    # selftext), and category (subreddit).
+    #
+    # NOTE: RSS does NOT include score, num_comments, upvote_ratio,
+    # over_18, flair. Posts come back with those fields set to 0/
+    # default. Filters that depend on them (min_score, min_comments,
+    # nsfw, min_upvote_ratio) effectively become no-ops on RSS-sourced
+    # posts. That's a deliberate trade-off: working Reddit data beats
+    # perfectly-filtered nothing. For tight filters the user should
+    # rely on Pullpush/Arctic which do carry these fields.
+    _RSS_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+    def _parse_rss_entry(self, entry):
+        """Convert one Atom <entry> into the bot's post dict shape.
+        Best-effort; missing fields default to 0/empty.
+        """
+        ns = self._RSS_NS
+
+        def _text(el):
+            return (el.text if el is not None else "") or ""
+
+        title = _text(entry.find("atom:title", ns)).strip()
+        link_el = entry.find("atom:link", ns)
+        url = link_el.get("href") if link_el is not None else ""
+        # Entry id is "t3_xxx" or sometimes "tag:reddit.com,...:t3_xxx".
+        raw_id = _text(entry.find("atom:id", ns))
+        m = re.search(r"t3_([a-z0-9]+)", raw_id, re.IGNORECASE)
+        pid = m.group(1) if m else raw_id.split("/")[-1]
+        author = _text(entry.find("atom:author/atom:name", ns)).strip()
+        if author.startswith("/u/"):
+            author = author[3:]
+        cat_el = entry.find("atom:category", ns)
+        subreddit = cat_el.get("term") if cat_el is not None else ""
+        # `updated` is the post timestamp in ISO 8601 with offset.
+        updated = _text(entry.find("atom:updated", ns)).strip()
+        ts = 0
+        if updated:
+            try:
+                # Strip the timezone portion (Reddit always emits +00:00)
+                # for a plain isoformat parse.
+                dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                ts = int(dt.timestamp())
+            except Exception:
+                ts = 0
+        # Selftext lives in <content type="html"> wrapped with comment
+        # markers (<!-- SC_OFF -->...<!-- SC_ON -->).
+        content_el = entry.find("atom:content", ns)
+        raw_html = _text(content_el)
+        # Strip HTML tags and decode entities for a plain-text body
+        # the keyword-match path can scan.
+        body_plain = re.sub(r"<[^>]+>", " ", raw_html)
+        body_plain = _html.unescape(body_plain)
+        body_plain = re.sub(r"\s+", " ", body_plain).strip()
+        # Compute a permalink path so `_parse_post`-style code works.
+        # url looks like https://www.reddit.com/r/SUB/comments/<id>/<slug>/
+        permalink = ""
+        if url:
+            m2 = re.search(r"^https?://[^/]+(/r/[^?]+)", url)
+            if m2:
+                permalink = m2.group(1)
+        try:
+            post_date_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+        except (OSError, OverflowError, ValueError):
+            post_date_str = ""
+        return {
+            "title": title,
+            "url": url or (f"https://reddit.com{permalink}" if permalink else ""),
+            "score": 0,        # not in RSS
+            "comments": 0,     # not in RSS
+            "subreddit": subreddit,
+            "author": author or "[deleted]",
+            "date": post_date_str,
+            "timestamp": ts,
+            "text": body_plain[:500],
+            "is_video": False,
+            "upvote_ratio": 0,
+            "domain": "",
+            "external_url": url or "",
+            "flair": "",
+            "id": pid,
+            "over_18": False,
+            "_source": "reddit_rss",
+        }
+
+    def _search_reddit_rss(self, keyword, subreddit_path, sort, time_filter, limit):
+        """Reddit RSS search — the bypass for the IP/UA bot wall on
+        the JSON endpoints. Hits /r/<sub>/search.rss when a sub is
+        provided, /search.rss for global queries. Multi-sub (a+b+c)
+        is supported via the `restrict_sr=on` flag.
+
+        Returns a list of post dicts in the same shape `_search_reddit_native`
+        returns. Hard short-circuits to [] if `_reddit_dead` (we use
+        that flag to signal the operator forced REDDIT_API_DISABLED;
+        RSS is still Reddit-hosted, so respect that opt-out).
+        """
+        if self._reddit_dead:
+            return []
+        # Three URL shapes:
+        #   - /r/<sub>/search.rss?q=KEYWORD  → keyword search within sub
+        #   - /search.rss?q=KEYWORD          → global keyword search
+        #   - /r/<sub>/new.rss               → chronological recent posts
+        #                                       (when keyword is empty,
+        #                                       for the tight-window
+        #                                       fast path)
+        if subreddit_path and keyword:
+            url = f"https://www.reddit.com/r/{subreddit_path}/search.rss"
+            params = {
+                "q": keyword,
+                "restrict_sr": "on",
+                "sort": sort or "new",
+                "t": time_filter or "all",
+                "limit": min(limit, 100),
+            }
+        elif subreddit_path:
+            url = f"https://www.reddit.com/r/{subreddit_path}/new.rss"
+            params = {"limit": min(limit, 100)}
+        else:
+            url = "https://www.reddit.com/search.rss"
+            params = {
+                "q": keyword,
+                "sort": sort or "new",
+                "t": time_filter or "all",
+                "limit": min(limit, 100),
+            }
+        headers = {
+            "User-Agent": self.headers.get("User-Agent", "python:reddit-strategy:v1 (rss)"),
+            "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+        }
+        results = []
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=20)
+            if resp.status_code != 200:
+                print(f"\n    ⚠ Reddit RSS returned {resp.status_code} for {url}", flush=True)
+                # 403/429 on RSS is rare but if it happens the wall has
+                # expanded — latch _reddit_dead so we stop trying.
+                if resp.status_code in (403, 429):
+                    with self._lock:
+                        if not self._reddit_dead:
+                            self._reddit_dead = True
+                            self._reddit_dead_reason = f"RSS returned {resp.status_code}"
+                            print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_dead_reason}", flush=True)
+                return []
+            # Parse Atom XML.
+            try:
+                root = _ET.fromstring(resp.text)
+            except _ET.ParseError as e:
+                print(f"\n    ⚠ Reddit RSS XML parse failed: {e}", flush=True)
+                return []
+            entries = root.findall("atom:entry", self._RSS_NS)
+            seen_ids = set()
+            for entry in entries:
+                try:
+                    post = self._parse_rss_entry(entry)
+                except Exception:
+                    continue
+                if not post.get("id"):
+                    continue
+                if post["id"] in seen_ids:
+                    continue
+                seen_ids.add(post["id"])
+                results.append(post)
+            print(f"(rss: {len(results)} posts)", end=" ", flush=True)
+        except requests.exceptions.RequestException as e:
+            print(f"\n    ⚠ Reddit RSS request failed: {e}", flush=True)
+        return results
+
     def _search_pullpush(self, keyword, subreddit, sort_by, max_days_old, limit,
                          sort_order="desc"):
         """Pullpush.io with timestamp-based pagination — can exceed 100 results."""
@@ -653,20 +828,26 @@ class RedditSearchBot:
                 print(f"    Trying {api_name} API...", end=" ", flush=True)
 
                 if api_name == "reddit":
+                    # Reddit's JSON endpoints are walled off for cloud
+                    # egress IPs (Railway, Cloudflare Workers, etc.),
+                    # but the RSS / Atom endpoints are still served
+                    # cleanly with no UA discrimination. Switched the
+                    # primary Reddit data path to RSS — gets us back
+                    # current Reddit data without OAuth credentials.
+                    # Trade-off: RSS doesn't include score / num_comments
+                    # / upvote_ratio / over_18 — those fields come back
+                    # as 0/default. Filters depending on them become
+                    # no-ops on RSS-sourced posts; Pullpush + Arctic
+                    # still carry those signals if the user has tight
+                    # filters.
                     if subreddit_path and "+" in subreddit_path:
-                        # Multi-sub: query each subreddit individually so every
-                        # one gets an equal quota, rather than letting Reddit's
-                        # combined-sub search (r/a+b+c) decide the mix (which
-                        # biases heavily toward the highest-scoring sub and can
-                        # starve the others). Fan out the per-sub fetches in
-                        # parallel to avoid serial network latency.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 25)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 8)) as ex:
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 5)) as ex:
                             futures = [
-                                ex.submit(self._search_reddit_native,
+                                ex.submit(self._search_reddit_rss,
                                           keyword, sub, reddit_sort, time_filter, per_sub)
                                 for sub in subs
                             ]
@@ -674,9 +855,9 @@ class RedditSearchBot:
                                 try:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
-                                    print(f"    per-sub fetch error (reddit): {e}")
+                                    print(f"    per-sub fetch error (reddit rss): {e}")
                     else:
-                        batch = self._search_reddit_native(
+                        batch = self._search_reddit_rss(
                             keyword, subreddit_path, reddit_sort, time_filter, needed_raw
                         )
                 elif api_name == "pullpush":
@@ -1333,10 +1514,34 @@ class RedditSearchBot:
         # created_utc (newest first) so we get the most recent posts
         # within the budget.
         pp_sort_type = "created_utc"
-        # Map empty/None keyword to "" so _search_pullpush sends no
-        # q filter — Pullpush returns recent posts in the sub.
+        # Pick the data source. Reddit RSS (/r/<sub>/new.rss) is the
+        # best option when reachable — real-time recent posts with no
+        # rate limit and no search-index lag. Falls back to Pullpush
+        # only when Reddit RSS is marked dead (operator opted out via
+        # REDDIT_API_DISABLED or the RSS endpoint hard-blocked us).
+        use_rss = not self._reddit_dead
+        # Map period of `max_days_old` to a Reddit `t` window. RSS
+        # also accepts `t=day/week/month/year/all` for the listings
+        # path but not for /new (which is purely chronological).
+        if max_days_old <= 1:
+            time_filter = "day"
+        elif max_days_old <= 7:
+            time_filter = "week"
+        else:
+            time_filter = "all"
+
         def _fetch_recent(sub):
             try:
+                if use_rss:
+                    # /r/<sub>/new.rss returns chronological recent
+                    # posts. We get up to 100 per call. No keyword,
+                    # no time filter — we enforce the time window
+                    # client-side via the timestamp check below.
+                    return self._search_reddit_rss(
+                        keyword="", subreddit_path=sub, sort="new",
+                        time_filter=time_filter, limit=per_sub_budget,
+                    )
+                # Fallback to Pullpush when Reddit RSS is dead.
                 return self._search_pullpush(
                     keyword="", subreddit=sub, sort_by=pp_sort_type,
                     max_days_old=max_days_old, limit=per_sub_budget,

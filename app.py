@@ -5170,6 +5170,79 @@ def api_check_subreddit():
         return jsonify({"exists": None, "error": str(e)})
 
 
+@app.route("/api/check-live/debug-comment", methods=["GET"])
+def api_check_live_debug_comment():
+    """Trace exactly what the comment-liveness RSS check does for a
+    given comment URL, through the configured proxy. Tries TWO RSS
+    methods and reports raw status/kind/entries for each so we can see
+    which works in production (the proxy routes to old.reddit.com,
+    which may serve comment RSS differently than www.reddit.com).
+
+    ?url=<full comment URL>   (required)
+    """
+    import requests as _rq
+    import xml.etree.ElementTree as _ET
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "?url=<comment url> required"}), 400
+    resolved = url
+    if "/s/" in url:
+        try:
+            rr = _resolve_reddit_share_url_proxy(url)
+            if rr and "/comments/" in rr:
+                resolved = rr
+        except Exception as e:
+            resolved = f"(resolve failed: {e}) {url}"
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)(?:/[^/]*)*?/([a-z0-9]{4,12})/?(?:\?|$)",
+                  resolved, re.IGNORECASE)
+    parsed = None
+    if m:
+        parsed = {"sub": m.group(1), "post_id": m.group(2), "comment_id": m.group(3).lower()}
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    headers = {"User-Agent": REDDIT_USER_AGENT,
+               "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"}
+    NP = {"http": None, "https": None}
+    out = {"input": url, "resolved": resolved, "parsed": parsed,
+           "proxy_base": base, "methods": {}}
+
+    def classify(t):
+        s = (t or "").lstrip()
+        return "xml" if s[:5].lower().startswith("<?xml") else ("html" if s[:1] == "<" else ("empty" if not s else "other"))
+
+    if parsed:
+        sub, pid, cid = parsed["sub"], parsed["post_id"], parsed["comment_id"]
+        for label, rss in [
+            ("permalink_rss", f"{base}/r/{sub}/comments/{pid}/comment/{cid}/.rss"),
+            ("postlevel_rss", f"{base}/r/{sub}/comments/{pid}/.rss"),
+        ]:
+            try:
+                r = _rq.get(rss, headers=headers, timeout=15, proxies=NP)
+                kind = classify(r.text)
+                ids, present = [], False
+                if kind == "xml":
+                    try:
+                        root = _ET.fromstring(r.text)
+                        ns = {"atom": "http://www.w3.org/2005/Atom"}
+                        for e in root.findall("atom:entry", ns):
+                            eid = (e.find("atom:id", ns).text or "")
+                            ids.append(eid.split(":")[-1][:14])
+                            if cid in eid.lower():
+                                present = True
+                    except Exception as pe:
+                        ids = [f"parse_err:{pe}"]
+                out["methods"][label] = {
+                    "url": rss, "status": r.status_code, "kind": kind,
+                    "entries": len(ids), "comment_id_present": present,
+                    "entry_ids": ids[:8],
+                    "preview": (r.text[:100].replace("\n", " ") if kind != "xml" else ""),
+                }
+            except Exception as e:
+                out["methods"][label] = {"url": rss, "error": f"{type(e).__name__}: {e}"}
+    out["live_verdict"] = _comment_liveness_via_rss(resolved)
+    return jsonify(out)
+
+
 @app.route("/api/health/rss", methods=["GET"])
 def api_health_rss():
     """Lightweight RSS health check. Probes the two RSS feeds the bot

@@ -4573,8 +4573,13 @@ async function submitGenLiveComments() {
     const ratio = parseFloat(document.getElementById('gen-live-ratio').value);
     if (!url || !bid) { toast('Enter URL and select brand', 'error'); return; }
     closeModal();
-    runTask('/api/generate/live-comments', { reddit_url: url, subreddit_id: sid, brand_id: bid, count, brand_mention_ratio: ratio }, () => {
-        toast('Live comments generated!', 'success');
+    runTask('/api/generate/live-comments', { reddit_url: url, subreddit_id: sid, brand_id: bid, count, brand_mention_ratio: ratio }, (result) => {
+        const n = _genResultComments(result).length;
+        if (_genPullFailed(result)) {
+            toast(`Generated ${n} live comment(s) — but couldn't pull the post's existing comments (replies generated without live thread context)`, 'info');
+        } else {
+            toast(`Live comments generated! (${n})`, 'success');
+        }
     }, 'Live Comments');
 }
 
@@ -7914,6 +7919,21 @@ async function _lsubsSubmitEditSub(pid, brandId) {
     }
 }
 
+// Gen-comment task results can be either a bare array (legacy) or
+// {comments:[...], existing_pull:{attempted,count}} (new). These read
+// both shapes.
+function _genResultComments(r) {
+    return Array.isArray(r) ? r : ((r && r.comments) || []);
+}
+function _genPullFailed(r) {
+    // "Failed to pull existing comments" = we tried (attempted) but got
+    // zero back (all sources blocked, or none existed). Bare-array
+    // results (legacy) carry no pull info → treat as not-failed.
+    if (Array.isArray(r) || !r) return false;
+    const p = r.existing_pull;
+    return !!(p && p.attempted && (p.count || 0) === 0);
+}
+
 function lsubsGenCommentsForPost(pid) {
     showModal(`
         <h3 class="text-xl font-bold mb-3">Generate Comments</h3>
@@ -7969,8 +7989,12 @@ async function _lsubsRunGenComments(pid) {
         // Inline polls were silently swallowing errors, leaving the spinner
         // running forever when the task was completed and GC'd server-side.
         _pollTask(task_id, 'Live Cmts', (result) => {
-            const n = (result || []).length;
-            toast(`Generated ${n} comment(s) — switch to Comments tab to see them`, 'success');
+            const n = _genResultComments(result).length;
+            const pullMsg = _genPullFailed(result)
+                ? ' — note: couldn\'t pull this post\'s existing comments (replies generated without live context)'
+                : '';
+            toast(`Generated ${n} comment(s)${pullMsg} — switch to Comments tab to see them`,
+                  pullMsg ? 'info' : 'success');
             if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
             if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
         });
@@ -8122,6 +8146,11 @@ async function _lsubsRunBatchGenerate(mode) {
     const aiCrawl = !!document.getElementById('lsubs-batch-aicrawl')?.checked;
     const bmode = document.querySelector('input[name="lsubs-batch-bmode"]:checked')?.value || 'default';
     closeModal();
+    // Aggregate pull-failure across all batch tasks so the final
+    // notification can report "couldn't pull existing comments for N
+    // of M posts". Tracked via a shared tally the per-task poll
+    // callbacks increment as they complete.
+    const tally = { started: 0, done: 0, pullFail: 0 };
     for (const pid of ids) {
         const bid = await _lsubsLookupPostBrand(pid);
         if (!bid) continue;
@@ -8135,19 +8164,34 @@ async function _lsubsRunBatchGenerate(mode) {
                 if (bmode === 'none') body.brand_mention_ratio = 0;
             }
             const { task_id } = await api(url, { method: 'POST', body });
+            tally.started++;
             const label = mode === 'hq' ? `Live HQ #${pid}` : `Live Cmts #${pid}`;
             _addBgTask(task_id, label);
             // Without a poll, the BG task pill would never clear — the
             // batch flow used to fire-and-forget. Use _pollTask so each
             // task disappears from the bar when done.
-            _pollTask(task_id, label, () => {
+            _pollTask(task_id, label, (result) => {
+                tally.done++;
+                // Comment mode pulls existing comments; HQ doesn't, so
+                // only count pull-fails for comment-mode tasks.
+                if (mode !== 'hq' && _genPullFailed(result)) tally.pullFail++;
                 if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts();
                 if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments();
+                // When the last task finishes, emit the summary toast
+                // including the pull-failure count.
+                if (tally.done >= tally.started) {
+                    const base = `Generated ${mode === 'hq' ? 'HQ thread' : 'comments'} for ${tally.done} post(s)`;
+                    if (mode !== 'hq' && tally.pullFail > 0) {
+                        toast(`${base} — couldn't pull existing comments for ${tally.pullFail} of ${tally.done} (replies generated without live context)`, 'info');
+                    } else {
+                        toast(`${base} ✓`, 'success');
+                    }
+                }
             });
         } catch (e) {}
         await new Promise(r => setTimeout(r, 250));
     }
-    toast(`Started ${ids.length} ${mode === 'hq' ? 'HQ' : 'comment'} generation task(s)`, 'success');
+    toast(`Started ${tally.started} ${mode === 'hq' ? 'HQ' : 'comment'} generation task(s)…`, 'info');
 }
 
 // Re-roll one comment in place. Synchronous Claude call (~10-30s) so the
@@ -12871,6 +12915,40 @@ if (_hashState) {
 } else {
     navigate('dashboard');
 }
+
+// RSS health monitor — early warning if Reddit ever changes/removes the
+// RSS feeds the bot depends on (Live Search posts + Check Live comment
+// removal detection). Throttled to once per 24h via localStorage so it
+// doesn't probe on every page load. If either feed degrades, a sticky
+// warning toast surfaces so the break is noticed within a day instead
+// of silently zeroing out searches.
+(function _rssHealthMonitor() {
+    try {
+        const KEY = 'rssHealthLastCheck';
+        const last = parseInt(localStorage.getItem(KEY) || '0', 10);
+        const now = Date.now();
+        if (now - last < 24 * 60 * 60 * 1000) return;  // checked within 24h
+        localStorage.setItem(KEY, String(now));
+        // Defer so it doesn't compete with the initial view render.
+        setTimeout(async () => {
+            try {
+                const h = await api('/api/health/rss');
+                if (h && h.ok === false) {
+                    const down = Object.entries(h.checks || {})
+                        .filter(([, v]) => !v.ok)
+                        .map(([k, v]) => `${k} (${v.status || v.error || 'fail'})`)
+                        .join(', ');
+                    persistentToast(
+                        `⚠ Reddit RSS health check FAILED: ${down}. ` +
+                        `Live Search and Check Live rely on RSS — if this persists, ` +
+                        `Reddit may have changed/blocked the feeds. Tell your dev.`,
+                        'error'
+                    );
+                }
+            } catch (e) { /* monitor is best-effort */ }
+        }, 4000);
+    } catch (e) { /* localStorage unavailable — skip */ }
+})();
 </script>
 </body>
 </html>

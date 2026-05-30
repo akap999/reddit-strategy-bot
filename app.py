@@ -4229,7 +4229,13 @@ def api_gen_comments():
                     op_reply_count=data.get("op_reply_count", 0),
                     ai_crawl=ai_crawl,
                 )
-            return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
+            return {
+                "comments": [{"id": c["id"], "body": c["body"][:100]} for c in comments],
+                # Reply-context pull outcome (only attempted for published
+                # posts with replies). attempted+count==0 → pull failed.
+                "existing_pull": getattr(comment_gen, "last_fetch",
+                                         {"attempted": False, "count": 0}),
+            }
         finally:
             db.close()
 
@@ -4486,7 +4492,13 @@ def api_gen_live_comments():
                 data.get("count", 5),
                 brand_mention_ratio=ratio,
             )
-            return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
+            return {
+                "comments": [{"id": c["id"], "body": c["body"][:100]} for c in comments],
+                # Whether we managed to pull the post's existing comments
+                # for reply context. attempted+count==0 → pull failed.
+                "existing_pull": getattr(comment_gen, "last_fetch",
+                                         {"attempted": False, "count": 0}),
+            }
         finally:
             db.close()
 
@@ -5063,6 +5075,66 @@ def api_check_subreddit():
             return jsonify({"exists": None, "error": f"Reddit returned status {r.status_code}"})
     except Exception as e:
         return jsonify({"exists": None, "error": str(e)})
+
+
+@app.route("/api/health/rss", methods=["GET"])
+def api_health_rss():
+    """Lightweight RSS health check. Probes the two RSS feeds the bot
+    now depends on (post-listing RSS + comment-thread RSS), through the
+    same proxy the bot uses, and reports whether each still returns
+    Atom XML.
+
+    Early-warning for the one real long-term risk: Reddit silently
+    changing/removing RSS. The admin UI calls this on load (throttled)
+    and warns if either feed degrades — so an RSS break surfaces within
+    a day instead of silently zeroing out Live Search / Check Live.
+
+    Returns {ok: bool, checks: {posts_rss, comment_rss}}.
+    """
+    import requests as _rq
+    import re as _re
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+    }
+
+    def is_xml(t):
+        return bool(t) and t.lstrip()[:5].lower().startswith("<?xml")
+
+    checks = {}
+    # 1. Post-listing RSS (drives Live Search).
+    try:
+        r = _rq.get(f"{base}/r/AskReddit/new.rss", params={"limit": 3},
+                    headers=headers, timeout=15)
+        ok = r.status_code == 200 and is_xml(r.text)
+        checks["posts_rss"] = {"ok": ok, "status": r.status_code,
+                               "kind": "xml" if is_xml(r.text) else "non-xml"}
+        # Derive a real post id for the comment-RSS probe.
+        post_id = None
+        if ok:
+            m = _re.search(r"/comments/([a-z0-9]+)/", r.text)
+            post_id = m.group(1) if m else None
+    except Exception as e:
+        checks["posts_rss"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        post_id = None
+
+    # 2. Comment-thread RSS (drives Check Live + gen-comment context).
+    try:
+        # Use the derived post id, or a fallback path that still
+        # exercises the comment-RSS route.
+        cu = (f"{base}/r/AskReddit/comments/{post_id}/.rss" if post_id
+              else f"{base}/r/AskReddit/new.rss")
+        r2 = _rq.get(cu, params={"limit": 3}, headers=headers, timeout=15)
+        ok2 = r2.status_code == 200 and is_xml(r2.text)
+        checks["comment_rss"] = {"ok": ok2, "status": r2.status_code,
+                                 "kind": "xml" if is_xml(r2.text) else "non-xml"}
+    except Exception as e:
+        checks["comment_rss"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    overall = all(c.get("ok") for c in checks.values())
+    return jsonify({"ok": overall, "proxy_configured": bool(proxy), "checks": checks})
 
 
 @app.route("/api/search/reddit/test-http-proxy", methods=["GET"])

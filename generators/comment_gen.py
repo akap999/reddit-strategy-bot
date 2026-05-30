@@ -526,6 +526,13 @@ class CommentGenerator:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         self._pattern_history = []
+        # Records the outcome of the most recent fetch_comments() call so
+        # callers (and the API/UI) can report when existing comments
+        # couldn't be pulled. attempted=False means we never tried (e.g.
+        # an unpublished post with no Reddit URL → nothing to pull).
+        # attempted=True + count==0 means we tried every source and got
+        # nothing back (all blocked, or the post genuinely has no comments).
+        self.last_fetch = {"attempted": False, "count": 0}
 
     @staticmethod
     def _extract_brand_focus(brand):
@@ -739,6 +746,17 @@ class CommentGenerator:
         return comments
 
     def fetch_comments(self, post_url, limit=20, max_retries=3):
+        """Thin wrapper that records the fetch outcome on self.last_fetch
+        so callers / the API / the UI can report when existing comments
+        couldn't be pulled. Delegates to _fetch_comments_impl.
+        """
+        comments, post_body, is_archived = self._fetch_comments_impl(
+            post_url, limit=limit, max_retries=max_retries
+        )
+        self.last_fetch = {"attempted": True, "count": len(comments)}
+        return comments, post_body, is_archived
+
+    def _fetch_comments_impl(self, post_url, limit=20, max_retries=3):
         """Fetch top comments from a Reddit post. Returns (comments, post_body, is_archived).
 
         Fallback chain (best → last resort):

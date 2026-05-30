@@ -8836,7 +8836,7 @@ function renderLsSearch(c) {
                     <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-2">
                         <div><label class="text-xs text-gray-400">Min Comments</label><input id="ls-mincom" type="number" value="1" oninput="document.getElementById('ls-fs-mincom').textContent=this.value||'0'"></div>
                         <div><label class="text-xs text-gray-400">Min Score</label><input id="ls-minscore" type="number" value="0"></div>
-                        <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="1" oninput="document.getElementById('ls-fs-days').textContent=this.value||'-'"></div>
+                        <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="30" oninput="document.getElementById('ls-fs-days').textContent=this.value||'-'" title="Upper bound on post age in days. Default 30 — going lower (e.g. 1, 7) drastically reduces results for niche keywords because Pullpush/Reddit don't have many posts in a tight window."></div>
                         <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
                         <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50" oninput="document.getElementById('ls-fs-limit').textContent=this.value||'50'"></div>
                     </div>

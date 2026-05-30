@@ -195,6 +195,76 @@ def _reddit_http_proxies():
     return {"http": p, "https": p}
 
 
+def _comment_liveness_via_rss(comment_url, timeout=15):
+    """Determine whether a specific Reddit comment is still live using
+    its permalink RSS feed — the bypass for the JSON API being
+    auth-gated for cloud IPs.
+
+    How it works (verified empirically): requesting a comment's
+    permalink RSS, `/r/<sub>/comments/<post>/comment/<cid>/.rss`,
+    returns an <entry> for that comment when it's LIVE. When the
+    comment is removed / deleted / nonexistent, Reddit omits it and
+    serves the post (or parent) entries instead — so the comment id
+    simply won't appear in the feed.
+
+    Returns:
+      'live'    — the comment id appears in its own permalink RSS
+      'removed' — feed fetched OK but the comment id is absent
+      None      — couldn't fetch / parse (caller should fall back or
+                  treat as inconclusive, NOT as removed)
+
+    Routes through REDDIT_PROXY_URL (the worker that reaches Reddit
+    RSS) when set, else direct www.reddit.com.
+    """
+    import requests as _requests
+    import xml.etree.ElementTree as _ET
+    if not comment_url:
+        return None
+    # Parse /r/SUB/comments/POSTID/.../COMMENTID from the URL.
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)(?:/[^/]*)*?/([a-z0-9]{4,12})/?(?:\?|$)",
+                  comment_url, re.IGNORECASE)
+    if not m:
+        # Fallback: simpler parse — post id after /comments/, comment
+        # id = last path segment.
+        mp = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)", comment_url, re.IGNORECASE)
+        seg = [s for s in comment_url.split("?")[0].rstrip("/").split("/") if s]
+        if not mp or not seg:
+            return None
+        sub, post_id, cid = mp.group(1), mp.group(2), seg[-1]
+    else:
+        sub, post_id, cid = m.group(1), m.group(2), m.group(3)
+    cid = cid.lower()
+    # Guard: if the "comment id" we parsed equals the post id, the URL
+    # was a post link, not a comment link — can't check a comment.
+    if cid == post_id.lower():
+        return None
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    rss_url = f"{base}/r/{sub}/comments/{post_id}/comment/{cid}/.rss"
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+    }
+    try:
+        r = _requests.get(rss_url, headers=headers, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        body = r.text or ""
+        if not body.lstrip().startswith("<?xml"):
+            return None
+        root = _ET.fromstring(body)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            eid = (entry.find("atom:id", ns).text or "")
+            if cid in eid.lower():
+                return "live"
+        # Feed parsed but our comment id isn't in it → removed/deleted.
+        return "removed"
+    except Exception as e:
+        print(f"[COMMENT-RSS] liveness check failed for {comment_url}: {e}", flush=True)
+        return None
+
+
 def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path. Three transport modes, in priority order:
 
@@ -2273,6 +2343,32 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             errors += 1
             error_details["bad_url"] += 1
             continue
+
+        # PRIMARY liveness check: comment-permalink RSS. Reddit's JSON
+        # API is auth-gated for cloud IPs (always 403), but the RSS
+        # feed is served — and a comment's permalink RSS includes the
+        # comment when LIVE and omits it when REMOVED. This is the only
+        # working anonymous removal signal. If it's conclusive we act
+        # on it and skip the (doomed) JSON fetch entirely. If it's
+        # inconclusive (None), fall through to the legacy JSON path.
+        rss_verdict = _comment_liveness_via_rss(clean_url)
+        if rss_verdict == "live":
+            print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (comment RSS)", flush=True)
+            _mark_live(item)
+            live += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
+            continue
+        elif rss_verdict == "removed":
+            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from feed)", flush=True)
+            _mark_dead(item)
+            dead += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
+            continue
+        # else: rss_verdict is None (inconclusive) → fall through to JSON.
 
         # Extract path from URL (strip domain) and append .json
         import re as _re

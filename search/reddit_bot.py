@@ -35,27 +35,40 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def balance_posts_by_subreddit(posts, limit, subreddits):
+def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=5):
     """Cut a sorted list of posts down to `limit` with equal priority per
-    subreddit.
+    subreddit, AND never return more than `max_per_sub` posts from any
+    single subreddit.
 
-    When multiple subreddits are requested, this takes up to `limit // N`
-    posts from each (preserving the input order within each sub, which is
-    assumed to already be sorted by score / comments / date / relevance).
-    Any remaining slots are filled with the top-scoring overflow posts.
+    When multiple subreddits are requested, this takes up to
+    `min(limit // N, max_per_sub)` posts from each (preserving the input
+    order within each sub, which is assumed to already be sorted by
+    score / comments / date / relevance). Any remaining slots are filled
+    with the top-scoring overflow posts — but the per-sub cap is honored
+    during the fill too, so no subreddit can exceed `max_per_sub`.
 
-    When `subreddits` is None or length 1, or when the input is already at
-    or under the limit, returns `posts[:limit]` unchanged.
+    `max_per_sub` (default 5): hard cap on results per subreddit in a
+    multi-sub search, so one busy subreddit can't dominate the output.
+    Set to None to disable the cap (pure even-distribution).
 
-    Callers: used both inside a single keyword search (after its own filter
-    stage) and at the multi-keyword merge stage so the final output is
-    balanced end-to-end, not just per-keyword.
+    Single-sub / global (subreddits None or length 1) returns
+    `posts[:limit]` unchanged — the cap only applies when more than one
+    subreddit was explicitly requested (you searched ONE sub on purpose,
+    so you want its results).
     """
-    if not subreddits or len(subreddits) <= 1 or len(posts) <= limit:
+    # Single-sub / global searches: no per-sub cap (the user targeted
+    # one sub, or none, so spreading/capping doesn't apply).
+    if not subreddits or len(subreddits) <= 1:
         return posts[:limit]
 
     n = len(subreddits)
     per_sub = limit // n
+    if per_sub < 1:
+        per_sub = 1
+    # Apply the hard per-subreddit cap.
+    if max_per_sub is not None:
+        per_sub = min(per_sub, max_per_sub)
+
     by_sub = {}
     for p in posts:
         key = (p.get("subreddit") or "").lower()
@@ -63,13 +76,26 @@ def balance_posts_by_subreddit(posts, limit, subreddits):
 
     result = []
     leftover = []
+    taken = {}
     for sub in by_sub:
-        result.extend(by_sub[sub][:per_sub])
+        head = by_sub[sub][:per_sub]
+        result.extend(head)
+        taken[sub] = len(head)
         leftover.extend(by_sub[sub][per_sub:])
+
     remaining = limit - len(result)
-    if remaining > 0:
+    if remaining > 0 and leftover:
         leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
-        result.extend(leftover[:remaining])
+        cap = max_per_sub if max_per_sub is not None else float("inf")
+        for p in leftover:
+            if remaining <= 0:
+                break
+            sub = (p.get("subreddit") or "").lower()
+            if taken.get(sub, 0) >= cap:
+                continue  # this sub already hit its cap — skip
+            result.append(p)
+            taken[sub] = taken.get(sub, 0) + 1
+            remaining -= 1
     return result
 
 

@@ -265,6 +265,50 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
         return None
 
 
+def _post_liveness_via_rss(post_url, timeout=15):
+    """Liveness check for a POST url via its comment RSS feed.
+
+    /r/<sub>/comments/<postid>/.rss returns Atom entries when the post
+    is live (the post itself + comments). A removed/deleted post
+    returns an empty feed (no entries) or a feed whose post entry body
+    is [removed]/[deleted].
+
+    Returns 'live' / 'removed' / None(inconclusive).
+    """
+    import requests as _requests
+    import xml.etree.ElementTree as _ET
+    if not post_url:
+        return None
+    m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, re.IGNORECASE)
+    if not m:
+        return None
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    rss_url = f"{base}{m.group(1)}/.rss"
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+    }
+    try:
+        r = _requests.get(rss_url, params={"limit": 5}, headers=headers, timeout=timeout)
+        if r.status_code == 404:
+            return "removed"
+        if r.status_code != 200 or not (r.text or "").lstrip().startswith("<?xml"):
+            return None
+        root = _ET.fromstring(r.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("atom:entry", ns)
+        if not entries:
+            # Live posts return at least the post entry; an empty feed
+            # is a strong removed signal.
+            return "removed"
+        # Live: feed has entries. (We don't try to detect [removed]
+        # post bodies here — an empty feed is the reliable signal.)
+        return "live"
+    except Exception:
+        return None
+
+
 def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path. Three transport modes, in priority order:
 
@@ -2835,20 +2879,43 @@ def api_check_live_start():
                 def _probe():
                     """One classification pass for the resolved URL.
                     Returned tuple: (liveness, detail). Pulled out so
-                    we can re-run on transient 'missing' verdicts."""
+                    we can re-run on transient 'missing' verdicts.
+
+                    PRIMARY path is RSS-based: Reddit's JSON API is
+                    auth-gated for cloud IPs (always 403), so the old
+                    fetch_reddit_comment_meta/_reddit_get_json path
+                    returned nothing → everything came back 'missing'.
+                    The comment-permalink RSS feed includes the comment
+                    when live and omits it when removed — a reliable
+                    signal that works through the proxy. JSON stays as a
+                    fallback for environments where it's reachable.
+                    """
                     if not classified:
                         return 'missing', 'URL did not match Reddit comment/post pattern'
-                    if classified.get('kind') == 'comment' and comment_id:
-                        try:
-                            meta = fetch_reddit_comment_meta(
-                                resolved, reddit_get=_reddit_get_json,
-                            )
-                            lv = classify_liveness(meta)
-                            if lv == 'missing':
-                                return lv, "comment id not found in Reddit JSON response (likely transient — Reddit didn't return the target comment in the thread tree, or fetch hit rate-limit/proxy hiccup)"
-                            return lv, None
-                        except Exception as e:
-                            return 'error', str(e)
+                    if classified.get('kind') == 'comment':
+                        # RSS first — the working anonymous signal.
+                        rss_v = _comment_liveness_via_rss(resolved)
+                        if rss_v == 'live':
+                            return 'live', 'via comment-permalink RSS'
+                        if rss_v == 'removed':
+                            return 'removed', 'comment id absent from its permalink RSS feed'
+                        # rss_v is None (inconclusive) → try JSON as fallback.
+                        if comment_id:
+                            try:
+                                meta = fetch_reddit_comment_meta(
+                                    resolved, reddit_get=_reddit_get_json,
+                                )
+                                lv = classify_liveness(meta)
+                                if lv == 'missing':
+                                    return lv, "RSS inconclusive + comment id not in JSON response (transient — proxy/rate-limit, or comment not in thread tree)"
+                                return lv, None
+                            except Exception as e:
+                                return 'error', str(e)
+                        return 'missing', 'RSS inconclusive and no comment id to JSON-check'
+                    # POST url: try the post's RSS feed first, then JSON.
+                    post_rss = _post_liveness_via_rss(resolved)
+                    if post_rss in ('live', 'removed'):
+                        return post_rss, f'post via RSS ({post_rss})'
                     try:
                         from urllib.parse import urlparse
                         path = urlparse(resolved).path.rstrip('/') + '.json'

@@ -127,6 +127,10 @@ class RedditSearchBot:
         # real 403 from an RSS endpoint latches this.
         self._reddit_rss_dead = False
         self._reddit_rss_dead_reason = None
+        # Guard against the tight-window fast path recursing into its
+        # own cascade fallback (which could otherwise re-trigger the
+        # fast path → infinite loop).
+        self._tight_window_recursion_guard = False
         # Optional opt-out: REDDIT_API_DISABLED=1 pre-latches the JSON
         # leg dead (it's blocked anyway). It deliberately does NOT
         # touch _reddit_rss_dead — RSS is the bypass and should stay
@@ -1659,10 +1663,67 @@ class RedditSearchBot:
         print(f"    Tight-window filter: kept {len(matched)} of {len(all_posts)} "
               f"(rejections: {rej_str})")
 
+        # Fallback: if the recent-fetch source produced nothing usable
+        # (RSS down/blocked AND Pullpush rate-limited/empty), fall back
+        # to the standard per-keyword cascade which ALSO tries Arctic.
+        # The production diagnostic showed Arctic returning real data
+        # when both RSS and Pullpush returned 0 — without this fallback
+        # the tight-window path would report 0 despite Arctic having
+        # the posts. We pass force_full_cascade to avoid re-entering
+        # this fast path (infinite loop guard).
+        if not matched and not self._tight_window_recursion_guard:
+            print(f"    ⚠ Tight-window yielded 0 — falling back to full "
+                  f"per-keyword cascade (includes Arctic).")
+            self._tight_window_recursion_guard = True
+            try:
+                fallback = self._full_cascade_multi(
+                    keywords, subreddits, **kwargs
+                )
+            finally:
+                self._tight_window_recursion_guard = False
+            if fallback:
+                return fallback
+
         # Sort by recency descending (this mode is fundamentally
         # "what's new") and balance across subs if multi-sub.
         matched.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
         return balance_posts_by_subreddit(matched, limit, subreddits)
+
+    def _full_cascade_multi(self, keywords, subreddits, **kwargs):
+        """Standard per-keyword concurrent search across the full
+        cascade (reddit RSS → pullpush → arctic). Used as the
+        tight-window fallback when the recent-fetch source came up
+        empty. Mirrors the non-fast-path branch of
+        search_multiple_keywords.
+        """
+        all_results = []
+        seen_ids = set()
+        # Re-attach subreddits into kwargs for the per-keyword search().
+        inner = dict(kwargs)
+        inner["subreddits"] = subreddits
+        inner.pop("subreddit", None)
+        limit = inner.get("limit", 50)
+
+        def _one(kw):
+            try:
+                return self.search(kw, **inner)
+            except Exception as e:
+                print(f"    cascade fallback error ({kw}): {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=min(len(keywords), 5)) as ex:
+            futures = {ex.submit(_one, kw): kw for kw in keywords}
+            for f in as_completed(futures):
+                try:
+                    for post in (f.result() or []):
+                        pid = post.get("id")
+                        if pid and pid not in seen_ids:
+                            seen_ids.add(pid)
+                            all_results.append(post)
+                except Exception as e:
+                    print(f"    cascade fallback merge error: {e}")
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return balance_posts_by_subreddit(all_results, limit, subreddits)
 
     def search_multiple_keywords(self, keywords, delay=2, concurrent=False, **kwargs):
         """

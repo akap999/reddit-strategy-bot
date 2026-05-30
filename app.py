@@ -46,6 +46,30 @@ from generators.subreddit_gen import SubredditGenerator
 from generators.post_gen import PostGenerator
 from generators.comment_gen import CommentGenerator
 
+# ---------------------------------------------------------------------------
+# Guard against REDDIT_PROXY_URL being set to a FORWARD proxy by mistake.
+#
+# REDDIT_PROXY_URL must be a URL-rewrite proxy (the Cloudflare worker) —
+# the code builds `{REDDIT_PROXY_URL}/r/<sub>/...` and fetches it directly.
+# If someone pastes a forward/tunnel proxy here (e.g. a residential proxy
+# like http://user:pass@host:port), every fetch becomes a malformed URL
+# with embedded credentials hitting the proxy host as if it were a Reddit
+# mirror → 407, AND the credentials leak into logs / debug output.
+#
+# Detect the forward-proxy shape (embedded `user:pass@` credentials) and
+# refuse to use it: blank both the module global and the env var so the
+# code falls back to direct Reddit instead of leaking creds / 407-ing.
+# (The operator still needs to set the correct worker URL for RSS to work
+# from a blocked cloud IP — this just prevents the broken/leaky state.)
+if REDDIT_PROXY_URL and "@" in REDDIT_PROXY_URL:
+    print("[startup] ⚠ REDDIT_PROXY_URL looks like a FORWARD proxy "
+          "(contains embedded credentials). That variable must be your "
+          "Cloudflare worker URL, not a residential/forward proxy. "
+          "Ignoring it to avoid leaking credentials and 407 errors. "
+          "Set REDDIT_PROXY_URL to your worker URL.", flush=True)
+    REDDIT_PROXY_URL = ""
+    os.environ.pop("REDDIT_PROXY_URL", None)
+
 app = Flask(__name__)
 app.secret_key = SECRET_KEY or os.urandom(32)
 
@@ -5203,8 +5227,13 @@ def api_check_live_debug_comment():
     headers = {"User-Agent": REDDIT_USER_AGENT,
                "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"}
     NP = {"http": None, "https": None}
+
+    def _redact(u):
+        # Never echo embedded credentials (user:pass@host) in output.
+        return re.sub(r"://[^/@]+@", "://***:***@", u or "")
+
     out = {"input": url, "resolved": resolved, "parsed": parsed,
-           "proxy_base": base, "methods": {}}
+           "proxy_base": _redact(base), "methods": {}}
 
     def classify(t):
         s = (t or "").lstrip()
@@ -5232,13 +5261,13 @@ def api_check_live_debug_comment():
                     except Exception as pe:
                         ids = [f"parse_err:{pe}"]
                 out["methods"][label] = {
-                    "url": rss, "status": r.status_code, "kind": kind,
+                    "url": _redact(rss), "status": r.status_code, "kind": kind,
                     "entries": len(ids), "comment_id_present": present,
                     "entry_ids": ids[:8],
                     "preview": (r.text[:100].replace("\n", " ") if kind != "xml" else ""),
                 }
             except Exception as e:
-                out["methods"][label] = {"url": rss, "error": f"{type(e).__name__}: {e}"}
+                out["methods"][label] = {"url": _redact(rss), "error": f"{type(e).__name__}: {e}"}
     out["live_verdict"] = _comment_liveness_via_rss(resolved)
     return jsonify(out)
 

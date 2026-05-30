@@ -753,7 +753,14 @@ class CommentGenerator:
         comments, post_body, is_archived = self._fetch_comments_impl(
             post_url, limit=limit, max_retries=max_retries
         )
-        self.last_fetch = {"attempted": True, "count": len(comments)}
+        # Record source for diagnostics: RSS comments carry
+        # _source='reddit_rss', Arctic '_source'='arctic'; JSON/Pullpush
+        # leave it unset. Lets the gen-all UI distinguish a fetch
+        # problem (0 comments / source=none) from genuine low relevance.
+        src = "none"
+        if comments:
+            src = comments[0].get("_source") or "json_or_pullpush"
+        self.last_fetch = {"attempted": True, "count": len(comments), "source": src}
         return comments, post_body, is_archived
 
     def _fetch_comments_impl(self, post_url, limit=20, max_retries=3):

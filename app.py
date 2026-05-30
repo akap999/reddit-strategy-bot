@@ -6000,12 +6000,20 @@ def _generate_hq_for_search_post(cg, db2, pid, post, brand, brand_name, brand_co
     db2.update_search_post_status(pid, "generating")
 
     comments, post_body, is_archived = cg.fetch_comments(post["reddit_url"], limit=20)
+    _fetch = getattr(cg, "last_fetch", {"count": len(comments), "source": "?"})
     if is_archived:
         db2.update_search_post_status(pid, "saved")
         raise ValueError("Post is archived — cannot comment")
     if len(comments) < 1:
         db2.update_search_post_status(pid, "saved")
-        raise ValueError("No comments found on this post — cannot analyze tone/context")
+        # Distinguish 'post genuinely has no comments' from 'all comment
+        # sources failed to fetch' — both land here, but the source tag
+        # tells them apart (source='none' = nothing returned anywhere).
+        raise ValueError(
+            f"No comments could be fetched (source={_fetch.get('source')}) — "
+            f"cannot analyze tone/context. If the post has comments on Reddit, "
+            f"this is a fetch failure (RSS/Pullpush/Arctic all empty), not low relevance."
+        )
 
     comment_stats = cg._compute_comment_stats(comments)
 
@@ -6020,7 +6028,19 @@ def _generate_hq_for_search_post(cg, db2, pid, post, brand, brand_name, brand_co
             "skipped": True,
             "relevance_score": rel_score,
             "threshold": relevance_threshold,
-            "reason": f"Post relevance score ({rel_score}) is below threshold ({relevance_threshold}).",
+            # Diagnostics so the operator can tell a genuine low-relevance
+            # skip from one caused by thin comment context.
+            "comments_fetched": _fetch.get("count"),
+            "comments_source": _fetch.get("source"),
+            "relevance_breakdown": {
+                k: relevance.get(k) for k in
+                ("topic_match", "problem_fit", "natural_fit",
+                 "conversation_opening", "disqualified", "disqualify_reason", "reason")
+                if k in relevance
+            },
+            "reason": (f"Post relevance score ({rel_score}) is below threshold "
+                       f"({relevance_threshold}). Fetched {_fetch.get('count')} "
+                       f"comment(s) via {_fetch.get('source')}."),
         }
 
     tone_analysis = cg.analyze_tone(

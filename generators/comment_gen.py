@@ -613,15 +613,153 @@ class CommentGenerator:
             pass
         return "unknown"
 
+    def _fetch_comments_rss(self, post_url, limit=20):
+        """PRIMARY comment source: Reddit's post comment RSS feed.
+
+        `/r/<sub>/comments/<postid>/.rss` returns the post + its top
+        comments as Atom entries — and unlike the JSON API it's served
+        to cloud IPs (through the proxy) with no rate limit. This is the
+        most reliable + most *current* source: it reflects what's
+        actually on the post right now.
+
+        Trade-off vs JSON/Pullpush/Arctic: RSS carries no score or
+        reply-count, so those come back 0. Comment-gen uses these for
+        context + reply-targeting, where body/author/recency matter
+        more than score — and the reply-target selector treats score=0
+        (unknown) gracefully.
+
+        Returns (comments, post_body, is_archived) — same shape as
+        fetch_comments.
+        """
+        import xml.etree.ElementTree as _ET
+        import html as _html
+        clean = post_url.split("?")[0].rstrip("/")
+        # Build /r/sub/comments/postid path, route through proxy base.
+        m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", clean, re.IGNORECASE)
+        if not m:
+            return [], "", False
+        base = (self.reddit_base or "https://www.reddit.com").rstrip("/")
+        rss_url = f"{base}{m.group(1)}/.rss"
+        headers = {
+            "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
+            "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+        }
+        comments = []
+        post_body = ""
+        try:
+            r = requests.get(rss_url, params={"limit": min(limit, 100)},
+                             headers=headers, timeout=20)
+            if r.status_code != 200 or not r.text.lstrip().startswith("<?xml"):
+                return [], "", False
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            root = _ET.fromstring(r.text)
+            entries = root.findall("atom:entry", ns)
+            # The post itself is usually the first entry; comments follow.
+            # We can't perfectly distinguish, so we treat every entry that
+            # has a t1_ id as a comment.
+            for e in entries:
+                eid = (e.find("atom:id", ns).text or "")
+                cm = re.search(r"t1_(\w+)", eid)
+                if not cm:
+                    # t3_ (the post) → capture its body for context.
+                    cont = e.find("atom:content", ns)
+                    if cont is not None and not post_body:
+                        pb = re.sub(r"<[^>]+>", " ", cont.text or "")
+                        post_body = _html.unescape(pb).strip()[:1000]
+                    continue
+                cont = e.find("atom:content", ns)
+                body = ""
+                if cont is not None:
+                    body = re.sub(r"<[^>]+>", " ", cont.text or "")
+                    body = re.sub(r"\s+", " ", _html.unescape(body)).strip()
+                if body in ("[deleted]", "[removed]", "") or len(body) < 10:
+                    continue
+                author = ""
+                a = e.find("atom:author/atom:name", ns)
+                if a is not None and a.text:
+                    author = a.text[3:] if a.text.startswith("/u/") else a.text
+                updated = (e.find("atom:updated", ns).text or "") if e.find("atom:updated", ns) is not None else ""
+                ts = 0
+                if updated:
+                    try:
+                        from datetime import datetime as _dt
+                        ts = int(_dt.fromisoformat(updated.replace("Z", "+00:00")).timestamp())
+                    except Exception:
+                        ts = 0
+                comments.append({
+                    "body": body[:600],
+                    "score": 0,          # not in RSS
+                    "author": author or "unknown",
+                    "id": cm.group(1),
+                    "permalink": "",
+                    "num_replies": 0,    # not in RSS
+                    "created_utc": ts,
+                    "_source": "reddit_rss",
+                })
+            if comments:
+                print(f"    fetch_comments via RSS: {len(comments)} comments")
+        except Exception as e:
+            print(f"    RSS comment fetch failed: {str(e)[:60]}")
+        return comments, post_body, False
+
+    def _fetch_comments_arctic(self, post_id, limit=20):
+        """Fallback comment source: Arctic-Shift archive by link_id.
+        Carries score (unlike RSS) but is a post-time snapshot, so it
+        may miss very recent comments and won't reflect later edits.
+        """
+        comments = []
+        try:
+            r = requests.get(
+                "https://arctic-shift.photon-reddit.com/api/comments/search",
+                params={"link_id": f"t3_{post_id}", "limit": min(limit, 100),
+                        "sort": "desc"},
+                headers={"User-Agent": self.headers.get("User-Agent", "Mozilla/5.0")},
+                timeout=25,
+            )
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                for c in data:
+                    body = c.get("body", "")
+                    if body in ("[deleted]", "[removed]", "") or len(body) < 10:
+                        continue
+                    comments.append({
+                        "body": body[:600],
+                        "score": c.get("score", 0) or 0,
+                        "author": c.get("author", "unknown"),
+                        "id": c.get("id", ""),
+                        "permalink": c.get("permalink", ""),
+                        "num_replies": 0,
+                        "created_utc": c.get("created_utc", 0) or 0,
+                        "_source": "arctic",
+                    })
+            if comments:
+                print(f"    fetch_comments via Arctic: {len(comments)} comments")
+        except Exception as e:
+            print(f"    Arctic comment fetch failed: {str(e)[:60]}")
+        return comments
+
     def fetch_comments(self, post_url, limit=20, max_retries=3):
-        """Fetch top comments from a Reddit post. Returns (comments, post_body, is_archived)."""
+        """Fetch top comments from a Reddit post. Returns (comments, post_body, is_archived).
+
+        Fallback chain (best → last resort):
+          1. Reddit RSS  — reliable via proxy, current data, no rate limit.
+          2. Reddit JSON — richer (score/nesting) but auth-gated for cloud
+                           IPs (403); kept for dev / if ever unblocked.
+          3. Arctic      — archive w/ scores, post-time snapshot.
+          4. Pullpush    — last resort, flaky rate limits.
+        """
         post_id = self.extract_post_id(post_url)
         if not post_id:
             print(f"    Could not extract post ID from URL")
             return [], "", False
 
+        # 1. RSS first — the reliable + current source.
+        rss_comments, rss_body, _ = self._fetch_comments_rss(post_url, limit=limit)
+        if rss_comments:
+            return rss_comments, rss_body, False
+
         comments = []
-        post_body = ""
+        post_body = rss_body
         is_archived = False
 
         for attempt in range(max_retries):
@@ -688,7 +826,15 @@ class CommentGenerator:
                 else:
                     print(f"    Reddit JSON failed: {str(e)[:50]}")
 
-        # Fallback to Pullpush
+        if comments:
+            return comments, post_body, is_archived
+
+        # 3. Arctic-Shift archive (has scores; post-time snapshot).
+        arctic_comments = self._fetch_comments_arctic(post_id, limit=limit)
+        if arctic_comments:
+            return arctic_comments, post_body, is_archived
+
+        # 4. Last resort: Pullpush (flaky rate limits).
         try:
             params = {"link_id": post_id, "size": limit, "sort": "desc", "sort_type": "score"}
             response = requests.get(self.pullpush_url, params=params, timeout=30)

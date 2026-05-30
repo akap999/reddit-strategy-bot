@@ -466,20 +466,28 @@ class RedditSearchBot:
         body_plain = re.sub(r"<[^>]+>", " ", raw_html)
         body_plain = _html.unescape(body_plain)
         body_plain = re.sub(r"\s+", " ", body_plain).strip()
-        # Compute a permalink path so `_parse_post`-style code works.
-        # url looks like https://www.reddit.com/r/SUB/comments/<id>/<slug>/
+        # Normalize the post URL to canonical www.reddit.com. The feed
+        # comes through the proxy (which routes to old.reddit.com), so
+        # the <link href> often points at old.reddit.com or the proxy's
+        # own worker domain. We only want the /r/SUB/comments/<id>/...
+        # path and always serve it from https://www.reddit.com so the
+        # links the user sees / saves are the standard Reddit URLs.
         permalink = ""
         if url:
             m2 = re.search(r"^https?://[^/]+(/r/[^?]+)", url)
             if m2:
                 permalink = m2.group(1)
+        canonical_url = (
+            f"https://www.reddit.com{permalink}" if permalink
+            else (url or "")
+        )
         try:
             post_date_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
         except (OSError, OverflowError, ValueError):
             post_date_str = ""
         return {
             "title": title,
-            "url": url or (f"https://reddit.com{permalink}" if permalink else ""),
+            "url": canonical_url,
             "score": 0,        # not in RSS
             "comments": 0,     # not in RSS
             "subreddit": subreddit,
@@ -490,7 +498,7 @@ class RedditSearchBot:
             "is_video": False,
             "upvote_ratio": 0,
             "domain": "",
-            "external_url": url or "",
+            "external_url": canonical_url,
             "flair": "",
             "id": pid,
             "over_18": False,

@@ -404,11 +404,17 @@ class RedditSearchBot:
         while len(results) < limit:
             batch_size = min(100, limit - len(results))
             params = {
-                "q": keyword,
                 "size": batch_size,
                 "sort": sort_order,
                 "sort_type": sort_by,
             }
+            # Pullpush will return ALL recent posts in the sub when
+            # `q` is omitted. The tight-window fast path
+            # (_search_recent_then_filter) uses this to fetch by-sub
+            # once and run keyword matching client-side, which dodges
+            # Pullpush's search-index lag for very recent posts.
+            if keyword:
+                params["q"] = keyword
             if subreddit:
                 params["subreddit"] = subreddit
 
@@ -1267,20 +1273,178 @@ class RedditSearchBot:
 
         return filtered
 
+    def _search_recent_then_filter(self, keywords, subreddits, **kwargs):
+        """Tight-window optimization: for `max_days_old` ≤ 7 across N
+        subs × K keywords, the standard per-(kw, sub) Pullpush fan-out
+        is wasteful — most (kw, sub, 24h) buckets are empty even when
+        recent posts in those subs would match the keyword set.
+
+        This path fetches the last `max_days_old` of posts per sub
+        ONCE (no keyword filter at Pullpush), then runs a fast Python
+        substring match over title + body for any of the keywords.
+        Behaviorally matches a `(kw1 OR kw2 OR ... OR kwN)` query the
+        Pullpush API can't directly express.
+
+        Args:
+            keywords: list[str] — at least one must substring-match
+                a post's title or body for it to be kept. Case-insensitive.
+            subreddits: list[str] — one Pullpush call per sub.
+            **kwargs: search() kwargs. Honoured:
+                max_days_old, limit, min_comments, min_score,
+                excluded_subreddits, nsfw, min_upvote_ratio.
+                The rest (max_subscribers, max_scrutiny) are skipped
+                because they require Reddit-API fetches.
+
+        Returns:
+            list of post dicts with .matched_keywords annotated.
+        """
+        max_days_old = kwargs.get("max_days_old") or 1
+        limit = kwargs.get("limit", 50)
+        min_comments = kwargs.get("min_comments", 0) or 0
+        min_score = kwargs.get("min_score", 0) or 0
+        excluded_set = {s.lower() for s in (kwargs.get("excluded_subreddits") or [])}
+        nsfw = kwargs.get("nsfw")
+        min_upvote_ratio = kwargs.get("min_upvote_ratio")
+        # Each sub gets a generous per-sub budget (200) since we're
+        # only making 1 call per sub — fast even on slow days.
+        per_sub_budget = 200
+
+        # Lowercase keywords once for the substring match. Strip
+        # quotes / boolean operators a user might paste in — they
+        # don't make sense for substring matching.
+        kw_lc = []
+        for kw in keywords:
+            cleaned = (kw or "").strip().lower()
+            for tok in ('"', "'", " AND ", " OR ", " NOT "):
+                cleaned = cleaned.replace(tok.lower(), " ")
+            cleaned = " ".join(cleaned.split())  # collapse whitespace
+            if cleaned:
+                kw_lc.append(cleaned)
+        if not kw_lc:
+            return []
+
+        # Per-sub fetch, concurrent. Cap at 5 to stay under Pullpush
+        # rate limit — even with 20 subs this finishes in 4 batches
+        # × ~5s = ~20s.
+        all_posts = []
+        seen_ids = set()
+        sort_by = kwargs.get("sort_by", "relevance")
+        # For tight-window mode, Pullpush sort_type should be
+        # created_utc (newest first) so we get the most recent posts
+        # within the budget.
+        pp_sort_type = "created_utc"
+        # Map empty/None keyword to "" so _search_pullpush sends no
+        # q filter — Pullpush returns recent posts in the sub.
+        def _fetch_recent(sub):
+            try:
+                return self._search_pullpush(
+                    keyword="", subreddit=sub, sort_by=pp_sort_type,
+                    max_days_old=max_days_old, limit=per_sub_budget,
+                    sort_order="desc",
+                )
+            except Exception as e:
+                print(f"    per-sub recent fetch error ({sub}): {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=min(len(subreddits), 5)) as ex:
+            futures = {ex.submit(_fetch_recent, sub): sub for sub in subreddits}
+            for f in as_completed(futures):
+                try:
+                    for p in (f.result() or []):
+                        pid = p.get("id")
+                        if pid and pid not in seen_ids:
+                            seen_ids.add(pid)
+                            all_posts.append(p)
+                except Exception as e:
+                    print(f"    fetch result error: {e}")
+
+        print(f"    Tight-window fetched {len(all_posts)} unique recent posts "
+              f"across {len(subreddits)} subs.")
+
+        # Client-side filter: keyword match + standard filters.
+        cutoff_ts = (datetime.utcnow() - timedelta(days=max_days_old)).timestamp()
+        matched = []
+        rej = {"no_kw_match": 0, "too_old": 0, "min_comments": 0,
+               "min_score": 0, "excluded_sub": 0, "nsfw": 0,
+               "min_upvote_ratio": 0}
+        for p in all_posts:
+            text = (p.get("title", "") + " " + p.get("text", "")).lower()
+            hit_kw = None
+            for kw in kw_lc:
+                if kw in text:
+                    hit_kw = kw
+                    break
+            if not hit_kw:
+                rej["no_kw_match"] += 1
+                continue
+            ts = p.get("timestamp", 0)
+            if ts and ts < cutoff_ts:
+                rej["too_old"] += 1
+                continue
+            if p.get("comments", 0) < min_comments:
+                rej["min_comments"] += 1
+                continue
+            if p.get("score", 0) < min_score:
+                rej["min_score"] += 1
+                continue
+            if excluded_set and p.get("subreddit", "").lower() in excluded_set:
+                rej["excluded_sub"] += 1
+                continue
+            if nsfw is True and not p.get("over_18"):
+                rej["nsfw"] += 1
+                continue
+            if nsfw is False and p.get("over_18"):
+                rej["nsfw"] += 1
+                continue
+            if (min_upvote_ratio is not None
+                    and p.get("upvote_ratio", 0) < min_upvote_ratio):
+                rej["min_upvote_ratio"] += 1
+                continue
+            p["matched_keywords"] = hit_kw
+            matched.append(p)
+
+        rej_str = ", ".join(f"{k}={v}" for k, v in rej.items() if v) or "none"
+        print(f"    Tight-window filter: kept {len(matched)} of {len(all_posts)} "
+              f"(rejections: {rej_str})")
+
+        # Sort by recency descending (this mode is fundamentally
+        # "what's new") and balance across subs if multi-sub.
+        matched.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return balance_posts_by_subreddit(matched, limit, subreddits)
+
     def search_multiple_keywords(self, keywords, delay=2, concurrent=False, **kwargs):
         """
         Search for multiple keywords, combining and deduplicating results.
 
-        Args:
-            keywords: List of search terms.
-            delay: Seconds between searches (sequential mode only).
-            concurrent: Run searches in parallel threads (faster, but more
-                        connections). Max 3 workers to stay API-friendly.
-            **kwargs: Passed directly to search().
-
-        Returns:
-            Combined, deduplicated list sorted by score descending.
+        Special fast path for tight time windows (max_days_old ≤ 7) WITH
+        a sub list: bypass the per-(keyword × sub) fan-out and instead
+        fetch the last N days of posts ONCE per sub (no keyword filter
+        upstream), then run a client-side multi-keyword substring match.
+        Saves O(K) Pullpush calls when querying N subs — which is the
+        difference between "1 result" and "all of them" for niche
+        keyword queries in 1-day windows where Pullpush's search index
+        lags behind /new.
         """
+        max_days_old = kwargs.get("max_days_old")
+        subreddits = kwargs.get("subreddits") or kwargs.get("subreddit")
+        if isinstance(subreddits, str):
+            subreddits = [subreddits]
+        if (max_days_old and 1 <= max_days_old <= 7
+                and subreddits and len(subreddits) >= 1
+                and len(keywords) > 1):
+            print(f"\n⚡ Tight-window fast path: max_days_old={max_days_old}, "
+                  f"{len(subreddits)} subs × {len(keywords)} keywords — "
+                  f"fetching recent posts per sub then client-filtering "
+                  f"for keywords (saves {len(subreddits) * (len(keywords) - 1)} "
+                  f"redundant fetches).")
+            # Strip subreddit / subreddits from kwargs so they don't
+            # collide with the explicit positional we pass.
+            inner_kwargs = {k: v for k, v in kwargs.items()
+                            if k not in ("subreddit", "subreddits")}
+            return self._search_recent_then_filter(
+                keywords, subreddits, **inner_kwargs
+            )
+
         all_results = []
         seen_ids = set()
 

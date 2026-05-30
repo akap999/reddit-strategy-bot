@@ -677,16 +677,16 @@ class RedditSearchBot:
                     if subreddit_path and "+" in subreddit_path:
                         # Multi-sub: Pullpush only accepts a single subreddit,
                         # so split and query each with equal quota — in parallel.
-                        # Cap concurrency at 3 (was 8): Pullpush rate-limits
-                        # aggressively past ~5 concurrent requests, and with
-                        # the outer search_multiple_keywords concurrency stack
-                        # we'd otherwise have 5×8 = 40 concurrent Pullpush
-                        # requests for multi-keyword × multi-sub queries.
+                        # Cap at 5 (was 8): Pullpush 429s at ~10 concurrent,
+                        # and with the outer 5-keyword pool that bounds total
+                        # in-flight Pullpush requests at 5×5 = 25. Stayed at 5
+                        # (not 3) because per-keyword serialization wrecks
+                        # throughput on 10+ keyword queries.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 50)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 3)) as ex:
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 5)) as ex:
                             futures = [
                                 ex.submit(self._search_pullpush,
                                           keyword, sub, sort_by, max_days_old, per_sub,
@@ -727,9 +727,12 @@ class RedditSearchBot:
                         batch = []
                         per_sub = max(needed_raw // max(len(top_subs), 1), 50)
                         if top_subs:
-                            # Arctic-Shift rate-limits with "Too many complex
-                            # queries" past ~3 concurrent. Cap accordingly.
-                            with ThreadPoolExecutor(max_workers=min(len(top_subs), 3)) as ex:
+                            # Arctic-Shift 429s ("Too many complex queries")
+                            # past ~5 concurrent. Cap at 4 — slightly
+                            # tighter than Pullpush since its rate limit is
+                            # stricter and complex queries (text + sub
+                            # filter) trigger it faster.
+                            with ThreadPoolExecutor(max_workers=min(len(top_subs), 4)) as ex:
                                 futures = [
                                     ex.submit(self._search_arctic,
                                               keyword, discovered_subs[sub_key],
@@ -744,12 +747,13 @@ class RedditSearchBot:
                             print(f"(queried {len(top_subs)} subs) ", end="")
                     else:
                         # Multi-sub path (a+b+c) — query each individually in parallel.
-                        # Cap concurrency at 3 (was 8) — Arctic rate-limit.
+                        # Cap at 4 (was 8) — Arctic rate-limit. See
+                        # discover-global branch above for rationale.
                         subs = [s.strip() for s in subreddit_path.split("+")
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 50)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 3)) as ex:
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 4)) as ex:
                             futures = [
                                 ex.submit(self._search_arctic,
                                           keyword, sub, max_days_old, per_sub)
@@ -1285,12 +1289,13 @@ class RedditSearchBot:
             return self.search(keyword, **kwargs)
 
         if concurrent and len(keywords) > 1:
-            # Outer keyword concurrency capped at 3 (was 5). Combined
-            # with the per-sub fan-out cap of 3, the max concurrent
-            # Pullpush/Arctic requests is now 9 — well under both
-            # services' rate limits — vs 40+ before, which was
-            # triggering 429s constantly and wrecking result counts.
-            with ThreadPoolExecutor(max_workers=min(len(keywords), 3)) as executor:
+            # Keep outer keyword concurrency at 5 for throughput.
+            # Pullpush/Arctic rate limits are smoothed by the smaller
+            # per-keyword sub fan-out (5 inner threads) below — that
+            # bounds the global max at 5 × 5 = 25 concurrent requests,
+            # which both services tolerate. Going lower (e.g. 3 × 3
+            # = 9) starved throughput badly for 10-keyword queries.
+            with ThreadPoolExecutor(max_workers=min(len(keywords), 5)) as executor:
                 futures = {executor.submit(_search_one, kw): kw for kw in keywords}
                 for future in as_completed(futures):
                     try:

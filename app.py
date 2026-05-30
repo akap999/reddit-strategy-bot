@@ -179,17 +179,44 @@ def _normalize_reddit_comment_url(url):
         return None
     return path + ".json"
 
+def _reddit_http_proxies():
+    """Return a requests-style proxies dict for the residential HTTP
+    proxy (IPRoyal etc.) when REDDIT_HTTP_PROXY is set, else None.
+
+    This is a FORWARD proxy (tunnel): requests go to the real
+    reddit.com URL but egress through the residential IP. Unlike the
+    Cloudflare worker (REDDIT_PROXY_URL, which rewrites the path),
+    this lets us hit Reddit's JSON endpoints — which Reddit serves to
+    residential IPs but blocks for datacenter IPs.
+    """
+    p = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+    if not p:
+        return None
+    return {"http": p, "https": p}
+
+
 def _reddit_get(path, timeout=15, max_retries=3):
-    """GET a Reddit API path, routing through Cloudflare proxy if configured.
+    """GET a Reddit API path. Three transport modes, in priority order:
+
+    1. Residential HTTP proxy (REDDIT_HTTP_PROXY) — tunnels to
+       www.reddit.com directly through a residential IP. Reddit serves
+       JSON to residential IPs, so this is the preferred path when set.
+    2. Cloudflare worker (REDDIT_PROXY_URL) — path-rewrite proxy; serves
+       RSS but Reddit 403s its JSON.
+    3. Direct old.reddit.com — last resort.
+
     path should start with / e.g. /user/spez/about.json
-    Retries on transient errors (403, 429, timeouts) with exponential backoff.
-    Also retries when proxy returns HTML instead of JSON.
-    Falls back to old.reddit.com directly when proxy consistently returns HTML.
+    Retries on transient errors (403/429/5xx, HTML-instead-of-JSON).
     """
     import requests as _requests
     import time as _time
+    http_proxies = _reddit_http_proxies()
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
+    if http_proxies:
+        # Residential proxy: hit www.reddit.com directly, tunneled.
+        base = "https://www.reddit.com"
+    else:
+        base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
     url = f"{base}{path}"
     ua = REDDIT_USER_AGENT
     headers = {"User-Agent": ua, "Accept": "application/json"}
@@ -201,8 +228,9 @@ def _reddit_get(path, timeout=15, max_retries=3):
                 wait = min(2 ** attempt * 2, 15)
                 print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
                 _time.sleep(wait)
-            print(f"[REDDIT_GET] {url} (proxy={'yes' if proxy else 'no'}, attempt={attempt+1})", flush=True)
-            resp = _requests.get(url, headers=headers, timeout=timeout)
+            print(f"[REDDIT_GET] {url} (transport={'residential' if http_proxies else ('worker' if proxy else 'direct')}, attempt={attempt+1})", flush=True)
+            resp = _requests.get(url, headers=headers, timeout=timeout,
+                                 proxies=http_proxies)
             # Retry on transient errors
             if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
                 print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
@@ -220,14 +248,16 @@ def _reddit_get(path, timeout=15, max_retries=3):
                 last_resp = None
                 break
 
-    # If proxy returned HTML after all retries, try old.reddit.com directly as fallback.
-    # old.reddit.com has much less aggressive bot-blocking than www.reddit.com and often
-    # returns JSON even from cloud IPs where www.reddit.com would return HTML/403.
-    if proxy and last_resp and last_resp.status_code == 200 and last_resp.text.lstrip()[:1] == "<":
+    # If the chosen transport returned HTML after all retries, try
+    # old.reddit.com as a fallback (routed through the residential
+    # proxy too when set). old.reddit.com has lighter bot-blocking and
+    # often returns JSON even when www.reddit.com serves HTML/403.
+    if (proxy or http_proxies) and last_resp and last_resp.status_code == 200 and last_resp.text.lstrip()[:1] == "<":
         fallback_url = f"https://old.reddit.com{path}"
-        print(f"[REDDIT_GET] Proxy returned HTML after retries, trying old.reddit.com fallback: {fallback_url}", flush=True)
+        print(f"[REDDIT_GET] Got HTML after retries, trying old.reddit.com fallback: {fallback_url}", flush=True)
         try:
-            fb_resp = _requests.get(fallback_url, headers=headers, timeout=timeout)
+            fb_resp = _requests.get(fallback_url, headers=headers, timeout=timeout,
+                                    proxies=http_proxies)
             if fb_resp.status_code == 200 and fb_resp.text.lstrip()[:1] != "<":
                 print(f"[REDDIT_GET] old.reddit.com fallback succeeded (JSON)", flush=True)
                 return fb_resp
@@ -4937,6 +4967,72 @@ def api_check_subreddit():
             return jsonify({"exists": None, "error": f"Reddit returned status {r.status_code}"})
     except Exception as e:
         return jsonify({"exists": None, "error": str(e)})
+
+
+@app.route("/api/search/reddit/test-http-proxy", methods=["GET"])
+def api_search_reddit_test_http_proxy():
+    """Verify the residential HTTP proxy (REDDIT_HTTP_PROXY) actually
+    unblocks Reddit's JSON API. Hits 3 JSON endpoints through the
+    proxy and reports status / body-kind / preview, plus the egress
+    IP the proxy presents (via httpbin) so you can confirm it's
+    residential and differs from Railway's own IP.
+
+    Run this AFTER setting REDDIT_HTTP_PROXY on Railway. If the JSON
+    probes come back body_kind=json, the proxy works and I can flip
+    comment-fetching + the search leg back to JSON.
+
+    ?sub=Mattress&q=mattress  (optional test targets)
+    """
+    import requests as _rq
+    proxies = _reddit_http_proxies()
+    if not proxies:
+        return jsonify({"error": "REDDIT_HTTP_PROXY is not set on this server"}), 400
+    sub = (request.args.get("sub") or "Mattress").strip()
+    q = (request.args.get("q") or "mattress").strip()
+    ua = REDDIT_USER_AGENT
+
+    def classify(text):
+        s = (text or "").lstrip()
+        if not s:
+            return "empty"
+        if s[0] in "{[":
+            return "json"
+        if s[:6].lower().startswith("<?xml"):
+            return "xml"
+        if s[0] == "<":
+            return "html"
+        return "other"
+
+    def probe(url, params=None):
+        try:
+            r = _rq.get(url, params=params, proxies=proxies, timeout=25,
+                        headers={"User-Agent": ua, "Accept": "application/json"})
+            body = r.text or ""
+            return {
+                "status": r.status_code,
+                "content_type": r.headers.get("Content-Type", ""),
+                "body_kind": classify(body),
+                "len": len(body),
+                "preview": body[:120].replace("\n", " "),
+            }
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    out = {
+        "json_search": probe(f"https://www.reddit.com/r/{sub}/search.json",
+                             {"q": q, "restrict_sr": "on", "limit": 3}),
+        "json_listing": probe(f"https://www.reddit.com/r/{sub}.json", {"limit": 3}),
+        "json_comments": probe(f"https://www.reddit.com/r/{sub}/new.json", {"limit": 1}),
+        "proxy_egress_ip": probe("https://httpbin.org/ip"),
+    }
+    return jsonify({
+        "proxy_active": True,
+        "note": ("If json_* show body_kind=json, the residential proxy "
+                 "unblocks Reddit's JSON API — tell me and I'll flip "
+                 "comment-fetching + the search leg back to JSON. "
+                 "proxy_egress_ip shows the residential IP being used."),
+        "probes": out,
+    })
 
 
 @app.route("/api/search/reddit/raw-probe", methods=["GET"])

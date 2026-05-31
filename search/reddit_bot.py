@@ -1575,18 +1575,25 @@ class RedditSearchBot:
         # only making 1 call per sub — fast even on slow days.
         per_sub_budget = 200
 
-        # Lowercase keywords once for the substring match. Strip
-        # quotes / boolean operators a user might paste in — they
-        # don't make sense for substring matching.
-        kw_lc = []
+        # Build a WORD-BOUNDARY regex per keyword. A naive substring
+        # test (`kw in text`) made short keywords like "hr" match
+        # "through" / "chrome" / "Chris" → flooded results with junk.
+        # `\bkw\b` matches "hr"/"HR" as a token but not those words.
+        # Strip quotes / boolean operators the user may have pasted.
+        kw_patterns = []  # list of (label, compiled_regex)
         for kw in keywords:
             cleaned = (kw or "").strip().lower()
             for tok in ('"', "'", " AND ", " OR ", " NOT "):
                 cleaned = cleaned.replace(tok.lower(), " ")
             cleaned = " ".join(cleaned.split())  # collapse whitespace
-            if cleaned:
-                kw_lc.append(cleaned)
-        if not kw_lc:
+            if not cleaned:
+                continue
+            try:
+                pat = re.compile(r"\b" + re.escape(cleaned) + r"\b", re.IGNORECASE)
+            except re.error:
+                pat = None
+            kw_patterns.append((cleaned, pat))
+        if not kw_patterns:
             return []
 
         # Per-sub fetch, concurrent. Cap at 5 to stay under Pullpush
@@ -1659,11 +1666,15 @@ class RedditSearchBot:
                "min_score": 0, "excluded_sub": 0, "nsfw": 0,
                "min_upvote_ratio": 0}
         for p in all_posts:
-            text = (p.get("title", "") + " " + p.get("text", "")).lower()
+            text = (p.get("title", "") + " " + p.get("text", ""))
             hit_kw = None
-            for kw in kw_lc:
-                if kw in text:
-                    hit_kw = kw
+            for label, pat in kw_patterns:
+                if pat is not None:
+                    if pat.search(text):
+                        hit_kw = label
+                        break
+                elif label in text.lower():  # fallback if regex compile failed
+                    hit_kw = label
                     break
             if not hit_kw:
                 rej["no_kw_match"] += 1
@@ -1784,20 +1795,31 @@ class RedditSearchBot:
         keyword queries in 1-day windows where Pullpush's search index
         lags behind /new.
         """
-        max_days_old = kwargs.get("max_days_old")
+        # NOTE: the tight-window fast path (_search_recent_then_filter)
+        # is DISABLED. It fetched each sub's /new.rss (no keyword) and
+        # matched keywords client-side with a naive substring test
+        # (`kw in text`), which made short keywords like "hr" match
+        # "through" / "chrome" / "Chris" → flooded results with junk →
+        # mass relevance-skips during gen-comments.
+        #
+        # The regular per-keyword search() cascade below uses Reddit's
+        # real search engine via /r/<sub>/search.rss?q=<kw>&t=<window>,
+        # which does proper token matching AND honors the time window —
+        # so days≤7 multi-sub searches now get accurate, relevant
+        # results without the substring-noise problem. (The old reason
+        # for the fast path — Pullpush's search-index lag at days=1 —
+        # no longer applies now that search.rss is reachable.)
+        # Set REDDIT_TIGHT_WINDOW=1 to opt back into the fast path.
         subreddits = kwargs.get("subreddits") or kwargs.get("subreddit")
         if isinstance(subreddits, str):
             subreddits = [subreddits]
-        if (max_days_old and 1 <= max_days_old <= 7
+        max_days_old = kwargs.get("max_days_old")
+        if (os.environ.get("REDDIT_TIGHT_WINDOW", "").strip().lower() in ("1", "true", "yes")
+                and max_days_old and 1 <= max_days_old <= 7
                 and subreddits and len(subreddits) >= 1
                 and len(keywords) > 1):
-            print(f"\n⚡ Tight-window fast path: max_days_old={max_days_old}, "
-                  f"{len(subreddits)} subs × {len(keywords)} keywords — "
-                  f"fetching recent posts per sub then client-filtering "
-                  f"for keywords (saves {len(subreddits) * (len(keywords) - 1)} "
-                  f"redundant fetches).")
-            # Strip subreddit / subreddits from kwargs so they don't
-            # collide with the explicit positional we pass.
+            print(f"\n⚡ Tight-window fast path (opt-in): max_days_old={max_days_old}, "
+                  f"{len(subreddits)} subs × {len(keywords)} keywords.")
             inner_kwargs = {k: v for k, v in kwargs.items()
                             if k not in ("subreddit", "subreddits")}
             return self._search_recent_then_filter(

@@ -1083,25 +1083,38 @@ Return JSON only:
         }
 
     def check_relevance(self, post_title, post_body, subreddit, comments, brand_name, brand_context, brand_keywords=None):
-        if not comments:
-            return {"score": 0, "disqualified": False, "reason": "No comments to analyze"}
-
-        comments_text = "\n".join([f'- "{c["body"][:250]}"' for c in comments[:10]])
+        # POST-CENTRIC relevance: judge from the post (title + body +
+        # subreddit), NOT the number of comments. A post with no/few
+        # comments must still be scored on its own merits — the comment
+        # count is not a relevance signal. (Comments, when present, are
+        # optional supplementary context only.) Previously this returned
+        # score 0 for comment-less posts and leaned on comment-derived
+        # criteria, which auto-skipped on-topic posts that simply hadn't
+        # accrued comments yet — especially recent posts via the RSS feed.
+        if comments:
+            comments_text = "\n".join([f'- "{c["body"][:250]}"' for c in comments[:10]])
+        else:
+            comments_text = "(no comments on this post yet — score from the post itself)"
         keywords_text = f"\nBRAND KEYWORDS: {', '.join(brand_keywords)}" if brand_keywords else ""
         post_body_text = f'\nPOST BODY: "{post_body[:500]}"' if post_body else ""
 
         prompt = f"""Analyze if this Reddit post is relevant for naturally mentioning a brand.
 
+Judge relevance from the POST ITSELF (title + body + subreddit). The
+number of comments is NOT a relevance factor — a post with zero comments
+can be highly relevant. Comments below (if any) are only supplementary
+context; do not penalize a post for having few or no comments.
+
 POST TITLE: "{post_title}"
 SUBREDDIT: r/{subreddit}{post_body_text}
 
-TOP COMMENTS:
+COMMENTS (supplementary context only — may be empty):
 {comments_text}
 
 BRAND: {brand_name}
 WHAT BRAND DOES: {brand_context}{keywords_text}
 
-Score 0-10 on these criteria:
+Score 0-10 on these criteria (all judged primarily from the POST):
 
 1. TOPIC MATCH (0-3): Is the post about something the brand offers/solves?
    3 = Direct match (post is about exactly what brand does)
@@ -1115,12 +1128,15 @@ Score 0-10 on these criteria:
    1 = General discussion
    0 = No problem or brand can't help
 
-3. NATURAL FIT (0-2): Would a brand mention feel organic?
+3. NATURAL FIT (0-2): Would a brand mention feel organic ON THIS POST?
+   Judge from the post type/topic, NOT comment count.
    2 = People are asking for recommendations or sharing solutions
    1 = Experience sharing is happening (can add yours)
    0 = Would feel forced, off-topic, or spammy
 
-4. CONVERSATION OPENING (0-2): Is there a natural way to enter this conversation?
+4. CONVERSATION OPENING (0-2): Is there a natural way to add a top-level comment?
+   Judge from the POST (a question/advice-seeking/experience post has an
+   opening even with zero comments). Do NOT lower this for few/no comments.
    2 = Clear opening (question asked, advice sought, experiences shared)
    1 = Possible but requires care
    0 = Closed discussion, argument, or meme thread

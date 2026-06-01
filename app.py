@@ -5992,9 +5992,9 @@ def api_generate_search_comments(pid):
             if is_archived:
                 db2.update_search_post_status(pid, "saved")
                 raise ValueError("Post is archived — cannot comment")
-            if len(comments) < 1:
-                db2.update_search_post_status(pid, "saved")
-                raise ValueError("No comments found on this post — cannot analyze tone/context")
+            # No comment-count gate — RSS counts are unreliable, so 0
+            # comments is allowed (generation works without existing
+            # comments). Only archived posts are blocked above.
 
             comment_stats = cg._compute_comment_stats(comments)
 
@@ -6134,17 +6134,11 @@ def _generate_hq_for_search_post(cg, db2, pid, post, brand, brand_name, brand_co
     if is_archived:
         db2.update_search_post_status(pid, "saved")
         raise ValueError("Post is archived — cannot comment")
-    if len(comments) < 1:
-        db2.update_search_post_status(pid, "saved")
-        # Distinguish 'post genuinely has no comments' from 'all comment
-        # sources failed to fetch' — both land here, but the source tag
-        # tells them apart (source='none' = nothing returned anywhere).
-        raise ValueError(
-            f"No comments could be fetched (source={_fetch.get('source')}) — "
-            f"cannot analyze tone/context. If the post has comments on Reddit, "
-            f"this is a fetch failure (RSS/Pullpush/Arctic all empty), not low relevance."
-        )
-
+    # NOTE: no comment-count gate. RSS comment counts are unreliable
+    # (RSS often under-reports / omits the count), so we do NOT skip
+    # posts for having "0" comments — generation proceeds regardless
+    # (tone analysis falls back to defaults, the HQ main comment is a
+    # top-level reply to the post). Only `is_archived` blocks gen.
     comment_stats = cg._compute_comment_stats(comments)
 
     relevance = cg.check_relevance(
@@ -6442,10 +6436,8 @@ def api_generate_search_comments_batch():
                         db2.update_search_post_status(pid, "saved")
                         results.append({"pid": pid, "skipped": True, "reason": "Post is archived"})
                         continue
-                    if len(comments) < 1:
-                        db2.update_search_post_status(pid, "saved")
-                        results.append({"pid": pid, "skipped": True, "reason": "No comments found"})
-                        continue
+                    # No comment-count gate — RSS counts are unreliable, so
+                    # 0 comments is allowed (gen proceeds regardless).
 
                     comment_stats = cg._compute_comment_stats(comments)
 

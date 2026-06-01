@@ -5868,6 +5868,62 @@ def api_delete_search_post(pid):
         db.close()
 
 
+@app.route("/api/search/posts/cleanup-recent", methods=["POST"])
+def api_cleanup_recent_search_posts():
+    """Bulk-delete recently-saved, UN-GENERATED Live Search posts across
+    ALL brands. Targets search_posts with:
+      - created_at within the last `hours` (default 24), AND
+      - status IN ('saved','irrelevant')  -- never 'complete'/'generating'
+
+    Destructive + irreversible. Requires {"confirm": true} in the body.
+    Pass {"dry_run": true} to preview the count without deleting.
+    Uses db.delete_search_post() per row so child search_comments +
+    account lifetime counters are cleaned up correctly.
+
+    Body: {confirm: bool, hours?: int (default 24), dry_run?: bool}
+    Returns {deleted, matched, by_status, by_brand}.
+    """
+    data = request.get_json(silent=True) or {}
+    hours = int(data.get("hours", 24))
+    dry_run = bool(data.get("dry_run", False))
+    if not dry_run and not data.get("confirm"):
+        return jsonify({"error": "Pass {\"confirm\": true} to delete, or {\"dry_run\": true} to preview."}), 400
+
+    db = get_db()
+    try:
+        rows = db.conn.execute(
+            """SELECT sp.id, sp.status, sp.subreddit,
+                      COALESCE(b.name, '(no brand)') AS brand_name
+                 FROM search_posts sp
+            LEFT JOIN brands b ON sp.brand_id = b.id
+                WHERE sp.status IN ('saved', 'irrelevant')
+                  AND sp.created_at >= datetime('now', ?)""",
+            (f'-{hours} hours',)
+        ).fetchall()
+        from collections import Counter
+        by_status = dict(Counter(r["status"] for r in rows))
+        by_brand = dict(Counter(r["brand_name"] for r in rows))
+        matched = len(rows)
+        deleted = 0
+        if not dry_run:
+            for r in rows:
+                try:
+                    db.delete_search_post(r["id"])
+                    deleted += 1
+                except Exception as e:
+                    print(f"[cleanup-recent] failed to delete search_post {r['id']}: {e}", flush=True)
+        return jsonify({
+            "dry_run": dry_run,
+            "hours": hours,
+            "matched": matched,
+            "deleted": deleted,
+            "by_status": by_status,
+            "by_brand": by_brand,
+        })
+    finally:
+        db.close()
+
+
 @app.route("/api/search/posts/<int:pid>/brand", methods=["PUT"])
 def api_update_search_post_brand(pid):
     db = get_db()

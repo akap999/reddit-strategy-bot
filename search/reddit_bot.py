@@ -1140,6 +1140,48 @@ class RedditSearchBot:
             print("    ⚠ All APIs failed or returned no results")
             return []
 
+        # ── Keyword-presence precision filter ─────────────────────────
+        # Reddit's search.rss matches loosely — it returns posts where the
+        # query term appears anywhere (often only in a COMMENT, or in a
+        # body Reddit indexed but RSS truncated), so the result set
+        # includes posts whose visible title/body don't contain the
+        # keyword at all. Those are off-topic for brand-mention targeting
+        # and get correctly skipped at gen time as low-relevance — but
+        # they shouldn't be in the result set in the first place.
+        #
+        # Keep only posts where the keyword's most distinctive (longest)
+        # token appears as a word-boundary match in the title or body.
+        # Word-boundary (not substring) so "hr" matches the term "HR" but
+        # not "through". Single distinctive token (not all tokens) so a
+        # multi-word keyword like "physiotherapy australia" matches a post
+        # titled "physiotherapy clinic?" without requiring every word.
+        # Opt out with REDDIT_KW_FILTER=0.
+        if (keyword and keyword.strip()
+                and os.environ.get("REDDIT_KW_FILTER", "1").strip().lower() not in ("0", "false", "no")):
+            import re as _kwre
+            raw_toks = [t.strip('"\'').lower()
+                        for t in _kwre.split(r"\s+", keyword.strip())]
+            toks = [t for t in raw_toks if t and t not in ("and", "or", "not")]
+            if toks:
+                pivot = max(toks, key=len)  # most distinctive token
+                kwpat = _kwre.compile(r"\b" + _kwre.escape(pivot) + r"\b", _kwre.IGNORECASE)
+                before_kw = len(filtered)
+                kept = [p for p in filtered
+                        if kwpat.search((p.get("title", "") + " " + (p.get("text", "") or "")))]
+                if kept:
+                    if before_kw - len(kept):
+                        print(f"    Keyword-presence filter ('{pivot}'): dropped "
+                              f"{before_kw - len(kept)} off-keyword posts, "
+                              f"{len(kept)} remain")
+                    filtered = kept
+                else:
+                    # Filter would wipe everything — likely the keyword is
+                    # only in comments / truncated bodies. Keep the set
+                    # rather than returning nothing.
+                    print(f"    Keyword-presence filter ('{pivot}'): would drop "
+                          f"all {before_kw} — keeping unfiltered (keyword likely "
+                          f"in comments or truncated RSS bodies)")
+
         # Always compute scrutiny scores (annotate every result);
         # only drop posts when max_scrutiny is provided.
         try:

@@ -5630,6 +5630,80 @@ def api_search_reddit_diagnose():
     })
 
 
+@app.route("/api/search/reddit/debug-search", methods=["GET"])
+def api_search_reddit_debug_search():
+    """Read-only: run the multi-keyword × multi-sub search and return the
+    raw results (title + subreddit + which keyword matched) WITHOUT
+    saving — so we can see whether the search is returning on-topic posts
+    from the right subreddits, vs off-topic / wrong-sub noise.
+
+    ?keywords=payroll,hris,hr & subs=Payroll,humanresources,Accounting
+    & days=7 & limit=30
+    """
+    from search.reddit_bot import RedditSearchBot, balance_posts_by_subreddit
+    keywords = [k.strip() for k in (request.args.get("keywords") or "").split(",") if k.strip()]
+    subs = [s.strip() for s in (request.args.get("subs") or "").split(",") if s.strip()]
+    days = int(request.args.get("days") or 7)
+    limit = min(int(request.args.get("limit") or 30), 100)
+    if not keywords:
+        return jsonify({"error": "?keywords=a,b,c required"}), 400
+
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    bot = RedditSearchBot(reddit_base=proxy.rstrip("/") if proxy else None,
+                          script_user_agent=REDDIT_USER_AGENT)
+    try:
+        if len(keywords) > 1:
+            results = bot.search_multiple_keywords(
+                keywords, concurrent=True, subreddits=subs or None,
+                sort_by="relevance", max_days_old=days, limit=limit, api="auto",
+            )
+        else:
+            results = bot.search(
+                keywords[0], subreddits=subs or None,
+                sort_by="relevance", max_days_old=days, limit=limit, api="auto",
+            )
+        results = balance_posts_by_subreddit(results, limit, subs or None)
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    # Which requested keyword does each result's title/body actually
+    # contain (word-boundary)? Helps spot search returning posts that
+    # don't match any keyword (= search relevance problem).
+    import re as _re
+    kw_pats = [(k, _re.compile(r"\b" + _re.escape(k.lower()) + r"\b")) for k in keywords]
+    requested_subs_lc = {s.lower() for s in subs}
+    rows = []
+    off_sub = 0
+    no_kw = 0
+    for r in results:
+        text = (r.get("title", "") + " " + (r.get("text", "") or "")).lower()
+        hits = [k for k, p in kw_pats if p.search(text)]
+        rsub = (r.get("subreddit") or "")
+        in_requested = (not requested_subs_lc) or (rsub.lower() in requested_subs_lc)
+        if not in_requested:
+            off_sub += 1
+        if not hits:
+            no_kw += 1
+        rows.append({
+            "subreddit": rsub,
+            "in_requested_subs": in_requested,
+            "title": (r.get("title") or "")[:90],
+            "keyword_hits": hits,
+            "comments": r.get("comments"),
+            "score": r.get("score"),
+            "source_hint": r.get("_source", "json/pullpush/arctic"),
+        })
+    from collections import Counter
+    return jsonify({
+        "keywords": keywords, "subs": subs, "days": days,
+        "total_results": len(rows),
+        "results_from_wrong_subreddit": off_sub,
+        "results_matching_no_keyword": no_kw,
+        "by_subreddit": dict(Counter(r["subreddit"] for r in rows)),
+        "results": rows,
+    })
+
+
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
     """Run a Reddit keyword search via RedditSearchBot (background task).
@@ -6327,7 +6401,25 @@ def api_generate_search_comments_batch():
                     threshold = data.get("relevance_threshold", 6)
                     if rel_score < threshold:
                         db2.update_search_post_status(pid, "irrelevant")
-                        results.append({"pid": pid, "skipped": True, "reason": f"Low relevance ({rel_score})"})
+                        results.append({
+                            "pid": pid, "skipped": True,
+                            "relevance_score": rel_score,
+                            "comments_fetched": len(comments),
+                            "comments_source": getattr(cg, "last_fetch", {}).get("source"),
+                            "post_title": (post.get("title") or "")[:80],
+                            "subreddit": post.get("subreddit"),
+                            "relevance_breakdown": {
+                                k: relevance.get(k) for k in
+                                ("topic_match", "problem_fit", "natural_fit",
+                                 "conversation_opening", "disqualified",
+                                 "disqualify_reason", "summary")
+                                if k in relevance
+                            },
+                            "reason": f"Low relevance ({rel_score}) — "
+                                      f"topic={relevance.get('topic_match')}/3 "
+                                      f"problem={relevance.get('problem_fit')}/3 "
+                                      f"on '{(post.get('title') or '')[:50]}' in r/{post.get('subreddit')}",
+                        })
                         continue
 
                     tone_analysis = cg.analyze_tone(

@@ -1516,6 +1516,15 @@ Return JSON only:
         target_band = intent_info["target_length_band"]
         intent_label = intent_info["intent_label"]
 
+        # AI-crawl optimization applies to the HQ MAIN comment only. HQ
+        # REPLIES (is_hq_reply=True) are conversation, not post-answers —
+        # they must NOT get the AI-CRAWL prompt block, the brand-domain
+        # vocabulary / long-tail-query stuffing, or the direct-answer
+        # persona override. ai_crawl_eff folds that rule in once so every
+        # downstream gate stays in sync. No-op for non-HQ-reply callers
+        # (is_hq_reply defaults False → ai_crawl_eff == ai_crawl).
+        ai_crawl_eff = ai_crawl and not is_hq_reply
+
         # INTENT-DRIVEN LENGTH SCALING: scale comment_stats.avg_words to
         # the band's target BEFORE the per-comment LENGTH math runs.
         # Recommendation-seeking posts → crisp (avg_words ≈ 25), so even
@@ -1538,7 +1547,7 @@ Return JSON only:
 
         # AI-CRAWL + RECOMMENDATION-SEEKING POST: override the random persona /
         # structure pick with a curated whitelist of "direct answer" voices.
-        if ai_crawl and is_recommendation:
+        if ai_crawl_eff and is_recommendation:
             ac_personas = [p for p in PERSONAS if p["id"] in AI_CRAWL_REC_PERSONAS]
             ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in AI_CRAWL_REC_STRUCTURES]
             if ac_personas and ac_structures:
@@ -1781,7 +1790,7 @@ NEVER USE THESE PHRASES: {banned_text}"""
         # for queries about the brand's domain. Used by Live Subreddits where
         # the post itself is meant to rank on ChatGPT / Perplexity / Claude.
         ai_crawl_section = ""
-        if ai_crawl:
+        if ai_crawl_eff:
             # When generating a single comment, the long-tail rule MUST fire on
             # this comment (there's no "other comment in the batch" to delegate
             # to). Otherwise (batch >1) at least one must carry the phrasing.
@@ -2177,7 +2186,7 @@ Generate exactly {num_comments} comments. Return JSON only:
 
     def validate_comments(self, post_title, post_body, subreddit, comments,
                           brand_name, generated_comments, tone_analysis=None,
-                          ai_crawl=False, post_intent=None):
+                          ai_crawl=False, post_intent=None, is_hq_reply=False):
         """LLM-driven quality gate for generated comments.
 
         Each comment is scored on four binary judgments by an LLM rubric:
@@ -2208,7 +2217,7 @@ Generate exactly {num_comments} comments. Return JSON only:
         ])
 
         ai_crawl_strictness = ""
-        if ai_crawl:
+        if ai_crawl and not is_hq_reply:
             ai_crawl_strictness = (
                 "\nAI-CRAWL MODE is ON. Apply stricter shape_match: the comment must "
                 "demonstrably reinforce the post title's underlying long-tail query "
@@ -2416,6 +2425,7 @@ Return JSON only:
         tone_analysis = kwargs.get("tone_analysis")
         ai_crawl     = kwargs.get("ai_crawl", False)
         post_intent  = kwargs.get("post_intent", None)
+        is_hq_reply  = kwargs.get("is_hq_reply", False)
 
         # Initial generation (full batch)
         result = self.generate_comments(**kwargs)
@@ -2431,7 +2441,7 @@ Return JSON only:
             post_title=post_title, post_body=post_body, subreddit=subreddit,
             comments=comments, brand_name=brand_name,
             generated_comments=bodies, tone_analysis=tone_analysis,
-            ai_crawl=ai_crawl, post_intent=post_intent,
+            ai_crawl=ai_crawl, post_intent=post_intent, is_hq_reply=is_hq_reply,
         )
         evals = val.get("evaluations") or []
 
@@ -2522,7 +2532,7 @@ Return JSON only:
                     post_title=post_title, post_body=post_body, subreddit=subreddit,
                     comments=comments, brand_name=brand_name,
                     generated_comments=[new_body], tone_analysis=tone_analysis,
-                    ai_crawl=ai_crawl, post_intent=post_intent,
+                    ai_crawl=ai_crawl, post_intent=post_intent, is_hq_reply=is_hq_reply,
                 )
                 ev2 = (v2.get("evaluations") or [{}])[0]
                 if ev2.get("pass"):
@@ -3406,6 +3416,7 @@ Return JSON only:
                     generated_comments=[body],
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
+                    is_hq_reply=True,
                 )
                 ev = (val.get("evaluations") or [{}])[0]
                 if not ev.get("pass"):

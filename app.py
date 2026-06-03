@@ -359,6 +359,108 @@ def _post_liveness_via_rss(post_url, timeout=15):
         return None
 
 
+def _reddit_comment_meta_via_rss(comment_url, timeout=15):
+    """Fetch a comment's metadata via its permalink RSS feed — the
+    cloud-IP-safe replacement for the JSON API that bulk-deploy relies
+    on (Reddit gates `.json` for datacenter IPs, so the JSON path returns
+    nothing on Railway and every row falls through to 'missing').
+
+    Returns the SAME dict shape as
+    `bulk_deploy.fetch_reddit_comment_meta`:
+        {"body","posted_at","is_removed","found","author"}
+
+    found=False  → feed couldn't be fetched/parsed (inconclusive; the
+                   caller treats this as 'missing' and may fall back to
+                   the JSON fetcher for local dev).
+    found=True + is_removed=False → comment is live; `body`/`posted_at`/
+                   `author` populated from the Atom entry.
+    found=True + is_removed=True  → feed parsed but the comment id is
+                   absent (removed/deleted) — same signal Check Live uses.
+
+    Routes through REDDIT_PROXY_URL (the worker) when set.
+    """
+    import requests as _requests
+    import xml.etree.ElementTree as _ET
+    from html import unescape as _unescape
+    from datetime import datetime as _dt, timezone as _tz
+
+    out = {"body": None, "posted_at": None, "is_removed": False,
+           "found": False, "author": None}
+    if not comment_url:
+        return out
+
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)(?:/[^/]*)*?/([a-z0-9]{4,12})/?(?:\?|$)",
+                  comment_url, re.IGNORECASE)
+    if not m:
+        mp = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)", comment_url, re.IGNORECASE)
+        seg = [s for s in comment_url.split("?")[0].rstrip("/").split("/") if s]
+        if not mp or not seg:
+            return out
+        sub, post_id, cid = mp.group(1), mp.group(2), seg[-1]
+    else:
+        sub, post_id, cid = m.group(1), m.group(2), m.group(3)
+    cid = cid.lower()
+    if cid == post_id.lower():
+        return out  # post link, not a comment link
+
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    rss_url = f"{base}/r/{sub}/comments/{post_id}/comment/{cid}/.rss"
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+    }
+
+    def _strip_tags(html):
+        txt = re.sub(r"<[^>]+>", " ", html or "")
+        return re.sub(r"\s+", " ", _unescape(txt)).strip()
+
+    def _pub_to_stored(s):
+        if not s:
+            return None
+        try:
+            d = _dt.fromisoformat(s.strip().replace("Z", "+00:00"))
+            if d.tzinfo:
+                d = d.astimezone(_tz.utc).replace(tzinfo=None)
+            return d.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+    try:
+        r = _requests.get(rss_url, headers=headers, timeout=timeout,
+                          proxies={"http": None, "https": None})
+        if r.status_code != 200:
+            return out
+        text = r.text or ""
+        if not text.lstrip().startswith("<?xml"):
+            return out
+        root = _ET.fromstring(text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            eid = (entry.findtext("atom:id", default="", namespaces=ns) or "")
+            if cid not in eid.lower():
+                continue
+            content = entry.findtext("atom:content", default="", namespaces=ns) or ""
+            body = _strip_tags(content)
+            author = entry.findtext("atom:author/atom:name", default="", namespaces=ns) or ""
+            out["found"] = True
+            out["body"] = body or None
+            out["posted_at"] = _pub_to_stored(
+                entry.findtext("atom:published", default="", namespaces=ns)
+                or entry.findtext("atom:updated", default="", namespaces=ns))
+            out["author"] = (author or "").strip().lstrip("/").replace("u/", "").strip() or None
+            stripped = (body or "").strip().lower()
+            out["is_removed"] = stripped in ("[removed]", "[deleted]")
+            return out
+        # Feed parsed but the comment id isn't in it → removed/deleted.
+        out["found"] = True
+        out["is_removed"] = True
+        return out
+    except Exception as e:
+        print(f"[COMMENT-RSS-META] failed for {comment_url}: {e}", flush=True)
+        return out
+
+
 def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path. Three transport modes, in priority order:
 
@@ -2690,6 +2792,7 @@ def api_bulk_deploy_from_sheet():
             reddit_get=_reddit_get_json,
             resolve_share=_resolve_reddit_share_url_proxy,
             source_filter=source_filter,
+            comment_meta_fetcher=_reddit_comment_meta_via_rss,
             _task_id=_task_id,
         )
 

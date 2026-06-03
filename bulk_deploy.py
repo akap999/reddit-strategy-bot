@@ -779,7 +779,8 @@ def _rollup_tier1(url, per_row, liveness, posted_at):
 def match_and_deploy_comment(db, classified: dict, *,
                               reddit_get: Callable,
                               similarity_threshold: float = 0.5,
-                              source_filter: Optional[str] = None) -> dict:
+                              source_filter: Optional[str] = None,
+                              comment_meta_fetcher: Optional[Callable] = None) -> dict:
     """Process a single comment URL — Tier 1 → Tier 2 → no-match.
 
     Returns a result dict the orchestrator records in tasks.progress.
@@ -803,6 +804,25 @@ def match_and_deploy_comment(db, classified: dict, *,
     # might exist from prior workflows.
     want_legacy = source_filter in (None, "comment")
     want_search = source_filter in (None, "search_comment")
+
+    def _get_meta(u):
+        """Fetch comment meta, preferring the RSS fetcher (cloud-IP-safe).
+        Falls back to the JSON `reddit_get` path only when RSS is
+        inconclusive (found=False) — covers local dev where JSON works.
+        """
+        if comment_meta_fetcher is not None:
+            try:
+                m = comment_meta_fetcher(u)
+            except Exception:
+                m = None
+            if m and m.get("found"):
+                return m
+            jm = fetch_reddit_comment_meta(u, reddit_get=reddit_get)
+            if jm and jm.get("found"):
+                return jm
+            return m or jm or {"body": None, "posted_at": None,
+                               "is_removed": False, "found": False, "author": None}
+        return fetch_reddit_comment_meta(u, reddit_get=reddit_get)
 
     # --- Tier 1: direct URL match (filtered by scope) ---------------------
     # Two passes: first an EXACT match on the stored URL, then a
@@ -845,7 +865,7 @@ def match_and_deploy_comment(db, classified: dict, *,
     liveness = "missing"
     tier1_results = []
     if tier1_matches:
-        meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+        meta = _get_meta(url)
         posted_at = meta.get("posted_at")
         liveness = classify_liveness(meta)
         tier1_results = [
@@ -925,7 +945,7 @@ def match_and_deploy_comment(db, classified: dict, *,
     # column) AND liveness — no extra round trip. Reuse Tier-1's fetch
     # if we already did it.
     if meta is None:
-        meta = fetch_reddit_comment_meta(url, reddit_get=reddit_get)
+        meta = _get_meta(url)
         posted_at = meta.get("posted_at")
         liveness = classify_liveness(meta)
     body = meta.get("body")
@@ -1205,6 +1225,7 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
                      reddit_get: Callable,
                      source_filter: Optional[str] = None,
                      resolve_share: Optional[Callable] = None,
+                     comment_meta_fetcher: Optional[Callable] = None,
                      _task_id: Optional[str] = None) -> dict:
     """Walk every URL in the sheet, match each to a DB row, mark deployed.
 
@@ -1221,6 +1242,15 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
     `/s/<token>` short URL and returns its canonical `/comments/...`
     form. If not provided, we use the local `resolve_reddit_share_url`
     fallback (direct request, no proxy).
+
+    `comment_meta_fetcher` (optional) is a callable
+    `(comment_url) -> {body, posted_at, is_removed, found, author}` that
+    fetches a comment's metadata via Reddit RSS (the cloud-IP-safe path).
+    When provided, it's preferred over the JSON `reddit_get` fetch —
+    the JSON API is auth-gated for datacenter IPs, which made every row
+    fall through to liveness='missing' / no_match on the deployed host.
+    The JSON fetch remains as a local-dev fallback when RSS is
+    inconclusive.
 
     Designed to be called via app.py's `start_task(...,
     pass_task_id=True)` — `_task_id` is injected by `start_task`.
@@ -1285,6 +1315,7 @@ def run_bulk_deploy(sheet_url: str, *, db_factory: Callable,
                 row = match_and_deploy_comment(
                     db, classified, reddit_get=reddit_get,
                     source_filter=source_filter,
+                    comment_meta_fetcher=comment_meta_fetcher,
                 )
                 # Preserve the original sheet URL in the report so the
                 # user can correlate report rows back to their sheet.

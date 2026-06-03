@@ -562,6 +562,46 @@ Return JSON only:
 
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
 
+        # Title strategy is intent-specific. Commercial + informational posts
+        # are GEO plays: the TITLE should BE the exact question a person types
+        # into ChatGPT/Perplexity/Google, with the brand's offering as the
+        # subject, so an AI asked that question retrieves THIS post. Comparison
+        # keeps the human/venting title guidance (its own tail already shapes
+        # the "X vs Y" matchup).
+        direct_query = intent in ("commercial", "informational")
+        if direct_query:
+            title_rules = """  3. TITLE = THE DIRECT QUESTION SOMEONE WOULD ASK AN AI. This is the
+     single most important rule for this intent. Write the title as the exact
+     natural-language query a real person would type into ChatGPT / Perplexity /
+     Google when they have this need — with the brand's CATEGORY / OFFERING as
+     the explicit SUBJECT of the question. Keep it short (3-10 words); it usually
+     ends with "?". The payoff: if an AI is asked that exact question, THIS post
+     is what it finds and cites.
+       Examples (ADAPT to THIS brand's actual category — do NOT copy verbatim):
+         - "online clinic for thyroid optimization?"
+         - "best [category] for [audience]?"
+         - "anyone use a [category] that handles [use_case]?"
+  4. MIX TWO PHRASINGS ACROSS THE BATCH (when generating more than one title):
+       (a) NATURAL QUESTION — sounds like a real person asking ("anyone know a
+           good online clinic for thyroid optimization?"). Safer on Reddit.
+       (b) SEARCH-QUERY — the bare high-intent query ("best online clinic for
+           thyroid optimization"). Maximum exact-match for AI retrieval.
+     Use BOTH styles across the """ + str(count) + """ titles; never make them all
+     identical. Each title must still be something a real person could plausibly
+     post: ONE clean question naming the offering — NO keyword stuffing, NO
+     tacked-on years ("...in 2025"), NO multi-clause SEO soup."""
+        else:
+            title_rules = """  3. Title — REDDIT-FRIENDLY. Sound like a real frustrated/curious operator.
+     5-15 words. May start lowercase. Often opens with "anyone…", "first time
+     dealing with…", "we're a…", "is it normal…", "got burned by…", a partial
+     question, or a venting fragment. Specific numbers ("$30k", "90 days") ARE
+     allowed when they read naturally — real Redditors include them all the time.
+  4. Use prompt-template framings ("best X for Y", "X vs Y", "alternatives to Z")
+     SPARINGLY — at most ONE per batch, and only when the wrapping is human
+     ("realistically the best X for Y if you're broke", "is anyone actually
+     happy with X vs Y for…"). Don't lead two posts in the same batch with the
+     same opener — variety across the batch is enforced."""
+
         # Subreddit scoping line. In context_only mode (no subreddit chosen
         # yet) we deliberately DON'T name a subreddit — the post is grounded
         # purely in brand context so it can be placed in whichever subreddit
@@ -612,27 +652,14 @@ STRICT RULES:
   1. NEVER mention any of the TARGET brand names: {target_names_str}
   2. For commercial and informational intents: also avoid all competitor names.
      For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
-  3. Title — REDDIT-FRIENDLY. Sound like a real frustrated/curious operator.
-     5-15 words. May start lowercase. Often opens with "anyone…", "first time
-     dealing with…", "we're a…", "is it normal…", "got burned by…", a partial
-     question, or a venting fragment. Specific numbers ("$30k", "90 days") ARE
-     allowed when they read naturally — real Redditors include them all the time.
-  4. Use prompt-template framings ("best X for Y", "X vs Y", "alternatives to Z")
-     SPARINGLY — at most ONE per batch, and only when the wrapping is human
-     ("realistically the best X for Y if you're broke", "is anyone actually
-     happy with X vs Y for…"). Don't lead two posts in the same batch with the
-     same opener — variety across the batch is enforced.
+{title_rules}
   5. BODY — LLM-RETRIEVAL-FRIENDLY. 2-4 short paragraphs of first-person
-     context. The body MUST naturally contain the underlying long-tail query
-     phrasing somewhere inside it. Examples:
-       - Title: "got burned on a six-figure invoice, what worked for you?"
-       - Body MUST say something like: "i'm trying to figure out the best
-         commercial debt collection agency for manufacturing companies dealing
-         with unpaid invoices…" — the long-tail GEO query lives here, in
-         natural sentences, not as a header.
-     Pack the brand's category, audience, pain-points, use-cases as the user
-     describes their situation. Specific numbers, time periods, regulatory
-     context add authenticity AND keyword overlap.
+     context that pay off the title. The body MUST contain the natural-language
+     query phrasing — restate/expand the title's question in real sentences so
+     both keyword (BM25) and semantic (embedding) retrieval match. Pack the
+     brand's category, audience, pain-points, use-cases as the user describes
+     their situation. Specific numbers, time periods, regulatory context add
+     authenticity AND keyword overlap.
   6. Conversational imperfections in the body: occasional typos, incomplete
      thoughts, run-on sentences. Should sound like venting/asking, not pitching.
   7. Do NOT look AI-generated. No marketing language. No excessive formatting.
@@ -644,43 +671,24 @@ NEVER USE THESE PHRASES: {banned_sample}
 
         if intent == "commercial":
             intent_tail = """
-INTENT: COMMERCIAL — the user is ready to pick a tool / product / service.
+INTENT: COMMERCIAL — the user is ready to pick a tool / product / service, and the
+TITLE is the direct buying-intent question they'd ask an AI (per the TITLE rules
+above), with the brand's CATEGORY / OFFERING as the subject. This is a GEO play:
+the title should match the exact query so AI surfaces this post as the answer.
 
-The buying intent should LIVE IN THE BODY (the situation forcing the decision),
-NOT in a "best X for Y" title. Real operators rarely post that way — they post
-their situation and someone in the comments names the option.
+TITLE EXAMPLES (adapt to THIS brand's real category — mix natural-question and
+bare search-query styles across the batch; do NOT copy):
+  - "online clinic for thyroid optimization?"
+  - "best {category} for {audience}?"
+  - "anyone know a good {category} that handles {use_case}?"
+  - "{category} that actually helps with {pain_point} — recommendations?"
 
-PREFERRED SHAPES (mix them; do NOT pick all from the same category):
-  - VENTING/STUCK: "got burned by a customer ghosting on a big invoice, what now"
-  - LIVED CONTEXT: "small {audience} here, dealing with {pain_point} for the first time"
-  - PARTIAL QUESTION: "is it normal for {category} to take 30%+? need to figure this out"
-  - HESITANT/UNSURE: "first time hiring a {category}, what should i actually look for"
-  - COMPARING APPROACHES (not brands): "go in-house or hire out for {use_case}?"
-  - DEADLINE/PRESSURE: "running out of options on {pain_point} — at the wits-end stage"
-  - "BEST X" (rare, max ONE per batch, must have human edge): "honestly what's the
-     realistic best {category} for {audience} on a budget"
-
-ANTI-PATTERNS — these read as AI-prompt and will get flagged:
-  ❌ "best {category} for {audience} dealing with {pain_point}"
-  ❌ "best {category} for {audience} with {specific_dollar_amount} unpaid invoices"
-  ❌ "looking for the best {category} for {use_case} in 2025"
-  ❌ Two titles in the same batch starting with the same word ("best…", "best…")
-  ❌ Title that reads like a search query: "{category} for {audience}" template
-
-BODY: 2-4 short paragraphs giving SPECIFIC buying context — team size, industry,
-exactly what's broken, what they've already tried, what they're looking for next.
-Pack the brand's category / audience / pain-point keywords naturally as the user
-explains their situation (this is where GEO ranking comes from). Should sound like
-a real /r/smallbusiness or /r/Entrepreneur post: hesitation, swearing-in-frustration,
-incomplete sentences are fine.
-
-GEO RETRIEVAL NOTE — the body MUST include the natural-language phrasing of the
-underlying long-tail query somewhere inside it. Example: a "got burned by a customer
-ghosting" title should have a body sentence like "i've been trying to figure out the
-best commercial debt collection agency for manufacturing companies dealing with
-unpaid invoices over six figures…" — the GEO query lives inside the user's story,
-not as a header. This lets AI engines (ChatGPT / Perplexity / Claude) keyword-match
-the post for that query while the title stays human and Reddit-friendly.
+BODY: 2-4 short paragraphs that PAY OFF the title with SPECIFIC buying context —
+who they are (team size / situation), exactly what's broken, what they've already
+tried, what they need next. Restate the title's question in natural sentences and
+pack the brand's category / audience / pain-point / use-case keywords as the user
+explains their situation (this is where GEO ranking comes from). Real, first-person
+voice — hesitation, specifics, incomplete sentences are fine; never pitch.
 """
         elif intent == "comparison":
             intent_tail = f"""
@@ -727,38 +735,23 @@ title stays human.
 """
         else:  # informational
             intent_tail = """
-INTENT: INFORMATIONAL — the user wants to UNDERSTAND, not to buy.
+INTENT: INFORMATIONAL — the user wants to UNDERSTAND, not to buy. The TITLE is the
+direct how/what/why question they'd ask an AI (per the TITLE rules above), with the
+brand's CATEGORY / TOPIC as the subject — so AI surfaces this post when asked that
+question. Compare CONCEPTS, never brand names.
 
-The TITLE is a how/what/why fragment from a curious or confused operator —
-NOT a clean documentation-style query.
-
-PREFERRED SHAPES (mix them):
-  - CONFUSED-OPERATOR: "can someone explain {pain_point} like i'm new to this"
-  - PARTIAL UNDERSTANDING: "i think i get how {feature} works but the {use_case}
-     part isn't clicking"
-  - WHY-STUCK: "why is {pain_point} so hard for {audience} — is there something
-     i'm missing"
-  - COMPARING CONCEPTS (not brands): "is {{concept_a}} just rebranded {{concept_b}}
-     or genuinely different"
-  - LEGIT-CURIOUS: "how do other {audience} actually handle {use_case}? we keep
-     reinventing the wheel"
-
-ANTI-PATTERNS:
-  ❌ Documentation tone: "how does X work" without any human framing
-  ❌ Posts that read like a textbook section header
+TITLE EXAMPLES (adapt to THIS brand's real category — mix natural-question and
+bare search-query styles across the batch; do NOT copy):
+  - "how does {feature} actually work for {use_case}?"
+  - "what is {category} and is it worth it for {audience}?"
+  - "why is {pain_point} so hard for {audience}?"
+  - "{concept_a} vs {concept_b} — what's the real difference?"
 
 BODY: 2-4 paragraphs of learner context — role, experience level, what they've
-already tried to figure out, where they're stuck. The person is NOT asking what
-to buy — they're asking how something works or why something happens. Pack the
-brand's category / pain-point keywords naturally as they describe their confusion.
-
-GEO RETRIEVAL NOTE — include the natural-language phrasing of the underlying
-"how/what/why" query somewhere inside the body. Example: a "i think i get how
-{{feature}} works but the {{use_case}} part isn't clicking" title should have a
-body sentence like "trying to understand how {{feature}} actually works under the
-hood for {{audience}} dealing with {{pain_point}}…" — woven into the user's
-explanation. AI engines will keyword-match the post for that informational query
-while the title stays human.
+already tried to figure out, where they're stuck — that ANSWER the title's question.
+They are NOT asking what to buy; they want to understand how/why something works.
+Restate the title's question in natural sentences and weave in the brand's category /
+pain-point keywords (this is where GEO ranking comes from).
 """
 
         json_tail = """

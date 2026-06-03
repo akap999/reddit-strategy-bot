@@ -3103,6 +3103,76 @@ def api_check_live_logs():
         db.close()
 
 
+@app.route("/api/check-live/revert/preview", methods=["GET"])
+def api_check_live_revert_preview():
+    """Read-only: identify recent check-live 'runs' and (optionally)
+    preview exactly what reverting a window would change. Nothing is
+    modified. Use this to find the run that flipped your statuses.
+
+    Query params:
+      hours   — look-back window for the run list (default 48)
+      minutes — convenience: preview reverting everything changed in the
+                last N minutes
+      since / until — explicit UTC 'YYYY-MM-DD HH:MM:SS' bounds to preview
+      action  — repeatable; limit to 'marked_dead' and/or 'restored'
+    """
+    db = get_db()
+    try:
+        hours = request.args.get("hours", 48, type=int)
+        runs = db.get_check_live_log_runs(hours=hours)
+        since = request.args.get("since") or None
+        until = request.args.get("until") or None
+        minutes = request.args.get("minutes", type=int)
+        if minutes and not since:
+            since = db.conn.execute(
+                "SELECT datetime('now', ?)", (f"-{int(minutes)} minutes",)
+            ).fetchone()[0]
+        actions = request.args.getlist("action") or None
+        preview = None
+        if since or until:
+            preview = db.revert_check_live_window(
+                since=since, until=until, actions=actions, dry_run=True)
+        return jsonify({"runs": runs, "preview": preview})
+    finally:
+        db.close()
+
+
+@app.route("/api/check-live/revert", methods=["POST"])
+def api_check_live_revert():
+    """Revert a window of check-live status changes back to each row's
+    prior status (from the check_live_log audit trail).
+
+    Body: {minutes? | since?/until?, actions?, confirm?}
+      - Provide `minutes` (last N minutes) OR `since`/`until`
+        (UTC 'YYYY-MM-DD HH:MM:SS').
+      - `actions` (optional): subset of ['marked_dead','restored'].
+      - confirm must be true to APPLY; otherwise a dry-run preview is
+        returned (changes nothing).
+    """
+    data = request.get_json() or {}
+    since = data.get("since")
+    until = data.get("until")
+    minutes = data.get("minutes")
+    actions = data.get("actions")
+    confirm = bool(data.get("confirm"))
+    db = get_db()
+    try:
+        if minutes and not since:
+            since = db.conn.execute(
+                "SELECT datetime('now', ?)", (f"-{int(minutes)} minutes",)
+            ).fetchone()[0]
+        if not since and not until:
+            return jsonify({
+                "error": "provide `minutes`, or `since`/`until` "
+                         "(UTC 'YYYY-MM-DD HH:MM:SS')"
+            }), 400
+        report = db.revert_check_live_window(
+            since=since, until=until, actions=actions, dry_run=not confirm)
+        return jsonify(report)
+    finally:
+        db.close()
+
+
 @app.route("/api/subreddits/<int:sid>/backfill-keywords", methods=["POST"])
 def api_backfill_keywords(sid):
     def task():

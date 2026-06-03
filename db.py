@@ -3348,8 +3348,16 @@ class Database:
         return old_status
 
     def undo_report(self, comment_id, source, actor_email=None):
-        """Reverse a 'report' status, restoring prev_status (or 'paid'
-        as a safe fallback). Returns the new status or None on failure.
+        """Reverse a 'report' status, restoring the comment to the live
+        'deployed' pipeline state. Returns the new status or None on
+        failure.
+
+        Always restores to 'deployed' (never 'paid'): undoing a report
+        means the comment is no longer in a monthly report, but it IS
+        still a live deployed comment. The operator re-marks it 'paid'
+        explicitly if it was paid for — we don't silently resurrect the
+        prior 'paid' state, which previously left reverted rows stuck in
+        a paid bucket the user didn't expect.
         """
         table = "comments" if source == "comment" else "search_comments"
         row = self.conn.execute(
@@ -3358,7 +3366,7 @@ class Database:
         ).fetchone()
         if not row or row["status"] != "report":
             return None
-        restore_to = row["prev_status"] if row["prev_status"] in ("deployed", "paid") else "paid"
+        restore_to = "deployed"
         self.conn.execute(
             f"""UPDATE {table}
                 SET status = ?, prev_status = NULL,
@@ -6974,3 +6982,170 @@ class Database:
         params.extend([limit, offset])
         rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
+
+    def get_check_live_log_runs(self, hours=48, gap_minutes=5):
+        """Cluster recent check_live_log rows into 'runs' by time gaps so
+        the operator can identify exactly which run changed statuses.
+
+        A new run starts whenever two consecutive log rows are more than
+        `gap_minutes` apart. Returns runs most-recent-first, each:
+          {started_at, ended_at, count, by_action, by_new_status,
+           by_source, sample}
+        Timestamps are the raw check_live_log.created_at strings (UTC),
+        suitable to pass straight back into revert_check_live_window().
+        """
+        from datetime import datetime as _dt
+        rows = self.conn.execute(
+            """SELECT comment_id, source, action, prev_status, new_status, created_at
+               FROM check_live_log
+               WHERE created_at >= datetime('now', ?)
+               ORDER BY created_at ASC, id ASC""",
+            (f"-{int(hours)} hours",)
+        ).fetchall()
+
+        def _parse(ts):
+            try:
+                return _dt.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return None
+
+        runs = []
+        cur = None
+        last_t = None
+        for r in rows:
+            t = _parse(r["created_at"])
+            new_run = (
+                cur is None or
+                (last_t is not None and t is not None and
+                 (t - last_t).total_seconds() > gap_minutes * 60)
+            )
+            if new_run:
+                cur = {
+                    "started_at": r["created_at"], "ended_at": r["created_at"],
+                    "count": 0, "by_action": {}, "by_new_status": {},
+                    "by_source": {}, "sample": [],
+                }
+                runs.append(cur)
+            cur["ended_at"] = r["created_at"]
+            cur["count"] += 1
+            cur["by_action"][r["action"]] = cur["by_action"].get(r["action"], 0) + 1
+            cur["by_new_status"][r["new_status"]] = cur["by_new_status"].get(r["new_status"], 0) + 1
+            cur["by_source"][r["source"]] = cur["by_source"].get(r["source"], 0) + 1
+            if len(cur["sample"]) < 8:
+                cur["sample"].append({
+                    "id": r["comment_id"], "source": r["source"],
+                    "action": r["action"], "from": r["prev_status"],
+                    "to": r["new_status"], "at": r["created_at"],
+                })
+            last_t = t
+        runs.reverse()
+        return runs
+
+    def revert_check_live_window(self, *, since=None, until=None, actions=None,
+                                 dry_run=True):
+        """Revert status changes recorded in check_live_log within a time
+        window back to the status each row had BEFORE the change.
+
+        Safety rules:
+          - Restores to the logged `prev_status` (the true original,
+            captured for BOTH marked_dead and restored actions).
+          - Only reverts a row when its CURRENT status still equals the
+            logged `new_status` for that run — so a status the operator
+            (or a later run) changed afterwards is left untouched.
+          - Dedupes per (comment_id, source): original = the EARLIEST
+            prev_status in the window; expected-current = the LATEST
+            new_status in the window.
+          - dry_run=True changes nothing; it returns the same report so
+            the operator can preview precisely what would happen.
+
+        `since`/`until` are UTC 'YYYY-MM-DD HH:MM:SS' strings compared
+        against check_live_log.created_at. `actions` optionally limits to
+        a subset of {'marked_dead','restored'}.
+
+        Each applied revert is itself logged (action='reverted') so the
+        audit trail stays complete.
+        """
+        where = ["action != 'reverted'"]
+        params = []
+        if since:
+            where.append("created_at >= ?"); params.append(since)
+        if until:
+            where.append("created_at <= ?"); params.append(until)
+        if actions:
+            qmarks = ",".join("?" for _ in actions)
+            where.append(f"action IN ({qmarks})"); params.extend(actions)
+        rows = self.conn.execute(
+            f"""SELECT comment_id, source, action, prev_status, new_status, created_at
+                FROM check_live_log
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at ASC, id ASC""",
+            params
+        ).fetchall()
+
+        # Group per (comment_id, source): earliest prev = true original,
+        # latest new = what the row should currently be if untouched.
+        groups = {}
+        order = []
+        for r in rows:
+            k = (r["comment_id"], r["source"])
+            if k not in groups:
+                groups[k] = {"orig": r["prev_status"], "expected": r["new_status"]}
+                order.append(k)
+            else:
+                groups[k]["expected"] = r["new_status"]
+
+        report = {
+            "window": {"since": since, "until": until},
+            "actions": actions or ["marked_dead", "restored"],
+            "dry_run": dry_run,
+            "total_log_rows": len(rows),
+            "affected_comments": len(groups),
+            "reverted": [], "skipped": [],
+            "note": ("Rows whose current status no longer matches the run's "
+                     "result are skipped (changed since the run). Restoring a "
+                     "row to 'paid' does not recover its original paid_at "
+                     "timestamp."),
+        }
+
+        for k in order:
+            cid, src = k
+            g = groups[k]
+            target = g["orig"]
+            table = "comments" if src == "comment" else "search_comments"
+            cur = self.conn.execute(
+                f"SELECT status FROM {table} WHERE id = ?", (cid,)
+            ).fetchone()
+            if not cur:
+                report["skipped"].append({"id": cid, "source": src, "reason": "row not found"})
+                continue
+            cur_status = cur["status"]
+            if not target:
+                report["skipped"].append({
+                    "id": cid, "source": src, "current": cur_status,
+                    "reason": "no recorded prior status to restore"})
+                continue
+            if cur_status != g["expected"]:
+                report["skipped"].append({
+                    "id": cid, "source": src, "current": cur_status,
+                    "expected": g["expected"], "would_restore_to": target,
+                    "reason": "current status changed since the run — left as-is"})
+                continue
+            if cur_status == target:
+                report["skipped"].append({
+                    "id": cid, "source": src, "current": cur_status,
+                    "reason": "already at target"})
+                continue
+            report["reverted"].append({"id": cid, "source": src,
+                                       "from": cur_status, "to": target})
+            if not dry_run:
+                self.conn.execute(
+                    f"UPDATE {table} SET status = ?, prev_status = NULL WHERE id = ?",
+                    (target, cid))
+                try:
+                    self.log_live_check(cid, src, "", "reverted", cur_status, target)
+                except Exception:
+                    pass
+
+        if not dry_run:
+            self.conn.commit()
+        return report

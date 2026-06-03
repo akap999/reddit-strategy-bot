@@ -578,12 +578,21 @@ Return JSON only:
          recommend a specific product/service to use? If it would instead just
          explain a concept, give general tips, or describe "what to look for,"
          the title is wrong — rewrite it as a request for a recommendation.
-       • OUR-BRAND CHECK — is the question narrowed (using the brand's real
-         category / who it's for / the specific problem or use-case it's best at,
-         from the context above) enough that THIS brand is a natural pick? If it's
-         broad enough that only a big generic market leader would be named, it's
-         too broad — tighten it to the brand's actual niche. NEVER write the
-         target brand name in the title.
+       • OUR-BRAND CHECK — would THIS brand be a natural answer? Read the BRAND
+         CONTEXT to decide which kind of brand it is:
+           - SPECIFIC product or service → narrow the question by its category /
+             who it's for / the problem or use-case it's best at, so it's a
+             natural pick and not a query only a big generic market leader wins.
+           - SUPPLIER / RETAILER / MARKETPLACE / DIRECTORY that sells or
+             aggregates many products or providers → category-level BUY-INTENT
+             questions are on-target: asking where to buy / the best place to
+             order / who sells the category (online, with fast shipping, with
+             financing, for pros, hard-to-find gear, etc.). The brand IS the
+             literal answer to those, so do NOT force it down to a single
+             product — across the batch, MIX these supplier-level questions with
+             more specific product/task ones.
+         Either way, NEVER write the target brand name in the title, and never
+         turn it into a generic info / "do they work" / how-it-works question.
   4. Keep titles short (~3-12 words) and human — a real person could post it. VARY
      the wording and structure across the batch; do NOT fall into one repeated
      shape, do NOT keyword-stuff, do NOT append years ("2025"). Mix more
@@ -823,7 +832,7 @@ Rate 0-10 on BOTH dimensions together:
   (1) How likely a real person types this exact question (or close paraphrase) into an AI / search engine, AND
   (2) Whether the NATURAL ANSWER is to RECOMMEND a specific product / brand / service to use or buy.
 
-High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y").
+High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services/suppliers ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y", "where to buy X online", "best place to order X", "who sells X").
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
 Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs.
 

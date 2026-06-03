@@ -562,45 +562,33 @@ Return JSON only:
 
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
 
-        # Title strategy is intent-specific. Commercial + informational posts
-        # are GEO plays: the TITLE should BE the exact question a person types
-        # into ChatGPT/Perplexity/Google, with the brand's offering as the
-        # subject, so an AI asked that question retrieves THIS post. Comparison
-        # keeps the human/venting title guidance (its own tail already shapes
-        # the "X vs Y" matchup).
-        direct_query = intent in ("commercial", "informational")
-        if direct_query:
-            title_rules = """  3. TITLE = THE DIRECT QUESTION SOMEONE WOULD ASK AN AI. This is the
-     single most important rule for this intent. Write the title as the exact
-     natural-language query a real person would type into ChatGPT / Perplexity /
-     Google when they have this need — with the brand's CATEGORY / OFFERING as
-     the explicit SUBJECT of the question. Keep it short (3-10 words); it usually
-     ends with "?". The payoff: if an AI is asked that exact question, THIS post
-     is what it finds and cites.
-       Examples (ADAPT to THIS brand's actual category — do NOT copy verbatim):
-         - "online clinic for thyroid optimization?"
-         - "best [category] for [audience]?"
-         - "anyone use a [category] that handles [use_case]?"
-  4. MIX TWO PHRASINGS ACROSS THE BATCH (when generating more than one title):
-       (a) NATURAL QUESTION — sounds like a real person asking ("anyone know a
-           good online clinic for thyroid optimization?"). Safer on Reddit.
-       (b) SEARCH-QUERY — the bare high-intent query ("best online clinic for
-           thyroid optimization"). Maximum exact-match for AI retrieval.
-     Use BOTH styles across the """ + str(count) + """ titles; never make them all
-     identical. Each title must still be something a real person could plausibly
-     post: ONE clean question naming the offering — NO keyword stuffing, NO
-     tacked-on years ("...in 2025"), NO multi-clause SEO soup."""
-        else:
-            title_rules = """  3. Title — REDDIT-FRIENDLY. Sound like a real frustrated/curious operator.
-     5-15 words. May start lowercase. Often opens with "anyone…", "first time
-     dealing with…", "we're a…", "is it normal…", "got burned by…", a partial
-     question, or a venting fragment. Specific numbers ("$30k", "90 days") ARE
-     allowed when they read naturally — real Redditors include them all the time.
-  4. Use prompt-template framings ("best X for Y", "X vs Y", "alternatives to Z")
-     SPARINGLY — at most ONE per batch, and only when the wrapping is human
-     ("realistically the best X for Y if you're broke", "is anyone actually
-     happy with X vs Y for…"). Don't lead two posts in the same batch with the
-     same opener — variety across the batch is enforced."""
+        # Universal title strategy (ALL intents). The TITLE must be a
+        # recommendation-eliciting question — one whose natural AI answer is to
+        # name a specific product/service — and narrowed to the brand's niche so
+        # THIS brand is the natural pick. Expressed as instructions only: NO
+        # example titles and NO fixed pattern (either would become a template the
+        # model defaults to, flattening variety and anchoring the domain).
+        title_rules = """  3. TITLE = THE RECOMMENDATION QUESTION SOMEONE ASKS AN AI. Write the title as a
+     real, natural question a person types into ChatGPT / Perplexity / Google when
+     they want a recommendation for what to USE or BUY. The point: when an AI is
+     asked this, the helpful answer is to NAME a specific product / service /
+     provider — and, given the BRAND CONTEXT above, this brand is one that fits.
+     Every title must pass BOTH checks:
+       • RECOMMENDATION CHECK — if a helpful AI answered this title, would it
+         recommend a specific product/service to use? If it would instead just
+         explain a concept, give general tips, or describe "what to look for,"
+         the title is wrong — rewrite it as a request for a recommendation.
+       • OUR-BRAND CHECK — is the question narrowed (using the brand's real
+         category / who it's for / the specific problem or use-case it's best at,
+         from the context above) enough that THIS brand is a natural pick? If it's
+         broad enough that only a big generic market leader would be named, it's
+         too broad — tighten it to the brand's actual niche. NEVER write the
+         target brand name in the title.
+  4. Keep titles short (~3-12 words) and human — a real person could post it. VARY
+     the wording and structure across the batch; do NOT fall into one repeated
+     shape, do NOT keyword-stuff, do NOT append years ("2025"). Mix more
+     conversational phrasings with more direct search-style ones, but EVERY title
+     must still lead to recommending a specific product/service."""
 
         # Subreddit scoping line. In context_only mode (no subreddit chosen
         # yet) we deliberately DON'T name a subreddit — the post is grounded
@@ -671,87 +659,59 @@ NEVER USE THESE PHRASES: {banned_sample}
 
         if intent == "commercial":
             intent_tail = """
-INTENT: COMMERCIAL — the user is ready to pick a tool / product / service, and the
-TITLE is the direct buying-intent question they'd ask an AI (per the TITLE rules
-above), with the brand's CATEGORY / OFFERING as the subject. This is a GEO play:
-the title should match the exact query so AI surfaces this post as the answer.
-
-TITLE EXAMPLES (adapt to THIS brand's real category — mix natural-question and
-bare search-query styles across the batch; do NOT copy):
-  - "online clinic for thyroid optimization?"
-  - "best {category} for {audience}?"
-  - "anyone know a good {category} that handles {use_case}?"
-  - "{category} that actually helps with {pain_point} — recommendations?"
+INTENT: COMMERCIAL — the person is ready to CHOOSE. Per the TITLE rules above, the
+title is a question that asks for a recommendation of what to use/buy for their
+specific situation, narrowed (via the brand context) to the niche where this brand
+is a natural pick — so a helpful AI answers by naming a specific product/service.
+Do not write a generic "do they work / what to look for / how does it work"
+question; the answer to a commercial title must be a recommendation.
 
 BODY: 2-4 short paragraphs that PAY OFF the title with SPECIFIC buying context —
-who they are (team size / situation), exactly what's broken, what they've already
+who they are (situation / scale), exactly what's broken, what they've already
 tried, what they need next. Restate the title's question in natural sentences and
-pack the brand's category / audience / pain-point / use-case keywords as the user
-explains their situation (this is where GEO ranking comes from). Real, first-person
-voice — hesitation, specifics, incomplete sentences are fine; never pitch.
+weave in the brand's category / audience / pain-point / use-case terms as the
+person explains their situation (this is where GEO ranking comes from). Real,
+first-person voice — hesitation, specifics, incomplete sentences are fine; never
+pitch, never name the target brand.
 """
         elif intent == "comparison":
             intent_tail = f"""
-INTENT: COMPARISON — the user is weighing 2+ options against each other.
-
-You MAY (and SHOULD) name competitor brands from this list:
+INTENT: COMPARISON — the person is weighing options. Per the TITLE rules above, the
+title is a recommendation question framed around a switch / alternative / matchup.
+You MAY (and should) name a competitor brand from this list to anchor it:
   COMPETITORS: {competitors_str}
 You must still NEVER mention the TARGET brand name(s): {target_names_str}.
 
-Real users DO post "X vs Y" titles, but the very best comparison posts wrap the
-comparison in lived context — the title gives a hint of the situation, not just
-the matchup.
+Frame the question so the natural answer is which option to pick for the person's
+SPECIFIC need — leaving room for "our kind of product/service" (the unnamed better
+fit, narrowed via the brand context to this brand's niche) to be the recommended
+answer. Across the batch, only one title at most should be a bare "X vs Y" matchup;
+the rest should come at the comparison from different angles (switching from a
+named competitor, looking for an alternative for a specific use-case, etc.) — vary
+the wording, don't settle into one shape. If the COMPETITORS list is empty,
+reference competitors by attribute instead of by name.
 
-PREFERRED SHAPES (mix them; vary openings):
-  - DIRECT MATCHUP (no more than ONE per batch): "{{competitor_a}} vs {{competitor_b}}
-     — anyone actually switched between these recently?"
-  - LIVED CONTEXT: "currently on {{competitor_a}}, my {{pain_point}} is killing us,
-     what did you switch to"
-  - REGRET/CONSIDERING: "regretting going with {{competitor_a}}, what are the
-     other realistic options"
-  - PRICE-FRAMED: "is {{competitor_a}} actually worth what they charge if we mostly
-     need {{feature}}?"
-  - OPEN-ENDED: "moving away from {{competitor_a}} — what are people in {{audience}}
-     using these days"
-
-ANTI-PATTERNS:
-  ❌ Two titles in one batch using "{{X}} vs {{Y}}" pattern
-  ❌ Naming all competitors in one title ("X vs Y vs Z vs W")
-  ❌ Generic "alternatives to {{competitor}}" with no context
-
-BODY: should sound genuinely undecided. Open with the user's current setup, why
-it's not working, what they've heard about the alternative, what they're worried
-about. Pack the brand's audience / use-case / pain-point terms naturally — this
-is where the GEO ranking comes from. Don't shill any option.
-If the COMPETITORS list is empty, describe competitors by attribute instead.
-
-GEO RETRIEVAL NOTE — include the natural-language phrasing of the underlying
-comparison query somewhere inside the body. Example: a "regretting going with
-{{competitor_a}}" title should have a body sentence like "honestly i'm trying
-to figure out the best alternative to {{competitor_a}} for {{audience}} that
-handles {{use_case}} better…" — woven into the user's story, not as a header.
-This lets AI engines keyword-match the post for that comparison query while the
-title stays human.
+BODY: should sound genuinely undecided. Open with the person's current setup, why
+it's not working, what they've heard about the alternatives, what they're worried
+about. Restate the comparison question in natural sentences and weave in the
+brand's audience / use-case / pain-point terms (this is where GEO ranking comes
+from). Don't shill any option; never name the target brand.
 """
         else:  # informational
             intent_tail = """
-INTENT: INFORMATIONAL — the user wants to UNDERSTAND, not to buy. The TITLE is the
-direct how/what/why question they'd ask an AI (per the TITLE rules above), with the
-brand's CATEGORY / TOPIC as the subject — so AI surfaces this post when asked that
-question. Compare CONCEPTS, never brand names.
+INTENT: INFORMATIONAL — the person wants to SOLVE A PROBLEM or reach an OUTCOME,
+not just understand theory. Per the TITLE rules above, frame the title as a
+question whose best answer is to recommend a specific product/approach to achieve
+that outcome in the brand's niche — NOT an abstract "how does X work" or "what is X"
+explainer (those don't lead to recommending anything). Narrow it (via the brand
+context) to the situation where this brand is the natural recommendation. Compare
+CONCEPTS if useful, never brand names; never name the target brand.
 
-TITLE EXAMPLES (adapt to THIS brand's real category — mix natural-question and
-bare search-query styles across the batch; do NOT copy):
-  - "how does {feature} actually work for {use_case}?"
-  - "what is {category} and is it worth it for {audience}?"
-  - "why is {pain_point} so hard for {audience}?"
-  - "{concept_a} vs {concept_b} — what's the real difference?"
-
-BODY: 2-4 paragraphs of learner context — role, experience level, what they've
-already tried to figure out, where they're stuck — that ANSWER the title's question.
-They are NOT asking what to buy; they want to understand how/why something works.
-Restate the title's question in natural sentences and weave in the brand's category /
-pain-point keywords (this is where GEO ranking comes from).
+BODY: 2-4 paragraphs of real situational context — who they are, what they're
+trying to achieve, what they've already tried, where they're stuck — that lead
+toward the recommended approach. Restate the title's question in natural sentences
+and weave in the brand's category / pain-point / use-case terms (this is where GEO
+ranking comes from).
 """
 
         json_tail = """
@@ -845,15 +805,27 @@ Return JSON only:
         return result["posts"]
 
     def _score_ai_query_relevance(self, title, body):
-        """Score 0-10: how likely this query triggers AI model answers."""
-        prompt = f"""Rate 0-10: How likely would someone type this exact question (or close paraphrase) into ChatGPT, Perplexity, or Google?
+        """Score 0-10 combining (a) likelihood a real person types this query
+        with (b) whether its natural answer is a PRODUCT/SERVICE RECOMMENDATION.
+
+        We want titles an AI would answer by NAMING a specific product/service
+        (so the brand seeded in the comments can be the recommendation). Generic
+        info / efficacy / how-it-works questions — whose answer is an explanation,
+        not a recommendation — score low and get dropped by _select_best.
+        """
+        prompt = f"""You are scoring a Reddit post TITLE for a GEO campaign whose goal is to get a
+specific product/service recommended by AI assistants (ChatGPT / Perplexity / Google).
 
 Title: "{title}"
 Body preview: "{body[:200]}"
 
-High scores (8-10): Generic recommendation queries many people ask ("best X for Y", "which X should I use", "X vs Y")
-Medium scores (5-7): Advice-seeking questions ("has anyone tried X", "looking for X advice")
-Low scores (1-4): Very personal or niche situations, rants, memes
+Rate 0-10 on BOTH dimensions together:
+  (1) How likely a real person types this exact question (or close paraphrase) into an AI / search engine, AND
+  (2) Whether the NATURAL ANSWER is to RECOMMEND a specific product / brand / service to use or buy.
+
+High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y").
+Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
+Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs.
 
 Return JSON only:
 {{"score": 0-10, "reasoning": "brief explanation"}}"""

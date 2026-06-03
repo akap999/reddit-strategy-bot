@@ -196,6 +196,22 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    # Reserved name for the "no subreddit yet" holding pool. Posts
+    # generated from brand context (no subreddit picked) are saved under
+    # this row so the NOT-NULL posts.subreddit_id FK is satisfied; the
+    # operator assigns a real subreddit later via PUT /api/posts/<id>/subreddit.
+    UNASSIGNED_SUBREDDIT = "unassigned"
+
+    def ensure_unassigned_subreddit(self):
+        """Get-or-create the shared 'unassigned' holding-pool subreddit row.
+
+        Used as the save target for posts generated without a subreddit.
+        It's a normal is_live=1 row, but the Live Subs subreddit pickers
+        list a brand's saved subreddits (not this), so it won't clutter
+        them — it only surfaces as an 'unassigned' group in the posts table.
+        """
+        return self.ensure_live_subreddit(self.UNASSIGNED_SUBREDDIT)
+
     def get_subreddit_by_name(self, name):
         row = self.conn.execute("SELECT * FROM subreddits WHERE name = ?", (name,)).fetchone()
         return dict(row) if row else None
@@ -5903,6 +5919,24 @@ class Database:
             (old_status, comment_id)
         )
         self.conn.commit()
+
+    def unmark_comment_paid(self, comment_id):
+        """Revert a 'paid' comment back to 'deployed' (clears paid_at).
+
+        Reliable regardless of prev_status — a paid comment is always a
+        deployed comment that was flagged paid, so 'deployed' is the
+        correct target. Returns 'deployed' on success, None if the row
+        wasn't in paid state.
+        """
+        row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        if not row or row["status"] != "paid":
+            return None
+        self.conn.execute(
+            "UPDATE comments SET status = 'deployed', paid_at = NULL, prev_status = NULL WHERE id = ?",
+            (comment_id,)
+        )
+        self.conn.commit()
+        return "deployed"
 
     def mark_post_paid(self, post_id):
         self.conn.execute(

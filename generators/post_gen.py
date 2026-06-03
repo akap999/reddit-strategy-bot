@@ -20,29 +20,61 @@ class PostGenerator:
         self.claude = claude
         self.db = db
 
-    def generate_posts(self, subreddit, brands, count, custom_topics=None):
-        """Generate GEO-style intent-balanced posts (posts NEVER mention target brands).
+    def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
+                       intent_counts=None, context_only=False):
+        """Generate GEO-style posts (posts NEVER mention target brands).
 
-        Produces a batch of `count` posts (must be 3, 6, or 9). Every group of 3
-        contains exactly 1 commercial + 1 comparison + 1 informational post — each
-        written as a long-tail AI-model query a real user would type into
-        ChatGPT/Perplexity. Competitor brand names ARE allowed in comparison posts
-        (they reflect real user queries); target brand names are never allowed.
+        Two ways to size the batch:
+          - `intent_counts`: an explicit per-intent map, e.g.
+            {"commercial": 2, "comparison": 0, "informational": 3}. Generates
+            exactly that many of each intent (the flexible mode used by the
+            Live Subreddits generator). Intents with 0 are skipped.
+          - `count`: legacy strict 1:1:1 batch — must be in POST_BATCH_SIZES
+            (3, 6, 9). Each group of 3 = 1 commercial + 1 comparison + 1
+            informational.
+
+        Each post is written as a long-tail AI-model query a real user would
+        type into ChatGPT/Perplexity. Competitor brand names ARE allowed in
+        comparison posts; target brand names are never allowed.
 
         Args:
-            subreddit: subreddit dict from DB
-            brands: single brand dict OR list of brand dicts (target brands — never mentioned)
-            count: number of posts to generate — must be in POST_BATCH_SIZES (3, 6, 9)
-            custom_topics: optional list of custom title/topic strings (appended as-is)
+            subreddit: subreddit dict from DB. With `context_only=True` this is
+                the SAVE TARGET only (e.g. the "unassigned" pool) — its
+                name/domain are NOT injected into the prompt; posts are grounded
+                purely in brand context so a real subreddit can be assigned
+                later.
+            brands: single brand dict OR list of brand dicts (never mentioned)
+            count: legacy batch size (POST_BATCH_SIZES) — ignored if
+                `intent_counts` is given
+            custom_topics: optional list of custom title/topic strings
+            intent_counts: optional {intent: n} map for flexible per-intent sizing
+            context_only: when True, generate from brand context without scoping
+                the prompt to a specific subreddit, and instruct the batch to
+                collectively cover ALL the brand's offerings.
 
         Returns:
-            list of saved post dicts with IDs, one per intent in 1:1:1 ratio
+            list of saved post dicts with IDs
         """
-        if count not in POST_BATCH_SIZES:
-            raise ValueError(
-                f"count must be one of {POST_BATCH_SIZES}, got {count}. "
-                "GEO batches are strict 1:1:1 commercial/comparison/informational."
-            )
+        # Build the per-intent generation plan: [(intent, n), ...].
+        if intent_counts:
+            plan = []
+            for it in INTENT_TYPES:
+                try:
+                    n = int(intent_counts.get(it, 0))
+                except (TypeError, ValueError):
+                    n = 0
+                if n > 0:
+                    plan.append((it, n))
+            if not plan:
+                raise ValueError("intent_counts must request at least one post")
+        else:
+            if count not in POST_BATCH_SIZES:
+                raise ValueError(
+                    f"count must be one of {POST_BATCH_SIZES}, got {count}. "
+                    "GEO batches are strict 1:1:1 commercial/comparison/informational."
+                )
+            per_intent = count // 3  # 1, 2, or 3
+            plan = [(it, per_intent) for it in INTENT_TYPES]
 
         # Normalize: accept single brand or list
         if isinstance(brands, dict):
@@ -50,7 +82,6 @@ class PostGenerator:
 
         brand_ids = [b["id"] for b in brands]
         primary_brand = brands[0]
-        per_intent = count // 3  # 1, 2, or 3
 
         # Existing titles for dedup (shared across all intent calls).
         # Scoped to THIS subreddit only — we intentionally allow the
@@ -79,13 +110,13 @@ class PostGenerator:
             for k, v in dist.items():
                 merged_dist[k] = merged_dist.get(k, 0) + v
 
-        # Generate per-intent: strict 1:1:1 is guaranteed by construction
+        # Generate per-intent per the plan built above.
         selected = []
-        for intent in INTENT_TYPES:
-            storylines_for_intent = self._select_storylines_from_dist(merged_dist, per_intent)
+        for intent, n_intent in plan:
+            storylines_for_intent = self._select_storylines_from_dist(merged_dist, n_intent)
             candidates = self._generate_candidates_for_intent(
                 subreddit, brands, intent, storylines_for_intent,
-                existing_titles, per_intent * 2
+                existing_titles, n_intent * 2, context_only=context_only
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -95,7 +126,7 @@ class PostGenerator:
             for c in candidates:
                 c["ai_query_score"] = self._score_ai_query_relevance(c["title"], c["body"])
 
-            picked = self._select_best(candidates, storylines_for_intent, per_intent)
+            picked = self._select_best(candidates, storylines_for_intent, n_intent)
             for c in picked:
                 c["intent"] = intent
                 # Dedup across intent calls — add picked titles to the seen set
@@ -503,7 +534,7 @@ Return JSON only:
         return "\n".join(lines), target_names, all_competitors
 
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
-                                        existing_titles, count):
+                                        existing_titles, count, context_only=False):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -531,10 +562,30 @@ Return JSON only:
 
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
 
-        # Shared header + intent-specific tail
-        header = f"""Generate {count} Reddit posts for r/{subreddit['name']}.
+        # Subreddit scoping line. In context_only mode (no subreddit chosen
+        # yet) we deliberately DON'T name a subreddit — the post is grounded
+        # purely in brand context so it can be placed in whichever subreddit
+        # fits best when it's assigned later. We also tell the model to make
+        # the batch collectively cover ALL of the brand's offerings.
+        if context_only:
+            scope_line = (
+                f"Generate {count} Reddit posts grounded in the brand context "
+                "below. A subreddit will be chosen and assigned later, so do NOT "
+                "reference any specific subreddit — write posts that would feel "
+                "native in whatever niche community matches the topic.\n\n"
+                "COVER ALL OFFERINGS: across this batch (and together with the "
+                "other intents being generated), collectively span the brand's "
+                "full range of use-cases, features and pain-points listed below "
+                "— don't cluster every post on the same one offering."
+            )
+        else:
+            scope_line = (
+                f"Generate {count} Reddit posts for r/{subreddit['name']}.\n\n"
+                f"SUBREDDIT DOMAIN: {subreddit['domain']}"
+            )
 
-SUBREDDIT DOMAIN: {subreddit['domain']}
+        # Shared header + intent-specific tail
+        header = f"""{scope_line}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
 {brand_block}

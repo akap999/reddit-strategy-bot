@@ -1950,6 +1950,19 @@ def api_mark_comment_paid(cid):
     finally:
         db.close()
 
+@app.route("/api/comments/<int:cid>/unmark-paid", methods=["POST"])
+def api_unmark_comment_paid(cid):
+    """Revert a paid comment back to deployed (clears paid_at). Reliable
+    even when prev_status was cleared by an earlier flow."""
+    db = get_db()
+    try:
+        restored = db.unmark_comment_paid(cid)
+        if not restored:
+            return jsonify({"error": "comment is not in paid state"}), 422
+        return jsonify({"ok": True, "status": restored})
+    finally:
+        db.close()
+
 @app.route("/api/comments/<int:cid>/undo", methods=["POST"])
 def api_undo_comment(cid):
     db = get_db()
@@ -4192,32 +4205,65 @@ def api_brand_live_subreddits_add(bid):
 
 @app.route("/api/live-posts/generate", methods=["POST"])
 def api_live_posts_generate():
-    """Generate AI-focused posts for a brand × one of its saved subreddits.
+    """Generate AI-focused posts for a brand, grounded in brand context.
 
-    Body: {brand_id, subreddit_name, count: 3|6|9, force?: bool}
-    - Auto-provisions a subreddits row (is_live=1) for the picked sub.
-    - Runs the subreddit-fit guardrail (skip with `force=true`).
-    - Reuses PostGenerator.generate_posts for the heavy lifting.
-    - Live-Reddit dedup: drops candidate titles that already exist on r/<sub>
-      with >= 0.85 token-set similarity AND score >= 3.
+    Body: {
+      brand_id,
+      subreddit_name?,                  # optional — omit to generate into the
+                                        #   'unassigned' pool and assign later
+      intent_counts?: {commercial, comparison, informational},  # flexible sizing
+      count?: 3|6|9,                    # legacy 1:1:1 sizing (if no intent_counts)
+      force?: bool                      # skip the subreddit-fit guardrail
+    }
+    - With a subreddit: auto-provisions its row, runs the fit guardrail
+      (skip with force), and dedups against live Reddit.
+    - Without a subreddit: generates purely from the brand's context
+      (covering all offerings) into the 'unassigned' pool; the operator
+      assigns a real subreddit per post afterward.
     """
-    from config import POST_BATCH_SIZES
+    from config import POST_BATCH_SIZES, INTENT_TYPES
     data = request.json or {}
     bid = data.get("brand_id")
-    sub_name = _normalize_sub_name(data.get("subreddit_name", ""))
-    count = int(data.get("count", 3))
+    sub_name = _normalize_sub_name(data.get("subreddit_name", "")) if data.get("subreddit_name") else ""
     force = bool(data.get("force", False))
-    if not bid or not sub_name:
-        return jsonify({"error": "brand_id and subreddit_name required"}), 400
-    if count not in POST_BATCH_SIZES:
-        return jsonify({"error": f"count must be one of {list(POST_BATCH_SIZES)}"}), 400
+    if not bid:
+        return jsonify({"error": "brand_id required"}), 400
+
+    # Sizing: explicit per-intent counts take priority over legacy `count`.
+    raw_ic = data.get("intent_counts") or None
+    intent_counts = None
+    count = None
+    if raw_ic:
+        if not isinstance(raw_ic, dict):
+            return jsonify({"error": "intent_counts must be an object"}), 400
+        intent_counts = {}
+        total = 0
+        for it in INTENT_TYPES:
+            try:
+                n = int(raw_ic.get(it, 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n < 0:
+                n = 0
+            if n > 10:
+                return jsonify({"error": f"max 10 posts per intent (got {n} for {it})"}), 400
+            intent_counts[it] = n
+            total += n
+        if total < 1:
+            return jsonify({"error": "request at least one post across the intents"}), 400
+    else:
+        count = int(data.get("count", 3))
+        if count not in POST_BATCH_SIZES:
+            return jsonify({"error": f"count must be one of {list(POST_BATCH_SIZES)}"}), 400
+
+    context_only = not sub_name
 
     db_check = get_db()
     try:
         brand = db_check.get_brand(bid)
         if not brand:
             return jsonify({"error": "Brand not found"}), 404
-        if sub_name not in _brand_search_subs(brand):
+        if sub_name and sub_name not in _brand_search_subs(brand):
             return jsonify({
                 "error": f"r/{sub_name} is not in this brand's saved subreddits. "
                          "Add it via Live Search → Save to brand or the Edit Brand modal."
@@ -4225,8 +4271,9 @@ def api_live_posts_generate():
     finally:
         db_check.close()
 
-    # Subreddit-fit guardrail (uses the proxy + Claude, cached 24h)
-    if not force:
+    # Subreddit-fit guardrail (uses the proxy + Claude, cached 24h).
+    # Only relevant when a specific subreddit was chosen.
+    if sub_name and not force:
         fit = _check_subreddit_fit(brand, sub_name)
         if not fit.get("fits"):
             return jsonify({
@@ -4238,15 +4285,22 @@ def api_live_posts_generate():
     def task():
         db, claude, _, post_gen, _ = make_generators()
         try:
-            sub = db.ensure_live_subreddit(sub_name)
-            if not sub:
-                raise ValueError(f"Could not provision r/{sub_name}")
+            if sub_name:
+                sub = db.ensure_live_subreddit(sub_name)
+                if not sub:
+                    raise ValueError(f"Could not provision r/{sub_name}")
+            else:
+                sub = db.ensure_unassigned_subreddit()
+                if not sub:
+                    raise ValueError("Could not provision the unassigned pool")
             brand_full = db.get_brand(bid)
             if not brand_full:
                 raise ValueError("Brand vanished")
 
-            # Generate the full intent-balanced batch.
-            posts = post_gen.generate_posts(sub, [brand_full], count)
+            # Generate the batch (per-intent counts or legacy 1:1:1).
+            posts = post_gen.generate_posts(
+                sub, [brand_full], count=count,
+                intent_counts=intent_counts, context_only=context_only)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles
@@ -4257,10 +4311,14 @@ def api_live_posts_generate():
             skipped = []
             kept = []
             for p in posts:
-                try:
-                    hit = _live_reddit_dup(sub_name, p["title"])
-                except Exception:
-                    hit = None
+                # Live-Reddit dedup only makes sense once a subreddit is
+                # chosen; pool/context-only batches skip it.
+                hit = None
+                if sub_name:
+                    try:
+                        hit = _live_reddit_dup(sub_name, p["title"])
+                    except Exception:
+                        hit = None
                 if hit:
                     kept.append({**p, "matched_existing": hit})
                 else:

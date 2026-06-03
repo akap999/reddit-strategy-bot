@@ -35,6 +35,7 @@
            takes a hit. */
         .badge-replace { background: #3a2a0e; color: #ffb86b; }
         .badge-archived { background: #2a2a3a; color: #8888aa; }
+        .badge-report { background: #0d3d3a; color: #9efbe0; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
         .brand-tab { color: #818384; border-bottom: 2px solid transparent; cursor: pointer; }
         .brand-tab:hover { color: #D7DADC; }
@@ -4244,6 +4245,7 @@ function editDeployedLinkModal(cid, source) {
         comment = (_lsComments || []).find(c => c.id === cid) || (_acData || []).find(c => c.id === cid && c.source === 'search_comment');
     } else {
         comment = (_managedCommentsCache || []).find(c => c.id === cid)
+            || (typeof _lsubsCommentsCache !== 'undefined' ? (_lsubsCommentsCache || []).find(c => c.id === cid) : null)
             || (_acData || []).find(c => c.id === cid && c.source === 'comment')
             || (_commentsTreeData || []).find(c => c.id === cid);
     }
@@ -4276,6 +4278,7 @@ async function submitEditDeployedLink(cid, source) {
     } else {
         if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
         else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
+        if (typeof _lsubsApplyCommentPatch === 'function') _lsubsApplyCommentPatch(cid, patch);
         _acUpdateLocal(cid, 'comment', patch);
     }
 }
@@ -4286,8 +4289,22 @@ async function markCommentPaid(cid) {
     const patch = { status: 'paid', paid_at: new Date().toISOString() };
     if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
     else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
-    else loadCommentTree();
+    if (typeof _lsubsApplyCommentPatch === 'function') _lsubsApplyCommentPatch(cid, patch);
     _acUpdateLocal(cid, 'comment', patch);
+}
+
+// Revert a paid comment back to deployed (Live Subs). Reliable even when
+// prev_status was cleared by an earlier flow, unlike the generic Undo.
+async function lsubsUnmarkPaid(cid) {
+    try {
+        await api(`/api/comments/${cid}/unmark-paid`, { method: 'POST', body: {} });
+        toast('Reverted to deployed', 'success');
+        const patch = { status: 'deployed', paid_at: null, prev_status: null };
+        if (typeof _lsubsApplyCommentPatch === 'function') _lsubsApplyCommentPatch(cid, patch);
+        if (currentView === 'comments' && commentsTab === 'manage') _managedCommentsUpdateLocal(cid, patch);
+        else if (currentView === 'comments') _commentsTreeUpdateLocal(cid, patch);
+        _acUpdateLocal(cid, 'comment', patch);
+    } catch (e) { toast('Failed: ' + (e.message || e), 'error'); }
 }
 
 async function undeployComment(cid) {
@@ -7159,13 +7176,23 @@ function renderLsubsGenerate(c) {
                 </div>
             </div>
             <div class="flex flex-wrap gap-2 items-center pt-3" style="border-top:1px solid #2a2a2b">
-                <label class="text-xs text-gray-400 flex items-center gap-1">
-                    Count
-                    <select id="lsubs-count" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
-                        <option value="3">3 (1 commercial / 1 comparison / 1 informational)</option>
-                        <option value="6">6 (2-2-2)</option>
-                        <option value="9">9 (3-3-3)</option>
-                    </select>
+                <!-- Per-intent counts: choose how many of each intent to
+                     generate (0 to skip an intent). Posts are grounded in the
+                     brand's context; pick a subreddit above to target one, or
+                     leave it on "All subreddits" to generate into the
+                     Unassigned pool and assign a subreddit per post later. -->
+                <span class="text-xs text-gray-400">Posts per intent:</span>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="Buyer ready to pick a tool/service">
+                    Commercial
+                    <input type="number" id="lsubs-ic-commercial" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
+                </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="User weighing options (competitor names allowed)">
+                    Comparison
+                    <input type="number" id="lsubs-ic-comparison" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
+                </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="User wants to understand (no buying intent)">
+                    Informational
+                    <input type="number" id="lsubs-ic-informational" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
                 </label>
                 <!-- Inline "Also generate HQ" toggle so the user can
                      spawn an HQ thread for every freshly-generated post
@@ -7277,7 +7304,10 @@ function lsubsOnBrandChange() {
             subEl.disabled = true;
             subEl.innerHTML = '<option value="">No saved subreddits</option>';
             if (emptyEl) emptyEl.style.display = '';
-            if (genBtn) genBtn.disabled = true;
+            // Generation no longer requires a subreddit — it can run from
+            // brand context into the Unassigned pool. Custom/Filler still
+            // need a specific destination subreddit.
+            if (genBtn) genBtn.disabled = false;
             if (customBtn) customBtn.disabled = true;
             if (fillerBtn) fillerBtn.disabled = true;
             return;
@@ -7305,10 +7335,11 @@ function lsubsOnBrandChange() {
         subEl.innerHTML = allOpt + subOpts;
         subEl.value = '__ALL__';
         subEl.onchange = () => {
-            // Toggle the generate-buttons' enabled state when the
-            // user switches between 'All' and a specific sub.
+            // Generate Posts stays enabled regardless (no sub = pool).
+            // Custom/Filler are inherently subreddit-targeted, so they
+            // toggle with the 'All' pseudo-option.
             const isAll = subEl.value === '__ALL__';
-            if (genBtn) genBtn.disabled = isAll;
+            if (genBtn) genBtn.disabled = false;
             if (customBtn) customBtn.disabled = isAll;
             if (fillerBtn) fillerBtn.disabled = isAll;
             lsubsUpdateSubLink();
@@ -7318,9 +7349,10 @@ function lsubsOnBrandChange() {
         // selection (hides it) — keeps state consistent on brand
         // switch.
         lsubsUpdateSubLink();
-        // Default 'All' → generation buttons disabled; existing-post
-        // table loads brand-wide.
-        if (genBtn) genBtn.disabled = true;
+        // Default 'All' → Generate Posts is enabled (generates into the
+        // Unassigned pool from brand context); Custom/Filler need a
+        // specific subreddit so they stay disabled until one is picked.
+        if (genBtn) genBtn.disabled = false;
         if (customBtn) customBtn.disabled = true;
         if (fillerBtn) fillerBtn.disabled = true;
         lsubsLoadTable();
@@ -7374,10 +7406,13 @@ function lsubsRenderTable(posts) {
     // Same row layout as renderPostsFromCache so action buttons work consistently.
     el.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Title</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Day</th><th>Subreddit</th><th>Title</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
             <tbody>${posts.map(p => `
                 <tr>
                     <td>${p.suggested_post_day}</td>
+                    <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
+                        ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${p.brand_id||'null'})" title="Change subreddit">✎</button>`
+                        : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${p.brand_id||'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
                     <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
                     <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
                     <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
@@ -7443,27 +7478,34 @@ function lsubsUpdateSubLink() {
 
 async function lsubsGeneratePosts(force = false) {
     const { bid, sub } = lsubsContext();
-    if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
-    const count = parseInt(document.getElementById('lsubs-count')?.value || '3');
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    // Subreddit is optional. A specific sub → generate straight into it.
+    // "All subreddits" / blank → generate from brand context into the
+    // Unassigned pool and assign a subreddit per post later.
+    const hasSub = !!sub && sub !== '__ALL__';
+    const intent_counts = {
+        commercial: parseInt(document.getElementById('lsubs-ic-commercial')?.value || '0') || 0,
+        comparison: parseInt(document.getElementById('lsubs-ic-comparison')?.value || '0') || 0,
+        informational: parseInt(document.getElementById('lsubs-ic-informational')?.value || '0') || 0,
+    };
+    const count = intent_counts.commercial + intent_counts.comparison + intent_counts.informational;
+    if (count < 1) { toast('Set at least one post across the intents', 'error'); return; }
+
+    const reqBody = { brand_id: bid, intent_counts, force };
+    if (hasSub) reqBody.subreddit_name = sub;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
     let res;
     try {
-        res = await api('/api/live-posts/generate', {
-            method: 'POST',
-            body: { brand_id: bid, subreddit_name: sub, count, force }
-        });
+        res = await api('/api/live-posts/generate', { method: 'POST', body: reqBody });
     } catch (e) {
         // Subreddit-fit refusal comes back as 409 with structured payload
-        if (e && e.message && e.message.toLowerCase().includes('subreddit')) {
-            // try to surface fit details if api() captured them
-        }
-        // Try to fetch the JSON body manually for the fit-warn case
+        // (only possible when a specific subreddit was chosen).
         try {
             const r = await fetch('/api/live-posts/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, count, force })
+                body: JSON.stringify(reqBody)
             });
             if (r.status === 409) {
                 const d = await r.json();
@@ -7476,7 +7518,8 @@ async function lsubsGeneratePosts(force = false) {
     }
 
     const tid = res.task_id;
-    toast(`Generating ${count} post${count > 1 ? 's' : ''} for r/${sub}…`, 'info');
+    const dest = hasSub ? `r/${sub}` : 'the Unassigned pool';
+    toast(`Generating ${count} post${count > 1 ? 's' : ''} into ${dest}…`, 'info');
     _addBgTask(tid, 'Live Posts');
     const poll = setInterval(async () => {  // async callback so the auto-HQ branch below can await
         try {
@@ -7907,7 +7950,9 @@ async function lsubsEditSubreddit(pid, currentSub, brandId) {
         .join('');
     const brandSet = new Set((brandSubs || []).map(n => (n || '').toLowerCase()));
     const otherOpts = allLiveSubs
-        .filter(s => !brandSet.has((s.name || '').toLowerCase()) && (s.name || '').toLowerCase() !== (currentSub || '').toLowerCase())
+        .filter(s => !brandSet.has((s.name || '').toLowerCase())
+            && (s.name || '').toLowerCase() !== (currentSub || '').toLowerCase()
+            && (s.name || '').toLowerCase() !== 'unassigned')
         .map(s => `<option value="${(s.name || '').toLowerCase()}">r/${s.name}</option>`)
         .join('');
     showModal(`
@@ -8477,14 +8522,16 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                 <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
                     <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                     <button class="btn btn-sm" style="background:#1a3d3d;color:#9efbf0" onclick="lsubsRegenComment(${c.id})" title="Re-roll this single comment with a fresh take">Regen</button>
+                    ${['deployed','paid','report','replace','removed'].includes(c.status) ? `${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary" title="Open this comment on Reddit">↗ Reddit</a>` : ''}<button class="btn btn-sm" style="background:#26334a;color:#9ec4ff" onclick="editDeployedLinkModal(${c.id}, 'comment')" title="Edit the deployed Reddit link">Edit link</button>` : ''}
                     ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
                     ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
                     ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
-                    ${c.status === 'deployed' ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                    ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
+                    ${c.status === 'paid' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="lsubsUnmarkPaid(${c.id})" title="Revert this comment from paid back to deployed">↩ Undo paid</button>` : ''}
                     ${(c.status === 'deployed' || c.status === 'paid') ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'comment')" title="Push this comment into a monthly client report">📊 Report</button>` : ''}
-                    ${c.status === 'report' ? `<a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-sm btn-secondary">View</a><button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to its previous status">Undo report</button>` : ''}
+                    ${c.status === 'report' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to deployed">Undo report</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
-                    ${c.prev_status ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
+                    ${c.prev_status && c.status !== 'report' && c.status !== 'paid' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="lsubsDeleteComment(${c.id})" title="Delete this comment (and any replies under it)">Del</button>
                 </div>
             </td>
@@ -11493,7 +11540,7 @@ async function submitSendToReport(cid, source) {
 }
 
 async function undoReport(cid, source) {
-    if (!confirm('Remove this comment from the monthly report? Its status will revert to the previous step (paid or deployed).')) return;
+    if (!confirm('Remove this comment from the monthly report? Its status will revert to deployed.')) return;
     try {
         await api(`/api/comments/${cid}/undo-report`, { method: 'POST', body: { source } });
         toast('Removed from report', 'success');

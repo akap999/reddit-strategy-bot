@@ -4585,17 +4585,23 @@ def api_hq_add_replies(cid):
 def api_hq_op_reply(cid):
     """Generate an OP reply that engages with the existing HQ cluster.
 
-    Reads the root + every existing reply, then writes a single OP-voice
-    reply parented to the root. Never mentions brands, never criticizes.
+    Reads the root + every existing reply (and the LIVE thread when deployed),
+    then writes a single OP-voice reply parented to the root.
+
+    Body: {ai_crawl?, affirm_brand?}
+      - affirm_brand=False (default): neutral OP reply, never mentions brands.
+      - affirm_brand=True: OP returns and endorses the brand as their own
+        outcome (for refreshing a live thread).
     """
     data = request.json or {}
     ai_crawl = bool(data.get("ai_crawl", True))
+    affirm_brand = bool(data.get("affirm_brand", False))
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
         try:
             saved = comment_gen.generate_op_reply_to_cluster(
-                cid, ai_crawl=ai_crawl,
+                cid, ai_crawl=ai_crawl, affirm_brand=affirm_brand,
             )
             if saved is None:
                 return []

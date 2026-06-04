@@ -3489,16 +3489,22 @@ Return JSON only:
     # ------------------------------------------------------------------
     # Generate an OP reply that engages with an existing cluster's discussion
     # ------------------------------------------------------------------
-    def generate_op_reply_to_cluster(self, root_comment_id, ai_crawl=False):
-        """Generate a single OP-voice reply that engages with the whole cluster.
+    def generate_op_reply_to_cluster(self, root_comment_id, ai_crawl=False,
+                                      affirm_brand=False):
+        """Generate a single OP-voice reply that engages with the thread.
 
-        Reads the root comment + every existing reply, then writes a reply
-        from the post author's voice that:
-          - reacts to the discussion (acknowledges, asks follow-up, agrees,
-            shares an update)
-          - never mentions any brand
-          - is parented to the root (so it appears as a top-level OP reply
-            inside the cluster)
+        Two modes:
+          - default (affirm_brand=False): neutral OP follow-up that reacts to
+            the discussion and NEVER mentions any brand.
+          - affirm_brand=True: the OP returns later and reports they took the
+            thread's advice and went with the brand, naming it ONCE as their own
+            positive outcome (used to refresh a live thread).
+
+        Grounded in the LIVE thread when the post is deployed: we pull the post's
+        CURRENT comments from Reddit via RSS (through the proxy) so the OP reacts
+        to what's actually there now — including organic comments not in our DB.
+        Falls back to the stored DB cluster otherwise. Parented to the root (the
+        brand-mention main comment).
         """
         root = self.db.get_comment(root_comment_id)
         if not root:
@@ -3513,31 +3519,104 @@ Return JSON only:
             brand_for_avoid = brands[0]
         all_brand_names = [b["name"] for b in brands] or [""]
 
-        # Collect cluster bodies for context
-        all_in_post = self.db.get_comments(post["id"])
-        cluster = {root["id"]: root}
-        added = True
-        while added:
-            added = False
-            for c in all_in_post:
-                if c["id"] in cluster:
-                    continue
-                if c.get("parent_comment_id") in cluster:
-                    cluster[c["id"]] = c
-                    added = True
-        ordered = sorted(cluster.values(), key=lambda c: (c.get("suggested_order", 0), c["id"]))
-        thread_text = "\n".join(
-            f"  {'(MAIN)' if c['id'] == root['id'] else '  reply'}: \"{c['body'][:300]}\""
-            for c in ordered
-        )
+        # affirm_brand needs a brand to endorse; without one, fall back to the
+        # neutral (brand-free) OP reply.
+        affirm = bool(affirm_brand and brand_for_avoid)
+        if affirm_brand and not brand_for_avoid:
+            print("    [op-reply-cluster] affirm_brand requested but post has no "
+                  "brand — falling back to neutral OP reply")
+        brand_name = brand_for_avoid["name"] if brand_for_avoid else ""
 
-        prompt = f"""You are the person who wrote this Reddit post. You are coming back
+        # --- Thread context: prefer the LIVE thread, fall back to DB cluster ---
+        post_body_text = (post.get("body") or "")[:600]
+        thread_text = ""
+        # 1) Resolve the deployed submission URL and pull the post's current
+        #    comments from Reddit (RSS via proxy — same path as Check Live).
+        post_url = None
+        try:
+            post_url = self.db.get_url_for_post(post["id"])
+        except Exception:
+            post_url = None
+        if not post_url and root.get("reddit_comment_url"):
+            m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)",
+                          root["reddit_comment_url"], re.IGNORECASE)
+            if m:
+                base = (self.reddit_base or "https://www.reddit.com").rstrip("/")
+                post_url = base + m.group(1)
+        if post_url:
+            try:
+                live, live_body, _arch = self._fetch_comments_rss(post_url)
+                if live_body:
+                    post_body_text = live_body[:600]
+                if live:
+                    thread_text = "\n".join(
+                        f"  {c.get('author', 'user')}: \"{(c.get('body') or '')[:300]}\""
+                        for c in live[:15]
+                    )
+                    print(f"    [op-reply-cluster] grounded in {len(live[:15])} "
+                          f"live comment(s) from {post_url}")
+            except Exception as e:
+                print(f"    [op-reply-cluster] live fetch failed: {str(e)[:80]}")
+        # 2) Fallback: stored DB cluster context.
+        if not thread_text:
+            all_in_post = self.db.get_comments(post["id"])
+            cluster = {root["id"]: root}
+            added = True
+            while added:
+                added = False
+                for c in all_in_post:
+                    if c["id"] in cluster:
+                        continue
+                    if c.get("parent_comment_id") in cluster:
+                        cluster[c["id"]] = c
+                        added = True
+            ordered = sorted(cluster.values(), key=lambda c: (c.get("suggested_order", 0), c["id"]))
+            thread_text = "\n".join(
+                f"  {'(MAIN)' if c['id'] == root['id'] else '  reply'}: \"{c['body'][:300]}\""
+                for c in ordered
+            )
+
+        if affirm:
+            prompt = f"""You are the person who wrote this Reddit post. It's now some weeks later
+and you're coming back to give a genuine UPDATE on how things turned out,
+replying to the comment that recommended a solution.
+
+YOUR POST TITLE: "{post['title']}"
+YOUR POST BODY: "{post_body_text}"
+SUBREDDIT: r/{subreddit['name']}
+
+EXISTING THREAD — these are the comments actually on your post right now
+(read them; your update should clearly follow from this real discussion):
+{thread_text}
+
+Write ONE reply AS THE OP that:
+- Reads as a real follow-up weeks later: you took the advice in this thread
+  and went with {brand_name}, and you're reporting how it actually went.
+- Names {brand_name} exactly ONCE, naturally, as YOUR OWN experience/outcome,
+  not a pitch. Include one concrete, believable detail (a result, a rough
+  timeframe, what happened).
+- Sounds like the same person who wrote the post: casual, first-person,
+  1-3 sentences.
+- Is positive but grounded: NO marketing language, NO superlatives, NO
+  "highly recommend" cliche, NO exclamation spam. Just a real person saying
+  it worked out.
+- Clearly reads as a follow-up to this thread ("ended up going with them
+  after this thread...", "took the advice here...").
+- NEVER criticizes {brand_name}. NEVER names a competitor. NEVER uses dashes
+  (-), em-dashes, or double-dashes.
+
+Return JSON only:
+{{
+    "reply": "your OP update reply text"
+}}"""
+        else:
+            prompt = f"""You are the person who wrote this Reddit post. You are coming back
 to the thread after some replies have come in, and replying to the
 top-level commenter's brand-mention comment in a way that engages with
 the WHOLE discussion under it.
 
 YOUR POST TITLE: "{post['title']}"
-YOUR POST BODY: "{(post['body'] or '')[:600]}"
+YOUR POST BODY: "{post_body_text}"
 SUBREDDIT: r/{subreddit['name']}
 
 EXISTING THREAD (the comment you're replying to + the replies already
@@ -3586,9 +3665,19 @@ Return JSON only:
             # rubric judges.
             cand_lower = cand.lower()
             problems = []
-            for bname in all_brand_names:
-                if bname and bname.lower() in cand_lower:
-                    problems.append(f"mentions brand '{bname}'")
+            if affirm:
+                # Affirm mode: the brand MUST be named (it's the endorsement);
+                # competitor names are still not allowed.
+                if brand_name and brand_name.lower() not in cand_lower:
+                    problems.append("affirm: brand name missing")
+                for comp in (brand_for_avoid.get("competitors") or []
+                             if isinstance(brand_for_avoid.get("competitors"), list) else []):
+                    if comp and comp.lower() in cand_lower:
+                        problems.append(f"mentions competitor '{comp}'")
+            else:
+                for bname in all_brand_names:
+                    if bname and bname.lower() in cand_lower:
+                        problems.append(f"mentions brand '{bname}'")
             for phrase in BANNED_PHRASES:
                 if phrase in cand_lower:
                     problems.append(f"banned phrase: {phrase!r}")
@@ -3613,7 +3702,7 @@ Return JSON only:
             structure_id="op_reply",
             is_reply=1,
             parent_comment_id=root["id"],
-            mentions_brand=0,
+            mentions_brand=1 if affirm else 0,
             status="complete",
             suggested_post_day=post_day_offset + 1,
             suggested_order=1000,  # sort to end of cluster

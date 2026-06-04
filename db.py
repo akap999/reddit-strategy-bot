@@ -556,7 +556,8 @@ class Database:
         any "View" buttons would point at the wrong reddit thread.
         """
         self.conn.execute(
-            """UPDATE posts SET status = 'complete', deployed_at = NULL, paid_at = NULL
+            """UPDATE posts SET status = 'complete', deployed_at = NULL, paid_at = NULL,
+                   report_month = NULL, report_added_at = NULL, prev_status = NULL
                WHERE id = ? AND status IN ('published', 'paid')""",
             (post_id,)
         )

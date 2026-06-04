@@ -1172,10 +1172,27 @@ def api_publish_post(pid):
         data = request.json
         reddit_url = data.get("reddit_url", "")
         owner_account = data.get("owner_account", "")
+        # If the post is currently in a monthly report, exit report cleanly
+        # FIRST — this reverts its reported HQ anchor comment back to
+        # 'deployed' so the anchor isn't stranded in 'report' (which would
+        # make the report modal wrongly say "no HQ comment will anchor"),
+        # and clears report_month/report_added_at. (Normally Deploy isn't
+        # offered on a report post, but guard the API path regardless.)
+        try:
+            _cur = db.conn.execute("SELECT status FROM posts WHERE id = ?", (pid,)).fetchone()
+            if _cur and _cur["status"] == "report":
+                db.undo_post_report(pid, actor_email=_admin_email())
+        except Exception as e:
+            print(f"[publish] report-exit guard failed pid={pid}: {e}", flush=True)
         db.update_post_status(pid, "published")
-        # Set deployed_at timestamp
+        # Set deployed_at + clear any lingering report/undo breadcrumbs so a
+        # live published post never carries stale report_month / prev_status.
         from datetime import datetime as _dt
-        db.conn.execute("UPDATE posts SET deployed_at = ? WHERE id = ?", (_dt.now().strftime("%Y-%m-%d %H:%M:%S"), pid))
+        db.conn.execute(
+            "UPDATE posts SET deployed_at = ?, report_month = NULL, "
+            "report_added_at = NULL, prev_status = NULL WHERE id = ?",
+            (_dt.now().strftime("%Y-%m-%d %H:%M:%S"), pid)
+        )
         db.conn.commit()
         post = db.get_post(pid)
         if reddit_url and post:

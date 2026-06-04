@@ -3606,6 +3606,21 @@ Return JSON only:
                 for c in ordered
             )
 
+        # Vary the opening so repeated affirm generations don't all start the
+        # same way (the old prompt's "ended up going with..." example was
+        # anchoring every reply). Pick a random opening ANGLE — a category
+        # nudge, not a copyable phrase — per call.
+        _open_angle = random.choice([
+            "open with the concrete result/outcome first",
+            "open with a time reference (a few weeks/months in, after the project wrapped, etc.)",
+            "open by reacting to / replying directly to a point the commenter made",
+            "open mid-thought, casual, like you're just dropping back into the thread",
+            "open with a short status update on the situation from your original post",
+            "open with what finally pushed you to decide",
+            "open by answering a question someone in the thread raised",
+            "open with a small admission (you were skeptical, you put it off, etc.)",
+        ])
+
         if affirm:
             prompt = f"""You are the person who wrote this Reddit post. It's now some weeks later
 and you're coming back to give a genuine UPDATE on how things turned out,
@@ -3630,8 +3645,11 @@ Write ONE reply AS THE OP that:
 - Is positive but grounded: NO marketing language, NO superlatives, NO
   "highly recommend" cliche, NO exclamation spam. Just a real person saying
   it worked out.
-- Clearly reads as a follow-up to this thread ("ended up going with them
-  after this thread...", "took the advice here...").
+- Clearly reads as a follow-up to this thread (you're updating after taking
+  the advice here).
+- VARY YOUR OPENING — for THIS reply, {_open_angle}. Do NOT start with
+  "ended up going with" or "took the advice" (those are overused); find a
+  different, natural way in. Don't reuse a stock follow-up opener.
 - NEVER criticizes {brand_name}. NEVER names a competitor. NEVER uses dashes
   (-), em-dashes, or double-dashes.
 

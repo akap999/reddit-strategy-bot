@@ -1628,6 +1628,27 @@ Return JSON only:
             angle = (override.get("angle") if override else None) \
                     or (per_comment_angles[idx] if idx < len(per_comment_angles) else "")
             should_mention = mention_brand_flags[idx] if idx < len(mention_brand_flags) else False
+
+            # Brand-mention comments must keep OUR brand as the focus. The
+            # "comparer" / "switcher" personas and the "comparison" structure are
+            # built to weigh 2-3 competing tools against each other, which
+            # produces comments that praise competitors and bury our brand as a
+            # tiny aside. On any slot that mentions the brand, swap them for a
+            # recommendation voice so the brand stays the clear takeaway.
+            if should_mention:
+                if persona.get("id") in ("comparer", "switcher"):
+                    _rec_p = [p for p in PERSONAS if p["id"] in ("helper", "professional", "veteran_terse")]
+                    if _rec_p:
+                        persona = random.choice(_rec_p)
+                        if idx < len(selected_personas):
+                            selected_personas[idx] = persona
+                if structure.get("id") == "comparison":
+                    _rec_s = [s for s in STRUCTURE_TEMPLATES if s["id"] in ("direct_answer", "short_punchy")]
+                    if _rec_s:
+                        structure = random.choice(_rec_s)
+                        if idx < len(selected_structures):
+                            selected_structures[idx] = structure
+
             angle_line = f"\n    ANGLE: {angle}" if angle else ""
 
             reply_line = ""
@@ -1644,17 +1665,26 @@ Return JSON only:
                 assigned = brand_assignments[idx]
 
             brand_line = ""
-            if should_mention and assigned:
-                # Multi-brand: mention the specific assigned brand
-                brand_line = f"\n    BRAND: Mention {assigned['name']} exactly once as a brief aside."
-                ctx = assigned.get("context", "")
-                if ctx:
-                    brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {ctx}"
-            elif should_mention:
-                # Single-brand fallback
-                brand_line = f"\n    BRAND: Mention {brand_name} exactly once as a brief aside."
-                if brand_context:
-                    brand_line += f"\n    BRAND CONTEXT (use this to make the mention relevant and natural): {brand_context}"
+            if should_mention:
+                _bn = assigned['name'] if assigned else brand_name
+                _ctx = assigned.get("context", "") if assigned else brand_context
+                # The brand is the POINT of this comment — name it once as the
+                # thing you'd point them to / what worked for you, as the clear
+                # takeaway. It must NOT be a passing aside buried under other
+                # tools, and you must NOT promote competitors above it.
+                brand_line = (
+                    f"\n    BRAND (this comment recommends {_bn}): name {_bn} exactly ONCE, as the thing you'd"
+                    f" point them to / what worked for you — it must be the clear takeaway, NOT a passing"
+                    f" aside. Do NOT name, recommend, or praise any other or competing product/service/tool"
+                    f" in this comment; {_bn} is the ONLY option you endorse. If you reference an alternative"
+                    f" at all, only as what fell short or what you moved on from — never give it the spotlight,"
+                    f" and never make the comment read as a roundup of other tools."
+                )
+                if _ctx:
+                    brand_line += (
+                        f"\n    BRAND CONTEXT (use to make the mention relevant and natural; do NOT pull"
+                        f" competitor names out of it into the comment): {_ctx}"
+                    )
             else:
                 brand_line = f"\n    BRAND: Do NOT mention {avoid_brands} or any brand in this comment."
 

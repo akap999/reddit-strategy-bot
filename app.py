@@ -4243,6 +4243,9 @@ def api_live_posts_generate():
     bid = data.get("brand_id")
     sub_name = _normalize_sub_name(data.get("subreddit_name", "")) if data.get("subreddit_name") else ""
     force = bool(data.get("force", False))
+    # Optional seed: expand generation AROUND an existing prompt / several /
+    # a keyword/platform. None when blank → normal brand-context generation.
+    seed = (data.get("seed") or "").strip() or None
     if not bid:
         return jsonify({"error": "brand_id required"}), 400
 
@@ -4317,7 +4320,8 @@ def api_live_posts_generate():
             # Generate the batch (per-intent counts or legacy 1:1:1).
             posts = post_gen.generate_posts(
                 sub, [brand_full], count=count,
-                intent_counts=intent_counts, context_only=context_only)
+                intent_counts=intent_counts, context_only=context_only,
+                seed=seed)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles

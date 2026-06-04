@@ -21,8 +21,15 @@ class PostGenerator:
         self.db = db
 
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
-                       intent_counts=None, context_only=False):
+                       intent_counts=None, context_only=False, seed=None):
         """Generate GEO-style posts (posts NEVER mention target brands).
+
+        `seed` (optional): an existing prompt/question, several of them, or a
+        keyword/platform (e.g. "Instagram"). When set, every generated title is
+        an expansion AROUND that seed's theme/platform — sibling recommendation
+        questions that strengthen coverage of it — while still obeying all the
+        normal title/brand rules. Threaded into `_generate_candidates_for_intent`
+        as `seed_focus`.
 
         Two ways to size the batch:
           - `intent_counts`: an explicit per-intent map, e.g.
@@ -116,7 +123,8 @@ class PostGenerator:
             storylines_for_intent = self._select_storylines_from_dist(merged_dist, n_intent)
             candidates = self._generate_candidates_for_intent(
                 subreddit, brands, intent, storylines_for_intent,
-                existing_titles, n_intent * 2, context_only=context_only
+                existing_titles, n_intent * 2, context_only=context_only,
+                seed_focus=seed
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -534,7 +542,8 @@ Return JSON only:
         return "\n".join(lines), target_names, all_competitors
 
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
-                                        existing_titles, count, context_only=False):
+                                        existing_titles, count, context_only=False,
+                                        seed_focus=None):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -621,8 +630,26 @@ Return JSON only:
                 f"SUBREDDIT DOMAIN: {subreddit['domain']}"
             )
 
+        # Optional SEED FOCUS: narrow the batch to expand AROUND a user-supplied
+        # seed (an existing prompt/question, several, or a keyword/platform). The
+        # seed is the THEME/direction — NOT a template to copy — so all the title
+        # rules and brand scoping below still apply.
+        seed_block = ""
+        if seed_focus and str(seed_focus).strip():
+            seed_block = (
+                "\n\nSEED FOCUS — generate this batch AROUND the following seed (an "
+                "existing prompt/question, several of them, or a keyword/platform):\n"
+                f"{str(seed_focus).strip()}\n"
+                "Treat the seed as the THEME / PLATFORM / use-case to expand. Every "
+                "title must stay in that same space (same platform/topic) and be a "
+                "DIFFERENT, complementary recommendation question a real person would "
+                "ask there — strengthening coverage of this theme. Do NOT repeat the "
+                "seed verbatim or just reword it; explore adjacent angles within it. "
+                "All the TITLE rules and brand scoping below still apply."
+            )
+
         # Shared header + intent-specific tail
-        header = f"""{scope_line}
+        header = f"""{scope_line}{seed_block}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
 {brand_block}

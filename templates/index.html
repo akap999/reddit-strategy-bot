@@ -7208,6 +7208,15 @@ function renderLsubsGenerate(c) {
                     HQ replies
                     <input type="number" id="lsubs-gen-hq-replies" value="5" min="1" max="15" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px;width:60px">
                 </label>
+                <!-- Optional SEED: expand generation AROUND an existing prompt /
+                     several / a keyword or platform. Leave blank for normal
+                     brand-context generation. -->
+                <label class="text-xs text-gray-400 block" style="flex-basis:100%">
+                    Seed <span class="text-gray-600">(optional — generate prompts around an existing prompt, several (one per line), or a keyword/platform)</span>
+                    <textarea id="lsubs-seed" rows="2" class="w-full text-xs mt-1"
+                        placeholder="e.g. any good background music tools for Instagram Reels?   ·   or just: Instagram"
+                        style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px;font-family:inherit"></textarea>
+                </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
                 <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
                 <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
@@ -7491,8 +7500,10 @@ async function lsubsGeneratePosts(force = false) {
     const count = intent_counts.commercial + intent_counts.comparison + intent_counts.informational;
     if (count < 1) { toast('Set at least one post across the intents', 'error'); return; }
 
+    const seed = (document.getElementById('lsubs-seed')?.value || '').trim();
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
+    if (seed) reqBody.seed = seed;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
     let res;
@@ -7519,7 +7530,7 @@ async function lsubsGeneratePosts(force = false) {
 
     const tid = res.task_id;
     const dest = hasSub ? `r/${sub}` : 'the Unassigned pool';
-    toast(`Generating ${count} post${count > 1 ? 's' : ''} into ${dest}…`, 'info');
+    toast(`Generating ${count} prompt${count > 1 ? 's' : ''}${seed ? ' around your seed' : ''} into ${dest}…`, 'info');
     _addBgTask(tid, 'Live Posts');
     const poll = setInterval(async () => {  // async callback so the auto-HQ branch below can await
         try {
@@ -7774,6 +7785,12 @@ async function renderLsubsPosts(c) {
                     <option value="informational">Informational</option>
                 </select>
             </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1" title="Filter to posts in a specific monthly report (report_month)">
+                Month
+                <select id="lsubs-posts-month" onchange="lsubsLoadPosts()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All months</option>
+                </select>
+            </label>
             <div class="ml-auto flex items-center gap-2">
                 <label class="text-xs text-gray-400"><input type="checkbox" id="lsubs-posts-selectall" onchange="lsubsToggleSelectAll(this.checked)" class="mr-1"> Select All</label>
                 <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -7835,6 +7852,18 @@ function lsubsGetSelectedPostIds() {
     return Array.from(document.querySelectorAll('.lsubs-post-check:checked')).map(cb => parseInt(cb.dataset.id));
 }
 
+// Repopulate a month <select> from the distinct report_month values present in
+// `items` (mirrors Live Search's #ls-cf-month). Preserves the current selection
+// when it's still available; falls back to "All months".
+function _lsubsFillMonthOptions(sel, items) {
+    if (!sel) return;
+    const cur = sel.value;
+    const months = [...new Set((items || []).map(x => x && x.report_month).filter(Boolean))].sort().reverse();
+    sel.innerHTML = '<option value="">All months</option>' +
+        months.map(m => `<option value="${m}">${m}</option>`).join('');
+    sel.value = months.includes(cur) ? cur : '';
+}
+
 async function lsubsLoadPosts(silent = false) {
     const tableEl = document.getElementById('lsubs-posts-table');
     if (!tableEl) return;
@@ -7850,8 +7879,13 @@ async function lsubsLoadPosts(silent = false) {
     if (status) params.set('status', status);
     try {
         let posts = await api('/api/posts/all?' + params.toString());
+        // Month dropdown options come from the full fetched set (so switching
+        // month doesn't shrink the list); then filter client-side by report_month.
+        _lsubsFillMonthOptions(document.getElementById('lsubs-posts-month'), posts);
+        const month = document.getElementById('lsubs-posts-month')?.value || '';
         const intent = document.getElementById('lsubs-posts-intent')?.value || '';
         if (intent) posts = posts.filter(p => (p.intent || '') === intent);
+        if (month) posts = posts.filter(p => (p.report_month || '') === month);
         // Render status pills before the empty-state short-circuit so
         // they update even when the current filter has no matches.
         lsubsRenderPostCounts(posts);
@@ -8444,7 +8478,13 @@ async function renderLsubsComments(c) {
                 To
                 <input type="date" id="lsubs-cmt-date-to" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
             </label>
-            <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status and date filters">Clear filters</button>
+            <label class="text-xs text-gray-400 flex items-center gap-1" title="Filter to comments in a specific monthly report (report_month)">
+                Month
+                <select id="lsubs-cmt-month" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All months</option>
+                </select>
+            </label>
+            <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status, date and month filters">Clear filters</button>
             <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('')" title="Bulk-deploy comments from a sheet — matches across both Live Subs and Live Search pipelines">Bulk Deploy from Sheet</button>
             <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesubs')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
@@ -8493,6 +8533,7 @@ function lsubsClearCmtFilters() {
     const s = document.getElementById('lsubs-cmt-status'); if (s) s.value = '';
     const f = document.getElementById('lsubs-cmt-date-from'); if (f) f.value = '';
     const t = document.getElementById('lsubs-cmt-date-to'); if (t) t.value = '';
+    const mo = document.getElementById('lsubs-cmt-month'); if (mo) mo.value = '';
     _lsubsRenderComments();
 }
 
@@ -8589,6 +8630,9 @@ function _lsubsRenderComments() {
     const listEl = document.getElementById('lsubs-cmt-list');
     if (!listEl) return;
     const comments = _lsubsCommentsCache;
+    // Month dropdown options from the distinct report_month across the cache
+    // (mirrors Live Search). Preserves selection.
+    _lsubsFillMonthOptions(document.getElementById('lsubs-cmt-month'), comments);
     // Render the HQ-only status pills on every pass so they update
     // when the user changes the brand filter (which triggers a
     // re-fetch + re-render). The pills themselves count across the
@@ -8606,7 +8650,8 @@ function _lsubsRenderComments() {
     const statusFilter = document.getElementById('lsubs-cmt-status')?.value || '';
     const dateFrom = document.getElementById('lsubs-cmt-date-from')?.value || '';
     const dateTo = document.getElementById('lsubs-cmt-date-to')?.value || '';
-    const hasAnyFilter = !!(statusFilter || dateFrom || dateTo);
+    const monthFilter = document.getElementById('lsubs-cmt-month')?.value || '';
+    const hasAnyFilter = !!(statusFilter || dateFrom || dateTo || monthFilter);
     const matchHead = (c) => {
         if (dateFrom || dateTo) {
             const d = (c.created_at || '').substring(0, 10);
@@ -8672,13 +8717,17 @@ function _lsubsRenderComments() {
         // still scopes to cluster heads / organic to keep "show me
         // posts where activity happened in this date range" sane.
         const postMatchesStatus = !statusFilter || items.some(it => it.status === statusFilter);
+        // Month filter (report_month): post card stays iff at least one of its
+        // comments was reported in the chosen month — same report_month basis
+        // as Live Search.
+        const postMatchesMonth = !monthFilter || items.some(it => (it.report_month || '') === monthFilter);
         const filteredClusters = (dateFrom || dateTo)
             ? clusters.filter(cluster => matchHead(cluster[0].c))
             : clusters;
         const filteredOrganic = (dateFrom || dateTo)
             ? organic.filter(matchHead)
             : organic;
-        if (!postMatchesStatus) return '';
+        if (!postMatchesStatus || !postMatchesMonth) return '';
         if (hasAnyFilter && !filteredClusters.length && !filteredOrganic.length) {
             return '';
         }

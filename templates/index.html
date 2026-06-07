@@ -7903,7 +7903,9 @@ async function lsubsLoadPosts(silent = false) {
                     <tr>
                         <td><input type="checkbox" class="lsubs-post-check" data-id="${p.id}" data-brand="${(p.brands && p.brands[0] && p.brands[0].id) || ''}"></td>
                         <td>${p.suggested_post_day}</td>
-                        <td class="text-xs text-gray-400">r/${p.subreddit_name || ''}</td>
+                        <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
+                            ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change subreddit">✎</button>`
+                            : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
                         <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
                         <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
                         <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
@@ -7934,7 +7936,6 @@ async function lsubsLoadPosts(silent = false) {
                                 ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReportThisPost(${p.id})" title="Move this post back from report state (also reverts its reported comments)">↺ Undo report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`
                                 : `${p.status !== 'published' ? `<button class="btn btn-sm btn-secondary" onclick="publishPost(${p.id})">Deploy</button>` : `${!p.paid_at ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markPostPaid(${p.id})">Paid</button>` : ''}<button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployPost(${p.id})">Undeploy</button>`}<button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markPostRemoved(${p.id})" title="Mark this post as removed on Reddit">Removed</button>`}
                             ${p.status === 'published' || p.status === 'paid' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showReportThisPostModal(${p.id})" title="Push this post into a monthly client report">📊 Report</button>` : ''}
-                            <button class="btn btn-sm btn-secondary" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name || '').replace(/'/g, "\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change which subreddit this post is filed under">Edit sub</button>
                             <button class="btn btn-sm btn-danger" onclick="deletePost(${p.id})">Del</button>
                         </div></td>
                     </tr>

@@ -365,7 +365,7 @@ class Database:
                   image_prompt=None, image_url=None, ai_query_score=0,
                   is_custom=0, is_filler=0, status="draft",
                   suggested_post_day=0, prompt_version=None, brand_ids=None,
-                  intent=None):
+                  intent=None, concept_checklist=None):
         # Inherit is_live from the parent subreddit so list/aggregation queries
         # can cheaply filter live vs. regular without re-joining subreddits.
         sub_row = self.conn.execute(
@@ -375,11 +375,13 @@ class Database:
         cur = self.conn.execute(
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
-               status, suggested_post_day, prompt_version, intent, is_live)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               status, suggested_post_day, prompt_version, intent, is_live,
+               concept_checklist)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, brand_id, title, body, storyline,
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
-             status, suggested_post_day, prompt_version, intent, is_live)
+             status, suggested_post_day, prompt_version, intent, is_live,
+             concept_checklist)
         )
         post_id = cur.lastrowid
         # Populate junction table
@@ -1532,6 +1534,13 @@ class Database:
         post_cols3 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]
         if "intent" not in post_cols3:
             self.conn.execute("ALTER TABLE posts ADD COLUMN intent TEXT")
+            self.conn.commit()
+        # ----- posts: concept_checklist (JSON) for AI-Search semantic-coverage
+        #       mode — the per-post phrasing checklist the body (and later the HQ
+        #       anchor) should cover so the thread is retrievable for the whole
+        #       query cluster. NULL for standard-mode posts. -----
+        if "concept_checklist" not in post_cols3:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN concept_checklist TEXT")
             self.conn.commit()
 
         # ----- app_meta: small key/value store for one-time startup flags -----

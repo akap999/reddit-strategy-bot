@@ -7217,6 +7217,10 @@ function renderLsubsGenerate(c) {
                         placeholder="e.g. any good background music tools for Instagram Reels?   ·   or just: Instagram"
                         style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px;font-family:inherit"></textarea>
                 </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Semantic-coverage mode: runs a query fan-out and generates titles/bodies that blanket the whole rewrite cluster an AI engine (ChatGPT/Perplexity/Gemini) would search for — not just the literal prompt. Saves a per-post phrasing checklist the HQ anchor later covers.">
+                    <input type="checkbox" id="lsubs-ai-search">
+                    🎯 AI Search mode <span class="text-gray-600">(semantic coverage — fan out + cover the query cluster; uses the seed as the anchor if set)</span>
+                </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
                 <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
                 <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
@@ -7501,9 +7505,11 @@ async function lsubsGeneratePosts(force = false) {
     if (count < 1) { toast('Set at least one post across the intents', 'error'); return; }
 
     const seed = (document.getElementById('lsubs-seed')?.value || '').trim();
+    const aiSearch = !!document.getElementById('lsubs-ai-search')?.checked;
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
     if (seed) reqBody.seed = seed;
+    if (aiSearch) reqBody.ai_search = true;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
     let res;

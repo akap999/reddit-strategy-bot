@@ -21,8 +21,18 @@ class PostGenerator:
         self.db = db
 
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
-                       intent_counts=None, context_only=False, seed=None):
+                       intent_counts=None, context_only=False, seed=None,
+                       ai_search=False):
         """Generate GEO-style posts (posts NEVER mention target brands).
+
+        `ai_search` (optional, default False): the new AI-Search semantic-coverage
+        MODE. When True, runs ONE query fan-out pass (`_fanout_rewrites`) to derive
+        the union rewrite cluster + a concept/phrasing checklist for the brand
+        (optionally anchored on `seed`), then steers title/body generation to
+        collectively cover that cluster. Posts are tagged
+        `prompt_version=<v>-ai-search` and persist the checklist so the later HQ
+        anchor can cover the whole cluster. ai_search=False is the unchanged
+        standard path.
 
         `seed` (optional): an existing prompt/question, several of them, or a
         keyword/platform (e.g. "Instagram"). When set, every generated title is
@@ -90,6 +100,14 @@ class PostGenerator:
         brand_ids = [b["id"] for b in brands]
         primary_brand = brands[0]
 
+        # AI-Search mode: one fan-out pass, reused across every intent slice.
+        coverage_focus = None
+        checklist_json = None
+        if ai_search:
+            coverage_focus = self._fanout_rewrites(brands, seed)
+            if coverage_focus and coverage_focus.get("checklist"):
+                checklist_json = json.dumps(coverage_focus["checklist"])
+
         # Existing titles for dedup (shared across all intent calls).
         # Scoped to THIS subreddit only — we intentionally allow the
         # same title to be reused in a different subreddit, since
@@ -124,7 +142,10 @@ class PostGenerator:
             candidates = self._generate_candidates_for_intent(
                 subreddit, brands, intent, storylines_for_intent,
                 existing_titles, n_intent * 2, context_only=context_only,
-                seed_focus=seed
+                # In AI-Search mode the fan-out already consumed the seed, so
+                # we steer via coverage_focus instead of the seed block.
+                seed_focus=(None if ai_search else seed),
+                coverage_focus=coverage_focus,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -187,9 +208,10 @@ class PostGenerator:
                 is_filler=0,
                 status="complete",
                 suggested_post_day=post.get("suggested_post_day", 0),
-                prompt_version=PROMPT_VERSION,
+                prompt_version=(PROMPT_VERSION + "-ai-search") if ai_search else PROMPT_VERSION,
                 brand_ids=brand_ids,
                 intent=post.get("intent"),
+                concept_checklist=checklist_json,
             )
             post["id"] = post_id
             saved.append(post)
@@ -541,15 +563,79 @@ Return JSON only:
 
         return "\n".join(lines), target_names, all_competitors
 
+    def _fanout_rewrites(self, brands, seed=None):
+        """AI-Search mode: one Claude call that simulates how ChatGPT / Perplexity /
+        Gemini fan a prompt out into sub-queries, then UNIONs them into a master
+        rewrite cluster + a concept/phrasing checklist for the brand's space.
+
+        Returns {"rewrites": [str, ...], "checklist": [str, ...]} or None on failure
+        (callers treat None as "no coverage steering" and fall back to normal gen).
+        The flavoring (per-engine styles) happens INSIDE the single call; the output
+        is engine-agnostic because the deliverable (one Reddit thread cluster) is
+        shared across engines and retrieval is semantic.
+        """
+        if isinstance(brands, dict):
+            brands = [brands]
+        brand_block, target_names, _competitors = self._build_enriched_brand_block(brands)
+        seed_line = ""
+        if seed and str(seed).strip():
+            seed_line = (
+                "\nANCHOR SEED (expand the fan-out AROUND this — an existing "
+                f"prompt/question, several, or a keyword/platform):\n{str(seed).strip()}\n"
+            )
+        prompt = f"""You are mapping the AI-search query space for a GEO campaign. The goal is to get
+this brand recommended by AI assistants. AI engines REWRITE a user's prompt into
+several search sub-queries ("query fan-out") and retrieve SEMANTICALLY, so we need
+the full cluster of phrasings around the brand's buying/recommendation intent —
+NOT one literal phrasing.
+
+BRAND CONTEXT (ground the queries here; NEVER output the target brand name(s): {', '.join(target_names) or '(none)'}):
+{brand_block}
+{seed_line}
+Do this in your head, then return the merged result:
+  1. Imagine how each engine fans the intent out:
+     - ChatGPT: a FEW (2-3) natural-language queries close to how a person phrases it.
+     - Perplexity: SEVERAL (4-6) short, keyword-style queries.
+     - Gemini / AI Overviews: a WIDE set of decomposed sub-questions and angles.
+  2. UNION + DEDUPE them into one master list of distinct rewrites (paraphrases,
+     decomposed sub-questions, and modifier/entity variants) that a real person
+     could plausibly ask and whose natural answer is to RECOMMEND a product/service
+     in this brand's niche. Cover distinct REGIONS of the space (different
+     use-cases / platforms / buyer concerns), not just synonyms of one query.
+  3. Produce a concise CONCEPT/PHRASING CHECKLIST: the key natural-language
+     phrasings, synonyms and domain terms a Reddit thread should contain so it
+     matches the whole cluster for both keyword (BM25) and embedding retrieval.
+
+Return JSON only:
+{{
+  "rewrites": ["distinct sub-query 1", "distinct sub-query 2", "..."],
+  "checklist": ["phrasing/term 1", "phrasing/term 2", "..."]
+}}
+Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand name."""
+        result = self.claude.call(prompt, max_tokens=1500, temperature=0.7)
+        if not result or not isinstance(result, dict):
+            return None
+        rewrites = result.get("rewrites") or []
+        checklist = result.get("checklist") or []
+        if not rewrites and not checklist:
+            return None
+        return {"rewrites": rewrites, "checklist": checklist}
+
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,
-                                        seed_focus=None):
+                                        seed_focus=None, coverage_focus=None):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
         Each post is a long-tail AI-query title plus a conversational body. Competitor
         brand names are allowed for comparison intent only; target brand names are never
         allowed for any intent.
+
+        `coverage_focus` (AI-Search mode): {"rewrites": [...], "checklist": [...]}
+        from the fan-out pass. When set, the batch's titles must collectively span
+        DISTINCT rewrites in the cluster and each body must semantically cover the
+        checklist phrasings (so the thread is retrievable for the whole query
+        cluster, not just one literal phrasing).
         """
         if isinstance(brands, dict):
             brands = [brands]
@@ -648,8 +734,42 @@ Return JSON only:
                 "All the TITLE rules and brand scoping below still apply."
             )
 
+        # Optional AI-SEARCH COVERAGE: when the fan-out pass supplied a rewrite
+        # cluster + phrasing checklist, steer the batch to BLANKET the cluster's
+        # semantic space (titles cover distinct rewrites; bodies carry the
+        # checklist phrasings) so the thread is retrievable however an AI engine
+        # paraphrases the prompt. Instruction-only — the rewrites/checklist are
+        # the SPACE TO COVER, not titles to copy.
+        coverage_block = ""
+        if coverage_focus:
+            _rw = [str(r).strip() for r in (coverage_focus.get("rewrites") or []) if str(r).strip()]
+            _ck = [str(c).strip() for c in (coverage_focus.get("checklist") or []) if str(c).strip()]
+            if _rw or _ck:
+                rw_lines = "\n".join(f"  - {r}" for r in _rw[:25])
+                ck_str = "; ".join(_ck[:25])
+                coverage_block = (
+                    "\n\nAI-SEARCH COVERAGE — this batch is part of a campaign to get the "
+                    "brand recommended by AI engines (ChatGPT / Perplexity / Gemini), which "
+                    "RE-WRITE a user's prompt into many sub-queries and retrieve SEMANTICALLY. "
+                    "Your job is to BLANKET that query space, not match one phrasing.\n"
+                    "REWRITE CLUSTER (the distinct sub-queries the engines fan out to):\n"
+                    f"{rw_lines}\n"
+                    "  • Across this batch, the titles must collectively cover DIFFERENT "
+                    "rewrites from this cluster — assign a distinct angle to each title; do "
+                    "NOT cluster several titles on the same rewrite or produce near-duplicates.\n"
+                    "  • These are the SPACE to cover, NOT templates — phrase each title as a "
+                    "natural human question (all TITLE rules below still apply); never paste a "
+                    "rewrite verbatim.\n"
+                )
+                if ck_str:
+                    coverage_block += (
+                        "PHRASING CHECKLIST (weave these natural-language variants/concepts into "
+                        "the BODY so both keyword (BM25) and embedding retrieval match the whole "
+                        f"cluster): {ck_str}\n"
+                    )
+
         # Shared header + intent-specific tail
-        header = f"""{scope_line}{seed_block}
+        header = f"""{scope_line}{seed_block}{coverage_block}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
 {brand_block}

@@ -4252,6 +4252,8 @@ def api_live_posts_generate():
     # Optional seed: expand generation AROUND an existing prompt / several /
     # a keyword/platform. None when blank → normal brand-context generation.
     seed = (data.get("seed") or "").strip() or None
+    # AI-Search semantic-coverage mode (separate option; default off).
+    ai_search = bool(data.get("ai_search", False))
     if not bid:
         return jsonify({"error": "brand_id required"}), 400
 
@@ -4327,7 +4329,7 @@ def api_live_posts_generate():
             posts = post_gen.generate_posts(
                 sub, [brand_full], count=count,
                 intent_counts=intent_counts, context_only=context_only,
-                seed=seed)
+                seed=seed, ai_search=ai_search)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles
@@ -4567,6 +4569,9 @@ def api_gen_hq_comment():
                 post_day_offset=post.get("suggested_post_day", 0),
                 ai_crawl=ai_crawl,
                 num_replies=num_replies,
+                # AI-Search-mode posts carry a saved phrasing checklist so the
+                # anchor covers the whole query cluster (None for normal posts).
+                concept_checklist=post.get("concept_checklist"),
             )
             return [{"id": c["id"], "body": c["body"][:100]} for c in comments]
         finally:

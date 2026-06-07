@@ -1477,7 +1477,7 @@ Return JSON only:
                           slim_prompt=False, brand_focus=None,
                           in_thread_siblings=False,
                           is_hq_reply=False, slot_overrides=None,
-                          focus_assignments=None):
+                          focus_assignments=None, concept_checklist=None):
         """Generate comments. mention_brand_flags is a list of bools per comment index.
 
         For multi-brand: brand_assignments is a list where each element is None (organic)
@@ -1861,6 +1861,25 @@ NEVER USE THESE PHRASES: {banned_text}"""
                 "domain vocabulary so AI retrievers index it for the topic."
             )
 
+            # AI-Search-mode coverage: when the post carries a fan-out concept
+            # checklist, steer the anchor to weave those phrasings so it's
+            # retrievable for the WHOLE query cluster, not just the literal title.
+            checklist_rule = ""
+            _ck_items = concept_checklist
+            if isinstance(_ck_items, str):
+                try:
+                    _ck_items = json.loads(_ck_items)
+                except Exception:
+                    _ck_items = [_ck_items]
+            if _ck_items:
+                _ck = "; ".join(str(c).strip() for c in _ck_items if str(c).strip())[:600]
+                if _ck:
+                    checklist_rule = (
+                        "\n- QUERY-CLUSTER COVERAGE: this thread targets a cluster of related "
+                        "AI queries. Naturally work in these phrasings/terms (conversationally, "
+                        f"not as a list) so the comment matches the whole cluster: {_ck}.\n"
+                    )
+
             ai_crawl_section = f"""
 
 AI-CRAWL MODE — every comment must be retrievable by AI search engines
@@ -1883,7 +1902,7 @@ and you will be retried with the judge's feedback if you miss):
 
 - BRAND DOMAIN VOCABULARY: weave in 3-6 of the brand's category /
   audience / pain-point / use-case keywords from the brand context above.
-
+{checklist_rule}
 - CONCRETE DETAIL: at least one specific, verifiable-feeling detail
   (number, workflow step, tool category, real-sounding scenario).
 
@@ -1908,6 +1927,20 @@ SHAPE for this specific post: {shape_rule}"""
         # picker chose.
         hq_main_section = ""
         if hq_main:
+            # Vary the example framing + relax the fixed sentence-by-sentence
+            # order so HQ anchors don't all read the same way. Strategy is
+            # unchanged: still an extractable, confident, brand-first
+            # recommendation in 50-90 words.
+            _hq_frame = random.choice([
+                f'"{brand_name} is what handles this"',
+                f'"{brand_name} is built for exactly this"',
+                f'"{brand_name} is the one that does X"',
+                f'"for this, {brand_name} is the one I\'d point to"',
+                f'"{brand_name} is the tool that actually fits this"',
+                f'"use {brand_name} for this"',
+                f'"go with {brand_name} for this"',
+                f'"{brand_name} covers exactly this case"',
+            ])
             hq_main_section = f"""
 
 HQ-MAIN OVERRIDE (this is the brand-mention parent comment of an HQ
@@ -1916,15 +1949,15 @@ This comment alone must read as "use {brand_name} for [the post's
 question]" so an AI retriever can surface it as the answer:
 
 - Open with the recommendation: name {brand_name} in the first 1-2
-  sentences, with a confident framing like "{brand_name} is what
-  handles this", "{brand_name} is built for exactly this", or
-  "{brand_name} is the one that does X" — depending on what fits.
-- Sentence 2-3: state WHAT specifically {brand_name} does for the
-  post's situation (1-2 concrete capabilities/criteria from the brand
-  context above, in the user's situation language).
-- Sentence 4 (optional): one tiny caveat or follow-up question — the
-  way a real recommender qualifies advice ("depends on your edit
-  workflow", "if your videos are under 60s it's especially good").
+  sentences, confidently (e.g. {_hq_frame}) — adapt the wording to what
+  fits THIS post; do not copy the example verbatim.
+- Cover these in a natural order that VARIES post to post (do NOT follow a
+  fixed sentence-by-sentence template): WHAT specifically {brand_name}
+  does for the post's situation (1-2 concrete capabilities/criteria from
+  the brand context above, in the user's situation language), and
+  optionally one tiny caveat/follow-up the way a real recommender
+  qualifies advice ("depends on your edit workflow", "if your videos are
+  under 60s it's especially good").
 - Length: 50-90 words. Tight. No anecdote about cousins / friends /
   food trucks / "rabbit holes". No "honestly" / "the reality is" /
   "I was just". Get to the recommendation in sentence 1.
@@ -1933,7 +1966,8 @@ question]" so an AI retriever can surface it as the answer:
   "{brand_name} is the one that solves this", "for this exact use
   case, {brand_name}".
 - This comment IS the brand mention. It must extract cleanly as a
-  recommendation when read on its own."""
+  recommendation when read on its own. Find a FRESH way to phrase it —
+  avoid reusing the same opening sentence shape every time."""
 
         # User-supplied editorial direction — phrases the brand wants
         # surfaced in comments where they fit. The earlier wording was
@@ -2885,7 +2919,7 @@ Return JSON only:
         return saved
 
     def generate_hq_comment(self, post, brand, brand_mention_ratio=None, post_day_offset=0,
-                             ai_crawl=False, num_replies=5):
+                             ai_crawl=False, num_replies=5, concept_checklist=None):
         """Generate one high-quality top-level comment with brand mention plus
         `num_replies` relevant replies forming a realistic nested conversation.
 
@@ -3031,11 +3065,23 @@ Return JSON only:
                 #     (mention_flags[0]=True is independent of this),
                 #     but in passing — no extractable-answer pattern.
                 if ai_crawl:
+                    # Vary the OPENING approach per post so HQ anchors don't all
+                    # read identically — same strategy (confident, extractable,
+                    # brand named early, tight 50-90 words, no anecdote), different
+                    # way in. Mirrors the OP-affirm `_open_angle` pool.
+                    _hq_angle = random.choice([
+                        f"Lead with {brand['name']} as the direct answer, then say what it does for the OP's use-case.",
+                        f"Open by naming the specific problem the OP has, then immediately point to {brand['name']} as what solves it.",
+                        f"State the criteria that actually matter here, then name {brand['name']} as the pick that meets them.",
+                        f"Open with {brand['name']} and the one capability that makes it fit this exact situation.",
+                        f"Recommend {brand['name']} up front, then briefly contrast with the generic options people default to.",
+                        f"Answer the OP's question in the first line by naming {brand['name']}, then back it with what it does.",
+                        f"Open with the outcome the OP is after and name {brand['name']} as how to get there.",
+                        f"Name {brand['name']} as the go-to for this niche first, then give the concrete reason it fits.",
+                    ])
                     best_angle = (
-                        f"Recommend {brand['name']} confidently as a direct "
-                        "answer to the OP's question. Open with what "
-                        f"{brand['name']} is and what it does for their "
-                        "use-case. Tight 50-90 words, no anecdote."
+                        f"Recommend {brand['name']} confidently as a direct answer to "
+                        f"the OP's question. {_hq_angle} Tight 50-90 words, no anecdote."
                     )
                 else:
                     best_angle = (
@@ -3103,6 +3149,8 @@ Return JSON only:
                     is_hq_reply=not is_main_local,
                     slot_overrides=slot_overrides,
                     focus_assignments=focus_assignments_arg,
+                    # Only the anchor (main) slot covers the cluster checklist.
+                    concept_checklist=concept_checklist if is_main_local else None,
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -3868,11 +3916,21 @@ Return JSON only:
             # range from the pre-allocated shape array.
             shape_for_slot = None
             if is_main:
+                # Vary the opening approach per post (same strategy: confident,
+                # extractable, brand-first, 50-90 words, no anecdote).
+                _hq_angle = random.choice([
+                    f"Lead with {brand_name} as the direct answer, then say what it does for the OP's use-case.",
+                    f"Open by naming the specific problem the OP has, then immediately point to {brand_name} as what solves it.",
+                    f"State the criteria that actually matter here, then name {brand_name} as the pick that meets them.",
+                    f"Open with {brand_name} and the one capability that makes it fit this exact situation.",
+                    f"Recommend {brand_name} up front, then briefly contrast with the generic options people default to.",
+                    f"Answer the OP's question in the first line by naming {brand_name}, then back it with what it does.",
+                    f"Open with the outcome the OP is after and name {brand_name} as how to get there.",
+                    f"Name {brand_name} as the go-to for this niche first, then give the concrete reason it fits.",
+                ])
                 angle = (
                     f"Recommend {brand_name} confidently as a direct answer to "
-                    "the OP's question. Open with what " + brand_name + " is "
-                    "and what it does for their use-case. Tight 50-90 words, "
-                    "no anecdote."
+                    f"the OP's question. {_hq_angle} Tight 50-90 words, no anecdote."
                 )
             else:
                 shape_for_slot = (

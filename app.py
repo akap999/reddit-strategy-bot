@@ -3145,11 +3145,13 @@ def api_check_live_revert_preview():
                 last N minutes
       since / until — explicit UTC 'YYYY-MM-DD HH:MM:SS' bounds to preview
       action  — repeatable; limit to 'marked_dead' and/or 'restored'
+      brand   — optional brand name; scope runs + preview to one brand
     """
     db = get_db()
     try:
         hours = request.args.get("hours", 48, type=int)
-        runs = db.get_check_live_log_runs(hours=hours)
+        brand = request.args.get("brand") or None
+        runs = db.get_check_live_log_runs(hours=hours, brand_name=brand)
         since = request.args.get("since") or None
         until = request.args.get("until") or None
         minutes = request.args.get("minutes", type=int)
@@ -3161,7 +3163,8 @@ def api_check_live_revert_preview():
         preview = None
         if since or until:
             preview = db.revert_check_live_window(
-                since=since, until=until, actions=actions, dry_run=True)
+                since=since, until=until, actions=actions,
+                brand_name=brand, dry_run=True)
         return jsonify({"runs": runs, "preview": preview})
     finally:
         db.close()
@@ -3172,10 +3175,11 @@ def api_check_live_revert():
     """Revert a window of check-live status changes back to each row's
     prior status (from the check_live_log audit trail).
 
-    Body: {minutes? | since?/until?, actions?, confirm?}
+    Body: {minutes? | since?/until?, actions?, brand?, confirm?}
       - Provide `minutes` (last N minutes) OR `since`/`until`
         (UTC 'YYYY-MM-DD HH:MM:SS').
       - `actions` (optional): subset of ['marked_dead','restored'].
+      - `brand` (optional): scope the revert to one brand's rows.
       - confirm must be true to APPLY; otherwise a dry-run preview is
         returned (changes nothing).
     """
@@ -3184,6 +3188,7 @@ def api_check_live_revert():
     until = data.get("until")
     minutes = data.get("minutes")
     actions = data.get("actions")
+    brand = data.get("brand") or None
     confirm = bool(data.get("confirm"))
     db = get_db()
     try:
@@ -3197,7 +3202,8 @@ def api_check_live_revert():
                          "(UTC 'YYYY-MM-DD HH:MM:SS')"
             }), 400
         report = db.revert_check_live_window(
-            since=since, until=until, actions=actions, dry_run=not confirm)
+            since=since, until=until, actions=actions,
+            brand_name=brand, dry_run=not confirm)
         return jsonify(report)
     finally:
         db.close()
@@ -8920,6 +8926,45 @@ def portal_brand_check_live(bid):
 
     tid = start_task('portal-check-live-brand', task, pass_task_id=True)
     return jsonify({"task_id": tid})
+
+
+@app.route('/portal/brand/<int:bid>/revert-last-check-live', methods=['POST'])
+@client_required
+def portal_brand_revert_last_check_live(bid):
+    """One-click undo of this brand's MOST RECENT status update
+    (check-live run). Brand-scoped: it can only revert rows tagged
+    with this brand, so a concurrent run on another brand is never
+    touched. Dry-run by default — pass {confirm:true} to apply.
+
+    Returns {run, report}; `report` has the same shape as
+    revert_check_live_window (reverted[]/skipped[]/...)."""
+    cid, _ = _acting_client_id()
+    confirm = bool((request.get_json(silent=True) or {}).get("confirm"))
+    db = get_db()
+    try:
+        # Authorization: client must own this brand.
+        if bid not in set(db.client_brand_ids(cid)):
+            return abort(404)
+        brand_row = db.conn.execute(
+            "SELECT name FROM brands WHERE id = ?", (bid,)
+        ).fetchone()
+        brand_name = brand_row["name"] if brand_row else None
+        if not brand_name:
+            return abort(404)
+
+        # Most recent check-live run for this brand (last 7 days).
+        runs = db.get_check_live_log_runs(hours=168, brand_name=brand_name)
+        if not runs:
+            return jsonify({
+                "run": None, "report": None,
+                "error": "no recent status update found for this brand"})
+        run = runs[0]
+        report = db.revert_check_live_window(
+            since=run["started_at"], until=run["ended_at"],
+            brand_name=brand_name, dry_run=not confirm)
+        return jsonify({"run": run, "report": report})
+    finally:
+        db.close()
 
 
 @app.route('/portal/check-live-all', methods=['POST'])

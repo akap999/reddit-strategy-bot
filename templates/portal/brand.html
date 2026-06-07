@@ -10,9 +10,14 @@
     <h1 class="text-2xl font-semibold text-slate-900 mt-1">{{ brand.name }}</h1>
     <p class="mt-1 text-sm text-slate-500">Monthly reports for this brand.</p>
   </div>
-  <button id="brand-check-btn" type="button" onclick="runBrandCheckLive()" class="btn-ghost">
-    🔄 Update status for {{ brand.name }}
-  </button>
+  <div class="flex items-center gap-2 flex-wrap">
+    <button id="brand-check-btn" type="button" onclick="runBrandCheckLive()" class="btn-ghost">
+      🔄 Update status for {{ brand.name }}
+    </button>
+    <button id="brand-undo-btn" type="button" onclick="undoLastCheckLive()" class="btn-ghost" title="Revert this brand's most recent status update">
+      ↩ Undo last status update
+    </button>
+  </div>
 </div>
 
 <div id="brand-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
@@ -140,6 +145,63 @@ async function runBrandCheckLive() {
       console.warn(e);
     }
   }, 1500);
+}
+
+async function undoLastCheckLive() {
+  const btn = document.getElementById('brand-undo-btn');
+  const status = document.getElementById('brand-check-status');
+  const progress = document.getElementById('brand-check-progress');
+  const url = `/portal/brand/${BRAND_ID}/revert-last-check-live` + (ASCID ? ('?as=' + ASCID) : '');
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Checking…';
+  status.classList.remove('hidden');
+  progress.textContent = '';
+  try {
+    // 1) Dry-run preview.
+    const pj = await (await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })).json();
+    if (pj.error || !pj.report) {
+      progress.textContent = ' ' + (pj.error || 'Nothing to undo from the last update.');
+      btn.disabled = false; btn.textContent = orig;
+      return;
+    }
+    const reverted = pj.report.reverted || [];
+    if (!reverted.length) {
+      progress.textContent = ' Nothing to undo from the last update.';
+      btn.disabled = false; btn.textContent = orig;
+      return;
+    }
+    // Dominant from→to transition for a readable summary.
+    const tally = {};
+    reverted.forEach(r => {
+      const k = `${r.from} → ${r.to}`;
+      tally[k] = (tally[k] || 0) + 1;
+    });
+    const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+    const summary = top ? ` (mostly ${top[0]})` : '';
+    if (!confirm(`Revert ${reverted.length} change(s) from the last status update for {{ brand.name }}?${summary}`)) {
+      progress.textContent = ' Cancelled.';
+      btn.disabled = false; btn.textContent = orig;
+      return;
+    }
+    // 2) Apply.
+    btn.textContent = 'Reverting…';
+    const aj = await (await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    })).json();
+    const n = (aj.report && aj.report.reverted) ? aj.report.reverted.length : 0;
+    progress.textContent = ` Reverted ${n} item(s) — reloading…`;
+    setTimeout(() => window.location.reload(), 800);
+  } catch (e) {
+    progress.textContent = ' Failed: ' + (e.message || e);
+    btn.disabled = false; btn.textContent = orig;
+  }
 }
 </script>
 {% endblock %}

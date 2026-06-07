@@ -7018,7 +7018,7 @@ class Database:
         rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_check_live_log_runs(self, hours=48, gap_minutes=5):
+    def get_check_live_log_runs(self, hours=48, gap_minutes=5, brand_name=None):
         """Cluster recent check_live_log rows into 'runs' by time gaps so
         the operator can identify exactly which run changed statuses.
 
@@ -7028,14 +7028,22 @@ class Database:
            by_source, sample}
         Timestamps are the raw check_live_log.created_at strings (UTC),
         suitable to pass straight back into revert_check_live_window().
+
+        `brand_name` (optional, case-insensitive) narrows clustering to a
+        single brand's rows — so runs[0] is that brand's most recent run.
         """
         from datetime import datetime as _dt
+        where = ["created_at >= datetime('now', ?)"]
+        params = [f"-{int(hours)} hours"]
+        if brand_name:
+            where.append("brand_name = ? COLLATE NOCASE")
+            params.append(brand_name)
         rows = self.conn.execute(
-            """SELECT comment_id, source, action, prev_status, new_status, created_at
+            f"""SELECT comment_id, source, action, prev_status, new_status, created_at
                FROM check_live_log
-               WHERE created_at >= datetime('now', ?)
+               WHERE {' AND '.join(where)}
                ORDER BY created_at ASC, id ASC""",
-            (f"-{int(hours)} hours",)
+            params
         ).fetchall()
 
         def _parse(ts):
@@ -7077,7 +7085,7 @@ class Database:
         return runs
 
     def revert_check_live_window(self, *, since=None, until=None, actions=None,
-                                 dry_run=True):
+                                 brand_name=None, dry_run=True):
         """Revert status changes recorded in check_live_log within a time
         window back to the status each row had BEFORE the change.
 
@@ -7095,7 +7103,9 @@ class Database:
 
         `since`/`until` are UTC 'YYYY-MM-DD HH:MM:SS' strings compared
         against check_live_log.created_at. `actions` optionally limits to
-        a subset of {'marked_dead','restored'}.
+        a subset of {'marked_dead','restored'}. `brand_name` (optional,
+        case-insensitive) confines the revert to a single brand's rows —
+        so a brand-scoped undo can never touch another brand.
 
         Each applied revert is itself logged (action='reverted') so the
         audit trail stays complete.
@@ -7109,6 +7119,8 @@ class Database:
         if actions:
             qmarks = ",".join("?" for _ in actions)
             where.append(f"action IN ({qmarks})"); params.extend(actions)
+        if brand_name:
+            where.append("brand_name = ? COLLATE NOCASE"); params.append(brand_name)
         rows = self.conn.execute(
             f"""SELECT comment_id, source, action, prev_status, new_status, created_at
                 FROM check_live_log
@@ -7177,7 +7189,8 @@ class Database:
                     f"UPDATE {table} SET status = ?, prev_status = NULL WHERE id = ?",
                     (target, cid))
                 try:
-                    self.log_live_check(cid, src, "", "reverted", cur_status, target)
+                    self.log_live_check(cid, src, "", "reverted", cur_status,
+                                        target, brand_name=brand_name)
                 except Exception:
                     pass
 

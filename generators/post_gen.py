@@ -114,21 +114,47 @@ class PostGenerator:
         covered_before = 0
         seed_norm = self.db.normalize_seed(seed) if (ai_search and seed) else None
         if ai_search and seed_norm:
-            cluster = self.db.get_ai_search_cluster(primary_brand["id"], seed_norm)
-            if not cluster:
-                fan = self._fanout_rewrites(brands, seed)
-                if fan:
-                    cluster = self.db.save_ai_search_cluster(
-                        primary_brand["id"], seed_norm, seed,
-                        fan.get("anchor"), fan.get("rewrites"), fan.get("checklist"))
-            if cluster:
+            bid = primary_brand["id"]
+            # Everything already generated for this (brand, seed) — past posts count
+            # as covered regardless of when they were made.
+            covered = self.db.get_covered_target_queries(bid, seed_norm)
+            cluster = self.db.get_ai_search_cluster(bid, seed_norm)
+            rewrites = anchor = checklist = None
+            if cluster and not cluster.get("backfilled"):
+                # A real cluster exists → reuse it (history already credited via covered).
                 rewrites = json.loads(cluster.get("rewrites_json") or "[]")
                 checklist = json.loads(cluster.get("checklist_json") or "[]")
                 anchor = cluster.get("anchor") or None
+            else:
+                # No cluster, OR a backfilled (covered-only) one → BUILD/UPGRADE it so
+                # this run folds in the existing posts AND extends with new angles.
+                past_posts = self.db.get_ai_search_posts_for_seed(bid, seed_norm)
+                past_angles, seen_pa = [], set()
+                for p in past_posts:
+                    tq = (p.get("target_query") or "").strip()
+                    k = tq.lower()
+                    if tq and k not in seen_pa:
+                        seen_pa.add(k); past_angles.append(tq)
+                fan = self._fanout_rewrites(brands, seed, prior_coverage=past_angles)
+                if not fan and not past_angles:
+                    fan = self._fanout_rewrites(brands, seed)  # nothing prior → plain fan-out
+                anchor = (fan.get("anchor") if fan else None) or (cluster.get("anchor") if cluster else None)
+                checklist = (fan.get("checklist") if fan else None) or (json.loads(cluster.get("checklist_json") or "[]") if cluster else [])
+                # Past angles FIRST (so they're in the cluster + show covered), then the
+                # new fan-out angles (the gaps to fill). Dedup case-insensitively.
+                merged, seen_m = [], set()
+                for r in (past_angles + ((fan.get("rewrites") if fan else []) or [])):
+                    k = str(r).strip().lower()
+                    if k and k not in seen_m:
+                        seen_m.add(k); merged.append(r)
+                rewrites = merged
+                if rewrites:
+                    self.db.upsert_ai_search_cluster(
+                        bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
+            if rewrites:
                 coverage_focus = {"anchor": anchor, "rewrites": rewrites, "checklist": checklist}
                 if checklist:
                     checklist_json = json.dumps(checklist)
-                covered = self.db.get_covered_target_queries(primary_brand["id"], seed_norm)
                 remaining_gaps = [r for r in rewrites if str(r).strip().lower() not in covered]
                 cluster_size = len(rewrites)
                 covered_before = cluster_size - len(remaining_gaps)
@@ -652,10 +678,15 @@ Return JSON only:
 
         return "\n".join(lines), target_names, all_competitors
 
-    def _fanout_rewrites(self, brands, seed=None):
+    def _fanout_rewrites(self, brands, seed=None, prior_coverage=None):
         """AI-Search mode: one Claude call that simulates how ChatGPT / Perplexity /
         Gemini fan a prompt out into sub-queries, then UNIONs them into a master
         rewrite cluster + a concept/phrasing checklist for the brand's space.
+
+        `prior_coverage` (set of already-covered sub-queries, normalized): when given,
+        the fan-out is steered to produce DISTINCT NEW rewrites for the remaining
+        space (and any returned rewrite matching prior_coverage is filtered out), so
+        re-generating a seed extends the cluster instead of repeating past angles.
 
         Returns {"anchor": str, "rewrites": [str, ...], "checklist": [str, ...]} or
         None on failure (callers treat None as "no coverage steering" and fall back
@@ -674,6 +705,15 @@ Return JSON only:
             seed_line = (
                 "\nANCHOR SEED (expand the fan-out AROUND this — an existing "
                 f"prompt/question, several, or a keyword/platform):\n{str(seed).strip()}\n"
+            )
+        prior_norm = {str(c).strip().lower() for c in (prior_coverage or []) if str(c).strip()}
+        if prior_norm:
+            _cov = "\n".join(f"  - {c}" for c in list(prior_coverage)[:30])
+            seed_line += (
+                "\nALREADY COVERED — these sub-queries are already handled by existing "
+                "threads. Produce DISTINCT NEW rewrites for the REMAINING space (other "
+                "sub-use-cases / buyer concerns / phrasings). Do NOT repeat or lightly "
+                f"reword any of these:\n{_cov}\n"
             )
         prompt = f"""You are mapping the AI-search query space for a GEO campaign. The goal is to get
 this brand recommended by AI assistants. AI engines REWRITE a user's prompt into
@@ -718,6 +758,8 @@ Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand 
         if not result or not isinstance(result, dict):
             return None
         rewrites = result.get("rewrites") or []
+        if prior_norm:
+            rewrites = [r for r in rewrites if str(r).strip().lower() not in prior_norm]
         checklist = result.get("checklist") or []
         anchor = (result.get("anchor") or "").strip()
         if not rewrites and not checklist:

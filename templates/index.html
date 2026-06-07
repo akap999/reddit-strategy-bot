@@ -7168,10 +7168,22 @@ function renderLsubsClusters(c) {
                     <option value="">All brands</option>${brandOptions}
                 </select></label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsLoadClusters()">↻ Refresh</button>
+            <button class="btn btn-sm" style="background:#2a2336;color:#c4b5fd" onclick="lsubsBackfillClusters()" title="Reconstruct clusters from previously-generated AI-Search posts (grouped by their root prompt)">↺ Backfill from posts</button>
             <span class="text-xs text-gray-500">Each root prompt → its fanned rewrites (covered ✓ / gap ○) → the posts under each.</span>
         </div>
         <div id="lsubs-clusters-list"></div>`;
     lsubsLoadClusters();
+}
+
+async function lsubsBackfillClusters() {
+    const bid = document.getElementById('lsubs-cluster-brand')?.value;
+    try {
+        const res = await api('/api/live-posts/clusters/backfill', { method: 'POST', body: { brand_id: bid ? parseInt(bid) : null } });
+        toast(`Backfilled ${res.backfilled} cluster${res.backfilled === 1 ? '' : 's'} from existing posts`, res.backfilled ? 'success' : 'info');
+        lsubsLoadClusters(true);
+    } catch (e) {
+        toast('Backfill failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function lsubsLoadClusters(silent = false) {
@@ -7196,9 +7208,11 @@ function _lsubsRenderClusters() {
         return;
     }
     listEl.innerHTML = clusters.map((cl, i) => {
-        const chip = cl.complete
-            ? `<span class="badge" style="background:#10331f;color:#46d160">✓ ${cl.covered_count}/${cl.cluster_size} complete</span>`
-            : `<span class="badge" style="background:#1e1b4b;color:#a5b4fc">${cl.covered_count}/${cl.cluster_size} covered · ${cl.gap_count} gap${cl.gap_count === 1 ? '' : 's'}</span>`;
+        const chip = cl.backfilled
+            ? `<span class="badge" style="background:#2a2336;color:#c4b5fd" title="Reconstructed from existing posts — shows the rewrites you generated; the original fan-out's never-generated angles aren't recoverable">↺ ${cl.cluster_size} rewrites · backfilled</span>`
+            : (cl.complete
+                ? `<span class="badge" style="background:#10331f;color:#46d160">✓ ${cl.covered_count}/${cl.cluster_size} complete</span>`
+                : `<span class="badge" style="background:#1e1b4b;color:#a5b4fc">${cl.covered_count}/${cl.cluster_size} covered · ${cl.gap_count} gap${cl.gap_count === 1 ? '' : 's'}</span>`);
         const rows = (cl.rewrites || []).map(rw => {
             const posts = (rw.posts || []).map(p =>
                 `<a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.post_number != null ? ('#' + p.post_number + ' ') : ''}${(p.title || '').slice(0, 80)}</a> <span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.subreddit_name ? ` <span class="text-gray-600">r/${p.subreddit_name}</span>` : ''}`
@@ -7218,11 +7232,30 @@ function _lsubsRenderClusters() {
                     <div class="font-bold" style="color:#0079D3">${cl.seed || '(no seed)'}</div>
                     ${cl.anchor ? `<div class="text-xs text-gray-500">anchor: ${cl.anchor}</div>` : ''}
                 </div>
-                <div class="flex items-center gap-2 flex-wrap">${chip}${fill}</div>
+                <div class="flex items-center gap-2 flex-wrap">${chip}${fill}
+                    <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:140px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
+                    <button class="btn btn-sm btn-secondary" onclick="lsubsClusterAddPosts(${i})" title="Attach the listed posts to this cluster">+ Add post(s)</button>
+                </div>
             </div>
             <div>${rows}</div>
         </div>`;
     }).join('');
+}
+
+async function lsubsClusterAddPosts(i) {
+    const cl = _lsubsClustersCache[i];
+    if (!cl) return;
+    const raw = (document.getElementById('clu-add-' + i)?.value || '').trim();
+    const nums = raw.split(/[,\s]+/).map(x => parseInt(x)).filter(x => !isNaN(x));
+    if (!nums.length) { toast('Enter post number(s), e.g. 3,5', 'error'); return; }
+    try {
+        const res = await api('/api/live-posts/clusters/add-posts', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, post_numbers: nums } });
+        const got = (res.attached || []).length, miss = (res.not_found || []);
+        toast(`Added ${got} post${got === 1 ? '' : 's'} to the cluster${miss.length ? ` · not found: #${miss.join(', #')}` : ''}`, got ? 'success' : 'error');
+        lsubsLoadClusters(true);
+    } catch (e) {
+        toast('Add failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function lsubsGenClusterGaps(i) {

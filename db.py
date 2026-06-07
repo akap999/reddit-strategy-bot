@@ -728,6 +728,29 @@ class Database:
         self.conn.commit()
         return self.get_ai_search_cluster(brand_id, seed_norm)
 
+    def upsert_ai_search_cluster(self, brand_id, seed_norm, seed, anchor, rewrites,
+                                 checklist, backfilled=0):
+        """Insert OR update the cluster for (brand, seed) — used to (re)build/expand
+        it (e.g. fold past posts in + extend on re-generation, or upgrade a
+        backfilled cluster). Overwrites rewrites/checklist/anchor/seed/backfilled."""
+        existing = self.get_ai_search_cluster(brand_id, seed_norm)
+        if existing:
+            self.conn.execute(
+                """UPDATE ai_search_clusters
+                   SET seed=?, anchor=?, rewrites_json=?, checklist_json=?, backfilled=?
+                   WHERE brand_id IS ? AND seed_norm=?""",
+                (seed or "", anchor or "", json.dumps(rewrites or []),
+                 json.dumps(checklist or []), int(backfilled), brand_id, seed_norm))
+        else:
+            self.conn.execute(
+                """INSERT INTO ai_search_clusters
+                   (brand_id, seed_norm, seed, anchor, rewrites_json, checklist_json, backfilled)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (brand_id, seed_norm, seed or "", anchor or "",
+                 json.dumps(rewrites or []), json.dumps(checklist or []), int(backfilled)))
+        self.conn.commit()
+        return self.get_ai_search_cluster(brand_id, seed_norm)
+
     def get_ai_search_clusters_for_brand(self, brand_id=None):
         """All persisted clusters (a brand's root prompts). brand_id None → all."""
         if brand_id is None:
@@ -765,6 +788,89 @@ class Database:
                 "target_query": (meta.get("target_query") or "").strip(),
             })
         return out
+
+    def backfill_clusters_from_posts(self, brand_id=None):
+        """Reconstruct ai_search_clusters rows from previously-generated AI-Search
+        posts (their ai_search_meta), for (brand, seed) groups that don't have a
+        cluster yet. rewrites = the distinct target_queries already covered;
+        marked backfilled=1 (the original fan-out's never-generated gaps can't be
+        recovered). Returns the number of clusters created."""
+        if brand_id is None:
+            rows = self.conn.execute(
+                "SELECT brand_id, ai_search_meta FROM posts WHERE ai_search_meta IS NOT NULL"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT brand_id, ai_search_meta FROM posts "
+                "WHERE brand_id IS ? AND ai_search_meta IS NOT NULL", (brand_id,)
+            ).fetchall()
+        groups = {}  # (brand_id, seed_norm) -> {seed, anchor, targets:[...]}
+        for r in rows:
+            try:
+                meta = json.loads(r["ai_search_meta"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            seed = (meta.get("seed") or "").strip()
+            sn = self.normalize_seed(seed)
+            if not sn:
+                continue
+            tq = (meta.get("target_query") or "").strip()
+            g = groups.setdefault((r["brand_id"], sn),
+                                  {"seed": seed, "anchor": meta.get("anchor") or "", "targets": []})
+            if tq and tq.lower() not in [t.lower() for t in g["targets"]]:
+                g["targets"].append(tq)
+        n = 0
+        for (bid, sn), g in groups.items():
+            if self.get_ai_search_cluster(bid, sn) or not g["targets"]:
+                continue
+            self.conn.execute(
+                """INSERT OR IGNORE INTO ai_search_clusters
+                   (brand_id, seed_norm, seed, anchor, rewrites_json, checklist_json, backfilled)
+                   VALUES (?, ?, ?, ?, ?, ?, 1)""",
+                (bid, sn, g["seed"], g["anchor"], json.dumps(g["targets"]), json.dumps([]))
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def attach_posts_to_cluster(self, brand_id, seed_norm, post_numbers):
+        """Manually attach existing posts (by their per-brand post_number) to a
+        cluster: tag each post's ai_search_meta with the cluster's seed/anchor and a
+        target_query (its existing one, else its title), and add that as a covered
+        rewrite. Works for any post — even ones without prior AI-Search metadata.
+        Returns {attached:[nums], not_found:[nums], cluster_size:N}."""
+        cluster = self.get_ai_search_cluster(brand_id, seed_norm)
+        if not cluster:
+            return {"error": "no cluster for this seed", "attached": [], "not_found": []}
+        rewrites = json.loads(cluster.get("rewrites_json") or "[]")
+        lower = {str(r).strip().lower() for r in rewrites}
+        seed = cluster.get("seed") or seed_norm
+        anchor = cluster.get("anchor") or ""
+        attached, not_found = [], []
+        for num in post_numbers:
+            row = self.conn.execute(
+                "SELECT id, title, ai_search_meta FROM posts "
+                "WHERE brand_id IS ? AND post_number = ?", (brand_id, num)
+            ).fetchone()
+            if not row:
+                not_found.append(num)
+                continue
+            try:
+                meta = json.loads(row["ai_search_meta"]) if row["ai_search_meta"] else {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            tq = (meta.get("target_query") or "").strip() or (row["title"] or "").strip()[:120]
+            self.conn.execute(
+                "UPDATE posts SET ai_search_meta=? WHERE id=?",
+                (json.dumps({"seed": seed, "anchor": anchor, "target_query": tq}), row["id"]))
+            if tq and tq.lower() not in lower:
+                rewrites.append(tq); lower.add(tq.lower())
+            attached.append(num)
+        self.conn.commit()
+        self.upsert_ai_search_cluster(
+            brand_id, seed_norm, seed, anchor, rewrites,
+            json.loads(cluster.get("checklist_json") or "[]"), backfilled=0)
+        return {"attached": attached, "not_found": not_found, "cluster_size": len(rewrites)}
 
     def get_covered_target_queries(self, brand_id, seed_norm):
         """Set of normalized target_query strings already covered (= a post was
@@ -1682,10 +1788,15 @@ class Database:
             )
         """)
         self.conn.commit()
-        # seed (original, un-normalized text) for display in the Clusters view.
+        # seed (original, un-normalized text) for display in the Clusters view;
+        # backfilled flag = reconstructed from existing posts (rewrites = covered
+        # only, original fan-out gaps unknown).
         clu_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(ai_search_clusters)").fetchall()]
         if "seed" not in clu_cols:
             self.conn.execute("ALTER TABLE ai_search_clusters ADD COLUMN seed TEXT")
+            self.conn.commit()
+        if "backfilled" not in clu_cols:
+            self.conn.execute("ALTER TABLE ai_search_clusters ADD COLUMN backfilled INTEGER DEFAULT 0")
             self.conn.commit()
 
         # ----- app_meta: small key/value store for one-time startup flags -----

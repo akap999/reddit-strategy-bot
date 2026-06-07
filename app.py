@@ -4414,10 +4414,55 @@ def api_live_posts_clusters():
                 "covered_count": covered,
                 "gap_count": n - covered,
                 "complete": n > 0 and covered >= n,
+                "backfilled": bool(cl.get("backfilled")),
                 "created_at": cl.get("created_at"),
                 "rewrites": rw_rows,
             })
         return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route("/api/live-posts/clusters/backfill", methods=["POST"])
+def api_live_posts_clusters_backfill():
+    """Reconstruct cluster rows from previously-generated AI-Search posts so they
+    appear in the Clusters view. Body: {brand_id?}. Returns {backfilled: N}."""
+    data = request.get_json(silent=True) or {}
+    raw = data.get("brand_id")
+    try:
+        bid = int(raw) if raw not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        bid = None
+    db = get_db()
+    try:
+        n = db.backfill_clusters_from_posts(bid)
+        return jsonify({"backfilled": n})
+    finally:
+        db.close()
+
+
+@app.route("/api/live-posts/clusters/add-posts", methods=["POST"])
+def api_cluster_add_posts():
+    """Manually attach existing posts (by post number) to a cluster.
+    Body: {brand_id, seed, post_numbers:[...]}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        brand_id = int(data.get("brand_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "brand_id required"}), 400
+    seed = data.get("seed") or ""
+    nums = []
+    for x in (data.get("post_numbers") or []):
+        try:
+            nums.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return jsonify({"error": "post_numbers required"}), 400
+    db = get_db()
+    try:
+        res = db.attach_posts_to_cluster(brand_id, db.normalize_seed(seed), nums)
+        return jsonify(res)
     finally:
         db.close()
 

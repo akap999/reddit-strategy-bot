@@ -175,6 +175,15 @@ async function api(url, opts = {}) {
     }
 }
 
+// AI-Search mode marker: posts generated with AI Search mode are tagged
+// prompt_version="...-ai-search". Show a small badge wherever Live Subs posts
+// are displayed (generate tab, posts tab, post-detail modal).
+function _aiModeBadge(p) {
+    const pv = (p && p.prompt_version) || '';
+    if (!pv.includes('ai-search')) return '';
+    return ` <span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca" title="Generated with AI Search mode (semantic-coverage fan-out)">🎯 AI</span>`;
+}
+
 async function resolveRedditUrl(url) {
     if (!url || !url.includes('/s/')) return url;
     try {
@@ -2509,9 +2518,11 @@ async function showPostDetail(pid) {
             <span class="badge badge-${post.status}">${post.status === 'published' ? 'deployed' : post.status}</span>
             ${post.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0">report ${post.report_month}</span>` : ''}
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
+            ${_aiModeBadge(post)}
             ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
             <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
         </div>
+        ${(() => { let ck=[]; try { ck = JSON.parse(post.concept_checklist||'[]'); } catch(e){} return ck.length ? `<div class="text-xs mb-3" style="color:#a5b4fc"><b>AI-Search cluster coverage:</b> ${ck.join(' · ')}</div>` : ''; })()}
         <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
         ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3 break-all">Reddit: ${post.reddit_url}</p>` : ''}
@@ -7426,7 +7437,7 @@ function lsubsRenderTable(posts) {
                     <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
                         ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${p.brand_id||'null'})" title="Change subreddit">✎</button>`
                         : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${p.brand_id||'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
-                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}${_aiModeBadge(p)}</td>
                     <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
                     <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                     <td class="text-gray-400">${p.storyline || ''}</td>
@@ -7912,7 +7923,7 @@ async function lsubsLoadPosts(silent = false) {
                         <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
                             ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change subreddit">✎</button>`
                             : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
-                        <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                        <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}${_aiModeBadge(p)}</td>
                         <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
                         <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
                         <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>

@@ -151,11 +151,20 @@ class PostGenerator:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
                 continue
 
-            # Score each for AI-query relevance
+            # Score each for AI-query relevance. In AI-Search mode the scorer also
+            # enforces anchor-retention + question-form (off-anchor/vent → low).
+            _anchor = (coverage_focus.get("anchor") if coverage_focus else None) or None
             for c in candidates:
-                c["ai_query_score"] = self._score_ai_query_relevance(c["title"], c["body"])
+                c["ai_query_score"] = self._score_ai_query_relevance(
+                    c["title"], c["body"],
+                    anchor=_anchor, target_query=c.get("target_query"))
 
-            picked = self._select_best(candidates, storylines_for_intent, n_intent)
+            # AI-Search mode: coverage-gated selection (one strong post per distinct
+            # rewrite, weak/off-anchor dropped). Standard mode: storyline-balanced.
+            if ai_search:
+                picked = self._select_cluster_best(candidates, n_intent)
+            else:
+                picked = self._select_best(candidates, storylines_for_intent, n_intent)
             for c in picked:
                 c["intent"] = intent
                 # Dedup across intent calls — add picked titles to the seen set
@@ -568,8 +577,11 @@ Return JSON only:
         Gemini fan a prompt out into sub-queries, then UNIONs them into a master
         rewrite cluster + a concept/phrasing checklist for the brand's space.
 
-        Returns {"rewrites": [str, ...], "checklist": [str, ...]} or None on failure
-        (callers treat None as "no coverage steering" and fall back to normal gen).
+        Returns {"anchor": str, "rewrites": [str, ...], "checklist": [str, ...]} or
+        None on failure (callers treat None as "no coverage steering" and fall back
+        to normal gen). `anchor` is the core platform/use-case the campaign targets
+        (e.g. "Instagram Reels"), extracted from the seed (or the brand's primary
+        use-case when there's no seed) — generation keeps every title on this anchor.
         The flavoring (per-engine styles) happens INSIDE the single call; the output
         is engine-agnostic because the deliverable (one Reddit thread cluster) is
         shared across engines and retrieval is semantic.
@@ -593,22 +605,32 @@ BRAND CONTEXT (ground the queries here; NEVER output the target brand name(s): {
 {brand_block}
 {seed_line}
 Do this in your head, then return the merged result:
-  1. Imagine how each engine fans the intent out:
+  1. ANCHOR — identify the core platform / use-case this campaign targets. If the
+     seed names a platform or use-case (e.g. "Instagram Reels", "podcast intros",
+     "online store checkout"), THAT is the anchor — extract it exactly. If there's
+     no seed, derive the anchor from the brand's single most central use-case/
+     platform. The anchor is short (1-4 words). Every rewrite should stay on this
+     anchor; a rewrite may broaden to an ADJACENT variant (e.g. Reels → Shorts /
+     short-form video) but must never collapse to something fully generic
+     ("my videos", "content").
+  2. Imagine how each engine fans the intent out:
      - ChatGPT: a FEW (2-3) natural-language queries close to how a person phrases it.
      - Perplexity: SEVERAL (4-6) short, keyword-style queries.
      - Gemini / AI Overviews: a WIDE set of decomposed sub-questions and angles.
-  2. UNION + DEDUPE them into one master list of distinct rewrites (paraphrases,
+  3. UNION + DEDUPE them into one master list of distinct rewrites (paraphrases,
      decomposed sub-questions, and modifier/entity variants) that a real person
      could plausibly ask and whose natural answer is to RECOMMEND a product/service
-     in this brand's niche. Cover distinct REGIONS of the space (different
-     use-cases / platforms / buyer concerns), not just synonyms of one query.
-  3. Produce a concise CONCEPT/PHRASING CHECKLIST: the key natural-language
+     in this brand's niche. Each rewrite stays ON the anchor (or a named adjacent
+     variant). Cover distinct REGIONS of the space (different sub-use-cases / buyer
+     concerns), not just synonyms of one query.
+  4. Produce a concise CONCEPT/PHRASING CHECKLIST: the key natural-language
      phrasings, synonyms and domain terms a Reddit thread should contain so it
      matches the whole cluster for both keyword (BM25) and embedding retrieval.
 
 Return JSON only:
 {{
-  "rewrites": ["distinct sub-query 1", "distinct sub-query 2", "..."],
+  "anchor": "the platform/use-case to keep every title on (short)",
+  "rewrites": ["distinct on-anchor sub-query 1", "distinct sub-query 2", "..."],
   "checklist": ["phrasing/term 1", "phrasing/term 2", "..."]
 }}
 Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand name."""
@@ -617,9 +639,10 @@ Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand 
             return None
         rewrites = result.get("rewrites") or []
         checklist = result.get("checklist") or []
+        anchor = (result.get("anchor") or "").strip()
         if not rewrites and not checklist:
             return None
-        return {"rewrites": rewrites, "checklist": checklist}
+        return {"anchor": anchor, "rewrites": rewrites, "checklist": checklist}
 
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,
@@ -741,22 +764,39 @@ Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand 
         # paraphrases the prompt. Instruction-only — the rewrites/checklist are
         # the SPACE TO COVER, not titles to copy.
         coverage_block = ""
+        coverage_json_field = ""
         if coverage_focus:
             _rw = [str(r).strip() for r in (coverage_focus.get("rewrites") or []) if str(r).strip()]
             _ck = [str(c).strip() for c in (coverage_focus.get("checklist") or []) if str(c).strip()]
+            _anchor = (coverage_focus.get("anchor") or "").strip()
             if _rw or _ck:
                 rw_lines = "\n".join(f"  - {r}" for r in _rw[:25])
                 ck_str = "; ".join(_ck[:25])
+                anchor_rule = ""
+                if _anchor:
+                    anchor_rule = (
+                        f"ANCHOR = \"{_anchor}\". EVERY title must stay on this anchor "
+                        "(its platform/use-case must be present or unmistakably implied). "
+                        "A title may broaden to a NAMED adjacent variant only if its "
+                        "assigned rewrite already does so — it must NEVER drift to a fully "
+                        "generic phrasing (e.g. \"my videos\", \"content\") that drops the "
+                        "anchor. A title that loses the anchor is a FAILED title.\n"
+                    )
                 coverage_block = (
                     "\n\nAI-SEARCH COVERAGE — this batch is part of a campaign to get the "
                     "brand recommended by AI engines (ChatGPT / Perplexity / Gemini), which "
                     "RE-WRITE a user's prompt into many sub-queries and retrieve SEMANTICALLY. "
                     "Your job is to BLANKET that query space, not match one phrasing.\n"
+                    f"{anchor_rule}"
                     "REWRITE CLUSTER (the distinct sub-queries the engines fan out to):\n"
                     f"{rw_lines}\n"
-                    "  • Across this batch, the titles must collectively cover DIFFERENT "
-                    "rewrites from this cluster — assign a distinct angle to each title; do "
-                    "NOT cluster several titles on the same rewrite or produce near-duplicates.\n"
+                    "  • Each title must TARGET exactly ONE rewrite from this cluster, and "
+                    "different titles in the batch must target DIFFERENT rewrites — no two "
+                    "titles on the same rewrite, no near-duplicates.\n"
+                    "  • Report which rewrite each title targets in its \"target_query\" field "
+                    "(copy the rewrite text it covers).\n"
+                    "  • Each title must be a RECOMMENDATION QUESTION (an AI would answer it by "
+                    "naming a product/service) — never a vent or bare statement.\n"
                     "  • These are the SPACE to cover, NOT templates — phrase each title as a "
                     "natural human question (all TITLE rules below still apply); never paste a "
                     "rewrite verbatim.\n"
@@ -767,6 +807,7 @@ Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand 
                         "the BODY so both keyword (BM25) and embedding retrieval match the whole "
                         f"cluster): {ck_str}\n"
                     )
+                coverage_json_field = ',\n            "target_query": "the ONE rewrite from the cluster this title targets"'
 
         # Shared header + intent-specific tail
         header = f"""{scope_line}{seed_block}{coverage_block}
@@ -877,10 +918,10 @@ Return JSON only:
         {
             "title": "The long-tail AI query",
             "body": "2-4 paragraph first-person body with context",
-            "storyline": "storyline type from the list above"
+            "storyline": "storyline type from the list above"%s
         }
     ]
-}"""
+}""" % coverage_json_field
 
         prompt = header + intent_tail + json_tail
         result = self.claude.call(prompt, max_tokens=4000, temperature=0.9)
@@ -960,7 +1001,7 @@ Return JSON only:
 
         return result["posts"]
 
-    def _score_ai_query_relevance(self, title, body):
+    def _score_ai_query_relevance(self, title, body, anchor=None, target_query=None):
         """Score 0-10 combining (a) likelihood a real person types this query
         with (b) whether its natural answer is a PRODUCT/SERVICE RECOMMENDATION.
 
@@ -968,7 +1009,29 @@ Return JSON only:
         (so the brand seeded in the comments can be the recommendation). Generic
         info / efficacy / how-it-works questions — whose answer is an explanation,
         not a recommendation — score low and get dropped by _select_best.
+
+        AI-Search mode (anchor given): the score ALSO enforces ANCHOR RETENTION
+        (the title keeps the campaign's platform/use-case) and QUESTION FORM (a
+        recommendation question, not a vent/statement), and rewards a clean match
+        to its `target_query`. Off-anchor or vent titles score LOW so the
+        coverage-gated selector drops them. anchor=None → original behavior.
         """
+        anchor_block = ""
+        if anchor:
+            tq = f'\nThis title is supposed to target the cluster sub-query: "{target_query}".' if target_query else ""
+            anchor_block = f"""
+
+AI-SEARCH MODE — additionally enforce (these can CAP the score):
+  ANCHOR = "{anchor}". The title MUST keep this platform/use-case (present or
+  unmistakably implied). If the title has drifted to a generic phrasing that drops
+  the anchor (e.g. "...for my videos" when the anchor is "Instagram Reels"), cap the
+  score at 4 — it's off-target and weak.
+  QUESTION FORM. The title must read as a recommendation QUESTION, not a vent or
+  bare statement ("so tired of X", "need better Y"). A statement/vent caps at 5
+  even if on-anchor.{tq}
+  A strong title is: on-anchor + a recommendation question + cleanly maps to its
+  target sub-query."""
+
         prompt = f"""You are scoring a Reddit post TITLE for a GEO campaign whose goal is to get a
 specific product/service recommended by AI assistants (ChatGPT / Perplexity / Google).
 
@@ -981,7 +1044,7 @@ Rate 0-10 on BOTH dimensions together:
 
 High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services/suppliers ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y", "where to buy X online", "best place to order X", "who sells X").
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
-Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs.
+Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs.{anchor_block}
 
 Return JSON only:
 {{"score": 0-10, "reasoning": "brief explanation"}}"""
@@ -1018,6 +1081,44 @@ Return JSON only:
             if len(selected) >= count:
                 break
 
+        return selected[:count]
+
+    def _select_cluster_best(self, candidates, count, threshold=6):
+        """AI-Search coverage-gated selection: return up to `count` STRONG posts
+        that each cover a DISTINCT rewrite (target_query).
+
+        - Only candidates scoring >= `threshold` qualify (drops off-anchor / vent /
+          weak titles that the anchor-aware scorer pushed down).
+        - Picks the single highest-scoring candidate per distinct target_query, so
+          the kept batch spans different cluster regions instead of duplicating one.
+        - Falls back to the (deduped) title when a candidate has no target_query.
+        - If fewer than `count` distinct strong rewrites exist, fills remaining
+          slots with the next-best qualifying candidates and prints the shortfall
+          (no silent truncation).
+        """
+        strong = [c for c in candidates if c.get("ai_query_score", 0) >= threshold]
+        strong.sort(key=lambda c: c.get("ai_query_score", 0), reverse=True)
+
+        # One strong post per DISTINCT rewrite. We deliberately prefer distinct
+        # coverage over hitting `count`: padding the batch with a second post on a
+        # rewrite that's already covered just recreates the weak/redundant posts
+        # this selector exists to prevent. If too few distinct strong rewrites
+        # exist, return fewer and say so (no silent padding).
+        selected, seen_targets = [], set()
+        for c in strong:
+            key = (c.get("target_query") or c.get("title") or "").strip().lower()
+            if key in seen_targets:
+                continue
+            seen_targets.add(key)
+            selected.append(c)
+            if len(selected) >= count:
+                break
+
+        if len(selected) < count:
+            print(f"[post_gen] AI-Search: kept {len(selected)} of {count} requested — "
+                  f"only that many distinct rewrites cleared the quality bar "
+                  f"(score>={threshold}). Weak/off-anchor/duplicate candidates were "
+                  "dropped rather than padded; broaden the seed or lower counts for more.")
         return selected[:count]
 
     def _generate_image_prompt(self, title, body, storyline):

@@ -702,6 +702,91 @@ class Database:
         ).fetchall()
         return [r["title"] for r in rows]
 
+    # --- AI-Search cluster persistence (gap-fill / completion) ---
+
+    @staticmethod
+    def normalize_seed(seed):
+        return (seed or "").strip().lower()
+
+    def get_ai_search_cluster(self, brand_id, seed_norm):
+        """Return the persisted fan-out cluster row for (brand, seed) or None."""
+        row = self.conn.execute(
+            "SELECT * FROM ai_search_clusters WHERE brand_id IS ? AND seed_norm = ?",
+            (brand_id, seed_norm)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_ai_search_cluster(self, brand_id, seed_norm, seed, anchor, rewrites, checklist):
+        """Persist the canonical cluster for (brand, seed) once (idempotent)."""
+        self.conn.execute(
+            """INSERT OR IGNORE INTO ai_search_clusters
+               (brand_id, seed_norm, seed, anchor, rewrites_json, checklist_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (brand_id, seed_norm, seed or "", anchor or "",
+             json.dumps(rewrites or []), json.dumps(checklist or []))
+        )
+        self.conn.commit()
+        return self.get_ai_search_cluster(brand_id, seed_norm)
+
+    def get_ai_search_clusters_for_brand(self, brand_id=None):
+        """All persisted clusters (a brand's root prompts). brand_id None → all."""
+        if brand_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM ai_search_clusters ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM ai_search_clusters WHERE brand_id IS ? "
+                "ORDER BY created_at DESC, id DESC", (brand_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_ai_search_posts_for_seed(self, brand_id, seed_norm):
+        """Posts generated under a given (brand, seed) root, with their target_query
+        and display fields — for the Clusters coverage view."""
+        rows = self.conn.execute(
+            """SELECT p.id, p.title, p.status, p.post_number, p.ai_search_meta,
+                      s.name AS subreddit_name
+               FROM posts p LEFT JOIN subreddits s ON s.id = p.subreddit_id
+               WHERE p.brand_id IS ? AND p.ai_search_meta IS NOT NULL""",
+            (brand_id,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["ai_search_meta"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if self.normalize_seed(meta.get("seed")) != seed_norm:
+                continue
+            out.append({
+                "id": r["id"], "title": r["title"], "status": r["status"],
+                "post_number": r["post_number"], "subreddit_name": r["subreddit_name"],
+                "target_query": (meta.get("target_query") or "").strip(),
+            })
+        return out
+
+    def get_covered_target_queries(self, brand_id, seed_norm):
+        """Set of normalized target_query strings already covered (= a post was
+        generated) for this (brand, seed). Parses posts.ai_search_meta JSON."""
+        rows = self.conn.execute(
+            "SELECT ai_search_meta FROM posts "
+            "WHERE brand_id IS ? AND ai_search_meta IS NOT NULL",
+            (brand_id,)
+        ).fetchall()
+        covered = set()
+        for r in rows:
+            try:
+                meta = json.loads(r["ai_search_meta"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if self.normalize_seed(meta.get("seed")) != seed_norm:
+                continue
+            tq = (meta.get("target_query") or "").strip().lower()
+            if tq:
+                covered.add(tq)
+        return covered
+
     # --- Comments ---
 
     def save_comment(self, post_id, brand_id, body, persona_id=None,
@@ -1578,6 +1663,29 @@ class Database:
                 self.conn.execute(
                     "UPDATE posts SET post_number=? WHERE id=?",
                     (counters[bid], r["id"]))
+            self.conn.commit()
+
+        # ----- ai_search_clusters: persisted fan-out cluster per (brand, seed)
+        #       so AI-Search "generate more" fills gaps against a STABLE cluster
+        #       (exact X/N coverage) instead of re-deriving each run. -----
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_search_clusters (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand_id      INTEGER,
+                seed_norm     TEXT NOT NULL,
+                seed          TEXT,
+                anchor        TEXT,
+                rewrites_json TEXT,
+                checklist_json TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
+                UNIQUE(brand_id, seed_norm)
+            )
+        """)
+        self.conn.commit()
+        # seed (original, un-normalized text) for display in the Clusters view.
+        clu_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(ai_search_clusters)").fetchall()]
+        if "seed" not in clu_cols:
+            self.conn.execute("ALTER TABLE ai_search_clusters ADD COLUMN seed TEXT")
             self.conn.commit()
 
         # ----- app_meta: small key/value store for one-time startup flags -----

@@ -7136,6 +7136,7 @@ async function renderLiveSubreddits(el) {
             <div class="tab ${_lsubsTab==='generate'?'active':''}" onclick="_lsubsTab='generate';renderLsubsTabContent()">🤖 Generate</div>
             <div class="tab ${_lsubsTab==='posts'?'active':''}" onclick="_lsubsTab='posts';renderLsubsTabContent()">📝 Posts</div>
             <div class="tab ${_lsubsTab==='comments'?'active':''}" onclick="_lsubsTab='comments';renderLsubsTabContent()">💬 Comments</div>
+            <div class="tab ${_lsubsTab==='clusters'?'active':''}" onclick="_lsubsTab='clusters';renderLsubsTabContent()">🎯 Clusters</div>
         </div>
         <div id="lsubs-tab-content"></div>
     `;
@@ -7146,12 +7147,110 @@ function renderLsubsTabContent() {
     const c = document.getElementById('lsubs-tab-content');
     if (!c) return;
     c.parentElement.querySelectorAll('.tab').forEach((t, i) => {
-        const tabs = ['generate', 'posts', 'comments'];
+        const tabs = ['generate', 'posts', 'comments', 'clusters'];
         t.className = `tab ${_lsubsTab === tabs[i] ? 'active' : ''}`;
     });
     if (_lsubsTab === 'generate') renderLsubsGenerate(c);
     else if (_lsubsTab === 'posts') renderLsubsPosts(c);
     else if (_lsubsTab === 'comments') renderLsubsComments(c);
+    else if (_lsubsTab === 'clusters') renderLsubsClusters(c);
+}
+
+// ---- Live Subs "Clusters" tab: root prompt → rewrites (covered/gap) → posts ----
+let _lsubsClustersCache = [];
+
+function renderLsubsClusters(c) {
+    const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    c.innerHTML = `
+        <div class="flex flex-wrap gap-3 items-center mb-4">
+            <label class="text-xs text-gray-400 flex items-center gap-1">Brand
+                <select id="lsubs-cluster-brand" onchange="lsubsLoadClusters()" style="min-width:220px">
+                    <option value="">All brands</option>${brandOptions}
+                </select></label>
+            <button class="btn btn-sm btn-secondary" onclick="lsubsLoadClusters()">↻ Refresh</button>
+            <span class="text-xs text-gray-500">Each root prompt → its fanned rewrites (covered ✓ / gap ○) → the posts under each.</span>
+        </div>
+        <div id="lsubs-clusters-list"></div>`;
+    lsubsLoadClusters();
+}
+
+async function lsubsLoadClusters(silent = false) {
+    const listEl = document.getElementById('lsubs-clusters-list');
+    if (!listEl) return;
+    if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
+    const bid = document.getElementById('lsubs-cluster-brand')?.value;
+    try {
+        _lsubsClustersCache = (await api('/api/live-posts/clusters' + (bid ? ('?brand_id=' + bid) : ''))) || [];
+        _lsubsRenderClusters();
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load clusters: ${e.message || e}</p>`;
+    }
+}
+
+function _lsubsRenderClusters() {
+    const listEl = document.getElementById('lsubs-clusters-list');
+    if (!listEl) return;
+    const clusters = _lsubsClustersCache || [];
+    if (!clusters.length) {
+        listEl.innerHTML = `<p class="text-sm text-gray-500 mt-3">No AI-Search clusters yet — generate with <b>🎯 AI Search mode</b> + a seed in the Generate tab.</p>`;
+        return;
+    }
+    listEl.innerHTML = clusters.map((cl, i) => {
+        const chip = cl.complete
+            ? `<span class="badge" style="background:#10331f;color:#46d160">✓ ${cl.covered_count}/${cl.cluster_size} complete</span>`
+            : `<span class="badge" style="background:#1e1b4b;color:#a5b4fc">${cl.covered_count}/${cl.cluster_size} covered · ${cl.gap_count} gap${cl.gap_count === 1 ? '' : 's'}</span>`;
+        const rows = (cl.rewrites || []).map(rw => {
+            const posts = (rw.posts || []).map(p =>
+                `<a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.post_number != null ? ('#' + p.post_number + ' ') : ''}${(p.title || '').slice(0, 80)}</a> <span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.subreddit_name ? ` <span class="text-gray-600">r/${p.subreddit_name}</span>` : ''}`
+            ).join('<br>');
+            return `<div class="py-1" style="border-top:1px solid #20283a">
+                <div class="text-sm">${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span></div>
+                ${posts ? `<div class="text-xs ml-4 mt-1 text-gray-400">${posts}</div>` : ''}
+            </div>`;
+        }).join('');
+        const fill = cl.gap_count > 0
+            ? `<input type="number" id="clu-n-${i}" value="${Math.min(cl.gap_count, 5)}" min="1" max="10" class="text-xs" style="width:48px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px">
+               <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsGenClusterGaps(${i})" title="Generate posts targeting the uncovered rewrites">Fill gaps</button>`
+            : '';
+        return `<div class="card p-4 mb-3" style="background:#0e1320;border:1px solid #24304a">
+            <div class="flex items-start justify-between gap-3 flex-wrap mb-2">
+                <div style="min-width:0">
+                    <div class="font-bold" style="color:#0079D3">${cl.seed || '(no seed)'}</div>
+                    ${cl.anchor ? `<div class="text-xs text-gray-500">anchor: ${cl.anchor}</div>` : ''}
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">${chip}${fill}</div>
+            </div>
+            <div>${rows}</div>
+        </div>`;
+    }).join('');
+}
+
+async function lsubsGenClusterGaps(i) {
+    const cl = _lsubsClustersCache[i];
+    if (!cl) return;
+    const inp = document.getElementById('clu-n-' + i);
+    let n = parseInt(inp?.value || '0') || 0;
+    if (n < 1) n = Math.min(cl.gap_count || 1, 5);
+    const per = Math.floor(n / 3), rem = n % 3;
+    const intent_counts = { commercial: per + (rem > 0 ? 1 : 0), comparison: per + (rem > 1 ? 1 : 0), informational: per };
+    try {
+        const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, intent_counts } });
+        const tid = res.task_id;
+        toast(`Filling up to ${n} gap${n === 1 ? '' : 's'} for “${(cl.seed || '').slice(0, 40)}”…`, 'info');
+        if (typeof _addBgTask === 'function') _addBgTask(tid, 'Cluster gaps');
+        const poll = setInterval(async () => {
+            try {
+                const t = await api('/api/tasks/' + tid);
+                if (t.status === 'complete' || t.status === 'error') {
+                    clearInterval(poll);
+                    if (t.status === 'complete') { toast('Gaps filled — refreshing cluster', 'success'); lsubsLoadClusters(true); }
+                    else toast('Fill gaps failed: ' + (t.error || 'error'), 'error');
+                }
+            } catch (e) {}
+        }, 1500);
+    } catch (e) {
+        toast('Fill gaps failed: ' + (e.message || e), 'error');
+    }
 }
 
 function renderLsubsGenerate(c) {
@@ -7643,6 +7742,9 @@ function lsubsRenderResult(res) {
                 <div class="font-bold" style="color:#46d160">Generated ${kept.length} post${kept.length === 1 ? '' : 's'} for r/${res.subreddit_name}</div>
                 ${kept.length ? `<button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsGenHqForKept()" title="Generate an HQ thread for every post above">Gen HQ for all ${kept.length}</button>` : ''}
             </div>
+            ${(() => { const c = res.coverage; if (!c) return ''; const seedTxt = c.seed ? ` <span style="color:#9aa">“${(c.seed||'').slice(0,70)}”</span>` : ''; return c.complete
+                ? `<div class="text-xs mb-2" style="color:#46d160">✓ Cluster complete${seedTxt} — ${c.covered_after}/${c.cluster_size} rewrites covered. Broaden the seed to grow the cluster.</div>`
+                : `<div class="text-xs mb-2" style="color:#a5b4fc">🎯 Cluster coverage${seedTxt}: <b>${c.covered_after}/${c.cluster_size}</b> covered (+${c.targeted_this_run} this run) · <b>${c.remaining_after}</b> gap${c.remaining_after === 1 ? '' : 's'} left. Re-generate with the same seed to fill more.</div>`; })()}
             ${kept.length ? `<ul class="text-sm space-y-1">${kept.map(p => `<li class="flex items-center"><span class="flex-1">· <span class="badge badge-${(p.intent || 'draft')}">${p.intent || '—'}</span> <a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.title}</a></span>${_hqBtn(p)}</li>`).join('')}</ul>` : '<p class="text-sm text-gray-400">No posts kept after dedup.</p>'}
         </div>
     `;

@@ -19,6 +19,7 @@ class PostGenerator:
     def __init__(self, claude: ClaudeClient, db: Database):
         self.claude = claude
         self.db = db
+        self.last_coverage = None  # AI-Search gap-fill coverage summary (per run)
 
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
@@ -100,10 +101,47 @@ class PostGenerator:
         brand_ids = [b["id"] for b in brands]
         primary_brand = brands[0]
 
-        # AI-Search mode: one fan-out pass, reused across every intent slice.
+        # AI-Search mode: build/reuse the fan-out cluster.
+        #  - With a SEED: persist a STABLE cluster per (brand, seed) and only target
+        #    the UNCOVERED gaps each run, so "generate more" completes the cluster
+        #    instead of repeating. Exact X/N coverage.
+        #  - Without a seed: today's behavior (full fan-out, no gap tracking).
         coverage_focus = None
         checklist_json = None
-        if ai_search:
+        self.last_coverage = None
+        remaining_gaps = None          # None => not gap-filling
+        cluster_size = 0
+        covered_before = 0
+        seed_norm = self.db.normalize_seed(seed) if (ai_search and seed) else None
+        if ai_search and seed_norm:
+            cluster = self.db.get_ai_search_cluster(primary_brand["id"], seed_norm)
+            if not cluster:
+                fan = self._fanout_rewrites(brands, seed)
+                if fan:
+                    cluster = self.db.save_ai_search_cluster(
+                        primary_brand["id"], seed_norm, seed,
+                        fan.get("anchor"), fan.get("rewrites"), fan.get("checklist"))
+            if cluster:
+                rewrites = json.loads(cluster.get("rewrites_json") or "[]")
+                checklist = json.loads(cluster.get("checklist_json") or "[]")
+                anchor = cluster.get("anchor") or None
+                coverage_focus = {"anchor": anchor, "rewrites": rewrites, "checklist": checklist}
+                if checklist:
+                    checklist_json = json.dumps(checklist)
+                covered = self.db.get_covered_target_queries(primary_brand["id"], seed_norm)
+                remaining_gaps = [r for r in rewrites if str(r).strip().lower() not in covered]
+                cluster_size = len(rewrites)
+                covered_before = cluster_size - len(remaining_gaps)
+                if not remaining_gaps:
+                    # Cluster already complete — nothing new to add.
+                    self.last_coverage = {
+                        "seed": seed, "cluster_size": cluster_size,
+                        "covered_before": covered_before, "targeted_this_run": 0,
+                        "covered_after": covered_before, "remaining_after": 0,
+                        "complete": True}
+                    return []
+        elif ai_search:
+            # No seed → full fan-out, no cluster/gap tracking.
             coverage_focus = self._fanout_rewrites(brands, seed)
             if coverage_focus and coverage_focus.get("checklist"):
                 checklist_json = json.dumps(coverage_focus["checklist"])
@@ -136,16 +174,29 @@ class PostGenerator:
                 merged_dist[k] = merged_dist.get(k, 0) + v
 
         # Generate per-intent per the plan built above.
+        # In gap-fill mode, `run_gaps` is the shared, shrinking list of uncovered
+        # rewrites; each intent targets it and removes what it covers so two intents
+        # in the same run never cover the same gap.
+        run_gaps = list(remaining_gaps) if remaining_gaps is not None else None
+        targeted_count = 0
         selected = []
         for intent, n_intent in plan:
+            if run_gaps is not None:
+                if not run_gaps:
+                    break
+                n_intent = min(n_intent, len(run_gaps))
             storylines_for_intent = self._select_storylines_from_dist(merged_dist, n_intent)
+            # Gap-fill: steer this intent to the REMAINING gaps only.
+            intent_focus = coverage_focus
+            if run_gaps is not None and coverage_focus is not None:
+                intent_focus = {**coverage_focus, "rewrites": run_gaps}
             candidates = self._generate_candidates_for_intent(
                 subreddit, brands, intent, storylines_for_intent,
                 existing_titles, n_intent * 2, context_only=context_only,
                 # In AI-Search mode the fan-out already consumed the seed, so
                 # we steer via coverage_focus instead of the seed block.
                 seed_focus=(None if ai_search else seed),
-                coverage_focus=coverage_focus,
+                coverage_focus=intent_focus,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -169,7 +220,24 @@ class PostGenerator:
                 c["intent"] = intent
                 # Dedup across intent calls — add picked titles to the seen set
                 existing_titles.append(c["title"])
+                # Remove the gap this post just covered so later intents skip it.
+                if run_gaps is not None:
+                    tq = (c.get("target_query") or "").strip().lower()
+                    run_gaps = [g for g in run_gaps if str(g).strip().lower() != tq]
+            targeted_count += len(picked)
             selected.extend(picked)
+
+        # Coverage summary for gap-fill runs (exact X/N).
+        if remaining_gaps is not None:
+            covered_after = cluster_size - len(run_gaps)
+            self.last_coverage = {
+                "seed": seed, "cluster_size": cluster_size,
+                "covered_before": covered_before,
+                "targeted_this_run": targeted_count,
+                "covered_after": covered_after,
+                "remaining_after": len(run_gaps),
+                "complete": len(run_gaps) == 0,
+            }
 
         if not selected:
             return []

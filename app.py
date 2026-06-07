@@ -4369,12 +4369,57 @@ def api_live_posts_generate():
                 # kept in the response shape for backward compat with
                 # the UI's render code.
                 "skipped": [],
+                # AI-Search cluster-completion summary (None unless gap-filling
+                # against a persisted cluster for a seeded AI-Search run).
+                "coverage": getattr(post_gen, "last_coverage", None),
             }
         finally:
             db.close()
 
     tid = start_task("live-posts", task)
     return jsonify({"task_id": tid})
+
+
+@app.route("/api/live-posts/clusters")
+def api_live_posts_clusters():
+    """Cluster coverage view: each persisted AI-Search cluster (root prompt) →
+    its fanned rewrites (covered/gap) → the posts under each. Read-only."""
+    bid = request.args.get("brand_id", type=int)
+    db = get_db()
+    try:
+        clusters = db.get_ai_search_clusters_for_brand(bid)
+        out = []
+        for cl in clusters:
+            try:
+                rewrites = json.loads(cl.get("rewrites_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                rewrites = []
+            seed_norm = cl.get("seed_norm")
+            posts = db.get_ai_search_posts_for_seed(cl.get("brand_id"), seed_norm)
+            by_rw = {}
+            for p in posts:
+                by_rw.setdefault((p.get("target_query") or "").strip().lower(), []).append(p)
+            rw_rows, covered = [], 0
+            for r in rewrites:
+                ps = by_rw.get(str(r).strip().lower(), [])
+                if ps:
+                    covered += 1
+                rw_rows.append({"rewrite": r, "covered": bool(ps), "posts": ps})
+            n = len(rewrites)
+            out.append({
+                "brand_id": cl.get("brand_id"),
+                "seed": cl.get("seed") or cl.get("seed_norm"),
+                "anchor": cl.get("anchor"),
+                "cluster_size": n,
+                "covered_count": covered,
+                "gap_count": n - covered,
+                "complete": n > 0 and covered >= n,
+                "created_at": cl.get("created_at"),
+                "rewrites": rw_rows,
+            })
+        return jsonify(out)
+    finally:
+        db.close()
 
 
 @app.route("/api/live-posts/custom", methods=["POST"])

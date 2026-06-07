@@ -2520,8 +2520,9 @@ async function showPostDetail(pid) {
             <span class="badge ${post.is_filler ? 'badge-filler' : 'badge-brand'}">${post.is_filler ? 'Filler' : 'Brand'}</span>
             ${_aiModeBadge(post)}
             ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
-            <span class="text-xs text-gray-500">Day ${post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
+            <span class="text-xs text-gray-500">${post.post_number != null ? 'Post #'+post.post_number : 'Day '+post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
         </div>
+        ${(() => { let m=null; try { m = JSON.parse(post.ai_search_meta||'null'); } catch(e){} if (!m || (!m.seed && !m.anchor && !m.target_query)) return ''; const rows=[]; if (m.seed) rows.push(`<b>Root reference prompt:</b> ${m.seed}`); if (m.anchor) rows.push(`<b>Anchor:</b> ${m.anchor}`); if (m.target_query) rows.push(`<b>This post targets:</b> ${m.target_query}`); return `<div class="text-xs mb-2" style="color:#f0abfc">${rows.join('<br>')}</div>`; })()}
         ${(() => { let ck=[]; try { ck = JSON.parse(post.concept_checklist||'[]'); } catch(e){} return ck.length ? `<div class="text-xs mb-3" style="color:#a5b4fc"><b>AI-Search cluster coverage:</b> ${ck.join(' · ')}</div>` : ''; })()}
         <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
@@ -7430,15 +7431,15 @@ function lsubsRenderTable(posts) {
     // Same row layout as renderPostsFromCache so action buttons work consistently.
     el.innerHTML = `
         <table>
-            <thead><tr><th>Day</th><th>Subreddit</th><th>Title</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+            <thead><tr><th title="Post number (stable per brand)">#</th><th>Subreddit</th><th>Title</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total assigned (includes informed)">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total generated">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
             <tbody>${posts.map(p => `
                 <tr>
-                    <td>${p.suggested_post_day}</td>
+                    <td class="text-gray-400" style="font-variant-numeric:tabular-nums">${p.post_number ?? ''}</td>
                     <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
                         ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${p.brand_id||'null'})" title="Change subreddit">✎</button>`
                         : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${p.brand_id||'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
-                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}${_aiModeBadge(p)}</td>
-                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
+                    <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
+                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}</td>
                     <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                     <td class="text-gray-400">${p.storyline || ''}</td>
                     <td>${p.ai_query_score || '-'}</td>
@@ -7915,17 +7916,17 @@ async function lsubsLoadPosts(silent = false) {
         // can span multiple live subs for the brand.
         tableEl.innerHTML = `
             <table>
-                <thead><tr><th style="width:24px"></th><th>Day</th><th>Subreddit</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
+                <thead><tr><th style="width:24px"></th><th title="Post number (stable per brand)">#</th><th>Subreddit</th><th>Title</th><th>Brands</th><th>Type</th><th>Intent</th><th>Storyline</th><th>AI Score</th><th>Status</th><th>Owner</th><th title="Assigned: Brand + Non-Brand / Total">Assigned (B+NB/Total)</th><th title="Deployed: Brand + Non-Brand / Total">Deployed (B+NB/Total)</th><th>Actions</th></tr></thead>
                 <tbody>${posts.map(p => `
                     <tr>
                         <td><input type="checkbox" class="lsubs-post-check" data-id="${p.id}" data-brand="${(p.brands && p.brands[0] && p.brands[0].id) || ''}"></td>
-                        <td>${p.suggested_post_day}</td>
+                        <td class="text-gray-400" style="font-variant-numeric:tabular-nums">${p.post_number ?? ''}</td>
                         <td class="text-xs">${p.subreddit_name && p.subreddit_name !== 'unassigned'
                             ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Change subreddit">✎</button>`
                             : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
-                        <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}${_aiModeBadge(p)}</td>
+                        <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
                         <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
-                        <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span></td>
+                        <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}</td>
                         <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                         <td class="text-gray-400">${p.storyline || ''}</td>
                         <td>${p.ai_query_score || '-'}</td>
@@ -8687,6 +8688,8 @@ function _lsubsRenderComments() {
                 subreddit_name: c.subreddit_name || '',
                 post_url: c.post_reddit_url || '',
                 brand_name: c.brand_name || '',
+                post_prompt_version: c.post_prompt_version || '',
+                post_number: c.post_number,
                 items: [],
             };
         }
@@ -8834,9 +8837,11 @@ function _lsubsRenderComments() {
                  style="user-select:none">
                 <div class="flex items-center gap-2 flex-1" style="min-width:0">
                     <span data-post-caret style="color:#9ec4ff;font-size:14px;width:14px">${caret}</span>
+                    ${g.post_number != null ? `<span class="badge" style="background:#2a2a2b;color:#9ec4ff" title="Post number (stable per brand)">#${g.post_number}</span>` : ''}
                     <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline truncate" style="color:#0079D3;max-width:60%" onclick="event.stopPropagation()">${g.post_title.substring(0, 90)}</a>
                     <span class="text-xs text-gray-500">r/${g.subreddit_name}</span>
                     ${g.brand_name ? `<span class="badge badge-brand">${g.brand_name}</span>` : ''}
+                    ${_aiModeBadge({ prompt_version: g.post_prompt_version })}
                     ${statusChipsHtml ? `<span class="ml-1 flex gap-1 flex-wrap" style="opacity:0.85">${statusChipsHtml}</span>` : ''}
                 </div>
                 <div class="flex items-center gap-1" onclick="event.stopPropagation()">

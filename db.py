@@ -365,23 +365,33 @@ class Database:
                   image_prompt=None, image_url=None, ai_query_score=0,
                   is_custom=0, is_filler=0, status="draft",
                   suggested_post_day=0, prompt_version=None, brand_ids=None,
-                  intent=None, concept_checklist=None):
+                  intent=None, concept_checklist=None, ai_search_meta=None):
         # Inherit is_live from the parent subreddit so list/aggregation queries
         # can cheaply filter live vs. regular without re-joining subreddits.
         sub_row = self.conn.execute(
             "SELECT is_live FROM subreddits WHERE id = ?", (subreddit_id,)
         ).fetchone()
         is_live = 1 if (sub_row and sub_row["is_live"]) else 0
+        # Stable per-brand post number (live posts only): next in this brand's
+        # sequence. NULL for non-live posts.
+        post_number = None
+        if is_live:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(post_number),0)+1 AS n FROM posts "
+                "WHERE brand_id IS ? AND COALESCE(is_live,0)=1",
+                (brand_id,)
+            ).fetchone()
+            post_number = row["n"] if row else 1
         cur = self.conn.execute(
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
                status, suggested_post_day, prompt_version, intent, is_live,
-               concept_checklist)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               concept_checklist, ai_search_meta, post_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, brand_id, title, body, storyline,
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
              status, suggested_post_day, prompt_version, intent, is_live,
-             concept_checklist)
+             concept_checklist, ai_search_meta, post_number)
         )
         post_id = cur.lastrowid
         # Populate junction table
@@ -1541,6 +1551,33 @@ class Database:
         #       query cluster. NULL for standard-mode posts. -----
         if "concept_checklist" not in post_cols3:
             self.conn.execute("ALTER TABLE posts ADD COLUMN concept_checklist TEXT")
+            self.conn.commit()
+        # ----- posts: ai_search_meta (JSON) — the root reference for an
+        #       AI-Search post: {seed, anchor, target_query}. Surfaced in the
+        #       post-detail modal. NULL for standard-mode posts. -----
+        if "ai_search_meta" not in post_cols3:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN ai_search_meta TEXT")
+            self.conn.commit()
+        # ----- posts: post_number — a stable per-brand sequential number
+        #       (1,2,3...) over LIVE posts, in creation order. Replaces the old
+        #       "suggested_post_day" recommendation in the Live Subs UI. Same
+        #       post → same number across the Generate / Posts / Comments tabs.
+        #       NULL for non-live posts. -----
+        if "post_number" not in post_cols3:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN post_number INTEGER")
+            self.conn.commit()
+            # One-time backfill: number existing live posts per brand by age.
+            rows = self.conn.execute(
+                "SELECT id, brand_id FROM posts WHERE COALESCE(is_live,0)=1 "
+                "ORDER BY brand_id, created_at, id"
+            ).fetchall()
+            counters = {}
+            for r in rows:
+                bid = r["brand_id"]
+                counters[bid] = counters.get(bid, 0) + 1
+                self.conn.execute(
+                    "UPDATE posts SET post_number=? WHERE id=?",
+                    (counters[bid], r["id"]))
             self.conn.commit()
 
         # ----- app_meta: small key/value store for one-time startup flags -----
@@ -2833,7 +2870,9 @@ class Database:
                         'comment' as source,
                         p.title as post_title, p.id as p_id,
                         s.name as subreddit_name, b.name as brand_name,
-                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url
+                        (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url,
+                        p.prompt_version as post_prompt_version,
+                        p.post_number as post_number
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
@@ -2853,7 +2892,9 @@ class Database:
                         'search_comment' as source,
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,
-                        sp.reddit_url as post_reddit_url
+                        sp.reddit_url as post_reddit_url,
+                        sp.prompt_version as post_prompt_version,
+                        NULL as post_number
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  LEFT JOIN brands b ON sc.brand_id = b.id

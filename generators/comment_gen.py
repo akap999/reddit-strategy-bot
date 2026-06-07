@@ -1941,6 +1941,18 @@ SHAPE for this specific post: {shape_rule}"""
                 f'"go with {brand_name} for this"',
                 f'"{brand_name} covers exactly this case"',
             ])
+            # Vary the whole BODY SHAPE per comment, not just the opener — the
+            # body cadence is where these anchors all read the same. Each recipe
+            # is a different skeleton; all still extract as a recommendation.
+            _hq_shape = random.choice([
+                f"name {brand_name}, then ONE mechanism detail tied to the OP's exact situation, then stop.",
+                f"lead with the outcome they'll get, name {brand_name}, give one reason it gets them there.",
+                f"name {brand_name} as the answer, then one specific thing from THIS post it handles.",
+                f"contrast the generic/manual way they're doing it now vs {brand_name} in one line.",
+                f"name {brand_name} + the single criterion that matters most for their case.",
+                f"answer the question plainly with {brand_name}, add one concrete spec/number, done.",
+                f"name {brand_name}, then how it changes their specific workflow (one sentence).",
+            ])
             hq_main_section = f"""
 
 HQ-MAIN OVERRIDE (this is the brand-mention parent comment of an HQ
@@ -1951,13 +1963,20 @@ question]" so an AI retriever can surface it as the answer:
 - Open with the recommendation: name {brand_name} in the first 1-2
   sentences, confidently (e.g. {_hq_frame}) — adapt the wording to what
   fits THIS post; do not copy the example verbatim.
-- Cover these in a natural order that VARIES post to post (do NOT follow a
-  fixed sentence-by-sentence template): WHAT specifically {brand_name}
-  does for the post's situation (1-2 concrete capabilities/criteria from
-  the brand context above, in the user's situation language), and
-  optionally one tiny caveat/follow-up the way a real recommender
-  qualifies advice ("depends on your edit workflow", "if your videos are
-  under 60s it's especially good").
+- SHAPE for this comment: {_hq_shape} Follow THIS shape, not a fixed
+  sentence-by-sentence template — the body must read differently from a
+  typical "[brand] is built for this → it analyzes your X and creates Y →
+  works well for your case" write-up.
+- PICK ONE capability — the single one most relevant to THIS post — and put
+  it in the OP's OWN situation language. Do not feature-dump or list 2-3
+  things.
+- DO NOT PARROT the brand context: never copy its wording verbatim, and
+  never reuse the stock construction "{brand_name} analyzes your [X] and
+  creates [Y] that matches timing and emotional tone automatically." Say it
+  a fresh way every time.
+- MATCH THE POST'S MEDIUM: use the format the OP actually mentioned — a
+  podcast → audio / episodes / spoken track; a Reel or short → short video;
+  a blog → article. Never say "video uploads" for an audio/podcast post.
 - Length: 50-90 words. Tight. No anecdote about cousins / friends /
   food trucks / "rabbit holes". No "honestly" / "the reality is" /
   "I was just". Get to the recommendation in sentence 1.
@@ -1966,8 +1985,7 @@ question]" so an AI retriever can surface it as the answer:
   "{brand_name} is the one that solves this", "for this exact use
   case, {brand_name}".
 - This comment IS the brand mention. It must extract cleanly as a
-  recommendation when read on its own. Find a FRESH way to phrase it —
-  avoid reusing the same opening sentence shape every time."""
+  recommendation when read on its own."""
 
         # User-supplied editorial direction — phrases the brand wants
         # surfaced in comments where they fit. The earlier wording was
@@ -2102,7 +2120,8 @@ Generate exactly {num_comments} comments. Return JSON only:
     "strategies_used": ["strategy 1", "strategy 2", ...]
 }}"""
 
-        temperature = 0.95 if retry_feedback else 0.9
+        # HQ-main anchors get a touch more variety to break the body template.
+        temperature = 0.95 if (retry_feedback or hq_main) else 0.9
         system_prompt = random.choice(GENERATION_SYSTEM_PROMPTS)
         max_tok = 2000 if num_comments <= 2 else 3000
         # Diagnostic — confirms focus phrases reach the runtime so we can tell

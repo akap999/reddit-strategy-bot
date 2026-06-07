@@ -202,8 +202,19 @@ class PostGenerator:
             )
 
         # Save to DB — link to all brands via junction table
+        _anchor = (coverage_focus.get("anchor") if coverage_focus else None) or None
         saved = []
         for post in selected:
+            # AI-Search posts persist their root reference (the seed/anchor the
+            # cluster came from) + the specific rewrite this post targets, so the
+            # post-detail view can show what prompt it was generated for.
+            ai_search_meta = None
+            if ai_search:
+                ai_search_meta = json.dumps({
+                    "seed": seed,
+                    "anchor": _anchor,
+                    "target_query": post.get("target_query"),
+                })
             post_id = self.db.save_post(
                 subreddit_id=subreddit["id"],
                 brand_id=primary_brand["id"],
@@ -221,6 +232,7 @@ class PostGenerator:
                 brand_ids=brand_ids,
                 intent=post.get("intent"),
                 concept_checklist=checklist_json,
+                ai_search_meta=ai_search_meta,
             )
             post["id"] = post_id
             saved.append(post)

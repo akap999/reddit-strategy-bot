@@ -241,6 +241,16 @@ class PostGenerator:
         # rewrites; each intent targets it and removes what it covers so two intents
         # in the same run never cover the same gap.
         run_gaps = list(remaining_gaps) if remaining_gaps is not None else None
+        # First-time / no-seed standard route: derive a coverage map from the brand's
+        # enrichment so the batch deliberately spans distinct offerings (one facet per
+        # post) instead of clustering. Off for AI-Search (it has its own cluster), and
+        # when a seed or custom_topics already direct the batch. Empty when un-enriched
+        # → graceful fallback to today's open-ended generation.
+        facets_by_intent = None
+        if (not ai_search) and not (seed and str(seed).strip()) and not custom_topics:
+            _fm = self._brand_facets(brands)
+            if any(_fm.values()):
+                facets_by_intent = _fm
         targeted_count = 0
         selected = []
         for intent, n_intent in plan:
@@ -253,13 +263,26 @@ class PostGenerator:
             intent_focus = coverage_focus
             if run_gaps is not None and coverage_focus is not None:
                 intent_focus = {**coverage_focus, "rewrites": run_gaps}
+            # First-time coverage: hand this intent up to n_intent distinct facets
+            # (consumed so no facet repeats across the batch). No oversampling in
+            # facet mode — oversample + score-select could drop a facet to double
+            # up another, defeating the spread.
+            facet_targets = None
+            req_count = n_intent * 2
+            if facets_by_intent is not None:
+                _avail = facets_by_intent.get(intent) or []
+                if _avail:
+                    facet_targets = _avail[:n_intent]
+                    facets_by_intent[intent] = _avail[len(facet_targets):]
+                    req_count = n_intent
             candidates = self._generate_candidates_for_intent(
                 subreddit, brands, intent, storylines_for_intent,
-                existing_titles, n_intent * 2, context_only=context_only,
+                existing_titles, req_count, context_only=context_only,
                 # In AI-Search mode the fan-out already consumed the seed, so
                 # we steer via coverage_focus instead of the seed block.
                 seed_focus=(None if ai_search else seed),
                 coverage_focus=intent_focus,
+                facet_targets=facet_targets,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -717,6 +740,46 @@ Return JSON only:
 
         return "\n".join(lines), target_names, all_competitors
 
+    @staticmethod
+    def _brand_facets(brands):
+        """First-time / no-seed coverage map: turn a brand's enrichment into a flat,
+        de-duped list of concrete FACETS grouped by the intent that fits each:
+          use_cases   -> commercial    (the jobs people buy the product to do)
+          competitors -> comparison    ("alternative to <competitor>")
+          pain_points -> informational (the problems people research)
+        Returns {"commercial": [...], "comparison": [...], "informational": [...]}.
+        Empty lists when the brand isn't enriched — callers then fall back to the
+        normal open-ended generation."""
+        def _plist(val):
+            if isinstance(val, list):
+                return [str(x).strip() for x in val if str(x).strip()]
+            if isinstance(val, str) and val.strip():
+                try:
+                    p = json.loads(val)
+                    if isinstance(p, list):
+                        return [str(x).strip() for x in p if str(x).strip()]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                return [s.strip() for s in val.split(",") if s.strip()]
+            return []
+        blist = brands if isinstance(brands, list) else [brands]
+        out = {"commercial": [], "comparison": [], "informational": []}
+        seen = set()
+        def _add(intent, label):
+            label = (label or "").strip()
+            k = label.lower()
+            if label and k not in seen:
+                seen.add(k)
+                out[intent].append(label)
+        for b in blist:
+            for uc in _plist(b.get("use_cases")):
+                _add("commercial", uc)
+            for cp in _plist(b.get("competitors")):
+                _add("comparison", f"alternative to {cp}")
+            for pp in _plist(b.get("pain_points")):
+                _add("informational", pp)
+        return out
+
     def _fanout_rewrites(self, brands, seed=None, prior_coverage=None):
         """AI-Search mode: one Claude call that simulates how ChatGPT / Perplexity /
         Gemini fan a prompt out into sub-queries, then UNIONs them into a master
@@ -957,7 +1020,8 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
 
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,
-                                        seed_focus=None, coverage_focus=None):
+                                        seed_focus=None, coverage_focus=None,
+                                        facet_targets=None):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -970,6 +1034,10 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
         DISTINCT rewrites in the cluster and each body must semantically cover the
         checklist phrasings (so the thread is retrievable for the whole query
         cluster, not just one literal phrasing).
+
+        `facet_targets` (standard first-time route): a small list of distinct brand
+        offerings (one per post) to cover this batch — deliberate spread without the
+        AI-Search fan-out. Ignored when `coverage_focus`/`seed_focus` are set.
         """
         if isinstance(brands, dict):
             brands = [brands]
@@ -1120,8 +1188,38 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
                     )
                 coverage_json_field = ',\n            "target_query": "the ONE rewrite from the cluster this title targets"'
 
+        # Optional FIRST-TIME COVERAGE TARGETS (standard route, no seed): the caller
+        # derived distinct brand facets (one per post) from the brand's enrichment so
+        # a first-time batch spans the brand instead of clustering. Instruction-only —
+        # the facets are the SPACE to cover, not titles to copy. Mutually exclusive
+        # with seed/coverage blocks above.
+        facet_block = ""
+        if facet_targets and not coverage_focus and not (seed_focus and str(seed_focus).strip()):
+            _ft = [str(f).strip() for f in facet_targets if str(f).strip()]
+            if _ft:
+                ft_lines = "\n".join(f"  - {f}" for f in _ft)
+                _extra = count - len(_ft)
+                extra_rule = (
+                    f"  • For the remaining {_extra} post(s) beyond these targets, pick OTHER "
+                    "distinct brand offerings/angles — never repeat a target or an offering "
+                    "already used in this batch.\n"
+                ) if _extra > 0 else ""
+                facet_block = (
+                    "\n\nCOVERAGE TARGETS — to give this batch deliberate spread, cover the "
+                    "brand's DISTINCT offerings below, ONE per post (no two posts on the same one):\n"
+                    f"{ft_lines}\n"
+                    "  • Each title TARGETS exactly ONE item above and must be a natural "
+                    "RECOMMENDATION QUESTION for it (a helpful AI would answer by naming a "
+                    "product/service); different posts target DIFFERENT items.\n"
+                    f"{extra_rule}"
+                    "  • These are the SPACE to cover, NOT templates — phrase each as a real "
+                    "human question (all TITLE rules below still apply); never paste an item verbatim.\n"
+                    "  • Report which item each title targets in its \"target_query\" field.\n"
+                )
+                coverage_json_field = ',\n            "target_query": "the ONE coverage target this title covers"'
+
         # Shared header + intent-specific tail
-        header = f"""{scope_line}{seed_block}{coverage_block}
+        header = f"""{scope_line}{seed_block}{coverage_block}{facet_block}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
 {brand_block}

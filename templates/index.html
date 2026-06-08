@@ -10793,12 +10793,11 @@ async function _bulkDeployPoll(taskId) {
                 if (summaryEl) {
                     summaryEl.innerHTML = `
                         <span class="text-green-400">Deployed: ${s.deployed || 0}</span> ·
-                        <span style="color:#ff8b60">Marked removed: ${s.marked_removed || 0}</span> ·
-                        ${s.marked_replace ? `<span style="color:#ffb86b">Marked replace: ${s.marked_replace}</span> · ` : ''}
+                        <span style="color:#9ec4ff" title="Matched but not confirmed live on Reddit — left untouched in its current state (never marked removed)">Left as-is: ${s.left_assigned || 0}</span> ·
                         <span class="text-gray-400">Already: ${(s.already_deployed || 0) + (s.already_removed || 0)}</span> ·
                         <span class="text-yellow-400">No match: ${s.no_match || 0}</span> ·
                         <span class="text-red-400">Error: ${s.error || 0}</span>
-                        ${(s.by_tier) ? ` <span class="text-gray-500">(URL match: ${s.by_tier.url_match || 0}, body match: ${s.by_tier.body_match || 0}${s.by_tier.removed_singleton ? `, removed singleton: ${s.by_tier.removed_singleton}` : ''})</span>` : ''}
+                        ${(s.by_tier) ? ` <span class="text-gray-500">(URL match: ${s.by_tier.url_match || 0}, body match: ${s.by_tier.body_match || 0})</span>` : ''}
                     `;
                 }
                 if (statusEl) statusEl.textContent = `Task complete · ${result.processed || 0} URLs processed`;
@@ -10880,6 +10879,9 @@ function _bulkDeployRenderResults(results) {
     const actionColour = {
         deployed:           '#9efbb4',
         already_deployed:   '#9ec4ff',
+        // Matched but not confirmed-live → left untouched in its current
+        // state (bulk deploy never marks removed). Neutral blue.
+        left_assigned:      '#9ec4ff',
         marked_removed:     '#ff8b60',
         // Recent-removal sub-state — lighter amber to distinguish at
         // a glance from the regular removed bucket.

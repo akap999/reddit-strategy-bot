@@ -4226,6 +4226,20 @@ def api_brand_live_subreddits_add(bid):
         db.close()
 
 
+def _brand_needs_enrichment(brand):
+    """True when a brand has no enrichment yet — no `enriched_at` AND no GEO fields.
+    Brands the user partly filled by hand (any GEO field present) are left alone, and
+    the manual `context` is never touched by enrichment."""
+    if not brand:
+        return False
+    if (brand.get("enriched_at") or "").strip():
+        return False
+    def _has(v):
+        return bool(v) and str(v).strip() not in ("", "[]", "null", "{}")
+    return not any(_has(brand.get(k)) for k in
+                   ("category", "use_cases", "pain_points", "competitors"))
+
+
 @app.route("/api/live-posts/generate", methods=["POST"])
 def api_live_posts_generate():
     """Generate AI-focused posts for a brand, grounded in brand context.
@@ -4329,6 +4343,32 @@ def api_live_posts_generate():
             brand_full = db.get_brand(bid)
             if not brand_full:
                 raise ValueError("Brand vanished")
+
+            # Self-heal: a brand added with only a MANUAL context (not enriched) has no
+            # use_cases/pain_points/competitors, so first-time coverage + the AI fan-out
+            # have nothing to work with. Enrich the GEO fields now — but NEVER overwrite
+            # the user's manual `context` (we discard the draft's context_summary).
+            if _brand_needs_enrichment(brand_full):
+                try:
+                    from generators.brand_enrichment import enrich_brand
+                    from datetime import datetime as _dt_now
+                    draft = enrich_brand(claude, brand_full.get("name") or "",
+                                         brand_full.get("domain_url") or "")
+                    if draft:
+                        db.update_brand(
+                            bid,
+                            category=(draft.get("category") or None),
+                            audience=(draft.get("audience") or None),
+                            use_cases=json.dumps(draft.get("use_cases") or []),
+                            pain_points=json.dumps(draft.get("pain_points") or []),
+                            features=json.dumps(draft.get("features") or []),
+                            competitors=json.dumps(draft.get("competitors") or []),
+                            enriched_at=_dt_now.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        )  # context intentionally omitted → manual context preserved
+                        brand_full = db.get_brand(bid)
+                        print(f"[live-posts] auto-enriched brand {bid} on generate (manual context kept)")
+                except Exception as e:
+                    print(f"[live-posts] auto-enrich skipped for brand {bid}: {e}")
 
             # Generate the batch (per-intent counts or legacy 1:1:1).
             posts = post_gen.generate_posts(
@@ -8803,6 +8843,100 @@ def portal_month(month):
             posts=grouped["posts"], search_comments=grouped["search_comments"],
             is_admin_view=is_admin,
         )
+    finally:
+        db.close()
+
+
+@app.route('/portal/api/find-link')
+@client_required
+def portal_find_link():
+    """Resolve a pasted Reddit post/comment link to its location in THIS
+    client's monthly reports. Returns JSON:
+      {found:true, month, brand, fid, kind}  — fid = the immutable post/comment
+        id the month page highlights; kind = 'comment' | 'hq' | 'mention'.
+      {found:false, reason}                  — unrecognized / not reported / not theirs.
+    Strictly client-scoped (report_client_id, else the client's brand list) so a
+    client can never resolve a link to records they don't own. Reuses the same
+    URL parsing + matching as admin Bulk Deploy."""
+    from bulk_deploy import classify_reddit_url
+    cid, _is_admin = _acting_client_id()
+    url = (request.args.get('url') or '').strip()
+    if not url:
+        return jsonify({"found": False, "reason": "Paste a Reddit post or comment link."})
+    parsed = classify_reddit_url(url)
+    if not parsed:
+        return jsonify({"found": False, "reason": "That doesn't look like a Reddit post or comment link."})
+    db = get_db()
+    try:
+        brand_ids = set(db.client_brand_ids(cid))
+
+        def _owned(row, post_brand_id=None):
+            rcid = row.get("report_client_id")
+            if rcid is not None:
+                return int(rcid) == int(cid)
+            bid = row.get("brand_id") or post_brand_id
+            return bid in brand_ids if bid is not None else False
+
+        def _brand_name(bid):
+            if not bid:
+                return ""
+            r = db.conn.execute("SELECT name FROM brands WHERE id = ?", (bid,)).fetchone()
+            return (r["name"] if r else "") or ""
+
+        # --- Comment link: match in legacy comments, then Live Search comments ---
+        if parsed.get("comment_id"):
+            comment_id = parsed["comment_id"]
+            row = db.find_comment_by_url(url) or db.find_comment_by_reddit_comment_id(comment_id)
+            src = "comment"
+            if not row:
+                row = db.find_search_comment_by_url(url) or db.find_search_comment_by_reddit_comment_id(comment_id)
+                src = "search_comment"
+            if row:
+                post_brand_id = None
+                if src == "comment" and row.get("post_id"):
+                    pr = db.conn.execute("SELECT brand_id FROM posts WHERE id = ?", (row["post_id"],)).fetchone()
+                    post_brand_id = pr["brand_id"] if pr else None
+                elif src == "search_comment" and row.get("search_post_id"):
+                    pr = db.conn.execute("SELECT brand_id FROM search_posts WHERE id = ?", (row["search_post_id"],)).fetchone()
+                    post_brand_id = pr["brand_id"] if pr else None
+                if not _owned(row, post_brand_id):
+                    return jsonify({"found": False, "reason": "That link isn't in your reports."})
+                if not row.get("report_month"):
+                    return jsonify({"found": False, "reason": "That comment isn't in a monthly report yet."})
+                return jsonify({"found": True, "month": row["report_month"],
+                                "brand": _brand_name(row.get("brand_id") or post_brand_id),
+                                "fid": comment_id, "kind": "comment"})
+            # No comment row → fall through to post-level (the parent post may be a reported HQ).
+
+        # --- Post link (or comment not matched): use the immutable post id ---
+        post_id = parsed.get("post_id")
+        for kind, post in db.find_posts_by_reddit_post_id(post_id):
+            if kind == "post":
+                r = db.conn.execute(
+                    """SELECT report_month, COALESCE(report_client_id, -1) AS rcid
+                         FROM comments
+                        WHERE post_id = ? AND report_month IS NOT NULL
+                          AND status IN ('report','removed','replace')
+                        ORDER BY report_added_at DESC, id DESC LIMIT 1""",
+                    (post["id"],)).fetchone()
+                pbid = post.get("brand_id")
+                if r and r["report_month"] and ((r["rcid"] != -1 and r["rcid"] == cid) or (r["rcid"] == -1 and pbid in brand_ids)):
+                    return jsonify({"found": True, "month": r["report_month"],
+                                    "brand": _brand_name(pbid), "fid": post_id, "kind": "hq"})
+            else:  # search_post → its reported Mentions
+                r = db.conn.execute(
+                    """SELECT report_month, COALESCE(report_client_id, -1) AS rcid, brand_id
+                         FROM search_comments
+                        WHERE search_post_id = ? AND report_month IS NOT NULL
+                          AND status IN ('report','removed','replace')
+                        ORDER BY report_added_at DESC, id DESC LIMIT 1""",
+                    (post["id"],)).fetchone()
+                if r and r["report_month"]:
+                    rbid = r["brand_id"] or post.get("brand_id")
+                    if (r["rcid"] != -1 and r["rcid"] == cid) or (r["rcid"] == -1 and rbid in brand_ids):
+                        return jsonify({"found": True, "month": r["report_month"],
+                                        "brand": _brand_name(rbid), "fid": post_id, "kind": "mention"})
+        return jsonify({"found": False, "reason": "That link isn't in your reports."})
     finally:
         db.close()
 

@@ -426,6 +426,29 @@ function exportFilteredCsv(ev) {
   return false;
 }
 
+// Highlight + scroll to the row matching a ?fid= (post/comment id) — used by
+// the dashboard "Find a deliverable by link" search. The immutable id appears
+// in the stored Reddit URL on the relevant <a> of that row, so we match by it.
+function _focusFromQuery() {
+  const fid = new URLSearchParams(window.location.search).get('fid');
+  if (!fid) return;
+  const find = () => Array.from(document.querySelectorAll('tr[data-row]'))
+    .find(tr => Array.from(tr.querySelectorAll('a[href]'))
+      .some(a => a.getAttribute('href').includes('/' + fid)));
+  let row = find();
+  // If the row is hidden by the current filters, clear them (keep brand) and re-apply.
+  if (row && row.style.display === 'none') {
+    _fState.sub = ''; _fState.status = '';
+    const subSel = document.getElementById('flt-sub'); if (subSel) subSel.value = '';
+    const stSel = document.getElementById('flt-status'); if (stSel) stSel.value = '';
+    applyFilters();
+  }
+  if (!row) return;
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.classList.add('row-focus');
+  setTimeout(() => row.classList.remove('row-focus'), 4000);
+}
+
 (function initFilters() {
   _readQueryToFilters();
   const wire = (id, key) => {
@@ -437,6 +460,7 @@ function exportFilteredCsv(ev) {
   wire('flt-status', 'status');
   wire('flt-sort', 'sort');
   applyFilters();
+  _focusFromQuery();
 })();
 
 async function runLiveCheck() {

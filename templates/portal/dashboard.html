@@ -26,6 +26,18 @@
   </div>
 </div>
 
+<!-- Find by link: paste a Reddit post/comment URL → jump to its report row. -->
+<div class="mb-6 surface border-soft rounded-xl p-4">
+  <label for="find-link-input" class="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Find a deliverable by link</label>
+  <form id="find-link-form" class="flex items-center gap-2 flex-wrap" onsubmit="return findByLink(event)">
+    <input id="find-link-input" type="text" inputmode="url" autocomplete="off"
+           placeholder="Paste a Reddit post or comment link…"
+           class="flex-1 min-w-[260px] rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
+    <button type="submit" id="find-link-btn" class="btn-primary">Find</button>
+  </form>
+  <div id="find-link-msg" class="hidden mt-2 text-sm"></div>
+</div>
+
 <div id="global-check-status" class="hidden mb-4 p-3 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
   <span class="font-medium">Refreshing status across all brands…</span>
   <span id="global-check-progress"></span>
@@ -121,6 +133,39 @@
 const BRAND_ROWS = {{ brand_rows | tojson }};
 const ASCID = {{ client.id if is_admin_view else 'null' }};
 const ASQS = ASCID ? ('&as=' + ASCID) : '';
+
+// Find by link: resolve a pasted Reddit URL to its report month + row, then
+// jump there. The server enforces client scoping; we just route the result.
+async function findByLink(ev) {
+  if (ev) ev.preventDefault();
+  const input = document.getElementById('find-link-input');
+  const btn = document.getElementById('find-link-btn');
+  const msg = document.getElementById('find-link-msg');
+  const url = (input.value || '').trim();
+  msg.className = 'hidden mt-2 text-sm';
+  if (!url) { input.focus(); return false; }
+  btn.disabled = true; const label = btn.textContent; btn.textContent = 'Finding…';
+  try {
+    const res = await fetch('/portal/api/find-link?url=' + encodeURIComponent(url) + ASQS);
+    const data = await res.json();
+    if (data && data.found) {
+      const q = new URLSearchParams();
+      if (data.brand) q.set('brand', data.brand);
+      if (data.fid) q.set('fid', data.fid);
+      if (ASCID) q.set('as', ASCID);
+      window.location = '/portal/month/' + data.month + '?' + q.toString();
+      return false;
+    }
+    msg.textContent = (data && data.reason) || "Couldn't find that link in your reports.";
+    msg.className = 'mt-2 text-sm text-amber-700';
+  } catch (e) {
+    msg.textContent = 'Something went wrong — please try again.';
+    msg.className = 'mt-2 text-sm text-red-700';
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+  return false;
+}
 
 function switchView(view) {
   const monthTab = document.getElementById('view-tab-month');

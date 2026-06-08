@@ -52,6 +52,9 @@
     table.report-table td { border-bottom: none; padding: 4px 0; font-size: 13px; }
     table.report-table td::before { content: attr(data-label) ": "; font-weight: 600; color: var(--text-muted); margin-right: 4px; }
   }
+  /* Transient highlight for a row jumped-to via the "find by link" search. */
+  table.report-table tbody tr.row-focus td { background: var(--accent-soft); transition: background 0.4s ease; }
+  table.report-table tbody tr.row-focus td:first-child { box-shadow: inset 3px 0 0 0 var(--accent); }
   .skeleton { background: linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 50%, #f1f5f9 100%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 6px; }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 </style>

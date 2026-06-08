@@ -658,53 +658,29 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
             "current_status": current_status,
         }
 
-    # Row already 'removed' in DB. Patch URL/posted_at silently and
-    # report `already_removed` so the user knows nothing changed.
+    # Row already 'removed' in DB (e.g. by Check Live). Leave it exactly
+    # as-is — bulk deploy never writes a 'removed' state — and just report
+    # that nothing changed.
     if current_status == "removed":
-        try:
-            db.mark_removed_with_url(rid, source, url, posted_at=posted_at)
-        except Exception:
-            pass
         return {
             "source": source, "id": rid,
             "action": "already_removed",
         }
 
-    # Reddit says the comment is gone — attach URL, flip to
-    # 'removed' or 'replace' (the chooser inside
-    # `mark_removed_with_url` picks 'replace' when posted_at is
-    # within the 14-day window), then log the event with the actual
-    # new status so audit traces show which bucket each row landed
-    # in.
-    if liveness == "removed":
-        try:
-            prev = db.mark_removed_with_url(rid, source, url, posted_at=posted_at)
-        except Exception as e:
-            return {
-                "source": source, "id": rid,
-                "action": "error", "reason": str(e),
-            }
-        # Re-read the row to learn whether the chooser picked
-        # 'replace' or 'removed'. (search_comments doesn't currently
-        # support 'replace' — that branch always lands in 'removed'.)
-        new_status = "removed"
-        try:
-            table = "comments" if source == "comment" else "search_comments"
-            row = db.conn.execute(
-                f"SELECT status FROM {table} WHERE id = ?", (rid,)
-            ).fetchone()
-            if row and row["status"]:
-                new_status = row["status"]
-        except Exception:
-            pass
-        _log_bulk_event(db, rid, source, url,
-                        "bulk_marked_removed", prev, new_status)
+    # Bulk deploy NEVER marks a comment removed. Only a Reddit-confirmed
+    # LIVE comment is flipped to 'deployed'; anything we can't confirm
+    # live — Reddit shows it removed/deleted ("removed") OR we couldn't
+    # verify it ("missing", e.g. fetch failed/unreachable) — is left
+    # exactly as-is in its current ('assigned'/'informed') state.
+    # Removed-detection is Check Live's job, not bulk deploy's.
+    if liveness != "live":
         return {
             "source": source, "id": rid,
-            "action": "marked_replace" if new_status == "replace" else "marked_removed",
+            "action": "left_assigned",
+            "current_status": current_status, "liveness": liveness,
         }
 
-    # liveness in {"live", "missing"} — deploy.
+    # liveness == "live" — deploy.
     try:
         if source == "comment":
             db.deploy_comment(rid, url, posted_at=posted_at)
@@ -730,11 +706,10 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
 _TIER1_PRIORITY = [
     "error",
     "deployed",
-    # `marked_replace` and `marked_removed` are equally informative
-    # (both are detection-time terminal states); rank them adjacent
-    # so the rollup picks whichever happened.
-    "marked_replace",
-    "marked_removed",
+    # A URL-matched row we left untouched (not live → not deployed, and
+    # bulk deploy never marks removed). More informative than the
+    # idempotent "already_*" states, so rank it above them.
+    "left_assigned",
     "already_removed",
     "already_deployed",
 ]
@@ -785,8 +760,9 @@ def match_and_deploy_comment(db, classified: dict, *,
 
     Returns a result dict the orchestrator records in tasks.progress.
     Possible action values:
-      - "deployed"            (URL/body match — flipped to deployed)
-      - "marked_removed"      (URL matched but Reddit shows removed/deleted)
+      - "deployed"            (URL/body match, Reddit-confirmed live — flipped to deployed)
+      - "left_assigned"       (matched, but not confirmed live (removed/unverifiable) —
+                               left untouched; bulk deploy NEVER marks a comment removed)
       - "already_deployed"    (idempotent — was already deployed)
       - "already_removed"     (idempotent — was already removed)
       - "no_match"            (URL didn't map to any DB row)
@@ -881,7 +857,7 @@ def match_and_deploy_comment(db, classified: dict, *,
         # see in Live Search) is still 'assigned' / 'informed' with no
         # URL attached. Falling through to Tier-2 lets the body matcher
         # find it. Errors also short-circuit so we don't double-process.
-        _ACTIONABLE = {"deployed", "marked_removed", "marked_replace", "error"}
+        _ACTIONABLE = {"deployed", "left_assigned", "error"}
         if any(r["action"] in _ACTIONABLE for r in tier1_results):
             return _rollup_tier1(url, tier1_results, liveness, posted_at)
         # Else: all Tier-1 matches were terminal. Continue to Tier-2.
@@ -968,55 +944,14 @@ def match_and_deploy_comment(db, classified: dict, *,
         }
 
     if liveness == "removed":
-        # Comment was removed/deleted on Reddit. We can't body-match
-        # against a `[removed]` sentinel, so we fall back to a
-        # singleton rule: if exactly ONE undeployed comment sits under
-        # this post, claim the URL goes to it, attach URL, mark removed.
-        # Otherwise we report no_match — never guess between candidates.
-        if len(candidates) == 1:
-            cand = candidates[0]
-            cand_kind = cand.get("__kind", "comment")
-            try:
-                prev = db.mark_removed_with_url(
-                    cand["id"], cand_kind, url, posted_at=posted_at,
-                )
-            except Exception as e:
-                return {
-                    "url": url, "kind": "comment", "tier": "removed_singleton",
-                    "source": cand_kind, "id": cand["id"],
-                    "action": "error", "reason": str(e),
-                    "liveness": liveness,
-                }
-            # Re-read the row to learn whether the chooser picked
-            # 'replace' (14-day window) or 'removed'.
-            new_status = "removed"
-            try:
-                table = "comments" if cand_kind == "comment" else "search_comments"
-                row = db.conn.execute(
-                    f"SELECT status FROM {table} WHERE id = ?", (cand["id"],)
-                ).fetchone()
-                if row and row["status"]:
-                    new_status = row["status"]
-            except Exception:
-                pass
-            _log_bulk_event(
-                db, cand["id"], cand_kind, url,
-                "bulk_marked_removed", prev, new_status,
-            )
-            out = {
-                "url": url, "kind": "comment", "tier": "removed_singleton",
-                "source": cand_kind, "id": cand["id"],
-                "action": "marked_replace" if new_status == "replace" else "marked_removed",
-                "liveness": liveness, "posted_at": posted_at,
-            }
-            if tier1_results:
-                out["extras"] = _tier1_as_extras()
-            return out
+        # Comment is removed/deleted on Reddit. Bulk deploy NEVER marks a
+        # comment removed — that's Check Live's job. Leave the row(s)
+        # untouched in their current state and just report it.
         if tier1_results:
             return _rollup_tier1(url, tier1_results, liveness, posted_at)
         return {
-            "url": url, "kind": "comment", "action": "no_match",
-            "reason": f"comment_removed_on_reddit_and_{len(candidates)}_candidates",
+            "url": url, "kind": "comment", "action": "left_assigned",
+            "reason": "comment removed on reddit — left untouched (not marked removed)",
             "liveness": liveness,
         }
 
@@ -1357,6 +1292,9 @@ def _summarise(results: list[dict]) -> dict:
         "marked_replace": 0,
         "already_deployed": 0,
         "already_removed": 0,
+        # Matched a row but it wasn't Reddit-confirmed-live, so it was left
+        # untouched in its current state (bulk deploy never marks removed).
+        "left_assigned": 0,
         "no_match": 0,
         "error": 0,
         "by_tier": {"url_match": 0, "body_match": 0, "author_singleton": 0, "removed_singleton": 0},

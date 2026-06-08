@@ -4434,6 +4434,23 @@ def api_live_posts_clusters():
     db = get_db()
     try:
         clusters = db.get_ai_search_clusters_for_brand(bid)
+        # Per-brand learned_context (anchor grounding), keyed by seed_norm — cached so
+        # we parse each brand's JSON once even when it has many clusters.
+        _lc_cache = {}
+        def _grounding_for(brand_id, seed_norm):
+            if brand_id not in _lc_cache:
+                br = db.get_brand(brand_id) if brand_id else None
+                try:
+                    _lc_cache[brand_id] = json.loads((br or {}).get("learned_context") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    _lc_cache[brand_id] = {}
+                if not isinstance(_lc_cache[brand_id], dict):
+                    _lc_cache[brand_id] = {}
+            entry = _lc_cache[brand_id].get(seed_norm)
+            if isinstance(entry, dict) and (entry.get("summary") or "").strip():
+                return {"summary": entry.get("summary", "").strip(),
+                        "covers": bool(entry.get("covers"))}
+            return None
         out = []
         for cl in clusters:
             rewrites = db.normalize_rewrites(cl.get("rewrites_json"))
@@ -4462,6 +4479,7 @@ def api_live_posts_clusters():
                 "complete": n > 0 and covered >= n,
                 "backfilled": bool(cl.get("backfilled")),
                 "created_at": cl.get("created_at"),
+                "grounding": _grounding_for(cl.get("brand_id"), seed_norm),
                 "rewrites": rw_rows,
             })
         return jsonify(out)

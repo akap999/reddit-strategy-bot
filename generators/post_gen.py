@@ -296,11 +296,16 @@ class PostGenerator:
 
             # Score each for AI-query relevance. In AI-Search mode the scorer also
             # enforces anchor-retention + question-form (off-anchor/vent → low).
+            # `brand_kind` (the brand's category) lets the scorer enforce ENTITY-TYPE
+            # match (the answer must name a brand of this kind) — relative + gated, so
+            # it only fires for an enriched brand and only on a clear mismatch.
             _anchor = (coverage_focus.get("anchor") if coverage_focus else None) or None
+            _brand_kind = (primary_brand.get("category") or "").strip()
             for c in candidates:
                 c["ai_query_score"] = self._score_ai_query_relevance(
                     c["title"], c["body"],
-                    anchor=_anchor, target_query=c.get("target_query"))
+                    anchor=_anchor, target_query=c.get("target_query"),
+                    brand_kind=_brand_kind)
 
             # AI-Search mode: deterministic embedding relevance gate (drops posts that
             # drifted off their target_query; no-op without an embeddings key), then
@@ -931,6 +936,14 @@ Do this in your head, then return the merged result:
        - Persona / segment          → for small business, for beginners/pros
        - Adjacent platform          → a NAMED adjacent (Reels → Shorts / TikTok)
      You MAY add up to 2 brand-specific regions the 6 don't capture.
+  2b. ENTITY-TYPE — every rewrite must be a query an AI would answer by naming a brand
+     of THIS brand's KIND (see its "Category" in the brand context); keep every region
+     within that kind. If the brand is a SERVICE / PROVIDER / CLINIC, regions are
+     provider-oriented (best service/clinic, where to get it / who offers it,
+     alternative to a competitor PROVIDER) — NOT treatment-vs-treatment or efficacy
+     ("which works better / does X work") comparisons, whose answer would be substances
+     rather than the brand. (For product / retailer brands this is already satisfied —
+     keep the usual product / buy-intent regions.)
   3. Write ONE rewrite per region — phrased the way the engines actually search
      (short, keyword-ish, real intent), distinct from the others. HARD RULE: if two
      rewrites would get essentially the SAME AI answer, keep only ONE. Aim for
@@ -1158,8 +1171,9 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
          recommend a specific product/service to use? If it would instead just
          explain a concept, give general tips, or describe "what to look for,"
          the title is wrong — rewrite it as a request for a recommendation.
-       • OUR-BRAND CHECK — would THIS brand be a natural answer? Read the BRAND
-         CONTEXT to decide which kind of brand it is:
+       • OUR-BRAND CHECK — would THIS brand be a natural answer? The title's answer
+         must name the SAME KIND of entity as this brand (read the "Category" line in
+         the brand context to decide which kind it is):
            - SPECIFIC product or service → narrow the question by its category /
              who it's for / the problem or use-case it's best at, so it's a
              natural pick and not a query only a big generic market leader wins.
@@ -1171,6 +1185,13 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
              literal answer to those, so do NOT force it down to a single
              product — across the batch, MIX these supplier-level questions with
              more specific product/task ones.
+           - SERVICE / PROVIDER / CLINIC (you go to it to GET something done) →
+             the title asks for the PROVIDER: the best service / clinic / where to
+             get it / who offers it for the use-case. Do NOT frame it as "best
+             <treatments>", "<A> vs <B> — which works better?", or "does <X> work?":
+             those are answered with substances / efficacy, not a provider, so this
+             brand can't be the cited answer. (A comparison is fine only when it
+             compares PROVIDERS, e.g. "alternative to <competitor clinic>".)
          Either way, NEVER write the target brand name in the title, and never
          turn it into a generic info / "do they work" / how-it-works question.
   4. Keep titles short (~3-12 words) and human — a real person could post it. VARY
@@ -1500,7 +1521,7 @@ Return JSON only:
 
         return result["posts"]
 
-    def _score_ai_query_relevance(self, title, body, anchor=None, target_query=None):
+    def _score_ai_query_relevance(self, title, body, anchor=None, target_query=None, brand_kind=None):
         """Score 0-10 combining (a) likelihood a real person types this query
         with (b) whether its natural answer is a PRODUCT/SERVICE RECOMMENDATION.
 
@@ -1514,7 +1535,30 @@ Return JSON only:
         recommendation question, not a vent/statement), and rewards a clean match
         to its `target_query`. Off-anchor or vent titles score LOW so the
         coverage-gated selector drops them. anchor=None → original behavior.
+
+        `brand_kind` (the brand's category, e.g. "telehealth men's health clinic"):
+        when set, enforce ENTITY-TYPE MATCH — the title's natural answer must name a
+        brand of THIS kind. A title whose answer is a different kind of thing (e.g.
+        a list of treatments/molecules, or an efficacy comparison, when the brand is
+        a provider/clinic) is capped. Conservative + relative: only a CLEAR mismatch
+        caps; same-kind queries (incl. valid same-kind comparisons) are untouched;
+        empty brand_kind → rule omitted entirely.
         """
+        entity_block = ""
+        if brand_kind and str(brand_kind).strip():
+            entity_block = f"""
+
+ENTITY-TYPE MATCH (relative to the brand — apply CONSERVATIVELY):
+  BRAND KIND: "{str(brand_kind).strip()}". A high-scoring title's natural answer must
+  NAME a brand of THIS kind. Cap the score at 3-4 ONLY when the answer would clearly
+  name a DIFFERENT kind of thing than the brand — e.g. the brand is a SERVICE /
+  PROVIDER / CLINIC but the title's answer is a list of treatments / ingredients /
+  molecules / products, or an efficacy "which works better / does X work" comparison
+  (those name substances, not a provider, so this brand can't be the cited answer).
+  Do NOT cap when the answer's kind MATCHES the brand — including valid same-kind
+  comparisons (product vs product for a product brand; clinic vs clinic for a clinic).
+  When unsure, do NOT apply this cap."""
+
         anchor_block = ""
         if anchor:
             tq = f'\nThis title is supposed to target the cluster sub-query: "{target_query}".' if target_query else ""
@@ -1543,7 +1587,7 @@ Rate 0-10 on BOTH dimensions together:
 
 High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services/suppliers ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y", "where to buy X online", "best place to order X", "who sells X").
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
-Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}
+Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}{entity_block}
 
 Return JSON only:
 {{"score": 0-10, "reasoning": "brief explanation"}}"""

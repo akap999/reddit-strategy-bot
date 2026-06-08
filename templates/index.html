@@ -7287,6 +7287,14 @@ function _lsubsRenderClusters() {
         const _isOpen = _lsubsExpandedClusters.has(cl.seed || '(no seed)');
         const _caret = _isOpen ? '▾' : '▸';
         const _bodyStyle = _isOpen ? '' : 'display:none';
+        // What the brand was found to offer for this seed (anchor grounding).
+        const _esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const _grnd = cl.grounding ? `
+                <div class="text-xs mt-1 mb-2 p-2" style="background:#0b1a14;border:1px solid #1f3a2c;border-radius:6px;line-height:1.4">
+                    <span class="badge" style="background:${cl.grounding.covers?'#10331f':'#3a2a0e'};color:${cl.grounding.covers?'#46d160':'#ffb86b'}">${cl.grounding.covers?'✓ brand offers this':'⚠ weak fit'}</span>
+                    <span style="color:#9fb4c9"> what ${_esc(cl.seed||'this topic')} grounding found:</span>
+                    <div style="color:#c7d2e0;margin-top:3px">${_esc(cl.grounding.summary)}</div>
+                </div>` : '';
         return `<div class="card p-4 mb-3" data-cluster-card="${i}" style="background:#0e1320;border:1px solid #24304a">
             <div class="flex items-start justify-between gap-3 flex-wrap mb-2">
                 <div style="min-width:0;cursor:pointer" onclick="_lsubsToggleCluster(${i})" title="Click to expand / collapse">
@@ -7298,6 +7306,7 @@ function _lsubsRenderClusters() {
                 </div>
             </div>
             <div data-cluster-body style="${_bodyStyle}">
+                ${_grnd}
                 <div>${rows}</div>
                 <div class="mt-2">
                     <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsClusterGenSelected(${i})" title="Generate posts for ONLY the checked rewrites above">▶ Generate for selected</button>

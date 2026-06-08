@@ -7119,9 +7119,40 @@ let _lsubsSubreddits = [];   // current brand's saved sub list
 let _lsubsSubCounts = {};    // {sub_lc: {deployed, reported}} from /api/brands/<id>/live-subreddits
 let _lsubsLastResult = null; // last generate response (for the skipped accordion)
 
-let _lsubsTab = 'generate';   // 'generate' | 'posts' | 'comments'
+let _lsubsTab = 'generate';   // 'generate' | 'posts' | 'comments' | 'clusters'
+
+// Live Subs UI state, persisted to localStorage so a page refresh keeps the
+// active sub-tab + filters (the top-level view is already restored via the URL
+// hash; this restores the sub-state) and so the BRAND selection is shared
+// across the sub-tabs (pick on Generate → still filtered on Posts/Comments/Clusters).
+let _lsubsUI = { tab: 'generate', brand: '',
+    posts: { status: '', intent: '', month: '' },
+    cmt:   { status: '', from: '', to: '', month: '' } };
+function _lsubsSaveUI() { try { localStorage.setItem('lsubsUI', JSON.stringify(_lsubsUI)); } catch (e) {} }
+function _lsubsLoadUI() {
+    try {
+        const s = JSON.parse(localStorage.getItem('lsubsUI') || '{}');
+        if (s && typeof s === 'object') {
+            _lsubsUI = Object.assign(_lsubsUI, s);
+            _lsubsUI.posts = Object.assign({ status: '', intent: '', month: '' }, s.posts || {});
+            _lsubsUI.cmt = Object.assign({ status: '', from: '', to: '', month: '' }, s.cmt || {});
+        }
+    } catch (e) {}
+}
+_lsubsLoadUI();
+// Sub-tab switch: remember the tab so a refresh lands here, not on Generate.
+function lsubsSwitchTab(t) { _lsubsTab = t; _lsubsUI.tab = t; _lsubsSaveUI(); renderLsubsTabContent(); }
+// Persist the shared brand from any sub-tab's brand <select>.
+function _lsubsSetBrand(v) { _lsubsUI.brand = v || ''; _lsubsSaveUI(); }
+// Build brand <option>s with the shared brand pre-selected.
+function _lsubsBrandOptions(includeAll) {
+    const cur = String(_lsubsUI.brand || '');
+    return (includeAll ? `<option value="" ${cur === '' ? 'selected' : ''}>All brands</option>` : '')
+        + _lsubsBrands.map(b => `<option value="${b.id}" ${String(b.id) === cur ? 'selected' : ''}>${b.name}</option>`).join('');
+}
 
 async function renderLiveSubreddits(el) {
+    _lsubsTab = _lsubsUI.tab || 'generate';   // restore last sub-tab on (re)load
     el.innerHTML = '<div class="spinner mx-auto my-8"></div>';
     try { _lsubsBrands = await api('/api/search/brands'); } catch(e) { _lsubsBrands = []; }
 
@@ -7133,10 +7164,10 @@ async function renderLiveSubreddits(el) {
             </div>
         </div>
         <div class="flex gap-1 mb-4" style="border-bottom:1px solid #343536">
-            <div class="tab ${_lsubsTab==='generate'?'active':''}" onclick="_lsubsTab='generate';renderLsubsTabContent()">🤖 Generate</div>
-            <div class="tab ${_lsubsTab==='posts'?'active':''}" onclick="_lsubsTab='posts';renderLsubsTabContent()">📝 Posts</div>
-            <div class="tab ${_lsubsTab==='comments'?'active':''}" onclick="_lsubsTab='comments';renderLsubsTabContent()">💬 Comments</div>
-            <div class="tab ${_lsubsTab==='clusters'?'active':''}" onclick="_lsubsTab='clusters';renderLsubsTabContent()">🎯 Clusters</div>
+            <div class="tab ${_lsubsTab==='generate'?'active':''}" onclick="lsubsSwitchTab('generate')">🤖 Generate</div>
+            <div class="tab ${_lsubsTab==='posts'?'active':''}" onclick="lsubsSwitchTab('posts')">📝 Posts</div>
+            <div class="tab ${_lsubsTab==='comments'?'active':''}" onclick="lsubsSwitchTab('comments')">💬 Comments</div>
+            <div class="tab ${_lsubsTab==='clusters'?'active':''}" onclick="lsubsSwitchTab('clusters')">🎯 Clusters</div>
         </div>
         <div id="lsubs-tab-content"></div>
     `;
@@ -7160,12 +7191,11 @@ function renderLsubsTabContent() {
 let _lsubsClustersCache = [];
 
 function renderLsubsClusters(c) {
-    const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
     c.innerHTML = `
         <div class="flex flex-wrap gap-3 items-center mb-4">
             <label class="text-xs text-gray-400 flex items-center gap-1">Brand
-                <select id="lsubs-cluster-brand" onchange="lsubsLoadClusters()" style="min-width:220px">
-                    <option value="">All brands</option>${brandOptions}
+                <select id="lsubs-cluster-brand" onchange="_lsubsSetBrand(this.value);lsubsLoadClusters()" style="min-width:220px">
+                    ${_lsubsBrandOptions(true)}
                 </select></label>
             <button class="btn btn-sm btn-secondary" onclick="lsubsLoadClusters()">↻ Refresh</button>
             <button class="btn btn-sm" style="background:#2a2336;color:#c4b5fd" onclick="lsubsBackfillClusters()" title="Reconstruct clusters from previously-generated AI-Search posts (grouped by their root prompt)">↺ Backfill from posts</button>
@@ -7191,12 +7221,31 @@ async function lsubsLoadClusters(silent = false) {
     if (!listEl) return;
     if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const bid = document.getElementById('lsubs-cluster-brand')?.value;
+    _lsubsUI.brand = bid || ''; _lsubsSaveUI();
     try {
         _lsubsClustersCache = (await api('/api/live-posts/clusters' + (bid ? ('?brand_id=' + bid) : ''))) || [];
         _lsubsRenderClusters();
     } catch (e) {
         listEl.innerHTML = `<p class="text-sm text-red-400">Failed to load clusters: ${e.message || e}</p>`;
     }
+}
+
+// Which clusters the user has expanded. Default = collapsed (like the Comments
+// cards). Keyed by seed so the open/closed state survives a re-render.
+const _lsubsExpandedClusters = new Set();
+
+function _lsubsToggleCluster(i) {
+    const card = document.querySelector(`[data-cluster-card="${i}"]`);
+    if (!card) return;
+    const body = card.querySelector('[data-cluster-body]');
+    const caret = card.querySelector('[data-cluster-caret]');
+    const willExpand = body.style.display === 'none';
+    body.style.display = willExpand ? '' : 'none';
+    if (caret) caret.textContent = willExpand ? '▾' : '▸';
+    const cl = _lsubsClustersCache[i];
+    const key = cl ? (cl.seed || '(no seed)') : String(i);
+    if (willExpand) _lsubsExpandedClusters.add(key);
+    else _lsubsExpandedClusters.delete(key);
 }
 
 function _lsubsRenderClusters() {
@@ -7235,25 +7284,30 @@ function _lsubsRenderClusters() {
             ? `<input type="number" id="clu-n-${i}" value="${Math.min(cl.gap_count, 5)}" min="1" max="10" class="text-xs" style="width:48px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px">
                <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsGenClusterGaps(${i})" title="Generate posts targeting the uncovered rewrites">Fill gaps</button>`
             : '';
-        return `<div class="card p-4 mb-3" style="background:#0e1320;border:1px solid #24304a">
+        const _isOpen = _lsubsExpandedClusters.has(cl.seed || '(no seed)');
+        const _caret = _isOpen ? '▾' : '▸';
+        const _bodyStyle = _isOpen ? '' : 'display:none';
+        return `<div class="card p-4 mb-3" data-cluster-card="${i}" style="background:#0e1320;border:1px solid #24304a">
             <div class="flex items-start justify-between gap-3 flex-wrap mb-2">
-                <div style="min-width:0">
-                    <div class="font-bold" style="color:#0079D3">${cl.seed || '(no seed)'}</div>
-                    ${cl.anchor ? `<div class="text-xs text-gray-500">anchor: ${cl.anchor} · <span style="color:#fbbf24">★</span> fixed region · <span style="color:#9ca3af">⚙</span> generated · <span style="color:#c4b5fd">✎</span> yours</div>` : ''}
+                <div style="min-width:0;cursor:pointer" onclick="_lsubsToggleCluster(${i})" title="Click to expand / collapse">
+                    <div class="font-bold" style="color:#0079D3"><span data-cluster-caret style="color:#9ec4ff;font-size:13px;margin-right:5px">${_caret}</span>${cl.seed || '(no seed)'}</div>
+                    ${cl.anchor ? `<div class="text-xs text-gray-500" style="margin-left:18px">anchor: ${cl.anchor} · <span style="color:#fbbf24">★</span> fixed region · <span style="color:#9ca3af">⚙</span> generated · <span style="color:#c4b5fd">✎</span> yours</div>` : ''}
                 </div>
                 <div class="flex items-center gap-2 flex-wrap">${chip}${fill}
                     <button class="btn btn-sm btn-danger" onclick="lsubsDeleteCluster(${i})" title="Delete this cluster (posts are kept)">🗑 Delete</button>
                 </div>
             </div>
-            <div>${rows}</div>
-            <div class="mt-2">
-                <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsClusterGenSelected(${i})" title="Generate posts for ONLY the checked rewrites above">▶ Generate for selected</button>
-            </div>
-            <div class="flex items-center gap-2 flex-wrap mt-2 pt-2" style="border-top:1px solid #20283a">
-                <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:130px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
-                <button class="btn btn-sm btn-secondary" onclick="lsubsClusterAddPosts(${i})" title="Attach the listed posts to this cluster">+ Add post(s)</button>
-                <input id="clu-fo-${i}" placeholder="paste real fan-out queries (comma/line)" class="text-xs flex-1" style="min-width:220px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Paste captured fan-out queries; each is region-classified and added only if its region is new">
-                <button class="btn btn-sm" style="background:#1a2a3d;color:#7dd3fc" onclick="lsubsClusterAddFanout(${i})" title="Add captured fan-out queries (region-deduped)">+ Add fan-out</button>
+            <div data-cluster-body style="${_bodyStyle}">
+                <div>${rows}</div>
+                <div class="mt-2">
+                    <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsClusterGenSelected(${i})" title="Generate posts for ONLY the checked rewrites above">▶ Generate for selected</button>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap mt-2 pt-2" style="border-top:1px solid #20283a">
+                    <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:130px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
+                    <button class="btn btn-sm btn-secondary" onclick="lsubsClusterAddPosts(${i})" title="Attach the listed posts to this cluster">+ Add post(s)</button>
+                    <input id="clu-fo-${i}" placeholder="paste real fan-out queries (comma/line)" class="text-xs flex-1" style="min-width:220px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Paste captured fan-out queries; each is region-classified and added only if its region is new">
+                    <button class="btn btn-sm" style="background:#1a2a3d;color:#7dd3fc" onclick="lsubsClusterAddFanout(${i})" title="Add captured fan-out queries (region-deduped)">+ Add fan-out</button>
+                </div>
             </div>
         </div>`;
     }).join('');
@@ -7365,9 +7419,9 @@ function renderLsubsGenerate(c) {
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
                 <div>
                     <label class="text-xs text-gray-400 mb-1 block">Brand</label>
-                    <select id="lsubs-brand" onchange="lsubsOnBrandChange()" style="width:100%">
-                        <option value="">Select brand…</option>
-                        ${_lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('')}
+                    <select id="lsubs-brand" onchange="_lsubsSetBrand(this.value);lsubsOnBrandChange()" style="width:100%">
+                        <option value="" ${String(_lsubsUI.brand||'')===''?'selected':''}>Select brand…</option>
+                        ${_lsubsBrands.map(b => `<option value="${b.id}" ${String(b.id)===String(_lsubsUI.brand||'')?'selected':''}>${b.name}</option>`).join('')}
                     </select>
                 </div>
                 <div>
@@ -7455,6 +7509,10 @@ function renderLsubsGenerate(c) {
         <div id="lsubs-skipped"></div>
         <div id="lsubs-table" class="mt-4"></div>
     `;
+    // If a brand was carried over from another sub-tab (shared brand), the
+    // <select> is pre-selected but its dependent UI (subreddit list, Generate
+    // buttons) only updates via the change handler — fire it once.
+    if (document.getElementById('lsubs-brand')?.value) lsubsOnBrandChange();
 }
 
 // Add a custom subreddit (typed by the user) to the active brand's
@@ -7986,14 +8044,12 @@ async function lsubsGenerateFiller() {
 // Live Subreddits — Posts tab (all live posts for a brand, full action toolbar)
 // =========================================================================
 async function renderLsubsPosts(c) {
-    const brandOptions = _lsubsBrands.map(b => `<option value="${b.id}">${b.name}</option>`).join('');
     c.innerHTML = `
         <div class="flex flex-wrap gap-3 items-center mb-4">
             <label class="text-xs text-gray-400 flex items-center gap-1">
                 Brand
-                <select id="lsubs-posts-brand" onchange="lsubsLoadPosts()" style="min-width:220px">
-                    <option value="">All brands</option>
-                    ${brandOptions}
+                <select id="lsubs-posts-brand" onchange="_lsubsSetBrand(this.value);lsubsLoadPosts()" style="min-width:220px">
+                    ${_lsubsBrandOptions(true)}
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -8046,6 +8102,11 @@ async function renderLsubsPosts(c) {
         <div id="lsubs-posts-counts" class="mb-3 flex flex-wrap gap-2" style="font-size:0.7rem"></div>
         <div id="lsubs-posts-table"></div>
     `;
+    // Restore persisted Posts filters (brand is handled by _lsubsBrandOptions;
+    // month is restored inside lsubsLoadPosts once its options are populated).
+    { const f = _lsubsUI.posts || {};
+      const st = document.getElementById('lsubs-posts-status'); if (st && f.status) st.value = f.status;
+      const it = document.getElementById('lsubs-posts-intent'); if (it && f.intent) it.value = f.intent; }
     lsubsLoadPosts();
 }
 
@@ -8115,9 +8176,17 @@ async function lsubsLoadPosts(silent = false) {
         let posts = await api('/api/posts/all?' + params.toString());
         // Month dropdown options come from the full fetched set (so switching
         // month doesn't shrink the list); then filter client-side by report_month.
-        _lsubsFillMonthOptions(document.getElementById('lsubs-posts-month'), posts);
-        const month = document.getElementById('lsubs-posts-month')?.value || '';
+        const _moEl = document.getElementById('lsubs-posts-month');
+        _lsubsFillMonthOptions(_moEl, posts);
+        // Restore the saved month once its options exist (only when the user
+        // hasn't already picked one this render).
+        if (_moEl && !_moEl.value && _lsubsUI.posts && _lsubsUI.posts.month) _moEl.value = _lsubsUI.posts.month;
+        const month = _moEl?.value || '';
         const intent = document.getElementById('lsubs-posts-intent')?.value || '';
+        // Persist the current Posts filters (brand is shared).
+        _lsubsUI.brand = bid || '';
+        _lsubsUI.posts = { status: status || '', intent: intent || '', month: month || '' };
+        _lsubsSaveUI();
         if (intent) posts = posts.filter(p => (p.intent || '') === intent);
         if (month) posts = posts.filter(p => (p.report_month || '') === month);
         // Render status pills before the empty-state short-circuit so
@@ -8687,9 +8756,8 @@ async function renderLsubsComments(c) {
         <div class="flex flex-wrap gap-3 items-center mb-4">
             <label class="text-xs text-gray-400 flex items-center gap-1">
                 Brand
-                <select id="lsubs-cmt-brand" onchange="lsubsLoadComments()" style="min-width:220px">
-                    <option value="">All brands</option>
-                    ${brandOptions}
+                <select id="lsubs-cmt-brand" onchange="_lsubsSetBrand(this.value);lsubsLoadComments()" style="min-width:220px">
+                    ${_lsubsBrandOptions(true)}
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -8731,6 +8799,12 @@ async function renderLsubsComments(c) {
         <div id="lsubs-cmt-counts" class="mb-3 flex flex-wrap gap-2" style="font-size:0.7rem"></div>
         <div id="lsubs-cmt-list"></div>
     `;
+    // Restore persisted Comments filters (brand via _lsubsBrandOptions; month
+    // restored inside _lsubsRenderComments once its options are populated).
+    { const f = _lsubsUI.cmt || {};
+      const st = document.getElementById('lsubs-cmt-status'); if (st && f.status) st.value = f.status;
+      const fr = document.getElementById('lsubs-cmt-date-from'); if (fr && f.from) fr.value = f.from;
+      const to = document.getElementById('lsubs-cmt-date-to'); if (to && f.to) to.value = f.to; }
     lsubsLoadComments();
 }
 
@@ -8825,6 +8899,7 @@ async function lsubsLoadComments(silent = false) {
     if (!silent) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     const params = new URLSearchParams({ live: '1', source: 'comment' });
     const bid = document.getElementById('lsubs-cmt-brand')?.value;
+    _lsubsUI.brand = bid || ''; _lsubsSaveUI();
     if (bid) params.set('brand_id', bid);
     // Status/date filters intentionally NOT sent to API — they're applied
     // client-side at the cluster head so a cluster doesn't get partially
@@ -8867,7 +8942,10 @@ function _lsubsRenderComments() {
     const comments = _lsubsCommentsCache;
     // Month dropdown options from the distinct report_month across the cache
     // (mirrors Live Search). Preserves selection.
-    _lsubsFillMonthOptions(document.getElementById('lsubs-cmt-month'), comments);
+    const _cmtMoEl = document.getElementById('lsubs-cmt-month');
+    _lsubsFillMonthOptions(_cmtMoEl, comments);
+    // Restore the saved month once its options exist (only when unset this render).
+    if (_cmtMoEl && !_cmtMoEl.value && _lsubsUI.cmt && _lsubsUI.cmt.month) _cmtMoEl.value = _lsubsUI.cmt.month;
     // Render the HQ-only status pills on every pass so they update
     // when the user changes the brand filter (which triggers a
     // re-fetch + re-render). The pills themselves count across the
@@ -8886,6 +8964,9 @@ function _lsubsRenderComments() {
     const dateFrom = document.getElementById('lsubs-cmt-date-from')?.value || '';
     const dateTo = document.getElementById('lsubs-cmt-date-to')?.value || '';
     const monthFilter = document.getElementById('lsubs-cmt-month')?.value || '';
+    // Persist the current Comments filters (brand is shared, saved in lsubsLoadComments).
+    _lsubsUI.cmt = { status: statusFilter, from: dateFrom, to: dateTo, month: monthFilter };
+    _lsubsSaveUI();
     const hasAnyFilter = !!(statusFilter || dateFrom || dateTo || monthFilter);
     const matchHead = (c) => {
         if (dateFrom || dateTo) {

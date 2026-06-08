@@ -7455,15 +7455,15 @@ function renderLsubsGenerate(c) {
                 <span class="text-xs text-gray-400">Posts per intent:</span>
                 <label class="text-xs text-gray-400 flex items-center gap-1" title="Buyer ready to pick a tool/service">
                     Commercial
-                    <input type="number" id="lsubs-ic-commercial" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
+                    <input type="number" id="lsubs-ic-commercial" value="2" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
                 </label>
                 <label class="text-xs text-gray-400 flex items-center gap-1" title="User weighing options (competitor names allowed)">
                     Comparison
-                    <input type="number" id="lsubs-ic-comparison" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
+                    <input type="number" id="lsubs-ic-comparison" value="0" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
                 </label>
                 <label class="text-xs text-gray-400 flex items-center gap-1" title="User wants to understand (no buying intent)">
                     Informational
-                    <input type="number" id="lsubs-ic-informational" value="1" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
+                    <input type="number" id="lsubs-ic-informational" value="0" min="0" max="10" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 6px;width:52px">
                 </label>
                 <!-- Inline "Also generate HQ" toggle so the user can
                      spawn an HQ thread for every freshly-generated post
@@ -7483,13 +7483,13 @@ function renderLsubsGenerate(c) {
                      several / a keyword or platform. Leave blank for normal
                      brand-context generation. -->
                 <label class="text-xs text-gray-400 block" style="flex-basis:100%">
-                    Seed <span class="text-gray-600">(optional — generate prompts around an existing prompt, several (one per line), or a keyword/platform)</span>
+                    Seed <span class="text-gray-600">(optional — ONE coherent theme per seed: a prompt, several related phrasings, or a keyword/platform. For separate topics, generate each separately so each gets its own cluster/anchor.)</span>
                     <textarea id="lsubs-seed" rows="2" class="w-full text-xs mt-1"
                         placeholder="e.g. any good background music tools for Instagram Reels?   ·   or just: Instagram"
                         style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px;font-family:inherit"></textarea>
                 </label>
                 <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Semantic-coverage mode: runs a query fan-out and generates titles/bodies that blanket the whole rewrite cluster an AI engine (ChatGPT/Perplexity/Gemini) would search for — not just the literal prompt. Saves a per-post phrasing checklist the HQ anchor later covers.">
-                    <input type="checkbox" id="lsubs-ai-search">
+                    <input type="checkbox" id="lsubs-ai-search" checked>
                     🎯 AI Search mode <span class="text-gray-600">(semantic coverage — fan out + cover the query cluster; uses the seed as the anchor if set)</span>
                 </label>
                 <label class="text-xs text-gray-400 block" style="flex-basis:100%">

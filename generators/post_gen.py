@@ -133,6 +133,11 @@ class PostGenerator:
         seed_norm = self.db.normalize_seed(seed) if (ai_search and seed) else None
         if ai_search and seed_norm:
             bid = primary_brand["id"]
+            # Anchor-scoped grounding: learn what THIS brand offers for this seed's
+            # topic (from the brand's own site), persist it into the brand's
+            # accumulating learned_context, and feed it into the fan-out + post
+            # prompts below. Cached per (brand, seed) → only fetched on a NEW anchor.
+            anchor_summary = self._ground_brand_for_anchor(brands, seed, seed_norm)
             # Everything already generated for this (brand, seed) — past posts count
             # as covered regardless of when they were made.
             covered = self.db.get_covered_target_queries(bid, seed_norm)
@@ -156,9 +161,10 @@ class PostGenerator:
                     tq = (p.get("target_query") or "").strip()
                     if tq and tq.lower() not in seen_pa:
                         seen_pa.add(tq.lower()); past_angles.append(tq)
-                fan = self._fanout_rewrites(brands, seed, prior_coverage=past_angles)
+                fan = self._fanout_rewrites(brands, seed, prior_coverage=past_angles,
+                                            anchor_summary=anchor_summary)
                 if not fan and not past_angles:
-                    fan = self._fanout_rewrites(brands, seed)  # nothing prior → plain fan-out
+                    fan = self._fanout_rewrites(brands, seed, anchor_summary=anchor_summary)  # nothing prior → plain fan-out
                 anchor = (fan.get("anchor") if fan else None) or (cluster.get("anchor") if cluster else None)
                 checklist = (fan.get("checklist") if fan else None) or (json.loads(cluster.get("checklist_json") or "[]") if cluster else [])
                 # Past angles FIRST (so they're in the cluster + show covered), then the
@@ -730,6 +736,26 @@ Return JSON only:
             if kw:
                 lines.append(f"  Keywords: {', '.join(kw)}")
 
+            # Anchor-scoped knowledge learned on past cluster creations: what this
+            # brand actually offers for specific topics. Grounds generation so posts
+            # stay truthful + on-target across the brand's covered topics.
+            learned = b.get("learned_context")
+            if learned:
+                try:
+                    learned = json.loads(learned) if isinstance(learned, str) else learned
+                except (json.JSONDecodeError, TypeError):
+                    learned = None
+                topic_lines = []
+                for entry in (learned.values() if isinstance(learned, dict) else []):
+                    if not isinstance(entry, dict):
+                        continue
+                    summ = (entry.get("summary") or "").strip()
+                    if summ and entry.get("covers"):
+                        topic_lines.append(f"    - {(entry.get('anchor') or '').strip()}: {summ}")
+                if topic_lines:
+                    lines.append("  What the brand offers for specific topics (learned):")
+                    lines.extend(topic_lines[:12])
+
         if not any_enriched:
             print(
                 f"[post_gen] WARNING: none of the selected brands "
@@ -739,6 +765,57 @@ Return JSON only:
             )
 
         return "\n".join(lines), target_names, all_competitors
+
+    def _ground_brand_for_anchor(self, brands, seed, seed_norm):
+        """On cluster creation, learn what the PRIMARY brand actually offers for this
+        seed's topic (from the brand's own site), persist it into the brand's
+        accumulating `learned_context` (keyed by seed_norm), and mutate the in-memory
+        brand so the brand block built just after reflects it. Cached: if this anchor
+        was already grounded, returns the stored summary without re-fetching.
+
+        Returns the anchor summary string (may be "")."""
+        if not (brands and seed and str(seed).strip()):
+            return ""
+        b = brands[0]
+        # Parse existing learned_context.
+        raw = b.get("learned_context")
+        try:
+            learned = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (json.JSONDecodeError, TypeError):
+            learned = {}
+        if not isinstance(learned, dict):
+            learned = {}
+        # Cached → reuse (no refetch).
+        if seed_norm in learned and isinstance(learned[seed_norm], dict):
+            return (learned[seed_norm].get("summary") or "").strip()
+        # Fetch + distill from the brand's own site.
+        try:
+            from generators.brand_enrichment import enrich_brand_for_anchor
+            import datetime as _dt
+            g = enrich_brand_for_anchor(self.claude, b.get("name") or "",
+                                        b.get("domain_url") or "", str(seed).strip())
+        except Exception as e:
+            print(f"[post_gen] anchor grounding skipped for seed '{seed}': {e}")
+            return ""
+        if not g or not g.get("summary"):
+            return ""
+        learned[seed_norm] = {
+            "anchor": str(seed).strip(),
+            "summary": g.get("summary", ""),
+            "covers": bool(g.get("covers")),
+            "key_points": g.get("key_points") or [],
+            "added_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if not g.get("covers"):
+            print(f"[post_gen] weak-fit anchor: '{b.get('name')}' has no clear offering for "
+                  f"'{seed}' — generating anyway, but consider a closer anchor.")
+        # Persist (manual `context` untouched) + mutate in-memory so the block sees it.
+        try:
+            self.db.update_brand(b["id"], learned_context=json.dumps(learned))
+        except Exception as e:
+            print(f"[post_gen] could not persist learned_context: {e}")
+        b["learned_context"] = json.dumps(learned)
+        return (g.get("summary") or "").strip()
 
     @staticmethod
     def _brand_facets(brands):
@@ -780,7 +857,7 @@ Return JSON only:
                 _add("informational", pp)
         return out
 
-    def _fanout_rewrites(self, brands, seed=None, prior_coverage=None):
+    def _fanout_rewrites(self, brands, seed=None, prior_coverage=None, anchor_summary=None):
         """AI-Search mode: one Claude call that simulates how ChatGPT / Perplexity /
         Gemini fan a prompt out into sub-queries, then UNIONs them into a master
         rewrite cluster + a concept/phrasing checklist for the brand's space.
@@ -807,6 +884,12 @@ Return JSON only:
             seed_line = (
                 "\nANCHOR SEED (expand the fan-out AROUND this — an existing "
                 f"prompt/question, several, or a keyword/platform):\n{str(seed).strip()}\n"
+            )
+        if anchor_summary and str(anchor_summary).strip():
+            seed_line += (
+                "\nWHAT THIS BRAND OFFERS FOR THE SEED TOPIC (ground the rewrites in this — "
+                "stay within what the brand can credibly answer; do NOT invent capabilities):\n"
+                f"{str(anchor_summary).strip()}\n"
             )
         prior_norm = {str(c).strip().lower() for c in (prior_coverage or []) if str(c).strip()}
         if prior_norm:
@@ -1094,7 +1177,14 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
      the wording and structure across the batch; do NOT fall into one repeated
      shape, do NOT keyword-stuff, do NOT append years ("2025"). Mix more
      conversational phrasings with more direct search-style ones, but EVERY title
-     must still lead to recommending a specific product/service."""
+     must still lead to recommending a specific product/service.
+  5. STORYLINE shapes the BODY's voice / scenario ONLY — the TITLE is ALWAYS a
+     recommendation question per rules 3-4, NEVER a vent, testimonial, rant, or
+     status update. So a "complaint" storyline becomes a body that frames the
+     frustration and then ASKS what to use (title stays a question like "best X
+     for Y?"); a "discovery"/"experience" storyline becomes a body sharing the
+     situation that ends in asking for recommendations — the title never reads as
+     "so tired of X" or "started using Y — game changer"."""
 
         # Subreddit scoping line. In context_only mode (no subreddit chosen
         # yet) we deliberately DON'T name a subreddit — the post is grounded
@@ -1453,7 +1543,7 @@ Rate 0-10 on BOTH dimensions together:
 
 High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services/suppliers ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y", "where to buy X online", "best place to order X", "who sells X").
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
-Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs.{anchor_block}
+Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}
 
 Return JSON only:
 {{"score": 0-10, "reasoning": "brief explanation"}}"""
@@ -1463,33 +1553,39 @@ Return JSON only:
             return result["score"]
         return 5  # default middle score
 
-    def _select_best(self, candidates, requested_storylines, count):
-        """Select the best N candidates by AI-query score with storyline variety."""
-        # Sort by AI-query score descending
-        sorted_candidates = sorted(candidates, key=lambda c: c.get("ai_query_score", 0), reverse=True)
+    def _select_best(self, candidates, requested_storylines, count, threshold=5):
+        """Select up to N candidates by AI-query score with storyline variety.
+
+        QUALITY FLOOR: only titles scoring >= `threshold` qualify. This drops
+        vents / testimonials / status-update titles (which the recommendation-
+        question scorer now caps at 1-4) even when they'd otherwise be pulled in
+        to fill a requested storyline slot (complaint / discovery / experience).
+        If fewer than `count` clear the bar, return fewer and log — never pad the
+        batch with weak/vent titles."""
+        strong = [c for c in candidates if c.get("ai_query_score", 0) >= threshold]
+        strong.sort(key=lambda c: c.get("ai_query_score", 0), reverse=True)
 
         selected = []
-        used_storylines = []
-
-        # First pass: try to fill each requested storyline with the highest-scoring match
+        # First pass: storyline variety, but ONLY among candidates that cleared the floor.
         for sl in requested_storylines:
-            for c in sorted_candidates:
+            for c in strong:
                 if c in selected:
                     continue
                 if c.get("storyline") == sl:
                     selected.append(c)
-                    used_storylines.append(sl)
                     break
 
-        # Second pass: fill remaining slots with highest-scoring unused candidates
-        while len(selected) < count and len(selected) < len(sorted_candidates):
-            for c in sorted_candidates:
-                if c not in selected:
-                    selected.append(c)
-                    break
+        # Second pass: fill remaining slots with the highest-scoring strong, unused candidates.
+        for c in strong:
             if len(selected) >= count:
                 break
+            if c not in selected:
+                selected.append(c)
 
+        if len(selected) < count:
+            print(f"[post_gen] standard select: kept {len(selected)} of {count} requested — only "
+                  f"that many titles cleared the recommendation-question bar (score>={threshold}); "
+                  "weak/vent/testimonial titles were dropped rather than padded.")
         return selected[:count]
 
     def _select_cluster_best(self, candidates, count, threshold=6):

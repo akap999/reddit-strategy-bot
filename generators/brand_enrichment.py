@@ -159,3 +159,62 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         "context_summary": _as_str(result.get("context_summary")),
         "_page_fetched":   bool(page_text),
     }
+
+
+def enrich_brand_for_anchor(claude: ClaudeClient, name: str, domain_url: str, anchor: str) -> dict:
+    """Anchor-scoped grounding: what does THIS brand actually offer/do for a given
+    topic (the cluster's seed/anchor, e.g. "Longevity")? Grounds in the brand's OWN
+    homepage + the model's confident knowledge — NOT the open web — so it never
+    invents offerings. When there's no real offering, returns covers=False.
+
+    Returns {summary, covers, key_points} (summary "" / covers False / [] on failure).
+    Used on cluster creation to ground the fan-out + post generation in the brand's
+    real capability for that anchor (and to flag weak-fit anchors).
+    """
+    anchor = (anchor or "").strip()
+    if not anchor:
+        return {"summary": "", "covers": False, "key_points": []}
+    html = _fetch_homepage(domain_url)
+    page_text = _extract_visible_text(html)
+    if page_text:
+        page_section = f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
+    else:
+        page_section = (
+            "HOMEPAGE TEXT: (could not fetch — rely on the brand name and your "
+            "confident knowledge of this brand; if unsure, set covers=false rather "
+            "than guessing.)"
+        )
+    prompt = f"""You are grounding a GEO campaign. We are about to build content anchored on a
+specific TOPIC for this brand, and need to know what THIS brand actually offers or
+does that is relevant to that topic — so the content stays truthful and on-target.
+
+BRAND NAME: {name}
+BRAND URL: {domain_url or "(none)"}
+ANCHOR TOPIC: "{anchor}"
+
+{page_section}
+
+Describe ONLY what is supported by the page above or your CONFIDENT knowledge of this
+brand — do NOT invent products, services, or claims. If the brand has no real offering
+relevant to "{anchor}", say so (covers=false): it's better to flag a poor fit than to
+fabricate.
+
+Return JSON only, exactly this shape:
+{{
+  "summary": "1-3 sentences: what this brand specifically offers/does for \\"{anchor}\\" (or, if covers=false, a one-line note that it doesn't really serve this topic)",
+  "covers": true or false,
+  "key_points": ["concrete offering / service / capability relevant to the topic", "..."]
+}}"""
+    result = claude.call(prompt, max_tokens=600, temperature=0.2)
+    if not isinstance(result, dict):
+        return {"summary": "", "covers": False, "key_points": []}
+    kp = result.get("key_points")
+    if isinstance(kp, list):
+        kp = [str(x).strip() for x in kp if str(x).strip()]
+    else:
+        kp = []
+    return {
+        "summary": str(result.get("summary") or "").strip(),
+        "covers": bool(result.get("covers")),
+        "key_points": kp,
+    }

@@ -239,7 +239,7 @@ class Database:
     def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
                      category=None, audience=None, use_cases=None, pain_points=None,
                      features=None, competitors=None, enriched_at=None,
-                     search_subreddits=None, focus=None):
+                     search_subreddits=None, focus=None, learned_context=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -249,7 +249,7 @@ class Database:
             "pain_points": pain_points, "features": features,
             "competitors": competitors, "enriched_at": enriched_at,
             "search_subreddits": search_subreddits,
-            "focus": focus,
+            "focus": focus, "learned_context": learned_context,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1760,6 +1760,12 @@ class Database:
             # fit. JSON-serialised array of strings. NULL/empty = no
             # focus, generator behaviour unchanged.
             "focus":             "ALTER TABLE brands ADD COLUMN focus TEXT",
+            # Anchor-scoped knowledge learned on cluster creation: what THIS
+            # brand offers for a given seed/anchor topic. JSON keyed by
+            # seed_norm: {seed_norm: {anchor, summary, covers, key_points, added_at}}.
+            # Accumulates over time; fed into generation. Separate from the
+            # user's manual `context`, which is never overwritten.
+            "learned_context":   "ALTER TABLE brands ADD COLUMN learned_context TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

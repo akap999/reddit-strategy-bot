@@ -764,6 +764,39 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    @staticmethod
+    def normalize_rewrites(raw):
+        """A cluster's rewrites_json is either a legacy flat [str] or the new
+        [{query, region, source}] form. Return the object form (backward-compatible),
+        deduped by query (case-insensitive)."""
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                raw = []
+        out, seen = [], set()
+        for r in (raw or []):
+            if isinstance(r, dict):
+                q = (r.get("query") or "").strip()
+                region = r.get("region") or "(unsorted)"
+                source = r.get("source") or "generated"
+            else:
+                q = str(r).strip()
+                region, source = "(unsorted)", "generated"
+            k = q.lower()
+            if q and k not in seen:
+                seen.add(k)
+                out.append({"query": q, "region": region, "source": source})
+        return out
+
+    def delete_ai_search_cluster(self, brand_id, seed_norm):
+        """Remove a cluster row (posts are kept). Returns rows deleted."""
+        cur = self.conn.execute(
+            "DELETE FROM ai_search_clusters WHERE brand_id IS ? AND seed_norm = ?",
+            (brand_id, seed_norm))
+        self.conn.commit()
+        return cur.rowcount
+
     def get_ai_search_posts_for_seed(self, brand_id, seed_norm):
         """Posts generated under a given (brand, seed) root, with their target_query
         and display fields — for the Clusters coverage view."""
@@ -823,11 +856,12 @@ class Database:
         for (bid, sn), g in groups.items():
             if self.get_ai_search_cluster(bid, sn) or not g["targets"]:
                 continue
+            rw_objs = [{"query": t, "region": "(from posts)", "source": "manual"} for t in g["targets"]]
             self.conn.execute(
                 """INSERT OR IGNORE INTO ai_search_clusters
                    (brand_id, seed_norm, seed, anchor, rewrites_json, checklist_json, backfilled)
                    VALUES (?, ?, ?, ?, ?, ?, 1)""",
-                (bid, sn, g["seed"], g["anchor"], json.dumps(g["targets"]), json.dumps([]))
+                (bid, sn, g["seed"], g["anchor"], json.dumps(rw_objs), json.dumps([]))
             )
             n += 1
         self.conn.commit()
@@ -842,8 +876,8 @@ class Database:
         cluster = self.get_ai_search_cluster(brand_id, seed_norm)
         if not cluster:
             return {"error": "no cluster for this seed", "attached": [], "not_found": []}
-        rewrites = json.loads(cluster.get("rewrites_json") or "[]")
-        lower = {str(r).strip().lower() for r in rewrites}
+        rewrites = self.normalize_rewrites(cluster.get("rewrites_json"))
+        lower = {r["query"].lower() for r in rewrites}
         seed = cluster.get("seed") or seed_norm
         anchor = cluster.get("anchor") or ""
         attached, not_found = [], []
@@ -864,7 +898,8 @@ class Database:
                 "UPDATE posts SET ai_search_meta=? WHERE id=?",
                 (json.dumps({"seed": seed, "anchor": anchor, "target_query": tq}), row["id"]))
             if tq and tq.lower() not in lower:
-                rewrites.append(tq); lower.add(tq.lower())
+                rewrites.append({"query": tq, "region": "(from posts)", "source": "manual"})
+                lower.add(tq.lower())
             attached.append(num)
         self.conn.commit()
         self.upsert_ai_search_cluster(

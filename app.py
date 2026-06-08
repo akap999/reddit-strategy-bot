@@ -4254,6 +4254,11 @@ def api_live_posts_generate():
     seed = (data.get("seed") or "").strip() or None
     # AI-Search semantic-coverage mode (separate option; default off).
     ai_search = bool(data.get("ai_search", False))
+    # Optional pasted REAL fan-out queries (captured from ChatGPT/Perplexity/Gemini)
+    # — folded into the cluster with region-dedup before generation.
+    observed_queries = [str(q).strip() for q in (data.get("observed_queries") or []) if str(q).strip()]
+    # Explicit rewrite selection from the Clusters view — generate only for these.
+    target_rewrites = [str(q).strip() for q in (data.get("target_rewrites") or []) if str(q).strip()]
     if not bid:
         return jsonify({"error": "brand_id required"}), 400
 
@@ -4329,7 +4334,8 @@ def api_live_posts_generate():
             posts = post_gen.generate_posts(
                 sub, [brand_full], count=count,
                 intent_counts=intent_counts, context_only=context_only,
-                seed=seed, ai_search=ai_search)
+                seed=seed, ai_search=ai_search, observed_queries=observed_queries,
+                target_rewrites=target_rewrites)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles
@@ -4390,10 +4396,7 @@ def api_live_posts_clusters():
         clusters = db.get_ai_search_clusters_for_brand(bid)
         out = []
         for cl in clusters:
-            try:
-                rewrites = json.loads(cl.get("rewrites_json") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                rewrites = []
+            rewrites = db.normalize_rewrites(cl.get("rewrites_json"))
             seed_norm = cl.get("seed_norm")
             posts = db.get_ai_search_posts_for_seed(cl.get("brand_id"), seed_norm)
             by_rw = {}
@@ -4401,10 +4404,13 @@ def api_live_posts_clusters():
                 by_rw.setdefault((p.get("target_query") or "").strip().lower(), []).append(p)
             rw_rows, covered = [], 0
             for r in rewrites:
-                ps = by_rw.get(str(r).strip().lower(), [])
+                q = r["query"]
+                ps = by_rw.get(q.strip().lower(), [])
                 if ps:
                     covered += 1
-                rw_rows.append({"rewrite": r, "covered": bool(ps), "posts": ps})
+                rw_rows.append({"rewrite": q, "region": r.get("region") or "(unsorted)",
+                                "source": r.get("source") or "generated",
+                                "covered": bool(ps), "posts": ps})
             n = len(rewrites)
             out.append({
                 "brand_id": cl.get("brand_id"),
@@ -4463,6 +4469,54 @@ def api_cluster_add_posts():
     try:
         res = db.attach_posts_to_cluster(brand_id, db.normalize_seed(seed), nums)
         return jsonify(res)
+    finally:
+        db.close()
+
+
+@app.route("/api/live-posts/clusters/add-fanout", methods=["POST"])
+def api_cluster_add_fanout():
+    """Manually add real fan-out queries to a cluster with REGION dedup: each query
+    is region-classified; added only if its region isn't already present.
+    Body: {brand_id, seed, queries:[...]}. Returns {added:[...], skipped:[...]}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        brand_id = int(data.get("brand_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "brand_id required"}), 400
+    seed = data.get("seed") or ""
+    queries = [str(q).strip() for q in (data.get("queries") or []) if str(q).strip()]
+    if not queries:
+        return jsonify({"error": "queries required"}), 400
+    db, claude, _, post_gen, _ = make_generators()
+    try:
+        sn = db.normalize_seed(seed)
+        cluster = db.get_ai_search_cluster(brand_id, sn)
+        if not cluster:
+            return jsonify({"error": "no cluster for this seed — generate it first"}), 404
+        rewrites = db.normalize_rewrites(cluster.get("rewrites_json"))
+        res = post_gen._merge_observed(rewrites, queries)
+        db.upsert_ai_search_cluster(
+            brand_id, sn, cluster.get("seed") or sn, cluster.get("anchor"),
+            res["rewrites"], json.loads(cluster.get("checklist_json") or "[]"), backfilled=0)
+        return jsonify({"added": res["added"], "skipped": res["skipped"],
+                        "cluster_size": len(res["rewrites"])})
+    finally:
+        db.close()
+
+
+@app.route("/api/live-posts/clusters/delete", methods=["POST"])
+def api_cluster_delete():
+    """Delete a cluster row (posts are kept). Body: {brand_id, seed}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        brand_id = int(data.get("brand_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "brand_id required"}), 400
+    seed = data.get("seed") or ""
+    db = get_db()
+    try:
+        n = db.delete_ai_search_cluster(brand_id, db.normalize_seed(seed))
+        return jsonify({"deleted": n})
     finally:
         db.close()
 

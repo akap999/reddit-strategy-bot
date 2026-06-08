@@ -7213,12 +7213,21 @@ function _lsubsRenderClusters() {
             : (cl.complete
                 ? `<span class="badge" style="background:#10331f;color:#46d160">✓ ${cl.covered_count}/${cl.cluster_size} complete</span>`
                 : `<span class="badge" style="background:#1e1b4b;color:#a5b4fc">${cl.covered_count}/${cl.cluster_size} covered · ${cl.gap_count} gap${cl.gap_count === 1 ? '' : 's'}</span>`);
-        const rows = (cl.rewrites || []).map(rw => {
+        const _ord = s => s === 'fixed' ? 0 : (s === 'generated' ? 1 : 2);
+        const sorted = [...(cl.rewrites || [])].sort((a, b) => _ord(a.source) - _ord(b.source));
+        const rows = sorted.map(rw => {
+            const mark = rw.source === 'fixed'
+                ? '<span title="Fixed region (priority)" style="color:#fbbf24">★</span>'
+                : (rw.source === 'manual'
+                    ? '<span title="From your capture / posts" style="color:#c4b5fd">✎</span>'
+                    : '<span title="Claude-generated region" style="color:#9ca3af">⚙</span>');
+            const regionTag = (rw.region && rw.region !== '(unsorted)')
+                ? ` <span class="badge" style="background:#15172b;color:#93a4c9;font-size:0.62rem">${rw.region}</span>` : '';
             const posts = (rw.posts || []).map(p =>
                 `<a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.post_number != null ? ('#' + p.post_number + ' ') : ''}${(p.title || '').slice(0, 80)}</a> <span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.subreddit_name ? ` <span class="text-gray-600">r/${p.subreddit_name}</span>` : ''}`
             ).join('<br>');
             return `<div class="py-1" style="border-top:1px solid #20283a">
-                <div class="text-sm">${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span></div>
+                <div class="text-sm"><input type="checkbox" class="clu-sel-${i}" data-q="${(rw.rewrite || '').replace(/"/g, '&quot;')}" style="vertical-align:middle;margin-right:5px" title="Select this rewrite to generate for it"> ${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} ${mark} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span>${regionTag}</div>
                 ${posts ? `<div class="text-xs ml-4 mt-1 text-gray-400">${posts}</div>` : ''}
             </div>`;
         }).join('');
@@ -7230,16 +7239,80 @@ function _lsubsRenderClusters() {
             <div class="flex items-start justify-between gap-3 flex-wrap mb-2">
                 <div style="min-width:0">
                     <div class="font-bold" style="color:#0079D3">${cl.seed || '(no seed)'}</div>
-                    ${cl.anchor ? `<div class="text-xs text-gray-500">anchor: ${cl.anchor}</div>` : ''}
+                    ${cl.anchor ? `<div class="text-xs text-gray-500">anchor: ${cl.anchor} · <span style="color:#fbbf24">★</span> fixed region · <span style="color:#9ca3af">⚙</span> generated · <span style="color:#c4b5fd">✎</span> yours</div>` : ''}
                 </div>
                 <div class="flex items-center gap-2 flex-wrap">${chip}${fill}
-                    <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:140px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
-                    <button class="btn btn-sm btn-secondary" onclick="lsubsClusterAddPosts(${i})" title="Attach the listed posts to this cluster">+ Add post(s)</button>
+                    <button class="btn btn-sm btn-danger" onclick="lsubsDeleteCluster(${i})" title="Delete this cluster (posts are kept)">🗑 Delete</button>
                 </div>
             </div>
             <div>${rows}</div>
+            <div class="mt-2">
+                <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsClusterGenSelected(${i})" title="Generate posts for ONLY the checked rewrites above">▶ Generate for selected</button>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap mt-2 pt-2" style="border-top:1px solid #20283a">
+                <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:130px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
+                <button class="btn btn-sm btn-secondary" onclick="lsubsClusterAddPosts(${i})" title="Attach the listed posts to this cluster">+ Add post(s)</button>
+                <input id="clu-fo-${i}" placeholder="paste real fan-out queries (comma/line)" class="text-xs flex-1" style="min-width:220px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Paste captured fan-out queries; each is region-classified and added only if its region is new">
+                <button class="btn btn-sm" style="background:#1a2a3d;color:#7dd3fc" onclick="lsubsClusterAddFanout(${i})" title="Add captured fan-out queries (region-deduped)">+ Add fan-out</button>
+            </div>
         </div>`;
     }).join('');
+}
+
+async function lsubsClusterGenSelected(i) {
+    const cl = _lsubsClustersCache[i];
+    if (!cl) return;
+    const checks = [...document.querySelectorAll('.clu-sel-' + i + ':checked')].map(el => el.dataset.q).filter(Boolean);
+    if (!checks.length) { toast('Tick one or more rewrites first', 'error'); return; }
+    const n = checks.length, per = Math.floor(n / 3), rem = n % 3;
+    const intent_counts = { commercial: per + (rem > 0 ? 1 : 0), comparison: per + (rem > 1 ? 1 : 0), informational: per };
+    try {
+        const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, target_rewrites: checks, intent_counts } });
+        const tid = res.task_id;
+        toast(`Generating ${n} post${n === 1 ? '' : 's'} for the selected rewrite${n === 1 ? '' : 's'}…`, 'info');
+        if (typeof _addBgTask === 'function') _addBgTask(tid, 'Selected rewrites');
+        const poll = setInterval(async () => {
+            try {
+                const t = await api('/api/tasks/' + tid);
+                if (t.status === 'complete' || t.status === 'error') {
+                    clearInterval(poll);
+                    if (t.status === 'complete') { toast('Generated — refreshing cluster', 'success'); lsubsLoadClusters(true); }
+                    else toast('Generate failed: ' + (t.error || 'error'), 'error');
+                }
+            } catch (e) {}
+        }, 1500);
+    } catch (e) {
+        toast('Generate failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function lsubsClusterAddFanout(i) {
+    const cl = _lsubsClustersCache[i];
+    if (!cl) return;
+    const raw = (document.getElementById('clu-fo-' + i)?.value || '').trim();
+    const queries = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    if (!queries.length) { toast('Paste fan-out queries first', 'error'); return; }
+    try {
+        const res = await api('/api/live-posts/clusters/add-fanout', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, queries } });
+        const add = (res.added || []).length, skip = (res.skipped || []);
+        toast(`Added ${add} new region${add === 1 ? '' : 's'}${skip.length ? ` · ${skip.length} skipped (region already covered)` : ''}`, add ? 'success' : 'info');
+        lsubsLoadClusters(true);
+    } catch (e) {
+        toast('Add fan-out failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function lsubsDeleteCluster(i) {
+    const cl = _lsubsClustersCache[i];
+    if (!cl) return;
+    if (!confirm(`Delete this cluster?\n\n“${(cl.seed || '').slice(0, 80)}”\n\nYour posts are kept — only the cluster structure is removed. Re-generating the seed rebuilds it.`)) return;
+    try {
+        await api('/api/live-posts/clusters/delete', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed } });
+        toast('Cluster deleted', 'success');
+        lsubsLoadClusters(true);
+    } catch (e) {
+        toast('Delete failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function lsubsClusterAddPosts(i) {
@@ -7364,6 +7437,12 @@ function renderLsubsGenerate(c) {
                 <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Semantic-coverage mode: runs a query fan-out and generates titles/bodies that blanket the whole rewrite cluster an AI engine (ChatGPT/Perplexity/Gemini) would search for — not just the literal prompt. Saves a per-post phrasing checklist the HQ anchor later covers.">
                     <input type="checkbox" id="lsubs-ai-search">
                     🎯 AI Search mode <span class="text-gray-600">(semantic coverage — fan out + cover the query cluster; uses the seed as the anchor if set)</span>
+                </label>
+                <label class="text-xs text-gray-400 block" style="flex-basis:100%">
+                    Observed fan-out queries <span class="text-gray-600">(optional — paste the REAL fanned-out queries you captured from ChatGPT/Perplexity/Gemini, one per line; each is region-classified and added only if its region is new)</span>
+                    <textarea id="lsubs-observed" rows="2" class="w-full text-xs mt-1"
+                        placeholder="best background music tools for instagram reels 2026&#10;ai background music generator for reels"
+                        style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px;font-family:inherit"></textarea>
                 </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
                 <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
@@ -7650,10 +7729,12 @@ async function lsubsGeneratePosts(force = false) {
 
     const seed = (document.getElementById('lsubs-seed')?.value || '').trim();
     const aiSearch = !!document.getElementById('lsubs-ai-search')?.checked;
+    const observed = (document.getElementById('lsubs-observed')?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
     if (seed) reqBody.seed = seed;
     if (aiSearch) reqBody.ai_search = true;
+    if (aiSearch && observed.length) reqBody.observed_queries = observed;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
     let res;

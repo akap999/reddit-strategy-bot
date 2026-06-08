@@ -31,6 +31,17 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath
 # --- Prompt Versioning ---
 PROMPT_VERSION = "v1.0"
 
+# --- AI-Search embedding relevance gate (optional / graceful) ---
+# Drops generated posts whose (title+body) is semantically too far from their target
+# fan-out query. OFF unless OPENAI_API_KEY is set; threshold tuned so natural Reddit
+# titles pass and only genuine drift fails.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+try:
+    EMBED_THRESHOLD = float(os.environ.get("EMBED_THRESHOLD", "0.68"))
+except (TypeError, ValueError):
+    EMBED_THRESHOLD = 0.68
+
 # --- Storyline Types ---
 STORYLINE_TYPES = {
     "experience": "Personal experience with a product/service in this space",

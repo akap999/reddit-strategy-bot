@@ -10,9 +10,27 @@ from generators.comment_gen import classify_post_intent
 from config import (
     STORYLINE_TYPES, AI_QUERY_PATTERNS, PROMPT_VERSION,
     POST_SPREAD_FACTOR, FILLER_LEAD_DAYS, REDDIT_USER_AGENT,
-    POST_BATCH_SIZES, INTENT_TYPES
+    POST_BATCH_SIZES, INTENT_TYPES,
+    OPENAI_API_KEY, EMBED_MODEL, EMBED_THRESHOLD,
 )
 from db import Database
+
+# The 6 standard recommendation-query axes (the "fixed regions") — the recurring
+# dimensions of "recommend me an X" queries, marked so the user can prioritize them.
+# Claude instantiates the ones that apply to a brand/seed and may add brand-specific
+# regions on top.
+FIXED_REGIONS = [
+    "Category / best tool",
+    "Comparison / alternative",
+    "Constraint",            # the dominant buying constraint (copyright, budget, compliance…)
+    "Use-case / workflow",
+    "Persona / segment",
+    "Adjacent platform",
+]
+
+# Hard ceiling on fan-out rewrites (one per region) — guarantees the cluster stays
+# sparse + region-unique regardless of what the model returns.
+MAX_FANOUT_REWRITES = 10
 
 
 class PostGenerator:
@@ -23,7 +41,7 @@ class PostGenerator:
 
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
-                       ai_search=False):
+                       ai_search=False, observed_queries=None, target_rewrites=None):
         """Generate GEO-style posts (posts NEVER mention target brands).
 
         `ai_search` (optional, default False): the new AI-Search semantic-coverage
@@ -119,12 +137,16 @@ class PostGenerator:
             # as covered regardless of when they were made.
             covered = self.db.get_covered_target_queries(bid, seed_norm)
             cluster = self.db.get_ai_search_cluster(bid, seed_norm)
-            rewrites = anchor = checklist = None
+            rewrites = None        # list of region objects {query, region, source}
+            anchor = checklist = None
             if cluster and not cluster.get("backfilled"):
                 # A real cluster exists → reuse it (history already credited via covered).
-                rewrites = json.loads(cluster.get("rewrites_json") or "[]")
+                rewrites = self.db.normalize_rewrites(cluster.get("rewrites_json"))
                 checklist = json.loads(cluster.get("checklist_json") or "[]")
                 anchor = cluster.get("anchor") or None
+                if observed_queries:
+                    rewrites = self._merge_observed(rewrites, observed_queries)["rewrites"]
+                    self.db.upsert_ai_search_cluster(bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
             else:
                 # No cluster, OR a backfilled (covered-only) one → BUILD/UPGRADE it so
                 # this run folds in the existing posts AND extends with new angles.
@@ -132,31 +154,46 @@ class PostGenerator:
                 past_angles, seen_pa = [], set()
                 for p in past_posts:
                     tq = (p.get("target_query") or "").strip()
-                    k = tq.lower()
-                    if tq and k not in seen_pa:
-                        seen_pa.add(k); past_angles.append(tq)
+                    if tq and tq.lower() not in seen_pa:
+                        seen_pa.add(tq.lower()); past_angles.append(tq)
                 fan = self._fanout_rewrites(brands, seed, prior_coverage=past_angles)
                 if not fan and not past_angles:
                     fan = self._fanout_rewrites(brands, seed)  # nothing prior → plain fan-out
                 anchor = (fan.get("anchor") if fan else None) or (cluster.get("anchor") if cluster else None)
                 checklist = (fan.get("checklist") if fan else None) or (json.loads(cluster.get("checklist_json") or "[]") if cluster else [])
                 # Past angles FIRST (so they're in the cluster + show covered), then the
-                # new fan-out angles (the gaps to fill). Dedup case-insensitively.
+                # new fan-out region objects (the gaps to fill). Dedup by query.
                 merged, seen_m = [], set()
-                for r in (past_angles + ((fan.get("rewrites") if fan else []) or [])):
-                    k = str(r).strip().lower()
-                    if k and k not in seen_m:
-                        seen_m.add(k); merged.append(r)
+                for tq in past_angles:
+                    if tq.lower() not in seen_m:
+                        seen_m.add(tq.lower())
+                        merged.append({"query": tq, "region": "(from posts)", "source": "manual"})
+                for r in ((fan.get("rewrites") if fan else []) or []):
+                    q = (r.get("query") if isinstance(r, dict) else str(r)).strip()
+                    if q and q.lower() not in seen_m:
+                        seen_m.add(q.lower())
+                        merged.append(r if isinstance(r, dict) else {"query": q, "region": "(unsorted)", "source": "generated"})
                 rewrites = merged
+                if observed_queries:
+                    rewrites = self._merge_observed(rewrites, observed_queries)["rewrites"]
                 if rewrites:
                     self.db.upsert_ai_search_cluster(
                         bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
             if rewrites:
-                coverage_focus = {"anchor": anchor, "rewrites": rewrites, "checklist": checklist}
+                rewrite_queries = [r["query"] for r in rewrites]
+                coverage_focus = {"anchor": anchor, "rewrites": rewrite_queries, "checklist": checklist}
                 if checklist:
                     checklist_json = json.dumps(checklist)
-                remaining_gaps = [r for r in rewrites if str(r).strip().lower() not in covered]
-                cluster_size = len(rewrites)
+                if target_rewrites:
+                    # Explicit selection: target EXACTLY these rewrites (one post each),
+                    # regardless of current coverage (lets you add depth to a region).
+                    _sel = {str(t).strip().lower() for t in target_rewrites if str(t).strip()}
+                    remaining_gaps = [q for q in rewrite_queries if q.strip().lower() in _sel]
+                    if not remaining_gaps:  # selection not in cluster → take it verbatim
+                        remaining_gaps = [str(t).strip() for t in target_rewrites if str(t).strip()]
+                else:
+                    remaining_gaps = [q for q in rewrite_queries if q.strip().lower() not in covered]
+                cluster_size = len(rewrite_queries)
                 covered_before = cluster_size - len(remaining_gaps)
                 if not remaining_gaps:
                     # Cluster already complete — nothing new to add.
@@ -236,9 +273,11 @@ class PostGenerator:
                     c["title"], c["body"],
                     anchor=_anchor, target_query=c.get("target_query"))
 
-            # AI-Search mode: coverage-gated selection (one strong post per distinct
-            # rewrite, weak/off-anchor dropped). Standard mode: storyline-balanced.
+            # AI-Search mode: deterministic embedding relevance gate (drops posts that
+            # drifted off their target_query; no-op without an embeddings key), then
+            # coverage-gated selection (one strong post per distinct rewrite).
             if ai_search:
+                candidates = self._embedding_gate(candidates)
                 picked = self._select_cluster_best(candidates, n_intent)
             else:
                 picked = self._select_best(candidates, storylines_for_intent, n_intent)
@@ -729,20 +768,27 @@ Do this in your head, then return the merged result:
      seed names a platform or use-case (e.g. "Instagram Reels", "podcast intros",
      "online store checkout"), THAT is the anchor — extract it exactly. If there's
      no seed, derive the anchor from the brand's single most central use-case/
-     platform. The anchor is short (1-4 words). Every rewrite should stay on this
-     anchor; a rewrite may broaden to an ADJACENT variant (e.g. Reels → Shorts /
-     short-form video) but must never collapse to something fully generic
-     ("my videos", "content").
-  2. Imagine how each engine fans the intent out:
-     - ChatGPT: a FEW (2-3) natural-language queries close to how a person phrases it.
-     - Perplexity: SEVERAL (4-6) short, keyword-style queries.
-     - Gemini / AI Overviews: a WIDE set of decomposed sub-questions and angles.
-  3. UNION + DEDUPE them into one master list of distinct rewrites (paraphrases,
-     decomposed sub-questions, and modifier/entity variants) that a real person
-     could plausibly ask and whose natural answer is to RECOMMEND a product/service
-     in this brand's niche. Each rewrite stays ON the anchor (or a named adjacent
-     variant). Cover distinct REGIONS of the space (different sub-use-cases / buyer
-     concerns), not just synonyms of one query.
+     platform. The anchor is short (1-4 words). Every rewrite stays on this anchor;
+     a rewrite may broaden to a NAMED adjacent variant (e.g. Reels → Shorts /
+     short-form) but never collapses to something generic ("my videos", "content").
+  2. REGIONS — real AI engines fan a prompt into only a FEW sub-queries (ChatGPT
+     ~2-3, Perplexity ~3-6, Gemini ~3-5), and across engines they converge on the
+     same handful of DISTINCT regions, NOT a dozen synonyms. Produce ONE rewrite per
+     region. Consider these 6 standard axes and instantiate the ones that apply to
+     THIS brand/seed (SKIP any that don't fit); fill the "Constraint" slot with this
+     brand's dominant buying constraint (copyright/licensing, price/free, compliance,
+     integration, speed…):
+       - Category / best tool      → "best X for Y"
+       - Comparison / alternative  → "X vs Y", "alternative to <competitor>"
+       - Constraint                → the #1 buying concern (e.g. copyright-safe, budget)
+       - Use-case / workflow        → the specific job (auto-sync to video, for podcasts)
+       - Persona / segment          → for small business, for beginners/pros
+       - Adjacent platform          → a NAMED adjacent (Reels → Shorts / TikTok)
+     You MAY add up to 2 brand-specific regions the 6 don't capture.
+  3. Write ONE rewrite per region — phrased the way the engines actually search
+     (short, keyword-ish, real intent), distinct from the others. HARD RULE: if two
+     rewrites would get essentially the SAME AI answer, keep only ONE. Aim for
+     ~5-8 rewrites TOTAL — fewer, distinct regions beat many synonyms.
   4. Produce a concise CONCEPT/PHRASING CHECKLIST: the key natural-language
      phrasings, synonyms and domain terms a Reddit thread should contain so it
      matches the whole cluster for both keyword (BM25) and embedding retrieval.
@@ -750,21 +796,164 @@ Do this in your head, then return the merged result:
 Return JSON only:
 {{
   "anchor": "the platform/use-case to keep every title on (short)",
-  "rewrites": ["distinct on-anchor sub-query 1", "distinct sub-query 2", "..."],
+  "rewrites": [
+    {{"query": "the sub-query, engine-style", "region": "one of the 6 axis names OR a brand-specific region", "fixed": true/false (true ONLY if it's one of the 6 standard axes)}},
+    ...
+  ],
   "checklist": ["phrasing/term 1", "phrasing/term 2", "..."]
 }}
-Aim for 12-20 rewrites and 8-15 checklist items. Never include the target brand name."""
+Aim for 5-8 rewrites total. Never include the target brand name."""
         result = self.claude.call(prompt, max_tokens=1500, temperature=0.7)
         if not result or not isinstance(result, dict):
             return None
-        rewrites = result.get("rewrites") or []
-        if prior_norm:
-            rewrites = [r for r in rewrites if str(r).strip().lower() not in prior_norm]
+        rewrites = []
+        for r in (result.get("rewrites") or []):
+            if isinstance(r, dict):
+                q = (r.get("query") or "").strip()
+                region = (r.get("region") or "(unsorted)").strip() or "(unsorted)"
+                source = "fixed" if r.get("fixed") else "generated"
+            else:
+                q, region, source = str(r).strip(), "(unsorted)", "generated"
+            if not q:
+                continue
+            if prior_norm and q.lower() in prior_norm:
+                continue
+            rewrites.append({"query": q, "region": region, "source": source})
+        rewrites = self._dedup_cap_regions(rewrites)
         checklist = result.get("checklist") or []
         anchor = (result.get("anchor") or "").strip()
         if not rewrites and not checklist:
             return None
         return {"anchor": anchor, "rewrites": rewrites, "checklist": checklist}
+
+    @staticmethod
+    def _dedup_cap_regions(rewrites):
+        """Guarantee region-uniqueness + a hard cap on a fan-out rewrite list.
+        Keep ONE rewrite per real region (first wins; fixed-source preferred), exempt
+        the "(unsorted)" placeholder, then cap at MAX_FANOUT_REWRITES with fixed
+        regions first."""
+        # Fixed-source first so a fixed region beats a generated dup of the same region.
+        ordered = sorted(rewrites, key=lambda r: 0 if r.get("source") == "fixed" else 1)
+        seen_region, out = set(), []
+        for r in ordered:
+            region = (r.get("region") or "(unsorted)").strip()
+            key = region.lower()
+            if region != "(unsorted)" and key in seen_region:
+                continue          # region already represented → drop the duplicate
+            if region != "(unsorted)":
+                seen_region.add(key)
+            out.append(r)
+        return out[:MAX_FANOUT_REWRITES]
+
+    def _classify_regions(self, queries, existing_regions):
+        """Classify each query into a region — reuse an existing region label when it
+        fits, else name a NEW short region. Returns [{query, region}] aligned to input.
+        Used to dedup manually-pasted fan-out queries by region."""
+        queries = [str(q).strip() for q in (queries or []) if str(q).strip()]
+        if not queries:
+            return []
+        ex = "\n".join(f"  - {r}" for r in existing_regions) if existing_regions else "  (none yet)"
+        qlist = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(queries))
+        prompt = f"""Classify each search query into a REGION = a distinct buyer-concern angle
+(e.g. category/best-tool, comparison/alternative, a constraint like copyright or
+budget, a use-case, a persona, an adjacent platform).
+
+EXISTING REGIONS — REUSE one of these verbatim if the query fits it:
+{ex}
+
+If a query fits NONE of the existing regions, name a NEW short region (2-4 words).
+
+QUERIES:
+{qlist}
+
+Return JSON only: {{"regions": ["region for query 1", "region for query 2", "..."]}}"""
+        result = self.claude.call(prompt, max_tokens=512, temperature=0.2)
+        regions = (result or {}).get("regions") or []
+        out = []
+        for i, q in enumerate(queries):
+            reg = regions[i].strip() if (i < len(regions) and regions[i]) else "(unsorted)"
+            out.append({"query": q, "region": reg or "(unsorted)"})
+        return out
+
+    def _merge_observed(self, rewrites, observed_queries):
+        """Fold pasted observed fan-out queries into a cluster's rewrites with
+        REGION DEDUP: classify each query's region; ADD it only if its region isn't
+        already present (and it's not a duplicate query). `rewrites` is the region-
+        object list. Returns {rewrites, added:[...], skipped:[...]}."""
+        existing_regions = {r.get("region") for r in rewrites
+                            if r.get("region") and r.get("region") not in ("(unsorted)", "(from posts)")}
+        existing_q = {r["query"].strip().lower() for r in rewrites}
+        classified = self._classify_regions(observed_queries, sorted(existing_regions))
+        added, skipped = [], []
+        for c in classified:
+            q, region = c["query"], c["region"]
+            if q.strip().lower() in existing_q:
+                skipped.append({"query": q, "region": region, "reason": "duplicate query"})
+                continue
+            if region in existing_regions and region not in ("(unsorted)",):
+                skipped.append({"query": q, "region": region, "reason": "region already covered"})
+                continue
+            rewrites.append({"query": q, "region": region, "source": "manual"})
+            existing_regions.add(region); existing_q.add(q.strip().lower())
+            added.append({"query": q, "region": region})
+        return {"rewrites": rewrites, "added": added, "skipped": skipped}
+
+    def _embed_texts(self, texts):
+        """Embedding vectors for `texts` via the OpenAI embeddings REST API. Graceful:
+        returns None when OPENAI_API_KEY is unset or on any error → the relevance gate
+        no-ops. Plain HTTP (no SDK / new dependency)."""
+        if not OPENAI_API_KEY or not texts:
+            return None
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": EMBED_MODEL, "input": texts},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                print(f"[post_gen] embedding gate inactive (API {resp.status_code})")
+                return None
+            data = resp.json().get("data") or []
+            if len(data) != len(texts):
+                return None
+            return [d.get("embedding") for d in sorted(data, key=lambda d: d.get("index", 0))]
+        except Exception as e:
+            print(f"[post_gen] embedding gate error: {e}")
+            return None
+
+    @staticmethod
+    def _cosine(a, b):
+        if not a or not b:
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(y * y for y in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    def _embedding_gate(self, candidates):
+        """Deterministic relevance gate: drop candidates whose (title+body) is below
+        EMBED_THRESHOLD cosine similarity to their target_query. No-op (returns input
+        unchanged) when embeddings are unavailable — so it never blocks generation."""
+        cands = [c for c in candidates if (c.get("target_query") or "").strip()]
+        if not cands:
+            return candidates
+        qv = self._embed_texts([c["target_query"].strip() for c in cands])
+        pv = self._embed_texts([((c.get("title") or "") + " " + (c.get("body") or "")).strip() for c in cands])
+        if not qv or not pv:
+            return candidates  # gate inactive → pass all
+        sim = {id(c): self._cosine(q, p) for c, q, p in zip(cands, qv, pv)}
+        keep, dropped = [], 0
+        for c in candidates:
+            if id(c) in sim and sim[id(c)] < EMBED_THRESHOLD:
+                dropped += 1
+                continue
+            keep.append(c)
+        if dropped:
+            print(f"[post_gen] embedding gate dropped {dropped} off-target candidate(s) "
+                  f"(cosine < {EMBED_THRESHOLD})")
+        return keep
 
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,

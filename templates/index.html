@@ -7410,17 +7410,12 @@ async function lsubsClusterGenSelected(i) {
         const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, target_rewrites: checks, intent_counts } });
         const tid = res.task_id;
         toast(`Generating ${n} post${n === 1 ? '' : 's'} for the selected rewrite${n === 1 ? '' : 's'}…`, 'info');
-        if (typeof _addBgTask === 'function') _addBgTask(tid, 'Selected rewrites');
-        const poll = setInterval(async () => {
-            try {
-                const t = await api('/api/tasks/' + tid);
-                if (t.status === 'complete' || t.status === 'error') {
-                    clearInterval(poll);
-                    if (t.status === 'complete') { toast('Generated — refreshing cluster', 'success'); lsubsLoadClusters(true); }
-                    else toast('Generate failed: ' + (t.error || 'error'), 'error');
-                }
-            } catch (e) {}
-        }, 1500);
+        // Delegate to the shared poller: it removes the bg-task pill on completion,
+        // handles a 404 (task GC'd on the server) and errors, and refreshes the cluster
+        // so the filled gaps flip to covered. The old hand-rolled poll never called
+        // _removeBgTask, so the top loader spun forever.
+        _addBgTask(tid, 'Selected rewrites');
+        _pollTask(tid, 'Selected rewrites', () => lsubsLoadClusters(true));
     } catch (e) {
         toast('Generate failed: ' + (e.message || e), 'error');
     }
@@ -7483,17 +7478,10 @@ async function lsubsGenClusterGaps(i) {
         const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, intent_counts } });
         const tid = res.task_id;
         toast(`Filling up to ${n} gap${n === 1 ? '' : 's'} for “${(cl.seed || '').slice(0, 40)}”…`, 'info');
-        if (typeof _addBgTask === 'function') _addBgTask(tid, 'Cluster gaps');
-        const poll = setInterval(async () => {
-            try {
-                const t = await api('/api/tasks/' + tid);
-                if (t.status === 'complete' || t.status === 'error') {
-                    clearInterval(poll);
-                    if (t.status === 'complete') { toast('Gaps filled — refreshing cluster', 'success'); lsubsLoadClusters(true); }
-                    else toast('Fill gaps failed: ' + (t.error || 'error'), 'error');
-                }
-            } catch (e) {}
-        }, 1500);
+        // Shared poller removes the bg pill on completion + refreshes the cluster so the
+        // filled gaps flip to covered (the old hand-rolled poll left the loader spinning).
+        _addBgTask(tid, 'Cluster gaps');
+        _pollTask(tid, 'Cluster gaps', () => lsubsLoadClusters(true));
     } catch (e) {
         toast('Fill gaps failed: ' + (e.message || e), 'error');
     }

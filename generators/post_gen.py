@@ -313,6 +313,18 @@ class PostGenerator:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
                 continue
 
+            # Snap each candidate's (LLM-reported, often paraphrased) target_query to the
+            # canonical cluster rewrite it best matches. Without this the saved
+            # ai_search_meta.target_query, the gap-shrink below, and the Clusters
+            # coverage view all key off a paraphrase that never equals the rewrite — so a
+            # post is generated but its gap never flips to covered.
+            if ai_search and coverage_focus and coverage_focus.get("rewrites"):
+                _canon = coverage_focus["rewrites"]
+                for c in candidates:
+                    _m = self.db.match_query_to_rewrites(c.get("target_query"), _canon)
+                    if _m:
+                        c["target_query"] = _m
+
             # Score each for AI-query relevance. In AI-Search mode the scorer also
             # enforces anchor-retention + question-form (off-anchor/vent → low).
             # `brand_kind` (the brand's category) lets the scorer enforce ENTITY-TYPE

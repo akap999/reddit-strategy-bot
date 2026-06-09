@@ -4477,9 +4477,17 @@ def api_live_posts_clusters():
             rewrites = db.normalize_rewrites(cl.get("rewrites_json"))
             seed_norm = cl.get("seed_norm")
             posts = db.get_ai_search_posts_for_seed(cl.get("brand_id"), seed_norm)
+            # Map each post to the canonical rewrite it covers, TOLERANTLY — a post's
+            # target_query is the model's (often paraphrased) self-report, so an exact
+            # string match misses real coverage. match_query_to_rewrites normalizes +
+            # falls back to high token-overlap so a generated post fills its gap.
+            rewrite_queries = [r["query"] for r in rewrites]
             by_rw = {}
             for p in posts:
-                by_rw.setdefault((p.get("target_query") or "").strip().lower(), []).append(p)
+                canon = db.match_query_to_rewrites(p.get("target_query"), rewrite_queries)
+                if canon is None:
+                    continue
+                by_rw.setdefault(canon.strip().lower(), []).append(p)
             rw_rows, covered = [], 0
             for r in rewrites:
                 q = r["query"]

@@ -710,6 +710,65 @@ class Database:
     def normalize_seed(seed):
         return (seed or "").strip().lower()
 
+    @staticmethod
+    def _norm_query(s):
+        """Normalize a query/title for tolerant matching: lowercase, strip punctuation
+        to spaces, collapse whitespace. So 'Best longevity clinic for men?' and
+        'best longevity clinic for men' compare equal."""
+        s = (s or "").lower()
+        s = re.sub(r"[^a-z0-9]+", " ", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    # Small, domain-neutral stopword set so content words (longevity, clinic, hormone…)
+    # drive matching, not filler (how/do/for/with…).
+    _MATCH_STOPWORDS = frozenset((
+        "a an and or the of for to in on at is are be do does did how what which who "
+        "whom whose why when where with without my me i you your they them it its as by "
+        "from into over under about best vs versus v can could should would will than "
+        "that this these those any some get got using use").split())
+
+    @classmethod
+    def _content_tokens(cls, s):
+        return {t for t in cls._norm_query(s).split() if t and t not in cls._MATCH_STOPWORDS}
+
+    @classmethod
+    def match_query_to_rewrites(cls, target_query, rewrite_queries):
+        """Map a post's (often LLM-paraphrased) target_query to the canonical cluster
+        rewrite it best corresponds to. Returns the matching rewrite query string (the
+        ORIGINAL casing from rewrite_queries) or None.
+
+        Strategy — tolerant of paraphrase, conservative against mis-binding:
+          1. normalized exact match (case/punctuation-insensitive);
+          2. else compare CONTENT tokens (stopwords stripped). Require >= 2 shared
+             content tokens (so a single common word like "longevity" can't create
+             false coverage), then score = max(Jaccard, overlap-coefficient) and take
+             the best rewrite scoring >= 0.5. Ties → first in list.
+        """
+        tq = cls._norm_query(target_query)
+        if not tq or not rewrite_queries:
+            return None
+        norm_pairs = [(rq, cls._norm_query(rq)) for rq in rewrite_queries]
+        for rq, nrq in norm_pairs:
+            if nrq and nrq == tq:
+                return rq
+        tq_c = cls._content_tokens(target_query)
+        if not tq_c:
+            return None
+        best, best_score = None, 0.0
+        for rq, _ in norm_pairs:
+            rc = cls._content_tokens(rq)
+            if not rc:
+                continue
+            shared = len(tq_c & rc)
+            if shared < 2:
+                continue
+            jac = shared / len(tq_c | rc)
+            overlap = shared / min(len(tq_c), len(rc))
+            score = max(jac, overlap)
+            if score > best_score:
+                best, best_score = rq, score
+        return best if best_score >= 0.5 else None
+
     def get_ai_search_cluster(self, brand_id, seed_norm):
         """Return the persisted fan-out cluster row for (brand, seed) or None."""
         row = self.conn.execute(

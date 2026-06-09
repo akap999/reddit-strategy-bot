@@ -863,12 +863,16 @@ Return JSON only:
                 and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
 
     def _assign_personas_to_regions(self, rewrites, personas):
-        """Deterministic, FIT-DRIVEN persona→region assignment. One Claude call ranks the
-        genuinely-fitting personas per region (by goal/trigger/vocab); code then assigns
-        each region its top-ranked fitting persona under a per-persona cap (processing the
-        most-constrained regions first), falling to the next-best fit, and only "(broad)"
-        when no fitting persona is available — never a forced/non-fitting filler. Mutates
-        rewrite["persona"]. No-op (blank) when the brand has no fit personas."""
+        """FIT-DRIVEN persona→region assignment with GUARANTEED coverage + even spread.
+
+        The LLM only supplies a *preference ranking* of personas per region (it does NOT
+        decide coverage). Code then guarantees every region gets its best-available
+        fitting persona under a per-persona cap, so the distribution holds even when the
+        LLM collapses to one persona. Each region's candidate list is backfilled with ALL
+        fit personas, so coverage never depends on the LLM returning good data.
+
+        Mutates rewrite["persona"]. No-op (blank) when the brand has no fit personas;
+        single fit persona → assigned to every region (it's the only fit)."""
         fitp = [p for p in (personas or []) if isinstance(p, dict) and p.get("label")
                 and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
         rlist = [r for r in (rewrites or []) if (r.get("query") or "").strip()]
@@ -877,6 +881,10 @@ Return JSON only:
                 r["persona"] = r.get("persona") or ""
             return
         labels = [p["label"] for p in fitp]
+        if len(labels) == 1:
+            for r in rlist:
+                r["persona"] = labels[0]
+            return
         label_by_lower = {l.lower(): l for l in labels}
         plines = "\n".join(
             f"  - {p['label']}: {p.get('profile','')}"
@@ -885,9 +893,8 @@ Return JSON only:
             + (f" | says it like: {p.get('vocab','')}" if p.get('vocab') else "")
             for p in fitp)
         qlist = "\n".join(f"  {i+1}. {r['query']}" for i, r in enumerate(rlist))
-        prompt = f"""For each REGION (a search question), decide which of these PERSONAS would
-genuinely ASK it — judge by each persona's goal / trigger / vocab. A persona fits a region only if a
-real person of that type would plausibly type that exact question.
+        prompt = f"""For each REGION (a search question), RANK these PERSONAS from the one MOST likely
+to ask that exact question to the one LEAST likely — judged by each persona's goal / trigger / vocab.
 
 PERSONAS:
 {plines}
@@ -895,41 +902,47 @@ PERSONAS:
 REGIONS:
 {qlist}
 
-For each region, list the fitting persona LABELS ranked best-fit FIRST (use the labels EXACTLY as
-written above). If no persona genuinely fits (it's a broad question almost anyone would ask), return
-an empty list for that region. Be honest — do not stretch a persona to fit.
+Rank ALL {len(labels)} personas for EVERY region (most-likely asker first). Use the labels EXACTLY as
+written above. Always return a complete ranking for each region — do not omit personas and do not
+return empty lists.
 
-Return JSON only: {{"assignments": [["label", "..."], ...]}}  — one ranked list per region, in the SAME order as the regions above."""
-        result = self.claude.call(prompt, max_tokens=900, temperature=0.2)
+Return JSON only: {{"assignments": [["label", "...ranked best→worst..."], ...]}} — one full ranked list per region, in the SAME order as the regions above."""
+        result = self.claude.call(prompt, max_tokens=1200, temperature=0.2)
         ranked = (result or {}).get("assignments") if isinstance(result, dict) else None
         if not isinstance(ranked, list):
             ranked = []
-        # Normalize per-region candidates to valid fit labels (best→worst).
+        # Per-region candidates = valid LLM-ranked labels (best→worst), then EVERY fit
+        # persona not yet listed (original order). Guarantees a full fallback per region
+        # regardless of what the LLM returned.
         per_region = []
         for i in range(len(rlist)):
             raw = ranked[i] if (i < len(ranked) and isinstance(ranked[i], list)) else []
-            norm = []
+            cands = []
             for c in raw:
                 cl = str(c).strip().lower()
-                if cl in label_by_lower and label_by_lower[cl] not in norm:
-                    norm.append(label_by_lower[cl])
-            per_region.append(norm)
-        cap = max(2, math.ceil(len(rlist) / len(fitp)))
+                if cl in label_by_lower and label_by_lower[cl] not in cands:
+                    cands.append(label_by_lower[cl])
+            for l in labels:  # backfill: every region can reach every fit persona
+                if l not in cands:
+                    cands.append(l)
+            per_region.append(cands)
+        cap = max(1, math.ceil(len(rlist) / len(labels)))
         counts = {l: 0 for l in labels}
-        chosen = {}
-        # Most-constrained first (fewest candidates); no-candidate regions go last → "(broad)".
-        order = sorted(range(len(rlist)),
-                       key=lambda i: len(per_region[i]) if per_region[i] else 10**6)
-        for i in order:
-            pick = "(broad)"
+        for i, r in enumerate(rlist):
+            pick = None
             for label in per_region[i]:
                 if counts[label] < cap:
                     pick = label
-                    counts[label] += 1
                     break
-            chosen[i] = pick
-        for i, r in enumerate(rlist):
-            r["persona"] = chosen.get(i, "(broad)")
+            if pick is None:  # defensive — cap*N >= regions so this should not trigger
+                pick = min(labels, key=lambda l: counts[l])
+            counts[pick] += 1
+            r["persona"] = pick
+        try:
+            print("[persona-assign] " + ", ".join(
+                f"{(r.get('region') or '?')}→{r['persona']}" for r in rlist))
+        except Exception:
+            pass
 
     def _ensure_personas(self, brands):
         """Auto-generate the brand's personas once (cached on `brands.personas`) so the
@@ -978,6 +991,7 @@ Return JSON only: {{"assignments": [["label", "..."], ...]}}  — one ranked lis
             anchor = existing.get("anchor")
             if observed:
                 rewrites = self._merge_observed(rewrites, observed)["rewrites"]
+                self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
                 self.db.upsert_ai_search_cluster(bid, seed_norm, existing.get("seed") or seed,
                                                  anchor, rewrites, checklist, backfilled=0)
             return {"brand_id": bid, "seed": existing.get("seed") or seed, "anchor": anchor,
@@ -994,6 +1008,9 @@ Return JSON only: {{"assignments": [["label", "..."], ...]}}  — one ranked lis
         anchor = fan.get("anchor") or ""
         if observed:
             rewrites = self._merge_observed(rewrites, observed)["rewrites"]
+            # observed-added regions arrive after the fan-out's assignment → re-assign the
+            # full set so every region (incl. manual ones) gets an evenly-distributed persona.
+            self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
         self.db.upsert_ai_search_cluster(bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
         return {"brand_id": bid, "seed": seed, "anchor": anchor,
                 "cluster_size": len(rewrites), "reused": False, "created": True}

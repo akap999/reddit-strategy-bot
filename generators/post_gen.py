@@ -130,6 +130,10 @@ class PostGenerator:
         remaining_gaps = None          # None => not gap-filling
         cluster_size = 0
         covered_before = 0
+        # Persona lens (AI-Search only): ensure the brand has auto-generated personas
+        # before the fan-out so it can ground/filter the regions. Cached + graceful.
+        if ai_search:
+            self._ensure_personas(brands)
         seed_norm = self.db.normalize_seed(seed) if (ai_search and seed) else None
         if ai_search and seed_norm:
             bid = primary_brand["id"]
@@ -187,7 +191,12 @@ class PostGenerator:
                         bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
             if rewrites:
                 rewrite_queries = [r["query"] for r in rewrites]
-                coverage_focus = {"anchor": anchor, "rewrites": rewrite_queries, "checklist": checklist}
+                # Per-region phrasings (body-side retrieval) + persona (attribution),
+                # keyed by the rewrite query so generation/saving can look them up.
+                variants_by_query = {r["query"].strip().lower(): (r.get("variants") or []) for r in rewrites}
+                persona_by_query = {r["query"].strip().lower(): (r.get("persona") or "") for r in rewrites}
+                coverage_focus = {"anchor": anchor, "rewrites": rewrite_queries, "checklist": checklist,
+                                  "variants_by_query": variants_by_query, "persona_by_query": persona_by_query}
                 if checklist:
                     checklist_json = json.dumps(checklist)
                 if target_rewrites:
@@ -210,10 +219,20 @@ class PostGenerator:
                         "complete": True}
                     return []
         elif ai_search:
-            # No seed → full fan-out, no cluster/gap tracking.
-            coverage_focus = self._fanout_rewrites(brands, seed)
-            if coverage_focus and coverage_focus.get("checklist"):
-                checklist_json = json.dumps(coverage_focus["checklist"])
+            # No seed → full fan-out, no cluster/gap tracking. Normalize the
+            # rewrite objects to query strings + per-region variant/persona maps.
+            _fan = self._fanout_rewrites(brands, seed)
+            if _fan and _fan.get("rewrites"):
+                _rws = _fan["rewrites"]
+                coverage_focus = {
+                    "anchor": _fan.get("anchor"),
+                    "rewrites": [r["query"] for r in _rws],
+                    "checklist": _fan.get("checklist") or [],
+                    "variants_by_query": {r["query"].strip().lower(): (r.get("variants") or []) for r in _rws},
+                    "persona_by_query": {r["query"].strip().lower(): (r.get("persona") or "") for r in _rws},
+                }
+                if coverage_focus["checklist"]:
+                    checklist_json = json.dumps(coverage_focus["checklist"])
 
         # Existing titles for dedup (shared across all intent calls).
         # Scoped to THIS subreddit only — we intentionally allow the
@@ -377,10 +396,13 @@ class PostGenerator:
             # post-detail view can show what prompt it was generated for.
             ai_search_meta = None
             if ai_search:
+                _pbq = (coverage_focus or {}).get("persona_by_query", {})
+                _tq = (post.get("target_query") or "").strip().lower()
                 ai_search_meta = json.dumps({
                     "seed": seed,
                     "anchor": _anchor,
                     "target_query": post.get("target_query"),
+                    "persona": _pbq.get(_tq, ""),
                 })
             post_id = self.db.save_post(
                 subreddit_id=subreddit["id"],
@@ -823,6 +845,51 @@ Return JSON only:
         return (g.get("summary") or "").strip()
 
     @staticmethod
+    def _parse_personas(brands):
+        """Parse the primary brand's stored personas JSON → list of dicts (or [])."""
+        b = brands[0] if isinstance(brands, list) else brands
+        raw = (b or {}).get("personas")
+        try:
+            p = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except (json.JSONDecodeError, TypeError):
+            p = []
+        return p if isinstance(p, list) else []
+
+    def _fit_personas(self, brands):
+        """Personas the brand can credibly be the answer for (fit yes/maybe) — the ones
+        that drive the fan-out lens. Excludes fit==no (the winnability filter)."""
+        return [p for p in self._parse_personas(brands)
+                if isinstance(p, dict) and p.get("label")
+                and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
+
+    def _ensure_personas(self, brands):
+        """Auto-generate the brand's personas once (cached on `brands.personas`) so the
+        fan-out lens has them. No-op when already present or generation fails — never
+        blocks generation. Brand-level (reused across all seeds/clusters)."""
+        b = brands[0] if isinstance(brands, list) else brands
+        if not b or self._parse_personas(brands):
+            return
+        try:
+            from generators.brand_enrichment import generate_brand_personas
+            personas = generate_brand_personas(
+                self.claude, b.get("name") or "", b.get("domain_url") or "",
+                category=b.get("category") or "", audience=b.get("audience") or "",
+                use_cases=b.get("use_cases"), pain_points=b.get("pain_points"))
+        except Exception as e:
+            print(f"[post_gen] persona generation skipped for brand {b.get('id')}: {e}")
+            return
+        if not personas:
+            return
+        try:
+            self.db.update_brand(b["id"], personas=json.dumps(personas))
+        except Exception as e:
+            print(f"[post_gen] could not persist personas: {e}")
+        b["personas"] = json.dumps(personas)
+        n_fit = sum(1 for p in personas if str(p.get("fit", "")).lower() in ("yes", "maybe"))
+        print(f"[post_gen] generated {len(personas)} personas for brand {b.get('id')} "
+              f"({n_fit} fit yes/maybe)")
+
+    @staticmethod
     def _brand_facets(brands):
         """First-time / no-seed coverage map: turn a brand's enrichment into a flat,
         de-duped list of concrete FACETS grouped by the intent that fits each:
@@ -905,6 +972,27 @@ Return JSON only:
                 "sub-use-cases / buyer concerns / phrasings). Do NOT repeat or lightly "
                 f"reword any of these:\n{_cov}\n"
             )
+        # Persona lens (title-side): fit yes/maybe personas ground WHICH questions get
+        # made + how they're phrased + tag each rewrite. A LENS, not a parallel region
+        # taxonomy. Empty when the brand has no (fit) personas → no change.
+        personas_block = ""
+        _fitp = self._fit_personas(brands)
+        if _fitp:
+            _plines = "\n".join(
+                f"  - {p['label']}: {p.get('profile','')}"
+                + (f" | wants: {p.get('goal','')}" if p.get('goal') else "")
+                + (f" | says it like: {p.get('vocab','')}" if p.get('vocab') else "")
+                for p in _fitp)
+            personas_block = (
+                "\nPERSONAS — the real askers for this brand (use as a LENS, NOT as separate regions):\n"
+                f"{_plines}\n"
+                "  • Use them to GROUND the rewrites in how real askers phrase things and to decide "
+                "which questions are worth targeting; SKIP any question no persona above would "
+                "credibly bring to THIS brand.\n"
+                "  • Do NOT create a region per persona or a persona×axis matrix — still ONE rewrite "
+                "per DISTINCT region. Tag each rewrite with the persona label it most represents (or "
+                "\"(broad)\").\n"
+            )
         prompt = f"""You are mapping the AI-search query space for a GEO campaign. The goal is to get
 this brand recommended by AI assistants. AI engines REWRITE a user's prompt into
 several search sub-queries ("query fan-out") and retrieve SEMANTICALLY, so we need
@@ -913,7 +1001,7 @@ NOT one literal phrasing.
 
 BRAND CONTEXT (ground the queries here; NEVER output the target brand name(s): {', '.join(target_names) or '(none)'}):
 {brand_block}
-{seed_line}
+{seed_line}{personas_block}
 Do this in your head, then return the merged result:
   1. ANCHOR — identify the core platform / use-case this campaign targets. If the
      seed names a platform or use-case (e.g. "Instagram Reels", "podcast intros",
@@ -948,6 +1036,9 @@ Do this in your head, then return the merged result:
      (short, keyword-ish, real intent), distinct from the others. HARD RULE: if two
      rewrites would get essentially the SAME AI answer, keep only ONE. Aim for
      ~5-8 rewrites TOTAL — fewer, distinct regions beat many synonyms.
+  3b. For EACH region, also list its VARIANTS — the 2-5 close phrasings/paraphrases an
+     engine would issue for that same intent (the different wordings that all map to
+     this one region). These are the body-side retrieval surface for that region's thread.
   4. Produce a concise CONCEPT/PHRASING CHECKLIST: the key natural-language
      phrasings, synonyms and domain terms a Reddit thread should contain so it
      matches the whole cluster for both keyword (BM25) and embedding retrieval.
@@ -956,7 +1047,7 @@ Return JSON only:
 {{
   "anchor": "the platform/use-case to keep every title on (short)",
   "rewrites": [
-    {{"query": "the sub-query, engine-style", "region": "one of the 6 axis names OR a brand-specific region", "fixed": true/false (true ONLY if it's one of the 6 standard axes)}},
+    {{"query": "the sub-query, engine-style", "region": "one of the 6 axis names OR a brand-specific region", "fixed": true/false (true ONLY if it's one of the 6 standard axes), "variants": ["close paraphrase 1", "close paraphrase 2"], "persona": "the persona label this region most represents, or (broad)"}},
     ...
   ],
   "checklist": ["phrasing/term 1", "phrasing/term 2", "..."]
@@ -967,17 +1058,24 @@ Aim for 5-8 rewrites total. Never include the target brand name."""
             return None
         rewrites = []
         for r in (result.get("rewrites") or []):
+            variants, persona = [], ""
             if isinstance(r, dict):
                 q = (r.get("query") or "").strip()
                 region = (r.get("region") or "(unsorted)").strip() or "(unsorted)"
                 source = "fixed" if r.get("fixed") else "generated"
+                persona = (r.get("persona") or "").strip()
+                for v in (r.get("variants") or []):
+                    vs = str(v).strip()
+                    if vs and vs.lower() != q.lower():
+                        variants.append(vs)
             else:
                 q, region, source = str(r).strip(), "(unsorted)", "generated"
             if not q:
                 continue
             if prior_norm and q.lower() in prior_norm:
                 continue
-            rewrites.append({"query": q, "region": region, "source": source})
+            rewrites.append({"query": q, "region": region, "source": source,
+                             "variants": variants, "persona": persona})
         rewrites = self._dedup_cap_regions(rewrites)
         checklist = result.get("checklist") or []
         anchor = (result.get("anchor") or "").strip()
@@ -990,17 +1088,30 @@ Aim for 5-8 rewrites total. Never include the target brand name."""
         """Guarantee region-uniqueness + a hard cap on a fan-out rewrite list.
         Keep ONE rewrite per real region (first wins; fixed-source preferred), exempt
         the "(unsorted)" placeholder, then cap at MAX_FANOUT_REWRITES with fixed
-        regions first."""
+        regions first. A same-region duplicate is NOT dropped — its query + variants are
+        FOLDED into the kept region's `variants` (so we retain the real phrasings)."""
+        def _add_variants(dst, items):
+            seen = {v.lower() for v in dst.get("variants", [])}
+            seen.add((dst.get("query") or "").strip().lower())
+            for v in items:
+                vs = str(v).strip()
+                if vs and vs.lower() not in seen:
+                    seen.add(vs.lower())
+                    dst.setdefault("variants", []).append(vs)
         # Fixed-source first so a fixed region beats a generated dup of the same region.
         ordered = sorted(rewrites, key=lambda r: 0 if r.get("source") == "fixed" else 1)
-        seen_region, out = set(), []
+        seen_region, out = {}, []
         for r in ordered:
+            r.setdefault("variants", [])
             region = (r.get("region") or "(unsorted)").strip()
             key = region.lower()
             if region != "(unsorted)" and key in seen_region:
-                continue          # region already represented → drop the duplicate
+                # Region already represented → fold this dup's query + variants in.
+                kept = seen_region[key]
+                _add_variants(kept, [r.get("query", "")] + (r.get("variants") or []))
+                continue
             if region != "(unsorted)":
-                seen_region.add(key)
+                seen_region[key] = r
             out.append(r)
         return out[:MAX_FANOUT_REWRITES]
 
@@ -1035,27 +1146,36 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
         return out
 
     def _merge_observed(self, rewrites, observed_queries):
-        """Fold pasted observed fan-out queries into a cluster's rewrites with
-        REGION DEDUP: classify each query's region; ADD it only if its region isn't
-        already present (and it's not a duplicate query). `rewrites` is the region-
-        object list. Returns {rewrites, added:[...], skipped:[...]}."""
-        existing_regions = {r.get("region") for r in rewrites
-                            if r.get("region") and r.get("region") not in ("(unsorted)", "(from posts)")}
+        """Fold pasted observed fan-out queries into a cluster's rewrites with REGION
+        DEDUP: classify each query's region. If the region is NEW → add it as a new
+        rewrite. If the region already EXISTS → the pasted phrasing is appended to that
+        region's `variants` (the real phrasings that feed the body) instead of being
+        dropped. `rewrites` is the region-object list. Returns {rewrites, added, enriched, skipped}."""
+        region_to_rw = {r.get("region"): r for r in rewrites
+                        if r.get("region") and r.get("region") not in ("(unsorted)", "(from posts)")}
         existing_q = {r["query"].strip().lower() for r in rewrites}
-        classified = self._classify_regions(observed_queries, sorted(existing_regions))
-        added, skipped = [], []
+        for r in rewrites:
+            existing_q.update(v.strip().lower() for v in (r.get("variants") or []))
+        classified = self._classify_regions(observed_queries, sorted(region_to_rw.keys()))
+        added, enriched, skipped = [], [], []
         for c in classified:
             q, region = c["query"], c["region"]
-            if q.strip().lower() in existing_q:
+            ql = q.strip().lower()
+            if ql in existing_q:
                 skipped.append({"query": q, "region": region, "reason": "duplicate query"})
                 continue
-            if region in existing_regions and region not in ("(unsorted)",):
-                skipped.append({"query": q, "region": region, "reason": "region already covered"})
+            if region in region_to_rw and region not in ("(unsorted)",):
+                # Region already covered → keep the real phrasing as a variant.
+                region_to_rw[region].setdefault("variants", []).append(q)
+                existing_q.add(ql)
+                enriched.append({"query": q, "region": region})
                 continue
-            rewrites.append({"query": q, "region": region, "source": "manual"})
-            existing_regions.add(region); existing_q.add(q.strip().lower())
+            new_rw = {"query": q, "region": region, "source": "manual", "variants": [], "persona": ""}
+            rewrites.append(new_rw)
+            region_to_rw[region] = new_rw
+            existing_q.add(ql)
             added.append({"query": q, "region": region})
-        return {"rewrites": rewrites, "added": added, "skipped": skipped}
+        return {"rewrites": rewrites, "added": added, "enriched": enriched, "skipped": skipped}
 
     def _embed_texts(self, texts):
         """Embedding vectors for `texts` via the OpenAI embeddings REST API. Graceful:
@@ -1259,8 +1379,15 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
             _rw = [str(r).strip() for r in (coverage_focus.get("rewrites") or []) if str(r).strip()]
             _ck = [str(c).strip() for c in (coverage_focus.get("checklist") or []) if str(c).strip()]
             _anchor = (coverage_focus.get("anchor") or "").strip()
+            _vbq = coverage_focus.get("variants_by_query") or {}
             if _rw or _ck:
-                rw_lines = "\n".join(f"  - {r}" for r in _rw[:25])
+                # Show each rewrite WITH its own variant phrasings (the real ways that
+                # intent gets asked) so the post targeting it can pack them into the body.
+                def _rw_line(r):
+                    vs = [str(v).strip() for v in (_vbq.get(r.strip().lower()) or []) if str(v).strip()]
+                    tail = f"   [also asked as: {'; '.join(vs[:6])}]" if vs else ""
+                    return f"  - {r}{tail}"
+                rw_lines = "\n".join(_rw_line(r) for r in _rw[:25])
                 ck_str = "; ".join(_ck[:25])
                 anchor_rule = ""
                 if _anchor:
@@ -1290,6 +1417,8 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
                     "  • These are the SPACE to cover, NOT templates — phrase each title as a "
                     "natural human question (all TITLE rules below still apply); never paste a "
                     "rewrite verbatim.\n"
+                    "  • Weave the targeted rewrite's \"also asked as\" phrasings naturally into "
+                    "that post's BODY, so the thread is retrieved however that intent is worded.\n"
                 )
                 if ck_str:
                     coverage_block += (

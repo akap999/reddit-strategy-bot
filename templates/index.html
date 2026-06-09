@@ -1909,6 +1909,9 @@ async function editBrandContext(brandName) {
         return '';
     }).filter(Boolean).join('\n');
 
+    let personas = [];
+    try { personas = JSON.parse(first.personas || '[]'); } catch(e) {}
+
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
         <div class="space-y-3">
@@ -1934,6 +1937,13 @@ async function editBrandContext(brandName) {
                 <label class="text-xs text-gray-400">Focus phrases <span class="text-gray-600">(one phrase per line. Each phrase is paired with the brand mention so AI search engines index the association — e.g. "Amerisleep ↔ fiberglass-free". Optional: append <code>| keyword, keyword</code> to scope a phrase to posts mentioning those keywords. Otherwise relevance is auto-detected.)</span></label>
                 <textarea id="edit-brand-focus" rows="4" class="w-full" placeholder="fiberglass-free&#10;toxic-free | mattress, foam&#10;made in USA" style="min-height:90px;resize:vertical;font-family:inherit">${_focusToText(focus)}</textarea>
             </div>
+            <div>
+                <div class="flex items-center justify-between">
+                    <label class="text-xs text-gray-400">Personas <span class="text-gray-600">(auto-generated; used by AI-Search to find which questions to target. ✅ fit / 🟡 maybe / ❌ no = can the brand be the cited answer)</span></label>
+                    <button class="btn btn-secondary btn-sm" onclick="regenerateBrandPersonas(${first.id})" title="Clear + regenerate personas from the brand's site/context">↻ Regenerate</button>
+                </div>
+                <div id="edit-brand-personas" class="mt-1">${_renderPersonasList(personas)}</div>
+            </div>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
         <div class="flex gap-2 mt-4">
@@ -1941,6 +1951,40 @@ async function editBrandContext(brandName) {
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
         </div>
     `);
+}
+
+function _renderPersonasList(personas) {
+    if (!Array.isArray(personas) || !personas.length) {
+        return '<p class="text-xs text-gray-500">None yet — auto-generated on the brand\'s next AI-Search generate (or click Regenerate).</p>';
+    }
+    const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const fitBadge = f => {
+        f = String(f||'').toLowerCase();
+        if (f === 'yes')  return '<span class="badge" style="background:#10331f;color:#46d160">✅ fit</span>';
+        if (f === 'maybe') return '<span class="badge" style="background:#3a2a0e;color:#ffb86b">🟡 maybe</span>';
+        return '<span class="badge" style="background:#3a1a1a;color:#ff8b8b">❌ no</span>';
+    };
+    return personas.map(p => `
+        <div class="text-xs py-1" style="border-top:1px solid #2a2a2b">
+            <span class="font-medium" style="color:#d8b4fe">🧑 ${esc(p.label)}</span> ${fitBadge(p.fit)}
+            <span class="text-gray-400">${esc(p.profile||'')}</span>
+            ${p.goal ? `<div class="text-gray-500 ml-4">wants: ${esc(p.goal)}</div>` : ''}
+        </div>`).join('');
+}
+
+async function regenerateBrandPersonas(bid) {
+    const box = document.getElementById('edit-brand-personas');
+    if (box) box.innerHTML = '<div class="spinner my-2" style="width:16px;height:16px;border-width:2px"></div>';
+    try {
+        const res = await api(`/api/brands/${bid}/personas/regenerate`, { method: 'POST' });
+        if (box) box.innerHTML = _renderPersonasList(res.personas || []);
+        // Keep the in-memory brand state fresh so reopening the modal shows them.
+        const all = (_brandsViewState && _brandsViewState._allBrands) || [];
+        all.filter(b => b.id === bid).forEach(b => { b.personas = JSON.stringify(res.personas || []); });
+        toast(`Generated ${(res.personas||[]).length} personas`, 'success');
+    } catch (e) {
+        if (box) box.innerHTML = `<p class="text-xs text-red-400">Failed: ${e.message || e}</p>`;
+    }
 }
 
 async function saveBrandContext(brandName) {
@@ -2522,7 +2566,7 @@ async function showPostDetail(pid) {
             ${post.brand_names ? `<span class="text-xs text-yellow-400">Brands: ${post.brand_names}</span>` : ''}
             <span class="text-xs text-gray-500">${post.post_number != null ? 'Post #'+post.post_number : 'Day '+post.suggested_post_day} | AI Score: ${post.ai_query_score} | ${post.storyline}</span>
         </div>
-        ${(() => { let m=null; try { m = JSON.parse(post.ai_search_meta||'null'); } catch(e){} if (!m || (!m.seed && !m.anchor && !m.target_query)) return ''; const rows=[]; if (m.seed) rows.push(`<b>Root reference prompt:</b> ${m.seed}`); if (m.anchor) rows.push(`<b>Anchor:</b> ${m.anchor}`); if (m.target_query) rows.push(`<b>This post targets:</b> ${m.target_query}`); return `<div class="text-xs mb-2" style="color:#f0abfc">${rows.join('<br>')}</div>`; })()}
+        ${(() => { let m=null; try { m = JSON.parse(post.ai_search_meta||'null'); } catch(e){} if (!m || (!m.seed && !m.anchor && !m.target_query)) return ''; const rows=[]; if (m.seed) rows.push(`<b>Root reference prompt:</b> ${m.seed}`); if (m.anchor) rows.push(`<b>Anchor:</b> ${m.anchor}`); if (m.target_query) rows.push(`<b>This post targets:</b> ${m.target_query}`); if (m.persona && m.persona !== '(broad)') rows.push(`<b>Persona:</b> 🧑 ${m.persona}`); return `<div class="text-xs mb-2" style="color:#f0abfc">${rows.join('<br>')}</div>`; })()}
         ${(() => { let ck=[]; try { ck = JSON.parse(post.concept_checklist||'[]'); } catch(e){} return ck.length ? `<div class="text-xs mb-3" style="color:#a5b4fc"><b>AI-Search cluster coverage:</b> ${ck.join(' · ')}</div>` : ''; })()}
         <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
@@ -7257,6 +7301,7 @@ function _lsubsRenderClusters() {
         return;
     }
     listEl.innerHTML = clusters.map((cl, i) => {
+        const _esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const chip = cl.backfilled
             ? `<span class="badge" style="background:#2a2336;color:#c4b5fd" title="Reconstructed from existing posts — shows the rewrites you generated; the original fan-out's never-generated angles aren't recoverable">↺ ${cl.cluster_size} rewrites · backfilled</span>`
             : (cl.complete
@@ -7272,11 +7317,16 @@ function _lsubsRenderClusters() {
                     : '<span title="Claude-generated region" style="color:#9ca3af">⚙</span>');
             const regionTag = (rw.region && rw.region !== '(unsorted)')
                 ? ` <span class="badge" style="background:#15172b;color:#93a4c9;font-size:0.62rem">${rw.region}</span>` : '';
+            const personaTag = (rw.persona && rw.persona !== '(broad)')
+                ? ` <span class="badge" style="background:#241a2e;color:#d8b4fe;font-size:0.62rem" title="Persona this region targets">🧑 ${_esc(rw.persona)}</span>` : '';
+            const variants = (rw.variants && rw.variants.length)
+                ? `<div class="text-xs ml-4 mt-1" style="color:#6b7280" title="Real phrasings woven into the body for retrieval">also asked as: ${rw.variants.slice(0,6).map(_esc).join(' · ')}</div>` : '';
             const posts = (rw.posts || []).map(p =>
                 `<a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.post_number != null ? ('#' + p.post_number + ' ') : ''}${(p.title || '').slice(0, 80)}</a> <span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.subreddit_name ? ` <span class="text-gray-600">r/${p.subreddit_name}</span>` : ''}`
             ).join('<br>');
             return `<div class="py-1" style="border-top:1px solid #20283a">
-                <div class="text-sm"><input type="checkbox" class="clu-sel-${i}" data-q="${(rw.rewrite || '').replace(/"/g, '&quot;')}" style="vertical-align:middle;margin-right:5px" title="Select this rewrite to generate for it"> ${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} ${mark} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span>${regionTag}</div>
+                <div class="text-sm"><input type="checkbox" class="clu-sel-${i}" data-q="${(rw.rewrite || '').replace(/"/g, '&quot;')}" style="vertical-align:middle;margin-right:5px" title="Select this rewrite to generate for it"> ${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} ${mark} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span>${regionTag}${personaTag}</div>
+                ${variants}
                 ${posts ? `<div class="text-xs ml-4 mt-1 text-gray-400">${posts}</div>` : ''}
             </div>`;
         }).join('');
@@ -7288,7 +7338,6 @@ function _lsubsRenderClusters() {
         const _caret = _isOpen ? '▾' : '▸';
         const _bodyStyle = _isOpen ? '' : 'display:none';
         // What the brand was found to offer for this seed (anchor grounding).
-        const _esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const _grnd = cl.grounding ? `
                 <div class="text-xs mt-1 mb-2 p-2" style="background:#0b1a14;border:1px solid #1f3a2c;border-radius:6px;line-height:1.4">
                     <span class="badge" style="background:${cl.grounding.covers?'#10331f':'#3a2a0e'};color:${cl.grounding.covers?'#46d160':'#ffb86b'}">${cl.grounding.covers?'✓ brand offers this':'⚠ weak fit'}</span>

@@ -239,7 +239,8 @@ class Database:
     def update_brand(self, brand_id, context=None, domain_url=None, keywords=None,
                      category=None, audience=None, use_cases=None, pain_points=None,
                      features=None, competitors=None, enriched_at=None,
-                     search_subreddits=None, focus=None, learned_context=None):
+                     search_subreddits=None, focus=None, learned_context=None,
+                     personas=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -250,6 +251,7 @@ class Database:
             "competitors": competitors, "enriched_at": enriched_at,
             "search_subreddits": search_subreddits,
             "focus": focus, "learned_context": learned_context,
+            "personas": personas,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -766,9 +768,14 @@ class Database:
 
     @staticmethod
     def normalize_rewrites(raw):
-        """A cluster's rewrites_json is either a legacy flat [str] or the new
-        [{query, region, source}] form. Return the object form (backward-compatible),
-        deduped by query (case-insensitive)."""
+        """A cluster's rewrites_json is either a legacy flat [str] or the
+        [{query, region, source, variants, persona}] form. Return the object form
+        (backward-compatible), deduped by query (case-insensitive).
+
+        `variants` = the real phrasings that map to this region (body-side retrieval
+        context); `persona` = the persona this region most represents (attribution).
+        Legacy rows → variants []/persona "".
+        """
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
@@ -776,17 +783,26 @@ class Database:
                 raw = []
         out, seen = [], set()
         for r in (raw or []):
+            variants, persona = [], ""
             if isinstance(r, dict):
                 q = (r.get("query") or "").strip()
                 region = r.get("region") or "(unsorted)"
                 source = r.get("source") or "generated"
+                persona = (r.get("persona") or "").strip()
+                _vseen = set()
+                for v in (r.get("variants") or []):
+                    vs = str(v).strip()
+                    if vs and vs.lower() not in _vseen:
+                        _vseen.add(vs.lower())
+                        variants.append(vs)
             else:
                 q = str(r).strip()
                 region, source = "(unsorted)", "generated"
             k = q.lower()
             if q and k not in seen:
                 seen.add(k)
-                out.append({"query": q, "region": region, "source": source})
+                out.append({"query": q, "region": region, "source": source,
+                            "variants": variants, "persona": persona})
         return out
 
     def delete_ai_search_cluster(self, brand_id, seed_norm):
@@ -1766,6 +1782,10 @@ class Database:
             # Accumulates over time; fed into generation. Separate from the
             # user's manual `context`, which is never overwritten.
             "learned_context":   "ALTER TABLE brands ADD COLUMN learned_context TEXT",
+            # Auto-generated buyer personas (ICPs) for persona-aware fan-out. JSON
+            # list of {label, profile, trigger, goal, constraints, vocab, fit}.
+            # fit ∈ {yes,maybe,no} = is the brand a credible answer for this persona.
+            "personas":          "ALTER TABLE brands ADD COLUMN personas TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

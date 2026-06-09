@@ -1022,6 +1022,27 @@ def api_enrich_existing_brand(bid):
     return jsonify(draft)
 
 
+@app.route("/api/brands/<int:bid>/personas/regenerate", methods=["POST"])
+def api_regenerate_brand_personas(bid):
+    """Clear + regenerate this brand's auto personas now (grounded in its site +
+    enrichment). Returns the new personas. Manual context is never touched."""
+    from generators.brand_enrichment import generate_brand_personas
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        claude = ClaudeClient(ANTHROPIC_API_KEY)
+        personas = generate_brand_personas(
+            claude, brand["name"], brand.get("domain_url") or "",
+            category=brand.get("category") or "", audience=brand.get("audience") or "",
+            use_cases=brand.get("use_cases"), pain_points=brand.get("pain_points"))
+        db.update_brand(bid, personas=json.dumps(personas))
+        return jsonify({"personas": personas})
+    finally:
+        db.close()
+
+
 @app.route("/api/brands/<int:bid>/focus-coverage")
 def api_brand_focus_coverage(bid):
     """Aggregate focus-pairing hit/miss counts for a brand.
@@ -4467,6 +4488,8 @@ def api_live_posts_clusters():
                     covered += 1
                 rw_rows.append({"rewrite": q, "region": r.get("region") or "(unsorted)",
                                 "source": r.get("source") or "generated",
+                                "variants": r.get("variants") or [],
+                                "persona": r.get("persona") or "",
                                 "covered": bool(ps), "posts": ps})
             n = len(rewrites)
             out.append({
@@ -4556,8 +4579,8 @@ def api_cluster_add_fanout():
         db.upsert_ai_search_cluster(
             brand_id, sn, cluster.get("seed") or sn, cluster.get("anchor"),
             res["rewrites"], json.loads(cluster.get("checklist_json") or "[]"), backfilled=0)
-        return jsonify({"added": res["added"], "skipped": res["skipped"],
-                        "cluster_size": len(res["rewrites"])})
+        return jsonify({"added": res["added"], "enriched": res.get("enriched", []),
+                        "skipped": res["skipped"], "cluster_size": len(res["rewrites"])})
     finally:
         db.close()
 

@@ -218,3 +218,90 @@ Return JSON only, exactly this shape:
         "covers": bool(result.get("covers")),
         "key_points": kp,
     }
+
+
+def generate_brand_personas(claude: ClaudeClient, name: str, domain_url: str,
+                            category: str = "", audience: str = "",
+                            use_cases=None, pain_points=None) -> list:
+    """Auto-generate a small set of well-designed buyer PERSONAS (ICPs) for this brand,
+    grounded in the brand's own site + enrichment. Used for persona-aware fan-out:
+    each persona is a distinct kind of asker, with a brand-FIT judgment so the fan-out
+    can target only the personas this brand can credibly be the answer for.
+
+    Returns a list (3-5) of:
+      {label, profile, trigger, goal, constraints, vocab, fit}
+    where fit ∈ {"yes","maybe","no"}. Returns [] on failure. No fabrication — when
+    unsure whether the brand serves a persona, mark fit "no" rather than inventing.
+    """
+    def _join(v):
+        if isinstance(v, list):
+            return "; ".join(str(x).strip() for x in v if str(x).strip())
+        return str(v or "").strip()
+    html = _fetch_homepage(domain_url)
+    page_text = _extract_visible_text(html, max_chars=4000)
+    page_section = (f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
+                    if page_text else
+                    "HOMEPAGE TEXT: (could not fetch — rely on the fields below + your "
+                    "confident knowledge of this brand.)")
+    prompt = f"""You are defining the buyer PERSONAS for a GEO campaign — the distinct kinds of
+people who would search for what this brand offers. These personas decide which
+recommendation questions are worth targeting and whether THIS brand is a credible
+answer for each.
+
+BRAND NAME: {name}
+BRAND URL: {domain_url or "(none)"}
+CATEGORY: {category or "(unknown)"}
+AUDIENCE: {audience or "(unknown)"}
+USE-CASES: {_join(use_cases) or "(unknown)"}
+PAIN-POINTS: {_join(pain_points) or "(unknown)"}
+
+{page_section}
+
+Produce 3-5 DISTINCT, non-overlapping personas (different situations/intents — not
+rewordings of each other). Ground them in the brand's real space; do NOT invent.
+For each, judge FIT honestly: would a helpful AI, answering THIS persona's questions,
+credibly recommend THIS brand?
+  - "yes"   = squarely the brand's customer
+  - "maybe" = plausible/adjacent
+  - "no"    = this persona wants something the brand isn't (include a couple of these
+              when they're realistic — they are the winnability filter; better to flag
+              a mismatch than pretend)
+
+Return JSON only, exactly this shape:
+{{
+  "personas": [
+    {{
+      "label": "2-4 word name (e.g. 'burnt-out exec')",
+      "profile": "who they are + their situation, 1 line",
+      "trigger": "what makes them go search",
+      "goal": "the job-to-be-done they want solved",
+      "constraints": "budget / compliance / urgency / discretion etc. (short)",
+      "vocab": "how THEY would phrase it (a few words/terms)",
+      "fit": "yes" | "maybe" | "no"
+    }}
+  ]
+}}"""
+    result = claude.call(prompt, max_tokens=1200, temperature=0.4)
+    items = (result or {}).get("personas") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        return []
+    out = []
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        label = str(p.get("label") or "").strip()
+        if not label:
+            continue
+        fit = str(p.get("fit") or "").strip().lower()
+        if fit not in ("yes", "maybe", "no"):
+            fit = "maybe"
+        out.append({
+            "label": label,
+            "profile": str(p.get("profile") or "").strip(),
+            "trigger": str(p.get("trigger") or "").strip(),
+            "goal": str(p.get("goal") or "").strip(),
+            "constraints": str(p.get("constraints") or "").strip(),
+            "vocab": str(p.get("vocab") or "").strip(),
+            "fit": fit,
+        })
+    return out[:5]

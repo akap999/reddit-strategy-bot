@@ -7244,10 +7244,11 @@ function renderLsubsClusters(c) {
             <button class="btn btn-sm btn-secondary" onclick="lsubsLoadClusters()">↻ Refresh</button>
             <button class="btn btn-sm" style="background:#2a2336;color:#c4b5fd" onclick="lsubsBackfillClusters()" title="Reconstruct clusters from previously-generated AI-Search posts (grouped by their root prompt)">↺ Backfill from posts</button>
         </div>
-        <div class="flex flex-wrap gap-2 items-center mb-4">
+        <div class="flex flex-wrap gap-2 items-start mb-4">
             <input id="lsubs-cluster-seed" placeholder="seed (keyword or full prompt) — e.g. longevity" class="text-xs flex-1" style="min-width:240px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px">
             <button class="btn btn-sm" style="background:#10331f;color:#46d160" onclick="lsubsCreateCluster()" title="Build + save a cluster (fan-out + grounding + personas) for the selected brand — no posts generated">✨ Create cluster</button>
-            <span class="text-xs text-gray-500">Each root prompt → its fanned rewrites (covered ✓ / gap ○) → the posts under each.</span>
+            <span class="text-xs text-gray-500" style="flex-basis:100%">Each root prompt → its fanned rewrites (covered ✓ / gap ○) → the posts under each.</span>
+            <textarea id="lsubs-cluster-observed" rows="2" placeholder="optional — paste REAL fan-out queries captured from ChatGPT/Perplexity/Gemini (one per line); folded into the cluster, region-deduped" class="text-xs" style="flex-basis:100%;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:6px 10px;font-family:inherit"></textarea>
         </div>
         <div id="lsubs-clusters-list"></div>`;
     lsubsLoadClusters();
@@ -7258,10 +7259,14 @@ async function lsubsCreateCluster() {
     const seed = (document.getElementById('lsubs-cluster-seed')?.value || '').trim();
     if (!bid) { toast('Pick a brand first', 'error'); return; }
     if (!seed) { toast('Enter a seed', 'error'); return; }
+    const observed = (document.getElementById('lsubs-cluster-observed')?.value || '')
+        .split('\n').map(s => s.trim()).filter(Boolean);
     const listEl = document.getElementById('lsubs-clusters-list');
     if (listEl) listEl.innerHTML = '<div class="spinner mx-auto my-6"></div>';
     try {
-        const res = await api('/api/live-posts/clusters/create', { method: 'POST', body: { brand_id: parseInt(bid), seed } });
+        const body = { brand_id: parseInt(bid), seed };
+        if (observed.length) body.observed_queries = observed;
+        const res = await api('/api/live-posts/clusters/create', { method: 'POST', body });
         if (res.error) { toast('Create failed: ' + res.error, 'error'); }
         else if (res.reused) { toast(`Cluster already existed for "${seed}" (${res.cluster_size} rewrites)`, 'info'); }
         else { toast(`Created cluster for "${seed}" — ${res.cluster_size} rewrites`, 'success'); }

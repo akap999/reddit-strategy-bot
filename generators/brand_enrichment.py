@@ -257,7 +257,7 @@ PAIN-POINTS: {_join(pain_points) or "(unknown)"}
 
 {page_section}
 
-Produce 3-5 DISTINCT, non-overlapping personas (different situations/intents — not
+Produce 4-6 DISTINCT, non-overlapping personas (different situations/intents — not
 rewordings of each other). Ground them in the brand's real space; do NOT invent.
 For each, judge FIT honestly: would a helpful AI, answering THIS persona's questions,
 credibly recommend THIS brand?
@@ -281,7 +281,7 @@ Return JSON only, exactly this shape:
     }}
   ]
 }}"""
-    result = claude.call(prompt, max_tokens=1200, temperature=0.4)
+    result = claude.call(prompt, max_tokens=1400, temperature=0.4)
     items = (result or {}).get("personas") if isinstance(result, dict) else None
     if not isinstance(items, list):
         return []
@@ -304,4 +304,4 @@ Return JSON only, exactly this shape:
             "vocab": str(p.get("vocab") or "").strip(),
             "fit": fit,
         })
-    return out[:5]
+    return out[:6]

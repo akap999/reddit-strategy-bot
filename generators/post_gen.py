@@ -862,6 +862,75 @@ Return JSON only:
                 if isinstance(p, dict) and p.get("label")
                 and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
 
+    def _assign_personas_to_regions(self, rewrites, personas):
+        """Deterministic, FIT-DRIVEN persona→region assignment. One Claude call ranks the
+        genuinely-fitting personas per region (by goal/trigger/vocab); code then assigns
+        each region its top-ranked fitting persona under a per-persona cap (processing the
+        most-constrained regions first), falling to the next-best fit, and only "(broad)"
+        when no fitting persona is available — never a forced/non-fitting filler. Mutates
+        rewrite["persona"]. No-op (blank) when the brand has no fit personas."""
+        fitp = [p for p in (personas or []) if isinstance(p, dict) and p.get("label")
+                and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
+        rlist = [r for r in (rewrites or []) if (r.get("query") or "").strip()]
+        if not fitp or not rlist:
+            for r in (rewrites or []):
+                r["persona"] = r.get("persona") or ""
+            return
+        labels = [p["label"] for p in fitp]
+        label_by_lower = {l.lower(): l for l in labels}
+        plines = "\n".join(
+            f"  - {p['label']}: {p.get('profile','')}"
+            + (f" | wants: {p.get('goal','')}" if p.get('goal') else "")
+            + (f" | triggered by: {p.get('trigger','')}" if p.get('trigger') else "")
+            + (f" | says it like: {p.get('vocab','')}" if p.get('vocab') else "")
+            for p in fitp)
+        qlist = "\n".join(f"  {i+1}. {r['query']}" for i, r in enumerate(rlist))
+        prompt = f"""For each REGION (a search question), decide which of these PERSONAS would
+genuinely ASK it — judge by each persona's goal / trigger / vocab. A persona fits a region only if a
+real person of that type would plausibly type that exact question.
+
+PERSONAS:
+{plines}
+
+REGIONS:
+{qlist}
+
+For each region, list the fitting persona LABELS ranked best-fit FIRST (use the labels EXACTLY as
+written above). If no persona genuinely fits (it's a broad question almost anyone would ask), return
+an empty list for that region. Be honest — do not stretch a persona to fit.
+
+Return JSON only: {{"assignments": [["label", "..."], ...]}}  — one ranked list per region, in the SAME order as the regions above."""
+        result = self.claude.call(prompt, max_tokens=900, temperature=0.2)
+        ranked = (result or {}).get("assignments") if isinstance(result, dict) else None
+        if not isinstance(ranked, list):
+            ranked = []
+        # Normalize per-region candidates to valid fit labels (best→worst).
+        per_region = []
+        for i in range(len(rlist)):
+            raw = ranked[i] if (i < len(ranked) and isinstance(ranked[i], list)) else []
+            norm = []
+            for c in raw:
+                cl = str(c).strip().lower()
+                if cl in label_by_lower and label_by_lower[cl] not in norm:
+                    norm.append(label_by_lower[cl])
+            per_region.append(norm)
+        cap = max(2, math.ceil(len(rlist) / len(fitp)))
+        counts = {l: 0 for l in labels}
+        chosen = {}
+        # Most-constrained first (fewest candidates); no-candidate regions go last → "(broad)".
+        order = sorted(range(len(rlist)),
+                       key=lambda i: len(per_region[i]) if per_region[i] else 10**6)
+        for i in order:
+            pick = "(broad)"
+            for label in per_region[i]:
+                if counts[label] < cap:
+                    pick = label
+                    counts[label] += 1
+                    break
+            chosen[i] = pick
+        for i, r in enumerate(rlist):
+            r["persona"] = chosen.get(i, "(broad)")
+
     def _ensure_personas(self, brands):
         """Auto-generate the brand's personas once (cached on `brands.personas`) so the
         fan-out lens has them. No-op when already present or generation fails — never
@@ -1030,13 +1099,8 @@ Return JSON only:
                 "which questions are worth targeting; SKIP any question no persona above would "
                 "credibly bring to THIS brand.\n"
                 "  • Do NOT create a region per persona or a persona×axis matrix — still ONE rewrite "
-                "per DISTINCT region.\n"
-                "  • PERSONA TAGGING: tag each region with the persona whose actual question it is — "
-                "decide by their trigger / goal / vocab, NOT by position in the list. Across the "
-                "cluster REPRESENT MULTIPLE personas — aim for each persona above to drive at least "
-                "one region where it genuinely fits. NEVER tag every region with the same persona "
-                "(especially not just the first one). Use \"(broad)\" only when a region truly spans "
-                "several personas.\n"
+                "per DISTINCT region. (Persona→region tagging is assigned separately afterward — you "
+                "don't need to label personas here.)\n"
             )
         prompt = f"""You are mapping the AI-search query space for a GEO campaign. The goal is to get
 this brand recommended by AI assistants. AI engines REWRITE a user's prompt into
@@ -1092,7 +1156,7 @@ Return JSON only:
 {{
   "anchor": "the platform/use-case to keep every title on (short)",
   "rewrites": [
-    {{"query": "the sub-query, engine-style", "region": "one of the 6 axis names OR a brand-specific region", "fixed": true/false (true ONLY if it's one of the 6 standard axes), "variants": ["close paraphrase 1", "close paraphrase 2"], "persona": "the persona label this region most represents, or (broad)"}},
+    {{"query": "the sub-query, engine-style", "region": "one of the 6 axis names OR a brand-specific region", "fixed": true/false (true ONLY if it's one of the 6 standard axes), "variants": ["close paraphrase 1", "close paraphrase 2"]}},
     ...
   ],
   "checklist": ["phrasing/term 1", "phrasing/term 2", "..."]
@@ -1122,6 +1186,9 @@ Aim for 5-8 rewrites total. Never include the target brand name."""
             rewrites.append({"query": q, "region": region, "source": source,
                              "variants": variants, "persona": persona})
         rewrites = self._dedup_cap_regions(rewrites)
+        # Deterministic, fit-driven persona→region assignment (replaces inline tagging):
+        # every region gets a fitting persona or "(broad)", no persona over the cap.
+        self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
         checklist = result.get("checklist") or []
         anchor = (result.get("anchor") or "").strip()
         if not rewrites and not checklist:

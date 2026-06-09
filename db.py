@@ -883,20 +883,31 @@ class Database:
         self.conn.commit()
         return n
 
-    def attach_posts_to_cluster(self, brand_id, seed_norm, post_numbers):
-        """Manually attach existing posts (by their per-brand post_number) to a
-        cluster: tag each post's ai_search_meta with the cluster's seed/anchor and a
-        target_query (its existing one, else its title), and add that as a covered
-        rewrite. Works for any post — even ones without prior AI-Search metadata.
-        Returns {attached:[nums], not_found:[nums], cluster_size:N}."""
+    def attach_posts_to_cluster(self, brand_id, seed_norm, post_numbers, region_by_num=None):
+        """Manually attach existing posts (by their per-brand post_number) to a cluster.
+
+        `region_by_num` (optional {post_number: region}) — the caller classifies each
+        post's title into a region first (via post_gen._classify_regions). When given:
+          - region matches an EXISTING cluster region → the post COVERS it: its
+            target_query is set to that region's primary query, and the post's title is
+            added to that region's `variants` (a real phrasing);
+          - else → a NEW rewrite is added with the classified region (or "(from posts)").
+        Without `region_by_num`, falls back to the old behavior ("(from posts)").
+        Returns {attached:[nums], not_found:[nums], existing:[nums], new:[nums], cluster_size:N}."""
         cluster = self.get_ai_search_cluster(brand_id, seed_norm)
         if not cluster:
             return {"error": "no cluster for this seed", "attached": [], "not_found": []}
         rewrites = self.normalize_rewrites(cluster.get("rewrites_json"))
-        lower = {r["query"].lower() for r in rewrites}
+        region_by_num = region_by_num or {}
+        lower = {r["query"].strip().lower(): r for r in rewrites}
+        by_region = {}
+        for r in rewrites:
+            reg = (r.get("region") or "").strip()
+            if reg and reg.lower() not in ("(unsorted)", "(from posts)"):
+                by_region.setdefault(reg.lower(), r)
         seed = cluster.get("seed") or seed_norm
         anchor = cluster.get("anchor") or ""
-        attached, not_found = [], []
+        attached, not_found, into_existing, into_new = [], [], [], []
         for num in post_numbers:
             row = self.conn.execute(
                 "SELECT id, title, ai_search_meta FROM posts "
@@ -909,19 +920,38 @@ class Database:
                 meta = json.loads(row["ai_search_meta"]) if row["ai_search_meta"] else {}
             except (json.JSONDecodeError, TypeError):
                 meta = {}
-            tq = (meta.get("target_query") or "").strip() or (row["title"] or "").strip()[:120]
+            title = (row["title"] or "").strip()[:120]
+            region = (region_by_num.get(num) or "").strip()
+            if region and region.lower() in by_region:
+                # Post covers an existing region → target that region's query + keep
+                # the post's title as a variant (a real phrasing).
+                kept = by_region[region.lower()]
+                tq = kept["query"]
+                vs = kept.setdefault("variants", [])
+                if title and title.lower() != tq.lower() and title.lower() not in {v.lower() for v in vs}:
+                    vs.append(title)
+                into_existing.append(num)
+            else:
+                tq = (meta.get("target_query") or "").strip() or title
+                reg = region or "(from posts)"
+                if tq and tq.lower() not in lower:
+                    new_rw = {"query": tq, "region": reg, "source": "manual", "variants": [], "persona": ""}
+                    rewrites.append(new_rw)
+                    lower[tq.lower()] = new_rw
+                    if reg.lower() not in ("(unsorted)", "(from posts)"):
+                        by_region.setdefault(reg.lower(), new_rw)
+                into_new.append(num)
             self.conn.execute(
                 "UPDATE posts SET ai_search_meta=? WHERE id=?",
-                (json.dumps({"seed": seed, "anchor": anchor, "target_query": tq}), row["id"]))
-            if tq and tq.lower() not in lower:
-                rewrites.append({"query": tq, "region": "(from posts)", "source": "manual"})
-                lower.add(tq.lower())
+                (json.dumps({"seed": seed, "anchor": anchor, "target_query": tq,
+                             "persona": meta.get("persona", "")}), row["id"]))
             attached.append(num)
         self.conn.commit()
         self.upsert_ai_search_cluster(
             brand_id, seed_norm, seed, anchor, rewrites,
             json.loads(cluster.get("checklist_json") or "[]"), backfilled=0)
-        return {"attached": attached, "not_found": not_found, "cluster_size": len(rewrites)}
+        return {"attached": attached, "not_found": not_found,
+                "existing": into_existing, "new": into_new, "cluster_size": len(rewrites)}
 
     def get_covered_target_queries(self, brand_id, seed_norm):
         """Set of normalized target_query strings already covered (= a post was

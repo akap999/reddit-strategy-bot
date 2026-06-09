@@ -889,6 +889,46 @@ Return JSON only:
         print(f"[post_gen] generated {len(personas)} personas for brand {b.get('id')} "
               f"({n_fit} fit yes/maybe)")
 
+    def create_cluster(self, brands, seed, observed_queries=None):
+        """Build + persist an AI-Search cluster for a (brand, seed) WITHOUT generating
+        any posts — the fan-out only. Reuse-only: if a cluster already exists for the
+        seed, fold in any observed_queries and return it unchanged (never clobber).
+        Returns a summary dict (or {error} when the fan-out yields nothing)."""
+        if isinstance(brands, dict):
+            brands = [brands]
+        if not brands or not (seed and str(seed).strip()):
+            return {"error": "brand and seed required"}
+        bid = brands[0]["id"]
+        seed_norm = self.db.normalize_seed(seed)
+        observed = [str(q).strip() for q in (observed_queries or []) if str(q).strip()]
+
+        existing = self.db.get_ai_search_cluster(bid, seed_norm)
+        if existing and not existing.get("backfilled"):
+            rewrites = self.db.normalize_rewrites(existing.get("rewrites_json"))
+            checklist = json.loads(existing.get("checklist_json") or "[]")
+            anchor = existing.get("anchor")
+            if observed:
+                rewrites = self._merge_observed(rewrites, observed)["rewrites"]
+                self.db.upsert_ai_search_cluster(bid, seed_norm, existing.get("seed") or seed,
+                                                 anchor, rewrites, checklist, backfilled=0)
+            return {"brand_id": bid, "seed": existing.get("seed") or seed, "anchor": anchor,
+                    "cluster_size": len(rewrites), "reused": True, "created": False}
+
+        # Build fresh: personas → grounding → fan-out (+ observed merge) → persist.
+        self._ensure_personas(brands)
+        anchor_summary = self._ground_brand_for_anchor(brands, seed, seed_norm)
+        fan = self._fanout_rewrites(brands, seed, anchor_summary=anchor_summary)
+        if not fan or not fan.get("rewrites"):
+            return {"error": "fan-out produced no rewrites"}
+        rewrites = fan.get("rewrites") or []
+        checklist = fan.get("checklist") or []
+        anchor = fan.get("anchor") or ""
+        if observed:
+            rewrites = self._merge_observed(rewrites, observed)["rewrites"]
+        self.db.upsert_ai_search_cluster(bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
+        return {"brand_id": bid, "seed": seed, "anchor": anchor,
+                "cluster_size": len(rewrites), "reused": False, "created": True}
+
     @staticmethod
     def _brand_facets(brands):
         """First-time / no-seed coverage map: turn a brand's enrichment into a flat,
@@ -990,8 +1030,13 @@ Return JSON only:
                 "which questions are worth targeting; SKIP any question no persona above would "
                 "credibly bring to THIS brand.\n"
                 "  • Do NOT create a region per persona or a persona×axis matrix — still ONE rewrite "
-                "per DISTINCT region. Tag each rewrite with the persona label it most represents (or "
-                "\"(broad)\").\n"
+                "per DISTINCT region.\n"
+                "  • PERSONA TAGGING: tag each region with the persona whose actual question it is — "
+                "decide by their trigger / goal / vocab, NOT by position in the list. Across the "
+                "cluster REPRESENT MULTIPLE personas — aim for each persona above to drive at least "
+                "one region where it genuinely fits. NEVER tag every region with the same persona "
+                "(especially not just the first one). Use \"(broad)\" only when a region truly spans "
+                "several personas.\n"
             )
         prompt = f"""You are mapping the AI-search query space for a GEO campaign. The goal is to get
 this brand recommended by AI assistants. AI engines REWRITE a user's prompt into

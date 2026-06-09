@@ -4528,6 +4528,32 @@ def api_live_posts_clusters_backfill():
         db.close()
 
 
+@app.route("/api/live-posts/clusters/create", methods=["POST"])
+def api_cluster_create():
+    """Create an AI-Search cluster for {brand_id, seed} WITHOUT generating posts
+    (fan-out + grounding + personas, persisted). Reuse-only: returns the existing
+    cluster unchanged if one already exists for the seed."""
+    data = request.get_json(silent=True) or {}
+    try:
+        brand_id = int(data.get("brand_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "brand_id required"}), 400
+    seed = (data.get("seed") or "").strip()
+    if not seed:
+        return jsonify({"error": "seed required"}), 400
+    observed = [str(q).strip() for q in (data.get("observed_queries") or []) if str(q).strip()]
+    db, claude, _, post_gen, _ = make_generators()
+    try:
+        brand = db.get_brand(brand_id)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        res = post_gen.create_cluster([brand], seed, observed_queries=observed)
+        code = 200 if not res.get("error") else 502
+        return jsonify(res), code
+    finally:
+        db.close()
+
+
 @app.route("/api/live-posts/clusters/add-posts", methods=["POST"])
 def api_cluster_add_posts():
     """Manually attach existing posts (by post number) to a cluster.
@@ -4546,9 +4572,32 @@ def api_cluster_add_posts():
             continue
     if not nums:
         return jsonify({"error": "post_numbers required"}), 400
-    db = get_db()
+    db, claude, _, post_gen, _ = make_generators()
     try:
-        res = db.attach_posts_to_cluster(brand_id, db.normalize_seed(seed), nums)
+        sn = db.normalize_seed(seed)
+        cluster = db.get_ai_search_cluster(brand_id, sn)
+        if not cluster:
+            return jsonify({"error": "no cluster for this seed — create it first"}), 404
+        # Classify each attached post's title into a region (reuse the existing region
+        # labels) so it covers the right region or forms a new one.
+        rewrites = db.normalize_rewrites(cluster.get("rewrites_json"))
+        existing_regions = sorted({r["region"] for r in rewrites
+                                   if r.get("region") and r["region"] not in ("(unsorted)", "(from posts)")})
+        title_by_num = {}
+        for num in nums:
+            row = db.conn.execute(
+                "SELECT title FROM posts WHERE brand_id IS ? AND post_number = ?", (brand_id, num)
+            ).fetchone()
+            if row:
+                title_by_num[num] = (row["title"] or "").strip()
+        numlist = [n for n in nums if title_by_num.get(n)]
+        region_by_num = {}
+        if numlist:
+            classified = post_gen._classify_regions([title_by_num[n] for n in numlist], existing_regions)
+            for i, n in enumerate(numlist):
+                if i < len(classified):
+                    region_by_num[n] = classified[i].get("region") or ""
+        res = db.attach_posts_to_cluster(brand_id, sn, nums, region_by_num=region_by_num)
         return jsonify(res)
     finally:
         db.close()

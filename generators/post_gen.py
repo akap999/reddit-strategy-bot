@@ -228,7 +228,15 @@ class PostGenerator:
                     if not remaining_gaps:  # selection not in cluster → take it verbatim
                         remaining_gaps = [str(t).strip() for t in target_rewrites if str(t).strip()]
                 else:
-                    remaining_gaps = [q for q in rewrite_queries if q.strip().lower() not in covered]
+                    # Order uncovered gaps MANUAL-first (then fixed, then generated) so a
+                    # Fill-gaps run spends its post budget on the user's captured queries
+                    # before the auto-generated regions.
+                    _src = {r["query"].strip().lower(): (r.get("source") or "generated") for r in rewrites}
+                    def _prio(q):
+                        s = _src.get(q.strip().lower(), "generated")
+                        return 0 if s == "manual" else (1 if s == "fixed" else 2)
+                    remaining_gaps = sorted(
+                        [q for q in rewrite_queries if q.strip().lower() not in covered], key=_prio)
                 cluster_size = len(rewrite_queries)
                 covered_before = cluster_size - len(remaining_gaps)
                 if not remaining_gaps:
@@ -1072,31 +1080,42 @@ Return JSON only: {{"assignments": [["label", "...ranked best→worst..."], ...]
             rewrites = self.db.normalize_rewrites(existing.get("rewrites_json"))
             checklist = json.loads(existing.get("checklist_json") or "[]")
             anchor = existing.get("anchor")
+            added = skipped = 0
             if observed:
-                rewrites = self._merge_observed(rewrites, observed)["rewrites"]
+                # Each pasted query → its own new manual region (skip exact dups).
+                res = self._merge_observed(rewrites, observed)
+                rewrites = res["rewrites"]; added = len(res["added"]); skipped = len(res["skipped"])
                 self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
                 self.db.upsert_ai_search_cluster(bid, seed_norm, existing.get("seed") or seed,
                                                  anchor, rewrites, checklist, backfilled=0)
             return {"brand_id": bid, "seed": existing.get("seed") or seed, "anchor": anchor,
-                    "cluster_size": len(rewrites), "reused": True, "created": False}
+                    "cluster_size": len(rewrites), "reused": True, "created": False,
+                    "manual_regions": added, "gap_regions": 0, "skipped": skipped}
 
-        # Build fresh: personas → grounding → fan-out (+ observed merge) → persist.
+        # Build fresh. Manual queries (if any) DEFINE their own regions and lead; the
+        # fan-out then fills ONLY the remaining angles (prior_coverage steers it away from
+        # what the manual queries already cover), marked generated.
         self._ensure_personas(brands)
         anchor_summary = self._ground_brand_for_anchor(brands, seed, seed_norm)
-        fan = self._fanout_rewrites(brands, seed, anchor_summary=anchor_summary)
-        if not fan or not fan.get("rewrites"):
+        manual_regions = self._regions_from_queries(observed) if observed else []
+        raw_observed = len([q for q in observed if str(q).strip()])
+        fan = self._fanout_rewrites(
+            brands, seed,
+            prior_coverage=([r["query"] for r in manual_regions] or None),
+            anchor_summary=anchor_summary)
+        gap_regions = (fan.get("rewrites") if fan else None) or []
+        if not gap_regions and not manual_regions:
             return {"error": "fan-out produced no rewrites"}
-        rewrites = fan.get("rewrites") or []
-        checklist = fan.get("checklist") or []
-        anchor = fan.get("anchor") or ""
-        if observed:
-            rewrites = self._merge_observed(rewrites, observed)["rewrites"]
-            # observed-added regions arrive after the fan-out's assignment → re-assign the
-            # full set so every region (incl. manual ones) gets an evenly-distributed persona.
-            self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
+        checklist = (fan.get("checklist") if fan else None) or []
+        anchor = (fan.get("anchor") if fan else None) or ""
+        # Manual regions FIRST (authoritative/priority), then the auto gap-fill regions.
+        rewrites = manual_regions + gap_regions
+        self._assign_personas_to_regions(rewrites, self._parse_personas(brands))
         self.db.upsert_ai_search_cluster(bid, seed_norm, seed, anchor, rewrites, checklist, backfilled=0)
         return {"brand_id": bid, "seed": seed, "anchor": anchor,
-                "cluster_size": len(rewrites), "reused": False, "created": True}
+                "cluster_size": len(rewrites), "reused": False, "created": True,
+                "manual_regions": len(manual_regions), "gap_regions": len(gap_regions),
+                "skipped": max(0, raw_observed - len(manual_regions))}
 
     @staticmethod
     def _brand_facets(brands):
@@ -1361,37 +1380,65 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
             out.append({"query": q, "region": reg or "(unsorted)"})
         return out
 
+    def _regions_from_queries(self, queries):
+        """Turn pasted REAL fan-out queries into their OWN regions — one region per
+        distinct query (the user's captured queries are authoritative; "a region each").
+        De-dupes exact repeats (normalized); one Claude call gives each a short 2-4 word
+        region label (graceful fallback to a query-derived label). Returns region objects
+        [{query, region, source:'manual', variants:[], persona:''}]."""
+        seen, uniq = set(), []
+        for q in (queries or []):
+            q = str(q).strip()
+            k = q.lower()
+            if q and k not in seen:
+                seen.add(k)
+                uniq.append(q)
+        if not uniq:
+            return []
+        labels = []
+        try:
+            qlist = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(uniq))
+            prompt = f"""Give each search query a SHORT 2-4 word REGION label naming its buyer-concern
+angle (e.g. "comparison / marketplace", "best for small teams", "compliance constraint"). Keep labels
+distinct where the queries differ in intent.
+
+QUERIES:
+{qlist}
+
+Return JSON only: {{"labels": ["label for query 1", "label for query 2", "..."]}}"""
+            res = self.claude.call(prompt, max_tokens=400, temperature=0.2)
+            if isinstance(res, dict):
+                labels = res.get("labels") or []
+        except Exception:
+            labels = []
+        def _fallback(q):
+            w = q.split()
+            return " ".join(w[:4]) if w else "(region)"
+        out = []
+        for i, q in enumerate(uniq):
+            lab = (str(labels[i]).strip() if (i < len(labels) and labels[i]) else "") or _fallback(q)
+            out.append({"query": q, "region": lab, "source": "manual", "variants": [], "persona": ""})
+        return out
+
     def _merge_observed(self, rewrites, observed_queries):
-        """Fold pasted observed fan-out queries into a cluster's rewrites with REGION
-        DEDUP: classify each query's region. If the region is NEW → add it as a new
-        rewrite. If the region already EXISTS → the pasted phrasing is appended to that
-        region's `variants` (the real phrasings that feed the body) instead of being
-        dropped. `rewrites` is the region-object list. Returns {rewrites, added, enriched, skipped}."""
-        region_to_rw = {r.get("region"): r for r in rewrites
-                        if r.get("region") and r.get("region") not in ("(unsorted)", "(from posts)")}
-        existing_q = {r["query"].strip().lower() for r in rewrites}
+        """Fold pasted REAL fan-out queries into a cluster: each distinct pasted query
+        becomes its OWN new region (source 'manual') — the captured queries are
+        authoritative ("a region each"). Skips only an exact duplicate of a query already
+        in the cluster (a region query or an existing variant). Returns
+        {rewrites, added, skipped}."""
+        existing_q = {r["query"].strip().lower() for r in rewrites if r.get("query")}
         for r in rewrites:
             existing_q.update(v.strip().lower() for v in (r.get("variants") or []))
-        classified = self._classify_regions(observed_queries, sorted(region_to_rw.keys()))
-        added, enriched, skipped = [], [], []
-        for c in classified:
-            q, region = c["query"], c["region"]
-            ql = q.strip().lower()
+        added, skipped = [], []
+        for rw in self._regions_from_queries(observed_queries):
+            ql = rw["query"].strip().lower()
             if ql in existing_q:
-                skipped.append({"query": q, "region": region, "reason": "duplicate query"})
+                skipped.append({"query": rw["query"], "reason": "duplicate query"})
                 continue
-            if region in region_to_rw and region not in ("(unsorted)",):
-                # Region already covered → keep the real phrasing as a variant.
-                region_to_rw[region].setdefault("variants", []).append(q)
-                existing_q.add(ql)
-                enriched.append({"query": q, "region": region})
-                continue
-            new_rw = {"query": q, "region": region, "source": "manual", "variants": [], "persona": ""}
-            rewrites.append(new_rw)
-            region_to_rw[region] = new_rw
+            rewrites.append(rw)
             existing_q.add(ql)
-            added.append({"query": q, "region": region})
-        return {"rewrites": rewrites, "added": added, "enriched": enriched, "skipped": skipped}
+            added.append({"query": rw["query"], "region": rw["region"]})
+        return {"rewrites": rewrites, "added": added, "skipped": skipped}
 
     def _embed_texts(self, texts):
         """Embedding vectors for `texts` via the OpenAI embeddings REST API. Graceful:

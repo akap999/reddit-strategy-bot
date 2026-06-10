@@ -4477,17 +4477,34 @@ def api_live_posts_clusters():
             rewrites = db.normalize_rewrites(cl.get("rewrites_json"))
             seed_norm = cl.get("seed_norm")
             posts = db.get_ai_search_posts_for_seed(cl.get("brand_id"), seed_norm)
-            # Map each post to the canonical rewrite it covers, TOLERANTLY — a post's
-            # target_query is the model's (often paraphrased) self-report, so an exact
-            # string match misses real coverage. match_query_to_rewrites normalizes +
-            # falls back to high token-overlap so a generated post fills its gap.
+            # Credit each post to its rewrite by STABLE IDENTITY, not by re-matching text.
+            # Posts generated for a region carry ai_search_meta.region (set at production
+            # time) → join on the region label (exact, unique within a cluster). Fall back
+            # to an exact query match, then to the tolerant matcher ONLY for legacy posts
+            # that predate the region stamp. This is why a post never drifts onto a
+            # textually-similar sibling region (the "concrete tools" problem).
             rewrite_queries = [r["query"] for r in rewrites]
+            region_to_q = {}
+            for r in rewrites:
+                reg = (r.get("region") or "").strip().lower()
+                if reg and reg not in ("(unsorted)", "(from posts)") and reg not in region_to_q:
+                    region_to_q[reg] = r["query"].strip().lower()
+            q_set = {q.strip().lower() for q in rewrite_queries}
             by_rw = {}
             for p in posts:
-                canon = db.match_query_to_rewrites(p.get("target_query"), rewrite_queries)
-                if canon is None:
+                key = None
+                p_region = (p.get("region") or "").strip().lower()
+                p_tq = (p.get("target_query") or "").strip().lower()
+                if p_region and p_region in region_to_q:           # 1) stable region id
+                    key = region_to_q[p_region]
+                elif p_tq and p_tq in q_set:                       # 2) exact query
+                    key = p_tq
+                else:                                              # 3) legacy fallback
+                    canon = db.match_query_to_rewrites(p.get("target_query"), rewrite_queries)
+                    key = canon.strip().lower() if canon else None
+                if key is None:
                     continue
-                by_rw.setdefault(canon.strip().lower(), []).append(p)
+                by_rw.setdefault(key, []).append(p)
             rw_rows, covered = [], 0
             for r in rewrites:
                 q = r["query"]
@@ -4565,13 +4582,16 @@ def api_cluster_create():
 @app.route("/api/live-posts/clusters/add-posts", methods=["POST"])
 def api_cluster_add_posts():
     """Manually attach existing posts (by post number) to a cluster.
-    Body: {brand_id, seed, post_numbers:[...]}."""
+    Body: {brand_id, seed, post_numbers:[...], region?}. When `region` is given (the
+    user ticked exactly one region row), attach ALL posts to THAT region directly —
+    no LLM re-classification. Otherwise classify each title into a region."""
     data = request.get_json(silent=True) or {}
     try:
         brand_id = int(data.get("brand_id"))
     except (TypeError, ValueError):
         return jsonify({"error": "brand_id required"}), 400
     seed = data.get("seed") or ""
+    region = (data.get("region") or "").strip()
     nums = []
     for x in (data.get("post_numbers") or []):
         try:
@@ -4586,25 +4606,29 @@ def api_cluster_add_posts():
         cluster = db.get_ai_search_cluster(brand_id, sn)
         if not cluster:
             return jsonify({"error": "no cluster for this seed — create it first"}), 404
-        # Classify each attached post's title into a region (reuse the existing region
-        # labels) so it covers the right region or forms a new one.
-        rewrites = db.normalize_rewrites(cluster.get("rewrites_json"))
-        existing_regions = sorted({r["region"] for r in rewrites
-                                   if r.get("region") and r["region"] not in ("(unsorted)", "(from posts)")})
-        title_by_num = {}
-        for num in nums:
-            row = db.conn.execute(
-                "SELECT title FROM posts WHERE brand_id IS ? AND post_number = ?", (brand_id, num)
-            ).fetchone()
-            if row:
-                title_by_num[num] = (row["title"] or "").strip()
-        numlist = [n for n in nums if title_by_num.get(n)]
-        region_by_num = {}
-        if numlist:
-            classified = post_gen._classify_regions([title_by_num[n] for n in numlist], existing_regions)
-            for i, n in enumerate(numlist):
-                if i < len(classified):
-                    region_by_num[n] = classified[i].get("region") or ""
+        if region:
+            # Deterministic: bind every listed post to the chosen region (no classify).
+            region_by_num = {num: region for num in nums}
+        else:
+            # Classify each attached post's title into a region (reuse the existing region
+            # labels) so it covers the right region or forms a new one.
+            rewrites = db.normalize_rewrites(cluster.get("rewrites_json"))
+            existing_regions = sorted({r["region"] for r in rewrites
+                                       if r.get("region") and r["region"] not in ("(unsorted)", "(from posts)")})
+            title_by_num = {}
+            for num in nums:
+                row = db.conn.execute(
+                    "SELECT title FROM posts WHERE brand_id IS ? AND post_number = ?", (brand_id, num)
+                ).fetchone()
+                if row:
+                    title_by_num[num] = (row["title"] or "").strip()
+            numlist = [n for n in nums if title_by_num.get(n)]
+            region_by_num = {}
+            if numlist:
+                classified = post_gen._classify_regions([title_by_num[n] for n in numlist], existing_regions)
+                for i, n in enumerate(numlist):
+                    if i < len(classified):
+                        region_by_num[n] = classified[i].get("region") or ""
         res = db.attach_posts_to_cluster(brand_id, sn, nums, region_by_num=region_by_num)
         return jsonify(res)
     finally:

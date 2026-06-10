@@ -7353,7 +7353,7 @@ function _lsubsRenderClusters() {
                 `<a href="javascript:void(0)" onclick="showPostDetail(${p.id})" class="hover:underline" style="color:#0079D3">${p.post_number != null ? ('#' + p.post_number + ' ') : ''}${(p.title || '').slice(0, 80)}</a> <span class="badge badge-${p.status}">${p.status === 'published' ? 'deployed' : p.status}</span>${p.subreddit_name ? ` <span class="text-gray-600">r/${p.subreddit_name}</span>` : ''}`
             ).join('<br>');
             return `<div class="py-1" style="border-top:1px solid #20283a">
-                <div class="text-sm"><input type="checkbox" class="clu-sel-${i}" data-q="${(rw.rewrite || '').replace(/"/g, '&quot;')}" style="vertical-align:middle;margin-right:5px" title="Select this rewrite to generate for it"> ${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} ${mark} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span>${regionTag}${personaTag}</div>
+                <div class="text-sm"><input type="checkbox" class="clu-sel-${i}" data-q="${(rw.rewrite || '').replace(/"/g, '&quot;')}" data-region="${(rw.region || '').replace(/"/g, '&quot;')}" style="vertical-align:middle;margin-right:5px" title="Select this rewrite to generate for it (or tick one + Add post #s to attach to it)"> ${rw.covered ? '<span style="color:#46d160">✓</span>' : '<span style="color:#6b7280">○</span>'} ${mark} <span style="color:${rw.covered ? '#D7DADC' : '#9ca3af'}">${rw.rewrite}</span>${regionTag}${personaTag}</div>
                 ${variants}
                 ${posts ? `<div class="text-xs ml-4 mt-1 text-gray-400">${posts}</div>` : ''}
             </div>`;
@@ -7456,10 +7456,17 @@ async function lsubsClusterAddPosts(i) {
     const raw = (document.getElementById('clu-add-' + i)?.value || '').trim();
     const nums = raw.split(/[,\s]+/).map(x => parseInt(x)).filter(x => !isNaN(x));
     if (!nums.length) { toast('Enter post number(s), e.g. 3,5', 'error'); return; }
+    // If exactly one region row is ticked, attach the posts to THAT region (deterministic
+    // — no LLM re-classification). Zero/multiple ticked → fall back to auto-classify.
+    const ticked = [...document.querySelectorAll('.clu-sel-' + i + ':checked')]
+        .map(el => el.dataset.region).filter(Boolean);
+    const region = ticked.length === 1 ? ticked[0] : null;
     try {
-        const res = await api('/api/live-posts/clusters/add-posts', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, post_numbers: nums } });
+        const body = { brand_id: cl.brand_id, seed: cl.seed, post_numbers: nums };
+        if (region) body.region = region;
+        const res = await api('/api/live-posts/clusters/add-posts', { method: 'POST', body });
         const got = (res.attached || []).length, miss = (res.not_found || []);
-        toast(`Added ${got} post${got === 1 ? '' : 's'} to the cluster${miss.length ? ` · not found: #${miss.join(', #')}` : ''}`, got ? 'success' : 'error');
+        toast(`Added ${got} post${got === 1 ? '' : 's'}${region ? ` to “${region}”` : ' to the cluster'}${miss.length ? ` · not found: #${miss.join(', #')}` : ''}`, got ? 'success' : 'error');
         lsubsLoadClusters(true);
     } catch (e) {
         toast('Add failed: ' + (e.message || e), 'error');

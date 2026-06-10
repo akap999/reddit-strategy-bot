@@ -894,6 +894,9 @@ class Database:
                 "id": r["id"], "title": r["title"], "status": r["status"],
                 "post_number": r["post_number"], "subreddit_name": r["subreddit_name"],
                 "target_query": (meta.get("target_query") or "").strip(),
+                # Stable region identity stamped at production time (coverage joins on
+                # this); empty for legacy posts that predate the stamp.
+                "region": (meta.get("region") or "").strip(),
             })
         return out
 
@@ -986,6 +989,7 @@ class Database:
                 # the post's title as a variant (a real phrasing).
                 kept = by_region[region.lower()]
                 tq = kept["query"]
+                meta_region = kept.get("region") or region
                 vs = kept.setdefault("variants", [])
                 if title and title.lower() != tq.lower() and title.lower() not in {v.lower() for v in vs}:
                     vs.append(title)
@@ -993,6 +997,7 @@ class Database:
             else:
                 tq = (meta.get("target_query") or "").strip() or title
                 reg = region or "(from posts)"
+                meta_region = reg
                 if tq and tq.lower() not in lower:
                     new_rw = {"query": tq, "region": reg, "source": "manual", "variants": [], "persona": ""}
                     rewrites.append(new_rw)
@@ -1000,10 +1005,12 @@ class Database:
                     if reg.lower() not in ("(unsorted)", "(from posts)"):
                         by_region.setdefault(reg.lower(), new_rw)
                 into_new.append(num)
+            # Stamp the covered region into ai_search_meta so the coverage view joins on
+            # the stable region identity (not re-matched text).
             self.conn.execute(
                 "UPDATE posts SET ai_search_meta=? WHERE id=?",
                 (json.dumps({"seed": seed, "anchor": anchor, "target_query": tq,
-                             "persona": meta.get("persona", "")}), row["id"]))
+                             "persona": meta.get("persona", ""), "region": meta_region}), row["id"]))
             attached.append(num)
         self.conn.commit()
         self.upsert_ai_search_cluster(

@@ -125,6 +125,7 @@ class PostGenerator:
         #    instead of repeating. Exact X/N coverage.
         #  - Without a seed: today's behavior (full fan-out, no gap tracking).
         coverage_focus = None
+        region_by_query = {}           # canonical rewrite query (lower) -> its region label
         checklist_json = None
         self.last_coverage = None
         remaining_gaps = None          # None => not gap-filling
@@ -195,6 +196,7 @@ class PostGenerator:
                 # keyed by the rewrite query so generation/saving can look them up.
                 variants_by_query = {r["query"].strip().lower(): (r.get("variants") or []) for r in rewrites}
                 persona_by_query = {r["query"].strip().lower(): (r.get("persona") or "") for r in rewrites}
+                region_by_query = {r["query"].strip().lower(): (r.get("region") or "") for r in rewrites}
                 coverage_focus = {"anchor": anchor, "rewrites": rewrite_queries, "checklist": checklist,
                                   "variants_by_query": variants_by_query, "persona_by_query": persona_by_query}
                 if checklist:
@@ -231,6 +233,7 @@ class PostGenerator:
                     "variants_by_query": {r["query"].strip().lower(): (r.get("variants") or []) for r in _rws},
                     "persona_by_query": {r["query"].strip().lower(): (r.get("persona") or "") for r in _rws},
                 }
+                region_by_query = {r["query"].strip().lower(): (r.get("region") or "") for r in _rws}
                 if coverage_focus["checklist"]:
                     checklist_json = json.dumps(coverage_focus["checklist"])
 
@@ -283,6 +286,48 @@ class PostGenerator:
                 if not run_gaps:
                     break
                 n_intent = min(n_intent, len(run_gaps))
+
+            # ---- AI-Search cluster mode (gap-fill / explicit selection): generate ONE
+            # post per targeted rewrite, showing the model only that single rewrite, and
+            # BIND the post to that exact rewrite (query + region) IN CODE. The post can
+            # never drift to a sibling region and never lands nowhere: the binding is a
+            # recorded fact from production, not re-derived from the model's wording. ----
+            if ai_search and run_gaps is not None and coverage_focus is not None:
+                _anchor = coverage_focus.get("anchor") or None
+                _brand_kind = (primary_brand.get("category") or "").strip()
+                for gap_q in list(run_gaps)[:n_intent]:
+                    single_focus = {**coverage_focus, "rewrites": [gap_q]}
+                    cands = self._generate_candidates_for_intent(
+                        subreddit, brands, intent,
+                        self._select_storylines_from_dist(merged_dist, 1),
+                        existing_titles, 2, context_only=context_only,
+                        seed_focus=None, coverage_focus=single_focus, facet_targets=None)
+                    if not cands:
+                        print(f"[post_gen] AI-Search: no candidate for region «{gap_q[:60]}» — gap left open")
+                        continue
+                    # Bind every candidate to THIS rewrite by construction (not its
+                    # self-report), so scoring/gate/selection all judge it against the
+                    # region it was generated for.
+                    for c in cands:
+                        c["target_query"] = gap_q
+                        c["ai_query_score"] = self._score_ai_query_relevance(
+                            c["title"], c["body"], anchor=_anchor,
+                            target_query=gap_q, brand_kind=_brand_kind)
+                    cands = self._embedding_gate(cands)
+                    best = self._select_cluster_best(cands, 1)
+                    if not best:
+                        print(f"[post_gen] AI-Search: no candidate cleared the bar for region «{gap_q[:60]}» — gap left open")
+                        continue
+                    post = best[0]
+                    post["intent"] = intent
+                    post["target_query"] = gap_q                       # exact canonical
+                    post["region"] = region_by_query.get(gap_q.strip().lower(), "")
+                    existing_titles.append(post["title"])
+                    run_gaps = [g for g in run_gaps if g.strip().lower() != gap_q.strip().lower()]
+                    targeted_count += 1
+                    selected.append(post)
+                continue  # per-rewrite path done for this intent
+
             storylines_for_intent = self._select_storylines_from_dist(merged_dist, n_intent)
             # Gap-fill: steer this intent to the REMAINING gaps only.
             intent_focus = coverage_focus
@@ -412,11 +457,16 @@ class PostGenerator:
             if ai_search:
                 _pbq = (coverage_focus or {}).get("persona_by_query", {})
                 _tq = (post.get("target_query") or "").strip().lower()
+                # `region` is the STABLE identity coverage joins on. Per-rewrite mode
+                # stamps post["region"] by construction; otherwise fall back to the
+                # query→region map. So the post is credited to the exact region it was
+                # generated for — never re-matched from text.
                 ai_search_meta = json.dumps({
                     "seed": seed,
                     "anchor": _anchor,
                     "target_query": post.get("target_query"),
                     "persona": _pbq.get(_tq, ""),
+                    "region": post.get("region") or region_by_query.get(_tq, ""),
                 })
             post_id = self.db.save_post(
                 subreddit_id=subreddit["id"],
@@ -528,9 +578,9 @@ STRICT RULES:
      user explains their situation — this is what powers GEO ranking.
      The detected post intent for this title is: {intent_label}.
      The body MUST include a natural-language phrasing of the underlying
-     long-tail query somewhere inside it (e.g. "trying to figure out the
-     best [category] for [audience] dealing with [pain-point]") — woven
-     into a sentence the user might naturally write, NOT as a header.
+     long-tail recommendation query somewhere inside it — woven into a
+     sentence the user might naturally write (describe their situation and
+     what they're trying to pick or buy), NOT as a header and NOT a copied template.
   5. The body must be COMPATIBLE with the title — answer / expand / give
      context for whatever question or situation the title raises. Do NOT
      drift to a different topic.
@@ -1157,8 +1207,10 @@ Do this in your head, then return the merged result:
      THIS brand/seed (SKIP any that don't fit); fill the "Constraint" slot with this
      brand's dominant buying constraint (copyright/licensing, price/free, compliance,
      integration, speed…):
-       - Category / best tool      → "best X for Y"
-       - Comparison / alternative  → "X vs Y", "alternative to <competitor>"
+       - Category / top pick       → the buyer wants the leading option in the category
+                                      for their need (phrase it naturally — do NOT default
+                                      to a "best …" wording)
+       - Comparison / alternative  → weighing options, or an alternative to a named competitor
        - Constraint                → the #1 buying concern (e.g. copyright-safe, budget)
        - Use-case / workflow        → the specific job (auto-sync to video, for podcasts)
        - Persona / segment          → for small business, for beginners/pros
@@ -1173,7 +1225,9 @@ Do this in your head, then return the merged result:
      rather than the brand. (For product / retailer brands this is already satisfied —
      keep the usual product / buy-intent regions.)
   3. Write ONE rewrite per region — phrased the way the engines actually search
-     (short, keyword-ish, real intent), distinct from the others. HARD RULE: if two
+     (short, keyword-ish, real intent), distinct from the others. VARY the phrasing
+     across regions: use whatever wording a real searcher would for THAT region's
+     intent; do NOT force a "best …" shape on every region. HARD RULE: if two
      rewrites would get essentially the SAME AI answer, keep only ONE. Aim for
      ~5-8 rewrites TOTAL — fewer, distinct regions beat many synonyms.
   3b. For EACH region, also list its VARIANTS — the 2-5 close phrasings/paraphrases an
@@ -1768,7 +1822,7 @@ CRITICAL RULES:
 1. Posts must NEVER mention any brand name ({brand_names}) — they are generic domain questions/experiences
 2. Posts should NOT look AI-generated or markety
 3. Each post must feel like a real person wrote it
-4. Prioritize titles that are common search queries (e.g., "best X for Y", "which X should I use")
+4. Each title is a genuine recommendation question — its natural answer names a specific product/service to use or buy. Phrase it the way a real person would actually ask, and VARY the structure and opening word across the batch; do NOT default every title to a "best …" shape.
 5. Vary tone: some casual, some detailed, some frustrated, some curious
 6. Body text should be 2-4 paragraphs, conversational, with personal context
 7. Include minor imperfections: occasional typos, incomplete thoughts, run-on sentences
@@ -1857,7 +1911,7 @@ Rate 0-10 on BOTH dimensions together:
   (1) How likely a real person types this exact question (or close paraphrase) into an AI / search engine, AND
   (2) Whether the NATURAL ANSWER is to RECOMMEND a specific product / brand / service to use or buy.
 
-High (8-10): Clearly recommendation-seeking — a helpful AI would answer by naming specific products/services/suppliers ("best X for Y", "which X should I use for Z", "go-to X for Y", "alternative to X for Y", "where to buy X online", "best place to order X", "who sells X").
+High (8-10): Clearly recommendation-seeking — a helpful AI would answer by NAMING a specific product / service / supplier to use or buy. Judge by the ANSWER the title would get, NOT by how it is worded: any phrasing qualifies as long as the natural answer is a specific recommendation. Do NOT favor a "best …" wording over equally-valid recommendation questions.
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
 Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}{entity_block}
 

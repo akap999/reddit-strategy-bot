@@ -1151,6 +1151,27 @@ def api_get_post(pid):
     finally:
         db.close()
 
+@app.route("/api/posts/<int:pid>/regenerate-body", methods=["POST"])
+def api_regenerate_post_body(pid):
+    """Rewrite a post's BODY for the SAME title (title never changes). Synchronous —
+    one Claude call. Grounds the new body in the post's brand(s) + its ai_search_meta
+    (anchor/target_query/persona) and the shared ask-once body rules."""
+    db, claude, _, post_gen, _ = make_generators()
+    try:
+        post = db.get_post(pid)
+        if not post:
+            return jsonify({"error": "Not found"}), 404
+        brands = db.get_brands_for_post(pid)
+        if not brands:
+            return jsonify({"error": "post has no linked brand to ground the body"}), 400
+        body = post_gen.regenerate_body(post, brands)
+        if not body:
+            return jsonify({"error": "regeneration returned no body"}), 502
+        db.update_post_body(pid, body)
+        return jsonify({"body": body})
+    finally:
+        db.close()
+
 @app.route("/api/posts/custom", methods=["POST"])
 def api_add_custom_post():
     db = get_db()
@@ -2867,6 +2888,18 @@ def api_check_live_list_runs():
     db = get_db()
     try:
         return jsonify({"runs": db.list_check_live_runs(limit=100)})
+    finally:
+        db.close()
+
+
+@app.route("/api/check-live/removed-comments", methods=["GET"])
+def api_check_live_removed_comments():
+    """All comments currently marked removed / replace (with brand, subreddit, account)
+    for the Check Live → Analyse view. The UI does all filtering + per-brand/subreddit/
+    account aggregation client-side from this one list."""
+    db = get_db()
+    try:
+        return jsonify({"items": db.get_removed_comments()})
     finally:
         db.close()
 

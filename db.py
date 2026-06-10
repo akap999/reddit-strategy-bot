@@ -562,6 +562,11 @@ class Database:
         self.conn.execute("UPDATE posts SET status = ? WHERE id = ?", (status, post_id))
         self.conn.commit()
 
+    def update_post_body(self, post_id, body):
+        """Replace a post's body (used by the 'Regenerate body' action — title kept)."""
+        self.conn.execute("UPDATE posts SET body = ? WHERE id = ?", (body or "", post_id))
+        self.conn.commit()
+
     def undeploy_post(self, post_id):
         """Revert a deployed (published) post back to complete status.
 
@@ -3180,6 +3185,47 @@ class Database:
         else:
             query = f"SELECT * FROM ({q1} UNION ALL {q2}) combined {order}"
             rows = self.conn.execute(query, p1 + p2).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_removed_comments(self, brand_id=None, subreddit_id=None):
+        """All comments (regular + search) currently marked removed / replace, with their
+        brand + subreddit + account, for the Check Live → Analyse view. `replace` =
+        removed on Reddit but still inside the 14-day re-deploy window. No pagination —
+        the removed set is a small subset and analytics needs the full list."""
+        w1 = ["c.status IN ('removed','replace')"]
+        w2 = ["sc.status IN ('removed','replace')"]
+        p1, p2 = [], []
+        if brand_id:
+            w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN "
+                      "(SELECT post_id FROM post_brands WHERE brand_id = ?)))")
+            p1 += [brand_id, brand_id]
+            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+        if subreddit_id:
+            w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
+            row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+            w2.append("LOWER(sp.subreddit) = LOWER(?)"); p2.append(row["name"] if row else "")
+        where1 = " AND ".join(w1)
+        where2 = " AND ".join(w2)
+        q1 = f"""SELECT c.id, 'comment' AS source, c.status, c.prev_status,
+                        c.account_id, c.comment_type, c.reddit_comment_url,
+                        c.posted_at, c.deployed_at, c.last_live_check, c.created_at,
+                        p.title AS post_title, s.name AS subreddit_name, b.name AS brand_name
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
+                 WHERE {where1}"""
+        q2 = f"""SELECT sc.id, 'search_comment' AS source, sc.status, sc.prev_status,
+                        sc.account_id, NULL AS comment_type, sc.reddit_comment_url,
+                        sc.posted_at, sc.deployed_at, sc.last_live_check, sc.created_at,
+                        sp.title AS post_title, sp.subreddit AS subreddit_name, b.name AS brand_name
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
+                 WHERE {where2}"""
+        query = (f"SELECT * FROM ({q1} UNION ALL {q2}) combined "
+                 "ORDER BY COALESCE(last_live_check, deployed_at, created_at) DESC, id DESC")
+        rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,

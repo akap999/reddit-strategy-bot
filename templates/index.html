@@ -980,33 +980,34 @@ async function showAddBrandModal(subId) {
     `);
 }
 
-async function enrichBrandDraft() {
-    const name = document.getElementById('brand-name').value.trim();
-    const url = document.getElementById('brand-url').value.trim();
+async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
+    const name = (document.getElementById('brand-name')?.value || '').trim();
+    const url = (document.getElementById('brand-url')?.value || '').trim();
     if (!name && !url) { toast('Enter brand name or URL first', 'error'); return; }
-    const btn = document.getElementById('brand-enrich-btn');
-    const original = btn.innerHTML;
-    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>';
-    btn.disabled = true;
+    const btn = document.getElementById(btnId);
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>'; btn.disabled = true; }
+    // Guard each field — the simpler Add-Brand modal lacks the GEO enrichment inputs,
+    // so only populate the ones present (never crash on a missing element).
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
     try {
         const draft = await api('/api/brands/enrich', { method: 'POST', body: { name, domain_url: url } });
-        if (draft.category !== undefined) document.getElementById('brand-category').value = draft.category || '';
-        if (draft.audience !== undefined) document.getElementById('brand-audience').value = draft.audience || '';
         const joinArr = a => Array.isArray(a) ? a.join('\n') : '';
-        document.getElementById('brand-use-cases').value = joinArr(draft.use_cases);
-        document.getElementById('brand-pain-points').value = joinArr(draft.pain_points);
-        document.getElementById('brand-features').value = joinArr(draft.features);
-        document.getElementById('brand-competitors').value = Array.isArray(draft.competitors) ? draft.competitors.join(', ') : '';
-        // Only overwrite context if empty or user confirms
+        if (draft.category !== undefined) setVal('brand-category', draft.category || '');
+        if (draft.audience !== undefined) setVal('brand-audience', draft.audience || '');
+        setVal('brand-use-cases', joinArr(draft.use_cases));
+        setVal('brand-pain-points', joinArr(draft.pain_points));
+        setVal('brand-features', joinArr(draft.features));
+        setVal('brand-competitors', Array.isArray(draft.competitors) ? draft.competitors.join(', ') : '');
+        // Only overwrite context if empty
         const ctxEl = document.getElementById('brand-context');
-        if (!ctxEl.value.trim() && draft.context_summary) ctxEl.value = draft.context_summary;
-        const msg = draft._page_fetched ? 'Enriched from homepage — review and Save' : 'Enriched (homepage unreachable — review carefully)';
+        if (ctxEl && !ctxEl.value.trim() && draft.context_summary) ctxEl.value = draft.context_summary;
+        const msg = draft._page_fetched ? 'Analyzed from homepage — review and Save' : 'Analyzed (homepage unreachable — review carefully)';
         toast(msg, 'success');
     } catch (e) {
-        toast('Enrichment failed', 'error');
+        toast('Analyze failed', 'error');
     } finally {
-        btn.innerHTML = original;
-        btn.disabled = false;
+        if (btn) { btn.innerHTML = original; btn.disabled = false; }
     }
 }
 
@@ -1042,30 +1043,10 @@ function selectExistingBrandInModal() {
 }
 
 async function analyzeAddBrandUrl() {
-    const url = document.getElementById('brand-url').value;
-    if (!url) { toast('Enter a website URL first', 'error'); return; }
-    const btn = document.getElementById('brand-analyze-btn');
-    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px"></span>'; btn.disabled = true;
-
-    try {
-        const { task_id } = await api('/api/analyze-brand', { method: 'POST', body: { domain_url: url } });
-        const poll = setInterval(async () => {
-            const t = await api(`/api/tasks/${task_id}`);
-            if (t.status === 'complete') {
-                clearInterval(poll);
-                const info = t.result;
-                document.getElementById('brand-name').value = info.brand_name || '';
-                document.getElementById('brand-context').value = info.brand_context || '';
-                document.getElementById('brand-keywords').value = (info.brand_keywords || []).join(', ');
-                btn.innerHTML = 'Auto-analyze'; btn.disabled = false;
-                toast(`Analyzed: ${info.brand_name}`, 'success');
-            } else if (t.status === 'error') {
-                clearInterval(poll);
-                btn.innerHTML = 'Auto-analyze'; btn.disabled = false;
-                toast(`Could not analyze: ${t.error}`, 'error');
-            }
-        }, 2000);
-    } catch(e) { btn.innerHTML = 'Auto-analyze'; btn.disabled = false; }
+    // Auto-analyze now runs the SAME reliable homepage-enrichment pipeline as the
+    // ✨ Enrich button (the old /api/analyze-brand extractor was unreliable). It fills
+    // the same fields; the spinner shows on the Auto-analyze button.
+    return enrichBrandDraft('brand-analyze-btn');
 }
 
 function _splitLines(id) {
@@ -2568,7 +2549,7 @@ async function showPostDetail(pid) {
         </div>
         ${(() => { let m=null; try { m = JSON.parse(post.ai_search_meta||'null'); } catch(e){} if (!m || (!m.seed && !m.anchor && !m.target_query)) return ''; const rows=[]; if (m.seed) rows.push(`<b>Root reference prompt:</b> ${m.seed}`); if (m.anchor) rows.push(`<b>Anchor:</b> ${m.anchor}`); if (m.target_query) rows.push(`<b>This post targets:</b> ${m.target_query}`); if (m.persona && m.persona !== '(broad)') rows.push(`<b>Persona:</b> 🧑 ${m.persona}`); return `<div class="text-xs mb-2" style="color:#f0abfc">${rows.join('<br>')}</div>`; })()}
         ${(() => { let ck=[]; try { ck = JSON.parse(post.concept_checklist||'[]'); } catch(e){} return ck.length ? `<div class="text-xs mb-3" style="color:#a5b4fc"><b>AI-Search cluster coverage:</b> ${ck.join(' · ')}</div>` : ''; })()}
-        <div class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
+        <div data-post-body class="text-sm text-gray-300 whitespace-pre-wrap mb-4 max-h-60 overflow-y-auto">${post.body}</div>
         ${post.image_prompt ? `<p class="text-xs text-gray-500 mb-3">Image prompt: ${post.image_prompt}</p>` : ''}
         ${post.reddit_url ? `<p class="text-xs text-gray-400 mb-3 break-all">Reddit: ${post.reddit_url}</p>` : ''}
         <p class="text-xs text-gray-500">${post.comment_count} comments</p>
@@ -2579,11 +2560,32 @@ async function showPostDetail(pid) {
                  list the user clicked the title from (Posts tab,
                  Generate tab result panel, Comments tab card, etc.). -->
             <button class="btn btn-sm btn-accent" onclick="closeModal(); lsubsGenHqForPost(${post.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
+            <button class="btn btn-sm btn-secondary" onclick="regeneratePostBody(${post.id}, this)" title="Rewrite the body for this same title (fresh take)">↻ Regenerate body</button>
             ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
             ${isReported ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="closeModal(); undoReportThisPost(${post.id})">↺ Undo report</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
         </div>
     `);
+}
+
+async function regeneratePostBody(pid, btn) {
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '↻ Regenerating…'; }
+    try {
+        const res = await api(`/api/posts/${pid}/regenerate-body`, { method: 'POST' });
+        if (res && res.body) {
+            const bodyEl = document.querySelector('[data-post-body]');
+            if (bodyEl) bodyEl.textContent = res.body;          // safe: textContent, not HTML
+            if (typeof _postsUpdateLocal === 'function') _postsUpdateLocal(pid, { body: res.body });
+            toast('Body regenerated — title unchanged', 'success');
+        } else {
+            toast('Regenerate returned no body', 'error');
+        }
+    } catch (e) {
+        toast('Regenerate failed: ' + (e.message || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig || '↻ Regenerate body'; }
+    }
 }
 
 async function publishPost(pid) {
@@ -11162,20 +11164,143 @@ let _allBrandsForClients = [];
 // + saved so the admin can come back to it.
 // =========================================================================
 
+let _checkLiveTab = 'runs';
+let _checkLiveUI = { tab:'runs', brand:'', sub:'', status:'', month:'', from:'', to:'', account:'', source:'', prev:'' };
+let _checkLiveRemovedCache = null;
+function _checkLiveSaveUI(){ try{ localStorage.setItem('checkLiveUI', JSON.stringify(_checkLiveUI)); }catch(e){} }
+function _checkLiveLoadUI(){ try{ const s=JSON.parse(localStorage.getItem('checkLiveUI')||'{}'); if(s&&typeof s==='object'){ _checkLiveUI={..._checkLiveUI,...s}; _checkLiveTab=_checkLiveUI.tab||'runs'; } }catch(e){} }
+
 async function renderCheckLive(c) {
+    _checkLiveLoadUI();
     c.innerHTML = `
-        <div class="flex justify-between items-center mb-4">
-            <div>
-                <h2 class="text-xl font-bold" style="color:#9efbb4">Check Live</h2>
-                <p class="text-xs text-gray-400 mt-1">Health-check a sheet of comment URLs. Each run is named and saved — no DB changes are made.</p>
-            </div>
-            <button class="btn btn-accent btn-sm" onclick="showCheckLiveStartModal()">+ New Run</button>
+        <div class="mb-3">
+            <h2 class="text-xl font-bold" style="color:#9efbb4">Check Live</h2>
+            <p class="text-xs text-gray-400 mt-1"><b>Runs</b> — health-check a sheet of comment URLs (no DB changes). <b>Analyse</b> — your comments currently marked removed, by brand / subreddit / account.</p>
         </div>
-        <div id="checklive-list">
-            <div class="spinner mx-auto my-6"></div>
+        <div class="flex gap-1 mb-4 border-b border-gray-700">
+            <div id="checklive-tab-runs" class="tab ${_checkLiveTab==='runs'?'active':''}" onclick="checkLiveSwitchTab('runs')">📊 Runs</div>
+            <div id="checklive-tab-analyse" class="tab ${_checkLiveTab==='analyse'?'active':''}" onclick="checkLiveSwitchTab('analyse')">🔍 Analyse removed</div>
         </div>
+        <div id="checklive-tab-content"></div>
     `;
-    await _checkLiveLoadRuns();
+    renderCheckLiveTabContent();
+}
+
+function checkLiveSwitchTab(t){
+    _checkLiveTab=t; _checkLiveUI.tab=t; _checkLiveSaveUI();
+    const r=document.getElementById('checklive-tab-runs'), a=document.getElementById('checklive-tab-analyse');
+    if(r) r.classList.toggle('active', t==='runs');
+    if(a) a.classList.toggle('active', t==='analyse');
+    renderCheckLiveTabContent();
+}
+function renderCheckLiveTabContent(){
+    const c=document.getElementById('checklive-tab-content'); if(!c) return;
+    if(_checkLiveTab==='analyse') renderCheckLiveAnalyse(c);
+    else renderCheckLiveRuns(c);
+}
+function renderCheckLiveRuns(c){
+    c.innerHTML = `
+        <div class="flex justify-end mb-3"><button class="btn btn-accent btn-sm" onclick="showCheckLiveStartModal()">+ New Run</button></div>
+        <div id="checklive-list"><div class="spinner mx-auto my-6"></div></div>`;
+    _checkLiveLoadRuns();
+}
+
+// ---- Analyse removed comments ----
+function _clEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _clDetectDate(it){ return (it.last_live_check || it.deployed_at || it.posted_at || it.created_at || ''); }
+function _clSourceLabel(s){ return s==='search_comment' ? 'search' : 'live-subs'; }
+function checkLiveSetFilter(k,v){ _checkLiveUI[k]=v; _checkLiveSaveUI(); const c=document.getElementById('checklive-tab-content'); if(c) _clRenderAnalyse(c); }
+function checkLiveClearFilters(){ Object.assign(_checkLiveUI,{brand:'',sub:'',status:'',month:'',from:'',to:'',account:'',source:'',prev:''}); _checkLiveSaveUI(); const c=document.getElementById('checklive-tab-content'); if(c) _clRenderAnalyse(c); }
+async function checkLiveRefreshRemoved(){ _checkLiveRemovedCache=null; const c=document.getElementById('checklive-tab-content'); if(c) renderCheckLiveAnalyse(c); }
+
+async function renderCheckLiveAnalyse(c){
+    c.innerHTML = `<div class="spinner mx-auto my-6"></div>`;
+    if(_checkLiveRemovedCache===null){
+        try{ const res=await api('/api/check-live/removed-comments'); _checkLiveRemovedCache=(res&&res.items)||[]; }
+        catch(e){ c.innerHTML=`<p class="text-sm text-red-400">Failed to load removed comments: ${e.message||e}</p>`; return; }
+    }
+    _clRenderAnalyse(c);
+}
+
+function _clFiltered(){
+    const f=_checkLiveUI;
+    return (_checkLiveRemovedCache||[]).filter(it=>{
+        if(f.brand && (it.brand_name||'')!==f.brand) return false;
+        if(f.sub && (it.subreddit_name||'')!==f.sub) return false;
+        if(f.status && it.status!==f.status) return false;
+        if(f.account && (it.account_id||'')!==f.account) return false;
+        if(f.source && it.source!==f.source) return false;
+        if(f.prev && (it.prev_status||'')!==f.prev) return false;
+        const dt=_clDetectDate(it);
+        if(f.month && dt.substring(0,7)!==f.month) return false;
+        const d=dt.substring(0,10);
+        if(f.from && d && d<f.from) return false;
+        if(f.to && d && d>f.to) return false;
+        return true;
+    });
+}
+
+function _clRenderAnalyse(c){
+    const all=_checkLiveRemovedCache||[];
+    const f=_checkLiveUI;
+    const distinct=(arr,key)=>[...new Set(arr.map(x=>x[key]).filter(v=>v!=null&&v!==''))].sort();
+    const months=[...new Set(all.map(x=>_clDetectDate(x).substring(0,7)).filter(Boolean))].sort().reverse();
+    const opts=(vals,cur,allLabel)=>`<option value="">${allLabel}</option>`+vals.map(v=>`<option value="${_clEsc(v)}" ${String(v)===String(cur)?'selected':''}>${_clEsc(v)}</option>`).join('');
+    const items=_clFiltered();
+    const nRemoved=items.filter(i=>i.status==='removed').length, nReplace=items.filter(i=>i.status==='replace').length;
+    const breakdown=(key,label,fmt)=>{ const m={}; items.forEach(it=>{ const k=(it[key]==null||it[key]==='')?'—':it[key]; m[k]=(m[k]||0)+1; });
+        const rows=Object.entries(m).sort((a,b)=>b[1]-a[1]);
+        return `<div class="card p-3" style="background:#1a1a1b;border:1px solid #343536;min-width:200px;flex:1">
+            <div class="text-xs font-bold mb-2" style="color:#9efbb4">${label} <span class="text-gray-500">(${rows.length})</span></div>
+            ${rows.length?rows.map(([k,n])=>`<div class="flex justify-between text-xs py-0.5"><span style="color:#D7DADC">${_clEsc(fmt?fmt(k):k)}</span><span class="text-gray-400">${n}</span></div>`).join(''):'<div class="text-xs text-gray-600">none</div>'}
+        </div>`; };
+    const inp='background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px';
+    c.innerHTML = `
+        <div class="flex flex-wrap gap-2 items-end mb-3">
+            <label class="text-xs text-gray-400">Brand<br><select onchange="checkLiveSetFilter('brand',this.value)" style="${inp};min-width:150px">${opts(distinct(all,'brand_name'),f.brand,'All brands')}</select></label>
+            <label class="text-xs text-gray-400">Subreddit<br><select onchange="checkLiveSetFilter('sub',this.value)" style="${inp};min-width:150px">${opts(distinct(all,'subreddit_name'),f.sub,'All subreddits')}</select></label>
+            <label class="text-xs text-gray-400">Status<br><select onchange="checkLiveSetFilter('status',this.value)" style="${inp}">
+                <option value="" ${f.status===''?'selected':''}>removed + replace</option>
+                <option value="removed" ${f.status==='removed'?'selected':''}>removed only</option>
+                <option value="replace" ${f.status==='replace'?'selected':''}>replace only</option></select></label>
+            <label class="text-xs text-gray-400">Month<br><select onchange="checkLiveSetFilter('month',this.value)" style="${inp}">${opts(months,f.month,'All months')}</select></label>
+            <label class="text-xs text-gray-400">From<br><input type="date" value="${_clEsc(f.from)}" onchange="checkLiveSetFilter('from',this.value)" style="${inp}"></label>
+            <label class="text-xs text-gray-400">To<br><input type="date" value="${_clEsc(f.to)}" onchange="checkLiveSetFilter('to',this.value)" style="${inp}"></label>
+            <label class="text-xs text-gray-400">Account<br><select onchange="checkLiveSetFilter('account',this.value)" style="${inp};min-width:130px">${opts(distinct(all,'account_id'),f.account,'All accounts')}</select></label>
+            <label class="text-xs text-gray-400">Source<br><select onchange="checkLiveSetFilter('source',this.value)" style="${inp}">
+                <option value="" ${f.source===''?'selected':''}>All sources</option>
+                <option value="comment" ${f.source==='comment'?'selected':''}>live-subs</option>
+                <option value="search_comment" ${f.source==='search_comment'?'selected':''}>search</option></select></label>
+            <label class="text-xs text-gray-400">Was (before)<br><select onchange="checkLiveSetFilter('prev',this.value)" style="${inp}">${opts(distinct(all,'prev_status'),f.prev,'Any prior status')}</select></label>
+            <button class="btn btn-sm btn-secondary" onclick="checkLiveClearFilters()">Clear</button>
+            <button class="btn btn-sm btn-secondary" onclick="checkLiveRefreshRemoved()">↻ Refresh</button>
+        </div>
+        <div class="flex gap-3 mb-3 text-sm">
+            <span class="badge" style="background:#3a1020;color:#ff8aa8">${items.length} removed</span>
+            <span class="text-xs text-gray-400" style="align-self:center">removed: <b style="color:#ff6b9b">${nRemoved}</b> · replace: <b style="color:#ffb86b">${nReplace}</b></span>
+        </div>
+        <div class="flex flex-wrap gap-3 mb-4">
+            ${breakdown('brand_name','Per brand')}
+            ${breakdown('subreddit_name','Per subreddit', s=>s==='—'?s:('r/'+s))}
+            ${breakdown('account_id','Per account')}
+        </div>
+        ${items.length?`
+        <table>
+            <thead><tr><th>Subreddit</th><th>Brand</th><th>Account</th><th>Source</th><th>Post</th><th>Status</th><th>Was</th><th>Detected</th><th></th></tr></thead>
+            <tbody>${items.map(it=>`
+                <tr>
+                    <td class="text-xs">${it.subreddit_name?('r/'+_clEsc(it.subreddit_name)):'—'}</td>
+                    <td class="text-xs">${_clEsc(it.brand_name||'—')}</td>
+                    <td class="text-xs text-gray-400">${_clEsc(it.account_id||'—')}</td>
+                    <td class="text-xs text-gray-400">${_clSourceLabel(it.source)}</td>
+                    <td class="text-xs" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_clEsc((it.post_title||'').slice(0,80))}</td>
+                    <td><span class="badge badge-${it.status}">${it.status}</span></td>
+                    <td class="text-xs text-gray-500">${_clEsc(it.prev_status||'—')}</td>
+                    <td class="text-xs text-gray-500">${_clEsc(_clDetectDate(it).substring(0,16).replace('T',' '))}</td>
+                    <td>${it.reddit_comment_url?`<a href="${_clEsc(it.reddit_comment_url)}" target="_blank" rel="noopener" class="text-xs hover:underline" style="color:#0079D3">open ↗</a>`:''}</td>
+                </tr>`).join('')}</tbody>
+        </table>`:'<p class="text-sm text-gray-500 mt-3">No removed comments match these filters.</p>'}
+    `;
 }
 
 async function _checkLiveLoadRuns() {

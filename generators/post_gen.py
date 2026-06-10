@@ -32,6 +32,25 @@ FIXED_REGIONS = [
 # sparse + region-unique regardless of what the model returns.
 MAX_FANOUT_REWRITES = 10
 
+# Shared BODY composition rules — used by both the batch generator
+# (_generate_candidates_for_intent) and the single-post regenerator (regenerate_body)
+# so they never drift. The headline rule is ASK ONCE: a real person states the request
+# in one sentence and spends the rest giving context. Retrieval coverage comes from
+# concrete detail (each key term appearing once), NOT from re-asking the question in
+# several phrasings (which reads spammy / AI-generated and hurts Reddit survival).
+_BODY_GUIDANCE = """  • BODY — 2-4 short first-person paragraphs that pay off the title. ASK THE QUESTION
+    EXACTLY ONCE: state the request in a single natural sentence, then spend the rest
+    giving real context — the situation, constraints and specifics behind it. Do NOT
+    re-ask or rephrase the same question multiple times; a real person asks once.
+  • Coverage for LLM retrieval comes from CONCRETE DETAIL, not repetition: let the
+    brand's category, audience, pain-points and use-cases surface ONCE EACH as the user
+    describes their situation (specific numbers, time periods, context add authenticity
+    and keyword overlap) — never as restated versions of the ask.
+  • Conversational imperfections: occasional typos, incomplete thoughts, run-on
+    sentences. It should sound like a real person asking, not pitching.
+  • Do NOT look AI-generated. No marketing language, no excessive formatting, no emoji,
+    no dashes. Never mention the target brand name in the body."""
+
 
 class PostGenerator:
     def __init__(self, claude: ClaudeClient, db: Database):
@@ -1431,6 +1450,54 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
                   f"(cosine < {EMBED_THRESHOLD})")
         return keep
 
+    def regenerate_body(self, post, brands):
+        """Rewrite ONLY the body for an existing post, keeping its title unchanged.
+        Grounded in the brand block + the post's ai_search_meta (anchor / target_query /
+        persona, when present) so an AI-Search post stays on its region, and governed by
+        the shared _BODY_GUIDANCE (ask once). Returns the new body, or "" on failure."""
+        if isinstance(brands, dict):
+            brands = [brands]
+        title = (post.get("title") or "").strip()
+        if not title or not brands:
+            return ""
+        brand_block, target_names, _competitors = self._build_enriched_brand_block(brands)
+        target_names_str = ", ".join(target_names) if target_names else "(none)"
+        try:
+            meta = json.loads(post.get("ai_search_meta") or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        focus = []
+        if meta.get("anchor"):
+            focus.append(f"Anchor (keep the body on this topic): {meta['anchor']}")
+        if meta.get("target_query"):
+            focus.append(f"What this title is really asking for: {meta['target_query']}")
+        if meta.get("persona") and meta.get("persona") != "(broad)":
+            focus.append(f"The kind of person asking: {meta['persona']}")
+        focus_block = ("\n" + "\n".join(focus) + "\n") if focus else ""
+        storyline = post.get("storyline") or "question"
+        banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
+        prompt = f"""Write a NEW Reddit post BODY for this EXACT title. Do NOT change the title and do
+NOT paste it in as a heading. Produce a FRESH body (different angle / wording than before).
+
+TITLE (keep exactly as-is): "{title}"
+STORYLINE (shapes the body's voice/scenario only): {storyline}
+{focus_block}
+BRAND CONTEXT (ground the body here; NEVER name the target brand(s): {target_names_str}):
+{brand_block}
+
+BODY RULES:
+{_BODY_GUIDANCE}
+
+NEVER USE THESE PHRASES: {banned_sample}
+
+Return JSON only: {{"body": "the new post body"}}"""
+        result = self.claude.call(prompt, max_tokens=900, temperature=0.85)
+        if isinstance(result, dict):
+            return str(result.get("body") or "").strip()
+        if isinstance(result, str):
+            return result.strip()
+        return ""
+
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,
                                         seed_focus=None, coverage_focus=None,
@@ -1614,14 +1681,15 @@ Return JSON only: {{"regions": ["region for query 1", "region for query 2", "...
                     "  • These are the SPACE to cover, NOT templates — phrase each title as a "
                     "natural human question (all TITLE rules below still apply); never paste a "
                     "rewrite verbatim.\n"
-                    "  • Weave the targeted rewrite's \"also asked as\" phrasings naturally into "
-                    "that post's BODY, so the thread is retrieved however that intent is worded.\n"
+                    "  • Use the targeted rewrite's \"also asked as\" phrasings ONLY to choose "
+                    "natural vocabulary — do NOT restate them as separate asks in the body (they are "
+                    "near-duplicates of the one question). Ask once.\n"
                 )
                 if ck_str:
                     coverage_block += (
-                        "PHRASING CHECKLIST (weave these natural-language variants/concepts into "
-                        "the BODY so both keyword (BM25) and embedding retrieval match the whole "
-                        f"cluster): {ck_str}\n"
+                        "PHRASING CHECKLIST (fold these DISTINCT terms/concepts into the body as "
+                        "concrete detail, once each, so both keyword (BM25) and embedding retrieval "
+                        f"match — NOT as extra questions): {ck_str}\n"
                     )
                 coverage_json_field = ',\n            "target_query": "the ONE rewrite from the cluster this title targets"'
 
@@ -1670,32 +1738,24 @@ Claude). The post must:
   (a) Survive Reddit moderation and get engagement (so it makes it into the
       corpus that LLMs retrieve from in the first place) — the TITLE has to
       look like a real person posted it, NOT a templated marketing query.
-  (b) Rank for the underlying long-tail query when an LLM searches for it —
-      the BODY must contain the natural-language phrasing of that query, AND
-      the brand's category / audience / pain-point keywords. LLM retrieval is
-      both keyword (BM25) and semantic (embeddings); covering both means
-      verbatim phrasing + conceptual coverage in the body.
+  (b) Rank for the underlying long-tail query when an LLM searches for it — the
+      BODY includes the key terms ONCE within a believable story (the brand's
+      category / audience / pain-point words appear as the user describes their
+      situation). LLM retrieval is both keyword (BM25) and semantic (embeddings);
+      ONE natural phrasing of the question plus concrete contextual detail covers
+      both. Do NOT repeat the question in several phrasings to "cover more".
 
-These two goals are NOT in conflict if you do it right: human title, body that
-naturally includes the long-tail query phrasing within a believable story.
+These two goals are NOT in conflict if you do it right: a human title, and a body
+that asks once and otherwise reads like a real person giving context.
 
 STRICT RULES:
   1. NEVER mention any of the TARGET brand names: {target_names_str}
   2. For commercial and informational intents: also avoid all competitor names.
      For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
 {title_rules}
-  5. BODY — LLM-RETRIEVAL-FRIENDLY. 2-4 short paragraphs of first-person
-     context that pay off the title. The body MUST contain the natural-language
-     query phrasing — restate/expand the title's question in real sentences so
-     both keyword (BM25) and semantic (embedding) retrieval match. Pack the
-     brand's category, audience, pain-points, use-cases as the user describes
-     their situation. Specific numbers, time periods, regulatory context add
-     authenticity AND keyword overlap.
-  6. Conversational imperfections in the body: occasional typos, incomplete
-     thoughts, run-on sentences. Should sound like venting/asking, not pitching.
-  7. Do NOT look AI-generated. No marketing language. No excessive formatting.
-  8. Variety check: across this batch the {count} titles MUST use noticeably
-     different shapes/openings. Don't reuse the same template twice.
+{_BODY_GUIDANCE}
+  • Variety check: across this batch the {count} titles MUST use noticeably
+    different shapes/openings. Don't reuse the same template twice.
 
 NEVER USE THESE PHRASES: {banned_sample}
 """

@@ -1,4 +1,9 @@
-anthropic>=0.30.0
+# Pinned so a fresh (uncached) resolve lands on a Python 3.13-compatible set.
+# An unpinned anthropic>=0.30.0 re-resolved to an httpcore with no 3.13 wheel,
+# breaking the build once the cached pip layer was gone.
+anthropic==0.77.0
+httpx==0.28.1
+httpcore==1.0.9
 requests>=2.28.0
 beautifulsoup4>=4.12.0
 flask>=3.0.0

@@ -2905,6 +2905,42 @@ def api_check_live_removed_comments():
         db.close()
 
 
+def _valid_purge_month(m):
+    return isinstance(m, str) and len(m) == 7 and m[4] == '-' and m[:4].isdigit() and m[5:].isdigit()
+
+
+@app.route("/api/settings/ls-purge-preview", methods=["GET"])
+def api_ls_purge_preview():
+    """Dry-run count for the Live Search cleanup: how many saved/complete search posts
+    (with no worked comments) created up to & including `month` would be deleted."""
+    month = (request.args.get("month") or "").strip()
+    if not _valid_purge_month(month):
+        return jsonify({"error": "month must be YYYY-MM"}), 400
+    db = get_db()
+    try:
+        return jsonify(db.purge_untouched_search_posts(month, dry_run=True))
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/ls-purge", methods=["POST"])
+def api_ls_purge():
+    """Permanently delete untouched Live Search posts (+ comments) up to & including
+    `month`. Requires `confirm: true`. Only posts whose status is saved/complete AND whose
+    every comment is still draft/complete are removed — anything worked is left intact."""
+    data = request.get_json(silent=True) or {}
+    month = (data.get("month") or "").strip()
+    if not _valid_purge_month(month):
+        return jsonify({"error": "month must be YYYY-MM"}), 400
+    if data.get("confirm") is not True:
+        return jsonify({"error": "confirm:true required"}), 400
+    db = get_db()
+    try:
+        return jsonify(db.purge_untouched_search_posts(month, dry_run=False))
+    finally:
+        db.close()
+
+
 @app.route("/api/check-live/runs/<int:run_id>", methods=["GET"])
 def api_check_live_get_run(run_id):
     db = get_db()

@@ -129,6 +129,7 @@
             <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
             <a onclick="navigate('clients')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="clients" style="color:#0d9488">Clients</a>
             <a onclick="navigate('checklive')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="checklive" style="color:#9efbb4">Check Live</a>
+            <a onclick="navigate('settings')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="settings" style="color:#9ca3af">⚙ Settings</a>
         </nav>
         <div class="p-4 text-xs" style="border-top:1px solid #343536;color:#818384">
             CLI: python3 bot.py
@@ -573,7 +574,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients, checklive: renderCheckLive };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients, checklive: renderCheckLive, settings: renderSettings };
     (views[view] || views.dashboard)(app);
 }
 
@@ -11179,6 +11180,70 @@ let _allBrandsForClients = [];
 // status without touching the DB's comment rows. Each run is named
 // + saved so the admin can come back to it.
 // =========================================================================
+
+// ===== Settings → Live Search cleanup =====
+let _lsPurgePreview = null;  // last preview result; Delete enabled only after a preview
+function renderSettings(c) {
+    _lsPurgePreview = null;
+    const now = new Date();
+    const thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    c.innerHTML = `
+        <h2 class="text-xl font-bold mb-4" style="color:#9ca3af">⚙ Settings</h2>
+        <div class="card p-5" style="background:#1a1a1b;border:1px solid #343536;max-width:680px">
+            <h3 class="font-bold mb-1" style="color:#ff8aa8">Live Search cleanup</h3>
+            <p class="text-xs text-gray-400 mb-3" style="line-height:1.5">
+                Permanently delete saved <b>Live Search</b> posts (and their comments) that are still
+                untouched, created up to &amp; including the chosen month. <b style="color:#ff8aa8">This
+                cannot be undone.</b><br>
+                Only posts whose status is <code>saved/complete</code> <b>and whose every comment is
+                still <code>draft/complete</code></b> are removed — anything assigned / deployed / paid /
+                reported / removed / replaced is <b>never touched</b>.
+            </p>
+            <div class="flex gap-2 items-end flex-wrap mb-3">
+                <label class="text-xs text-gray-400">Delete up to &amp; including
+                    <br><input type="month" id="ls-purge-month" value="${thisMonth}" max="${thisMonth}"
+                        style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <button class="btn btn-sm btn-secondary" onclick="lsPurgePreview()">Preview</button>
+                <button class="btn btn-sm btn-danger" id="ls-purge-del-btn" onclick="lsPurgeRun()" disabled>🗑 Delete</button>
+            </div>
+            <div id="ls-purge-result" class="text-sm text-gray-300"></div>
+        </div>`;
+}
+async function lsPurgePreview() {
+    const month = document.getElementById('ls-purge-month')?.value;
+    const out = document.getElementById('ls-purge-result');
+    const delBtn = document.getElementById('ls-purge-del-btn');
+    if (!month) { toast('Pick a month', 'error'); return; }
+    out.innerHTML = '<span class="text-gray-500">Checking…</span>';
+    if (delBtn) delBtn.disabled = true; _lsPurgePreview = null;
+    try {
+        const r = await api('/api/settings/ls-purge-preview?month=' + encodeURIComponent(month));
+        _lsPurgePreview = { month, posts: r.posts, comments: r.comments };
+        out.innerHTML = `Will delete <b style="color:#ff8aa8">${r.posts}</b> post(s) + <b style="color:#ff8aa8">${r.comments}</b> comment(s) (created up to ${month}). <span class="text-gray-400">${r.protected_in_range} post(s) in that range are protected (have activity) and will be kept.</span>`;
+        if (delBtn) delBtn.disabled = (r.posts === 0);
+    } catch (e) {
+        out.innerHTML = `<span class="text-red-400">Preview failed: ${e.message || e}</span>`;
+    }
+}
+async function lsPurgeRun() {
+    if (!_lsPurgePreview || !_lsPurgePreview.posts) { toast('Run Preview first', 'error'); return; }
+    const { month, posts, comments } = _lsPurgePreview;
+    if (!confirm(`Permanently delete ${posts} Live Search post(s) and ${comments} comment(s) created up to ${month}?\n\nThis cannot be undone.`)) return;
+    const typed = prompt('Type DELETE to confirm:');
+    if ((typed || '').trim().toUpperCase() !== 'DELETE') { toast('Cancelled', 'info'); return; }
+    const out = document.getElementById('ls-purge-result');
+    const delBtn = document.getElementById('ls-purge-del-btn');
+    if (delBtn) delBtn.disabled = true;
+    out.innerHTML = '<span class="text-gray-500">Deleting…</span>';
+    try {
+        const r = await api('/api/settings/ls-purge', { method: 'POST', body: { month, confirm: true } });
+        toast(`Deleted ${r.posts} post(s) + ${r.comments} comment(s)`, 'success');
+        _lsPurgePreview = null;
+        lsPurgePreview();  // re-preview → now 0
+    } catch (e) {
+        out.innerHTML = `<span class="text-red-400">Delete failed: ${e.message || e}</span>`;
+    }
+}
 
 let _checkLiveTab = 'runs';
 let _checkLiveUI = { tab:'runs', brand:'', sub:'', status:'', month:'', from:'', to:'', account:'', source:'', prev:'' };

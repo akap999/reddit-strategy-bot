@@ -7268,6 +7268,72 @@ class Database:
         self.conn.execute("DELETE FROM search_posts WHERE id = ?", (post_id,))
         self.conn.commit()
 
+    # Statuses that count as "untouched / original" — safe to purge.
+    _LS_PURGE_POST_STATUSES = ('saved', 'complete')
+    _LS_PURGE_SAFE_COMMENT_STATUSES = ('draft', 'complete')
+
+    def purge_untouched_search_posts(self, month, dry_run=False):
+        """Delete Live Search posts (and their comments) that are still in their ORIGINAL
+        state, created up to and including `month` ('YYYY-MM'). CONSERVATIVE gate — a post
+        is purgeable ONLY when its status is saved/complete AND none of its comments has a
+        status outside draft/complete (any deployed/reported/etc. comment protects it).
+
+        dry_run=True → counts only ({posts, comments, protected_in_range}); no writes.
+        Returns {posts, comments, protected_in_range}."""
+        month = (month or "").strip()
+        if len(month) != 7 or month[4] != '-':
+            raise ValueError("month must be 'YYYY-MM'")
+        post_ph = ",".join("?" * len(self._LS_PURGE_POST_STATUSES))
+        safe_ph = ",".join("?" * len(self._LS_PURGE_SAFE_COMMENT_STATUSES))
+        gate = (f"""
+            sp.status IN ({post_ph})
+            AND strftime('%Y-%m', sp.created_at) <= ?
+            AND NOT EXISTS (
+                SELECT 1 FROM search_comments sc
+                 WHERE sc.search_post_id = sp.id
+                   AND sc.status NOT IN ({safe_ph})
+            )""")
+        params = list(self._LS_PURGE_POST_STATUSES) + [month] + list(self._LS_PURGE_SAFE_COMMENT_STATUSES)
+        ids = [r["id"] for r in self.conn.execute(
+            f"SELECT sp.id FROM search_posts sp WHERE {gate}", params).fetchall()]
+        # Posts in the SAME date range that are NOT purgeable (have activity) — surfaced so
+        # the operator can see the gate protecting worked posts.
+        total_in_range = self.conn.execute(
+            "SELECT COUNT(*) FROM search_posts WHERE strftime('%Y-%m', created_at) <= ?",
+            (month,)).fetchone()[0]
+        protected_in_range = total_in_range - len(ids)
+        if not ids:
+            return {"posts": 0, "comments": 0, "protected_in_range": protected_in_range}
+
+        def _chunks(seq, n=500):
+            for i in range(0, len(seq), n):
+                yield seq[i:i + n]
+
+        comment_total = 0
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            comment_total += self.conn.execute(
+                f"SELECT COUNT(*) FROM search_comments WHERE search_post_id IN ({ph})",
+                chunk).fetchone()[0]
+        if dry_run:
+            return {"posts": len(ids), "comments": comment_total,
+                    "protected_in_range": protected_in_range}
+
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            # Free rotation slots for any child comment that still had an account.
+            for r in self.conn.execute(
+                f"""SELECT account_id, COUNT(*) AS cnt FROM search_comments
+                    WHERE search_post_id IN ({ph}) AND account_id IS NOT NULL
+                      AND status != 'deleted'
+                    GROUP BY account_id""", chunk).fetchall():
+                self._decrement_lifetime(r["account_id"], r["cnt"])
+            self.conn.execute(f"DELETE FROM search_comments WHERE search_post_id IN ({ph})", chunk)
+            self.conn.execute(f"DELETE FROM search_posts WHERE id IN ({ph})", chunk)
+        self.conn.commit()
+        return {"posts": len(ids), "comments": comment_total,
+                "protected_in_range": protected_in_range}
+
     # --- Search Comments (Live Search) ---
 
     def add_search_comment(self, search_post_id, body, *,

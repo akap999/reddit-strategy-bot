@@ -8383,8 +8383,9 @@ def api_comment_to_report(cid):
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
     source = (data.get('source') or 'comment').strip()
-    # outcome: 'report' (deployed/paid → report, live-gated) or 'replaced' (replace →
-    # replaced, NO live gate — its source comment is already removed).
+    # outcome: 'report' (deployed/paid → report) or 'replaced' (replace → replaced).
+    # BOTH are live-gated — only a comment that's actually live on Reddit is accepted
+    # (for 'replaced' this confirms the replacement at its link is up).
     outcome = (data.get('outcome') or 'report').strip()
     brand_id = data.get('brand_id')
     try:
@@ -8401,15 +8402,14 @@ def api_comment_to_report(cid):
     allowed_from = ('replace',) if outcome == 'replaced' else ('deployed', 'paid')
     db = get_db()
     try:
-        if outcome == 'report':
-            # Live gate: only report a comment that's still live on Reddit. A non-live one
-            # is left at its current status (NOT moved to removed). Replaced skips this —
-            # its source is a 'replace' (already removed) comment.
-            gate = _report_live_gate(db, [{"id": cid, "source": source}])
-            if not gate["live"]:
-                nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
-                return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
-                                "message": "left unchanged — not live on Reddit"}), 200
+        # Live gate (both outcomes): only accept a comment that's actually live on Reddit.
+        # A non-live one is left at its current status (never moved to removed). For
+        # 'replaced' this verifies the replacement at the comment's link is live.
+        gate = _report_live_gate(db, [{"id": cid, "source": source}])
+        if not gate["live"]:
+            nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
+            return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
+                            "message": "left unchanged — not live on Reddit"}), 200
         result = db.move_comment_to_report(
             cid, source, month,
             actor_email=_admin_email(), brand_id=brand_id,
@@ -8708,11 +8708,10 @@ def api_bulk_to_report_filtered():
             items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
             ids = [{"id": r['id'], "source": r.get('source', 'comment')}
                    for r in items if r.get('status') in eligible]
-            if outcome == 'report':
-                gate = _report_live_gate(db, ids, task_id=_task_id)
-                move_ids = gate["live"]; skipped_not_live = len(gate["not_live"])
-            else:
-                move_ids = ids; skipped_not_live = 0
+            # Live gate BOTH outcomes — only comments actually live on Reddit are moved;
+            # non-live ones are left at their current status (never moved to removed).
+            gate = _report_live_gate(db, ids, task_id=_task_id)
+            move_ids = gate["live"]; skipped_not_live = len(gate["not_live"])
             out = db.bulk_move_to_report(
                 ids=move_ids, report_month=month, actor_email=actor, brand_id_override=brand_id,
                 target_status=target_status, allowed_from=eligible)

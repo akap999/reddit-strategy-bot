@@ -12114,7 +12114,12 @@ async function submitSendToReport(cid, source) {
     const payload = await resp.json().catch(() => ({}));
 
     if (resp.ok) {
-        toast(`Sent to ${month}`, 'success');
+        if (payload && payload.skipped) {
+            // Live gate: comment wasn't live on Reddit → left at its current status.
+            toast(`Left unchanged — not live on Reddit${payload.liveness ? ` (${payload.liveness})` : ''}`, 'info');
+        } else {
+            toast(`Sent to ${month}`, 'success');
+        }
         closeModal();
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
         else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
@@ -12211,18 +12216,27 @@ async function submitMarkReportedAll(scope) {
     }
     try {
         const res = await api('/api/comments/bulk-to-report-filtered', { method: 'POST', body });
-        const updated = (res && res.updated) || 0;
-        const skipped = (res && res.skipped) || 0;
-        const brandRequired = (res && res.brand_required) || 0;
-        const skippedMsg = skipped
-            ? ` · ${skipped} skipped${brandRequired ? ` (${brandRequired} unbranded — set a brand override to include)` : ''}`
-            : '';
-        toast(`Reported ${updated} comment(s) to ${month}${skippedMsg}`, 'success');
-        closeModal();
-        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
-        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        // Now a background task: it live-checks each candidate and reports ONLY the live
+        // ones (non-live left untouched). Poll for the final counts.
+        const refresh = () => {
+            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+            else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+                api('/api/search/comments').then(r => { _lsComments = r; lsFilterComments(); }).catch(() => {});
+            }
+        };
+        if (res && res.task_id) {
+            _addBgTask(res.task_id, 'Reporting (live-checking)');
+            _pollTask(res.task_id, 'Report', (result) => {
+                const r = result || {};
+                const updated = r.updated || 0, notLive = r.skipped_not_live || 0, br = r.brand_required || 0;
+                const extra = [notLive ? `${notLive} skipped (not live)` : '',
+                               br ? `${br} unbranded` : ''].filter(Boolean).join(' · ');
+                toast(`Reported ${updated} live comment(s) to ${month}${extra ? ' · ' + extra : ''}`, 'success');
+                refresh();
+            });
+            toast('Live-checking, then reporting the live ones…', 'info');
         }
+        closeModal();
     } catch (e) {
         toast('Failed: ' + (e.message || e), 'error');
     }

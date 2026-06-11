@@ -8315,6 +8315,52 @@ def _spawn_report_engagement_fetch(items):
         return None
 
 
+def _report_live_gate(db, items, task_id=None):
+    """NON-MUTATING liveness gate for the report flow. For each {id, source}, fetch the
+    comment's Reddit metadata and classify it — but NEVER change any row's status (unlike
+    the regular live-checker, which moves dead ones to 'removed'/'replace'). Only comments
+    confirmed LIVE may be reported; everything else (removed / missing / no URL / fetch
+    error) is left exactly as-is.
+
+    Returns {"live": [{id, source}], "not_live": [{id, source, liveness}]}.
+    Writes progress to the task when `task_id` is given.
+    """
+    from bulk_deploy import fetch_reddit_comment_meta, classify_liveness
+    live, not_live = [], []
+    total = len(items or [])
+    done = 0
+    for it in (items or []):
+        try:
+            cid = int(it.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        src = it.get("source") or "comment"
+        table = "comments" if src == "comment" else "search_comments"
+        row = db.conn.execute(
+            f"SELECT reddit_comment_url FROM {table} WHERE id = ?", (cid,)).fetchone()
+        url = ((row["reddit_comment_url"] if row else "") or "").strip()
+        liveness = "missing"
+        if url:
+            try:
+                meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+                liveness = classify_liveness(meta)
+            except Exception:
+                liveness = "missing"
+        if liveness == "live":
+            live.append({"id": cid, "source": src})
+        else:
+            not_live.append({"id": cid, "source": src, "liveness": liveness})
+        done += 1
+        if task_id:
+            try:
+                db.update_task_progress(task_id, {
+                    "checked": done, "total": total,
+                    "live": len(live), "skipped": len(not_live)})
+            except Exception:
+                pass
+    return {"live": live, "not_live": not_live}
+
+
 @app.route('/api/comments/<int:cid>/to-report', methods=['POST'])
 def api_comment_to_report(cid):
     data = request.get_json() or {}
@@ -8331,6 +8377,13 @@ def api_comment_to_report(cid):
         return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
     db = get_db()
     try:
+        # Live gate: only report a comment that's still live on Reddit. A non-live one is
+        # left at its current status (NOT moved to removed).
+        gate = _report_live_gate(db, [{"id": cid, "source": source}])
+        if not gate["live"]:
+            nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
+            return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
+                            "message": "left unchanged — not live on Reddit"}), 200
         result = db.move_comment_to_report(
             cid, source, month,
             actor_email=_admin_email(), brand_id=brand_id,
@@ -8548,18 +8601,20 @@ def api_bulk_to_report():
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     db = get_db()
     try:
+        # Live gate: only report comments still live on Reddit; non-live ones are left
+        # untouched (NOT moved to removed). This path is small (a post's checked comments)
+        # so the check runs inline.
+        gate = _report_live_gate(db, ids)
+        live = gate["live"]
         out = db.bulk_move_to_report(
-            ids=ids, report_month=month, actor_email=_admin_email(),
+            ids=live, report_month=month, actor_email=_admin_email(),
             brand_id_override=brand_id,
         )
-        # Background engagement fetch for everything we successfully
-        # moved. We don't know exactly which ids succeeded — the
-        # function returns aggregate counts — so we fetch for all of
-        # the originally-requested ids and let _check_live_batch
-        # handle the ones that aren't actually in report state (it
-        # operates by URL so it just refreshes their stats).
+        out["skipped_not_live"] = len(gate["not_live"])
+        out["not_live"] = gate["not_live"]
+        # Background engagement fetch for the (live) rows we moved.
         try:
-            items = _fetch_report_items(db, ids)
+            items = _fetch_report_items(db, live)
             _spawn_report_engagement_fetch(items)
         except Exception as e:
             print(f"[bulk-to-report] auto-stats spawn failed: {e}", flush=True)
@@ -8590,43 +8645,46 @@ def api_bulk_to_report_filtered():
         brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
-    db = get_db()
-    try:
-        # Reuse the existing global comments query (same filters
-        # `mark-paid-all` accepts) but constrain to deployed/paid.
-        status_filter = data.get('status')
-        if status_filter not in (None, 'deployed', 'paid', ''):
-            return jsonify({"error": "status must be deployed or paid or omitted"}), 400
-        # Pull candidate rows
-        candidates = db.get_all_comments_global(
-            status=status_filter,
-            brand_id=brand_id,
-            subreddit_id=int(data['subreddit_id']) if data.get('subreddit_id') else None,
-            account_id=data.get('account_id') or None,
-            source=data.get('source') or None,
-            date=data.get('date') or None,
-            limit=10000, offset=0, live=None,
-        )
-        items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
-        ids = []
-        for r in items:
-            if r.get('status') in ('deployed', 'paid'):
-                ids.append({"id": r['id'], "source": r.get('source', 'comment')})
-        out = db.bulk_move_to_report(
-            ids=ids, report_month=month, actor_email=_admin_email(),
-            brand_id_override=brand_id,
-        )
-        out["candidates_considered"] = len(items)
-        # Auto-fetch engagement in the background — same shape as the
-        # single-row and bulk-by-ids paths above.
+    status_filter = data.get('status')
+    if status_filter not in (None, 'deployed', 'paid', ''):
+        return jsonify({"error": "status must be deployed or paid or omitted"}), 400
+    # Capture request-scoped values before the background task (no request context inside).
+    actor = _admin_email()
+    sub_id = int(data['subreddit_id']) if data.get('subreddit_id') else None
+    account_id = data.get('account_id') or None
+    source = data.get('source') or None
+    date = data.get('date') or None
+
+    # The candidate set can be large (up to 10k) and each row needs a Reddit liveness
+    # fetch, so this runs as a background task. Only LIVE comments are moved to report;
+    # non-live ones are left at their current status (never moved to removed).
+    def task(_task_id=None):
+        db = get_db()
         try:
-            fetch_items = _fetch_report_items(db, ids)
-            _spawn_report_engagement_fetch(fetch_items)
-        except Exception as e:
-            print(f"[bulk-to-report-filtered] auto-stats spawn failed: {e}", flush=True)
-        return jsonify(out)
-    finally:
-        db.close()
+            candidates = db.get_all_comments_global(
+                status=status_filter, brand_id=brand_id, subreddit_id=sub_id,
+                account_id=account_id, source=source, date=date,
+                limit=10000, offset=0, live=None,
+            )
+            items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
+            ids = [{"id": r['id'], "source": r.get('source', 'comment')}
+                   for r in items if r.get('status') in ('deployed', 'paid')]
+            gate = _report_live_gate(db, ids, task_id=_task_id)
+            live = gate["live"]
+            out = db.bulk_move_to_report(
+                ids=live, report_month=month, actor_email=actor, brand_id_override=brand_id)
+            out["candidates_considered"] = len(items)
+            out["skipped_not_live"] = len(gate["not_live"])
+            try:
+                _spawn_report_engagement_fetch(_fetch_report_items(db, live))
+            except Exception as e:
+                print(f"[bulk-to-report-filtered] auto-stats spawn failed: {e}", flush=True)
+            return out
+        finally:
+            db.close()
+
+    tid = start_task("bulk-to-report-filtered", task, pass_task_id=True)
+    return jsonify({"task_id": tid})
 
 
 # ===========================================================================

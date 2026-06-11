@@ -11177,6 +11177,7 @@ let _allBrandsForClients = [];
 let _checkLiveTab = 'runs';
 let _checkLiveUI = { tab:'runs', brand:'', sub:'', status:'', month:'', from:'', to:'', account:'', source:'', prev:'' };
 let _checkLiveRemovedCache = null;
+let _checkLiveLiveCounts = { total: 0, by_brand: {}, by_subreddit: {}, by_account: {} };
 function _checkLiveSaveUI(){ try{ localStorage.setItem('checkLiveUI', JSON.stringify(_checkLiveUI)); }catch(e){} }
 function _checkLiveLoadUI(){ try{ const s=JSON.parse(localStorage.getItem('checkLiveUI')||'{}'); if(s&&typeof s==='object'){ _checkLiveUI={..._checkLiveUI,...s}; _checkLiveTab=_checkLiveUI.tab||'runs'; } }catch(e){} }
 
@@ -11226,7 +11227,7 @@ async function checkLiveRefreshRemoved(){ _checkLiveRemovedCache=null; const c=d
 async function renderCheckLiveAnalyse(c){
     c.innerHTML = `<div class="spinner mx-auto my-6"></div>`;
     if(_checkLiveRemovedCache===null){
-        try{ const res=await api('/api/check-live/removed-comments'); _checkLiveRemovedCache=(res&&res.items)||[]; }
+        try{ const res=await api('/api/check-live/removed-comments'); _checkLiveRemovedCache=(res&&res.items)||[]; _checkLiveLiveCounts=(res&&res.live)||{total:0,by_brand:{},by_subreddit:{},by_account:{}}; }
         catch(e){ c.innerHTML=`<p class="text-sm text-red-400">Failed to load removed comments: ${e.message||e}</p>`; return; }
     }
     _clRenderAnalyse(c);
@@ -11258,11 +11259,22 @@ function _clRenderAnalyse(c){
     const opts=(vals,cur,allLabel)=>`<option value="">${allLabel}</option>`+vals.map(v=>`<option value="${_clEsc(v)}" ${String(v)===String(cur)?'selected':''}>${_clEsc(v)}</option>`).join('');
     const items=_clFiltered();
     const nRemoved=items.filter(i=>i.status==='removed').length, nReplace=items.filter(i=>i.status==='replace').length;
-    const breakdown=(key,label,fmt)=>{ const m={}; items.forEach(it=>{ const k=(it[key]==null||it[key]==='')?'—':it[key]; m[k]=(m[k]||0)+1; });
+    // Live denominator (currently-up comments): respects the active single-dimension scope
+    // (brand → subreddit → account → grand total). Independent of the status/month/date
+    // filters, which only narrow the REMOVED numerator.
+    const lc=_checkLiveLiveCounts||{total:0,by_brand:{},by_subreddit:{},by_account:{}};
+    const liveScoped = f.brand ? (lc.by_brand[f.brand]||0)
+        : f.sub ? (lc.by_subreddit[f.sub]||0)
+        : f.account ? (lc.by_account[f.account]||0)
+        : (lc.total||0);
+    const rate = (items.length+liveScoped)>0 ? Math.round(items.length*100/(items.length+liveScoped)) : 0;
+    // breakdown card: per-dimension removed count + live count (from liveMap) per row.
+    const breakdown=(key,label,liveMap,fmt)=>{ const m={}; items.forEach(it=>{ const k=(it[key]==null||it[key]==='')?'—':it[key]; m[k]=(m[k]||0)+1; });
         const rows=Object.entries(m).sort((a,b)=>b[1]-a[1]);
         return `<div class="card p-3" style="background:#1a1a1b;border:1px solid #343536;min-width:200px;flex:1">
             <div class="text-xs font-bold mb-2" style="color:#9efbb4">${label} <span class="text-gray-500">(${rows.length})</span></div>
-            ${rows.length?rows.map(([k,n])=>`<div class="flex justify-between text-xs py-0.5"><span style="color:#D7DADC">${_clEsc(fmt?fmt(k):k)}</span><span class="text-gray-400">${n}</span></div>`).join(''):'<div class="text-xs text-gray-600">none</div>'}
+            <div class="flex justify-between text-[10px] text-gray-500 pb-1" style="border-bottom:1px solid #20283a"><span></span><span>removed · live</span></div>
+            ${rows.length?rows.map(([k,n])=>`<div class="flex justify-between text-xs py-0.5"><span style="color:#D7DADC">${_clEsc(fmt?fmt(k):k)}</span><span><span style="color:#ff8aa8">${n}</span> <span class="text-gray-600">·</span> <span style="color:#9efbb4">${(liveMap&&liveMap[k])||0}</span></span></div>`).join(''):'<div class="text-xs text-gray-600">none</div>'}
         </div>`; };
     const inp='background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px';
     c.innerHTML = `
@@ -11285,14 +11297,15 @@ function _clRenderAnalyse(c){
             <button class="btn btn-sm btn-secondary" onclick="checkLiveClearFilters()">Clear</button>
             <button class="btn btn-sm btn-secondary" onclick="checkLiveRefreshRemoved()">↻ Refresh</button>
         </div>
-        <div class="flex gap-3 mb-3 text-sm">
+        <div class="flex gap-3 mb-3 text-sm items-center flex-wrap">
             <span class="badge" style="background:#3a1020;color:#ff8aa8">${items.length} removed</span>
-            <span class="text-xs text-gray-400" style="align-self:center">removed: <b style="color:#ff6b9b">${nRemoved}</b> · replace: <b style="color:#ffb86b">${nReplace}</b></span>
+            <span class="badge" style="background:#10331f;color:#9efbb4" title="Comments currently live on Reddit (deployed/paid/report/replaced) for the active brand/subreddit/account scope. Not affected by the status/month/date filters above.">${liveScoped} live</span>
+            <span class="text-xs text-gray-400" style="align-self:center">${rate}% removed · removed: <b style="color:#ff6b9b">${nRemoved}</b> · replace: <b style="color:#ffb86b">${nReplace}</b></span>
         </div>
         <div class="flex flex-wrap gap-3 mb-4">
-            ${breakdown('brand_name','Per brand')}
-            ${breakdown('subreddit_name','Per subreddit', s=>s==='—'?s:('r/'+s))}
-            ${breakdown('account_id','Per account')}
+            ${breakdown('brand_name','Per brand',lc.by_brand)}
+            ${breakdown('subreddit_name','Per subreddit',lc.by_subreddit, s=>s==='—'?s:('r/'+s))}
+            ${breakdown('account_id','Per account',lc.by_account)}
         </div>
         ${items.length?`
         <table>

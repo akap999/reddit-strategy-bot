@@ -2899,7 +2899,8 @@ def api_check_live_removed_comments():
     account aggregation client-side from this one list."""
     db = get_db()
     try:
-        return jsonify({"items": db.get_removed_comments()})
+        return jsonify({"items": db.get_removed_comments(),
+                        "live": db.get_live_comment_counts()})
     finally:
         db.close()
 

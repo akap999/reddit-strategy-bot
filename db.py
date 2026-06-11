@@ -3228,6 +3228,52 @@ class Database:
         rows = self.conn.execute(query, p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
+    def get_live_comment_counts(self, brand_id=None, subreddit_id=None):
+        """Counts of comments currently LIVE on Reddit (status in deployed/paid/report/
+        replaced) across comments + search_comments — the denominator for the Check Live →
+        Analyse removal-rate view. Returns {total, by_brand, by_subreddit, by_account}
+        (null/empty bucket to '—', matching the removed breakdown). Counts only."""
+        live = ('deployed', 'paid', 'report', 'replaced')
+        ph_live = ",".join("?" * len(live))
+        w1 = [f"c.status IN ({ph_live})"]
+        w2 = [f"sc.status IN ({ph_live})"]
+        p1, p2 = list(live), list(live)
+        if brand_id:
+            w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN "
+                      "(SELECT post_id FROM post_brands WHERE brand_id = ?)))")
+            p1 += [brand_id, brand_id]
+            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+        if subreddit_id:
+            w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
+            row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
+            w2.append("LOWER(sp.subreddit) = LOWER(?)"); p2.append(row["name"] if row else "")
+        q1 = f"""SELECT 'comment' AS source, c.account_id AS account_id,
+                        s.name AS subreddit_name, b.name AS brand_name
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
+                 WHERE {' AND '.join(w1)}"""
+        q2 = f"""SELECT 'search_comment' AS source, sc.account_id AS account_id,
+                        sp.subreddit AS subreddit_name, b.name AS brand_name
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
+                 WHERE {' AND '.join(w2)}"""
+        rows = self.conn.execute(f"{q1} UNION ALL {q2}", p1 + p2).fetchall()
+        total = 0
+        by_brand, by_subreddit, by_account = {}, {}, {}
+        for r in rows:
+            total += 1
+            bk = (r["brand_name"] or "").strip() or "—"
+            sk = (r["subreddit_name"] or "").strip() or "—"
+            ak = (r["account_id"] or "").strip() or "—"
+            by_brand[bk] = by_brand.get(bk, 0) + 1
+            by_subreddit[sk] = by_subreddit.get(sk, 0) + 1
+            by_account[ak] = by_account.get(ak, 0) + 1
+        return {"total": total, "by_brand": by_brand,
+                "by_subreddit": by_subreddit, "by_account": by_account}
+
     def get_all_comments_global(self, status=None, brand_id=None, subreddit_id=None,
                                 account_id=None, sort_by=None, source=None,
                                 date=None, limit=200, offset=0, live=False):

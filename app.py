@@ -8368,17 +8368,91 @@ def _spawn_report_engagement_fetch(items):
         return None
 
 
+def _classify_url_liveness(url):
+    """Shared single-URL liveness probe — the SAME RSS-first signal the Check Live flow
+    uses (see the check-live task's `_probe`). Reddit's JSON API is auth-gated (403) for
+    cloud IPs, so a JSON-only check returns 'missing' for EVERYTHING; the comment-permalink
+    RSS feed is the reliable anonymous signal (present when live, absent when removed). JSON
+    stays as a fallback for environments where it's reachable. Resolves /s/ share links
+    first and retries once on a transient 'missing'.
+
+    Returns (liveness, detail) where liveness ∈ {'live','removed','missing','error'}.
+    """
+    from bulk_deploy import (classify_reddit_url, fetch_reddit_comment_meta,
+                             classify_liveness)
+    import time as _t
+    url = (url or "").strip()
+    if not url:
+        return ("missing", "no URL")
+    resolved = url
+    try:
+        if "/s/" in url:
+            r = _resolve_reddit_share_url_proxy(url)
+            if r and "/comments/" in r:
+                resolved = r
+    except Exception:
+        resolved = url
+
+    def _probe():
+        classified = classify_reddit_url(resolved)
+        if not classified:
+            return ("missing", "URL did not match Reddit comment/post pattern")
+        if classified.get("kind") == "comment":
+            rss_v = _comment_liveness_via_rss(resolved)
+            if rss_v == "live":
+                return ("live", "via comment-permalink RSS")
+            if rss_v == "removed":
+                return ("removed", "comment id absent from its permalink RSS feed")
+            # RSS inconclusive → JSON fallback (works where the API is reachable).
+            try:
+                meta = fetch_reddit_comment_meta(resolved, reddit_get=_reddit_get_json)
+                return (classify_liveness(meta), None)
+            except Exception as e:
+                return ("error", str(e))
+        # POST url: post RSS first, then post JSON.
+        post_rss = _post_liveness_via_rss(resolved)
+        if post_rss in ("live", "removed"):
+            return (post_rss, f"post via RSS ({post_rss})")
+        try:
+            from urllib.parse import urlparse
+            data = _reddit_get_json(urlparse(resolved).path.rstrip("/") + ".json")
+            if not data or not isinstance(data, list) or len(data) < 1:
+                return ("missing", "post JSON unavailable")
+            children = (data[0] or {}).get("data", {}).get("children", [])
+            if not children:
+                return ("removed", "post listing empty")
+            cd = (children[0] or {}).get("data", {}) or {}
+            body = (cd.get("selftext") or "").strip().lower()
+            if (cd.get("removed") is True or body in ("[removed]", "[deleted]")
+                    or cd.get("author") in ("[deleted]", "[removed]")):
+                return ("removed", "post removed/deleted")
+            return ("live", None)
+        except Exception as e:
+            return ("error", str(e))
+
+    liveness, detail = _probe()
+    if liveness == "missing":
+        # Most 'missing' verdicts are transient (proxy hiccup / soft rate-limit). Retry once.
+        _t.sleep(3)
+        rlv, rdetail = _probe()
+        if rlv != "missing":
+            liveness, detail = rlv, rdetail
+    return (liveness, detail)
+
+
 def _report_live_gate(db, items, task_id=None):
-    """NON-MUTATING liveness gate for the report flow. For each {id, source}, fetch the
-    comment's Reddit metadata and classify it — but NEVER change any row's status (unlike
-    the regular live-checker, which moves dead ones to 'removed'/'replace'). Only comments
-    confirmed LIVE may be reported; everything else (removed / missing / no URL / fetch
-    error) is left exactly as-is.
+    """NON-MUTATING liveness gate for the report flow. For each {id, source}, classify the
+    comment's Reddit liveness — but NEVER change any row's status (unlike the regular
+    live-checker, which moves dead ones to 'removed'/'replace'). Only comments confirmed
+    LIVE may be reported; everything else (removed / missing / no URL / fetch error) is left
+    exactly as-is.
+
+    Uses the shared RSS-first `_classify_url_liveness` (the JSON-only path always came back
+    'missing' on cloud IPs, which is why every comment was wrongly skipped as not-live).
 
     Returns {"live": [{id, source}], "not_live": [{id, source, liveness}]}.
     Writes progress to the task when `task_id` is given.
     """
-    from bulk_deploy import fetch_reddit_comment_meta, classify_liveness
     live, not_live = [], []
     total = len(items or [])
     done = 0
@@ -8395,8 +8469,7 @@ def _report_live_gate(db, items, task_id=None):
         liveness = "missing"
         if url:
             try:
-                meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
-                liveness = classify_liveness(meta)
+                liveness, _detail = _classify_url_liveness(url)
             except Exception:
                 liveness = "missing"
         if liveness == "live":

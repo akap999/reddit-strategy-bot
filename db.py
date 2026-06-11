@@ -3923,6 +3923,41 @@ class Database:
         )
         return restore_to
 
+    def reclassify_report_tag(self, comment_id, source, to_status, actor_email=None):
+        """Relabel an already-terminal report comment between the two parallel tags
+        'report' <-> 'replaced'. Pure status flip: report_month / report_added_at /
+        prev_status / brand_id are all preserved (it's NOT a new report, just a different
+        tag on the same delivered comment).
+
+        Eligible only from {'report','replaced'} and only when the target differs. Returns
+        the previous status on success, None if the row is missing / not in a terminal
+        report state / already at `to_status`. The live gate (only relabel comments still
+        live on Reddit) lives in the endpoint, mirroring move_comment_to_report.
+        """
+        if to_status not in ('report', 'replaced') or not comment_id:
+            return None
+        table = "comments" if source == "comment" else "search_comments"
+        row = self.conn.execute(
+            f"SELECT status, report_month FROM {table} WHERE id = ?",
+            (comment_id,)
+        ).fetchone()
+        if not row:
+            return None
+        old_status = row["status"]
+        if old_status not in ('report', 'replaced') or old_status == to_status:
+            return None
+        self.conn.execute(
+            f"UPDATE {table} SET status = ? WHERE id = ?",
+            (to_status, comment_id)
+        )
+        self.conn.commit()
+        self._log_report_audit(
+            comment_id=comment_id, source=source, action="retagged",
+            report_month=row["report_month"], prev_month=row["report_month"],
+            actor_email=actor_email,
+        )
+        return old_status
+
     def _log_report_audit(self, *, comment_id, source, action,
                            report_month, prev_month, actor_email):
         try:

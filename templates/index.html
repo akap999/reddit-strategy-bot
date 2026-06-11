@@ -5263,6 +5263,8 @@ function renderAllCommentCard(c) {
         actionBtns = `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly client report">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'report') {
         actionBtns = `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, '${src}')" title="Move back to previous status">Undo report</button>`;
+    } else if (c.status === 'replaced') {
+        actionBtns = `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="reclassifyReport(${c.id}, '${src}', 'report')" title="Re-tag this replacement as a plain reported comment (live-checked first)">Mark as reported</button><button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, '${src}')" title="Move back to previous status">Undo report</button>`;
     } else if (c.status === 'removed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'auto_assign')}">Auto</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'manual_assign')}">Assign</button><button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="${_acAction(src, c.id, 'unremove')}">Unremove</button>`;
     } else if (c.status === 'archived') {
@@ -8999,6 +9001,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                     ${c.status === 'paid' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="lsubsUnmarkPaid(${c.id})" title="Revert this comment from paid back to deployed">↩ Undo paid</button>` : ''}
                     ${(c.status === 'deployed' || c.status === 'paid') ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'comment')" title="Push this comment into a monthly client report">📊 Report</button>` : ''}
                     ${c.status === 'report' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to deployed">Undo report</button>` : ''}
+                    ${c.status === 'replaced' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="reclassifyReport(${c.id}, 'comment', 'report')" title="Re-tag this replacement as a plain reported comment (live-checked first)">Mark as reported</button><button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to deployed">Undo report</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
                     ${c.prev_status && c.status !== 'report' && c.status !== 'paid' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoComment(${c.id})" title="Undo to ${c.prev_status}">Undo</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="lsubsDeleteComment(${c.id})" title="Delete this comment (and any replies under it)">Del</button>
@@ -10686,6 +10689,12 @@ function lsFilterComments() {
                                     <span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>
                                     <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}
+                                ${c.status === 'replaced' ? `
+                                    <a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-secondary btn-sm">View</a>
+                                    <span class="badge ml-1" style="background:#0d3d20;color:#9efbb0" title="Replacement in monthly report">♻ ${c.report_month}</span>
+                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="reclassifyReport(${c.id}, 'search_comment', 'report')" title="Re-tag this replacement as a plain reported comment (live-checked first)">Mark as reported</button>
+                                    <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
+                                ` : ''}
                                 ${c.status === 'removed' ? `
                                     <button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>
@@ -12237,6 +12246,25 @@ async function undoReport(cid, source) {
     }
 }
 
+// Relabel a terminal report comment between 'report' <-> 'replaced' (e.g. mark a
+// 'replaced' comment as a plain 'reported'). Live-gated server-side: a non-live comment
+// is left unchanged. report_month is preserved.
+async function reclassifyReport(cid, source, to) {
+    const verb = to === 'report' ? 'reported' : 'replaced';
+    try {
+        const res = await api(`/api/comments/${cid}/reclassify-report`, { method: 'POST', body: { to, source } });
+        if (res && res.skipped) { toast('Left unchanged — not live on Reddit', 'error'); return; }
+        toast(`Marked as ${verb}`, 'success');
+        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        }
+        if (typeof _acRefreshIfActive === 'function') _acRefreshIfActive();
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
+    }
+}
+
 // "Mark Reported All" — bulk action mirrored on Mark Paid All.
 // Currently applied from the Live Search Comments header — pushes
 // the current filter's deployed/paid rows to report state.
@@ -12268,9 +12296,9 @@ async function showMarkReportedAllModal(scope) {
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-2">${_monthOptionsHtml()}</select>
         <label class="text-xs text-gray-400">Outcome</label>
-        <select id="rep-outcome" class="w-full mb-2" onchange="document.getElementById('rep-status-wrap').style.display = this.value==='replaced' ? 'none' : ''">
+        <select id="rep-outcome" class="w-full mb-2">
             <option value="report" selected>Reported — live deployed/paid → report (live-checked first)</option>
-            <option value="replaced">Replaced — pending 'replace' → replaced (replacement provided)</option>
+            <option value="replaced">Replaced — live deployed/paid → replaced (live-checked first)</option>
         </select>
         <div id="rep-status-wrap">
         <label class="text-xs text-gray-400">Status filter (only deployed/paid eligible)</label>
@@ -12295,7 +12323,9 @@ async function submitMarkReportedAll(scope) {
     if (!month) { toast('Pick a month', 'error'); return; }
     const body = { report_month: month, outcome };
     if (brandOverride) body.brand_id = brandOverride;
-    if (status && outcome !== 'replaced') body.status = status;  // replaced forces status='replace' server-side
+    // Both outcomes (report + replaced) are eligible from deployed/paid, so the status
+    // filter applies equally. Always honor it when set (else all deployed/paid match).
+    if (status) body.status = status;
     if (scope === 'livesubs') {
         const bid = document.getElementById('lsubs-cmt-brand')?.value;
         // The header filter scopes WHICH comments are candidates;

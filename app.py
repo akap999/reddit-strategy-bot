@@ -8475,6 +8475,41 @@ def api_comment_to_report(cid):
         db.close()
 
 
+@app.route('/api/comments/<int:cid>/reclassify-report', methods=['POST'])
+def api_comment_reclassify_report(cid):
+    """Relabel an already-terminal report comment between the two parallel tags
+    'report' <-> 'replaced' (e.g. mark a 'replaced' comment as a plain 'reported').
+
+    Body: {to: 'report'|'replaced', source: 'comment'|'search_comment'}.
+
+    Pure tag flip — report_month is preserved (not a new report). Still LIVE-GATED:
+    because 'report' counts toward the client's TOTAL, we only promote a comment that's
+    actually live on Reddit; a non-live one is left unchanged (never moved to removed).
+    """
+    data = request.get_json() or {}
+    to_status = (data.get('to') or '').strip()
+    source = (data.get('source') or 'comment').strip()
+    if to_status not in ('report', 'replaced'):
+        return jsonify({"error": "to must be 'report' or 'replaced'"}), 400
+    if source not in ('comment', 'search_comment'):
+        return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+    db = get_db()
+    try:
+        # Live gate: only relabel a comment that's still live on Reddit.
+        gate = _report_live_gate(db, [{"id": cid, "source": source}])
+        if not gate["live"]:
+            nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
+            return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
+                            "message": "left unchanged — not live on Reddit"}), 200
+        result = db.reclassify_report_tag(
+            cid, source, to_status, actor_email=_admin_email())
+        if result is None:
+            return jsonify({"error": "row not found or not in report/replaced status"}), 422
+        return jsonify({"ok": True, "status": to_status, "prev_status": result})
+    finally:
+        db.close()
+
+
 @app.route('/api/posts/<int:pid>/to-report', methods=['POST'])
 def api_post_to_report(pid):
     """Flip a Live Subs post + its comments into status='report'.

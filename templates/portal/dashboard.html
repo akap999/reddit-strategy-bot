@@ -95,6 +95,13 @@
           </div>
         </div>
         {% endif %}
+        {# Replacements PROVIDED this month (status='replaced') — a delivered
+           outcome, distinct from the pending `replace` chips above. #}
+        {% if m.replaced %}
+        <div class="flex items-center justify-end">
+          <span class="chip chip-replaced">{{ m.replaced }} replaced</span>
+        </div>
+        {% endif %}
       </div>
       {% if client.monthly_target %}
       <div class="flex items-center gap-2 text-xs text-slate-500 mb-1">

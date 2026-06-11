@@ -3765,8 +3765,12 @@ class Database:
         return []
 
     def move_comment_to_report(self, comment_id, source, report_month,
-                                actor_email=None, brand_id=None):
-        """Flip a comment's status to 'report' and stamp the month.
+                                actor_email=None, brand_id=None,
+                                target_status='report', allowed_from=('deployed', 'paid')):
+        """Flip a comment's status to `target_status` ('report' or 'replaced') and stamp
+        the month. `allowed_from` = the statuses eligible for this outcome ('deployed'/
+        'paid' for report; 'replace' for replaced). Both outcomes reuse the same
+        attribution columns (report_month / report_added_at / prev_status / brand_id).
 
         Returns the previous status string on success, None if the
         row wasn't found / isn't in deployed-or-paid status, or the
@@ -3802,7 +3806,7 @@ class Database:
         if not row:
             return None
         old_status = row["status"]
-        if old_status not in ("deployed", "paid"):
+        if old_status not in tuple(allowed_from):
             return None
         effective_brand_id = row["brand_id"]
         if effective_brand_id is None:
@@ -3821,12 +3825,12 @@ class Database:
             )
         self.conn.execute(
             f"""UPDATE {table}
-                SET status = 'report',
+                SET status = ?,
                     prev_status = ?,
                     report_month = ?,
                     report_added_at = datetime('now')
                 WHERE id = ?""",
-            (old_status, report_month, comment_id)
+            (target_status, old_status, report_month, comment_id)
         )
         self.conn.commit()
         self._log_report_audit(
@@ -3853,9 +3857,11 @@ class Database:
             f"SELECT status, prev_status, report_month FROM {table} WHERE id = ?",
             (comment_id,)
         ).fetchone()
-        if not row or row["status"] != "report":
+        if not row or row["status"] not in ("report", "replaced"):
             return None
-        restore_to = "deployed"
+        # Undoing a 'replaced' returns it to the pending 'replace' bucket (still needs a
+        # replacement); undoing a 'report' returns it to the live 'deployed' pipeline.
+        restore_to = "replace" if row["status"] == "replaced" else "deployed"
         self.conn.execute(
             f"""UPDATE {table}
                 SET status = ?, prev_status = NULL,
@@ -3885,10 +3891,11 @@ class Database:
             print(f"[report_audit] insert failed: {e}", flush=True)
 
     def bulk_move_to_report(self, *, ids, report_month, actor_email=None,
-                              brand_id_override=None):
-        """`ids` is a list of {id, source} dicts. Each row that's
-        eligible (status in deployed/paid) is flipped. Returns counts
-        {updated, skipped, brand_required}.
+                              brand_id_override=None,
+                              target_status='report', allowed_from=('deployed', 'paid')):
+        """`ids` is a list of {id, source} dicts. Each eligible row (status in
+        `allowed_from`) is flipped to `target_status` ('report' or 'replaced'). Returns
+        counts {updated, skipped, brand_required}.
 
         `brand_id_override` (optional): if supplied, applied to any
         row in the batch whose `brand_id` is currently NULL. Branded
@@ -3910,6 +3917,7 @@ class Database:
             res = self.move_comment_to_report(
                 cid, src, report_month, actor_email=actor_email,
                 brand_id=brand_id_override,
+                target_status=target_status, allowed_from=allowed_from,
             )
             if res is self.BRAND_REQUIRED:
                 brand_required += 1
@@ -4336,6 +4344,18 @@ class Database:
             bucket["mentions_live"] += r["live"] or 0
             bucket["mentions_removed"] += r["removed"] or 0
             bucket["mentions_replace"] += r["replace_cnt"] or 0
+        # 'replaced' (replacement PROVIDED) — a delivered deliverable, distinct from the
+        # pending 'replace' bucket above. Counted via a focused query and merged per month
+        # so the intricate HQ-verdict logic above stays untouched.
+        replaced_by_month = self.get_replaced_counts_for_client(client_id)
+        for m, n in replaced_by_month.items():
+            bucket = agg.setdefault(m, {
+                "month": m,
+                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
+                "mentions_replace": 0, "hq_total": 0, "hq_live": 0, "hq_removed": 0,
+                "hq_replace": 0,
+            })
+            bucket["replaced"] = n
         # Back-compat aggregates so callers that read .total / .live
         # / .removed (older callsites + the brand overview page) keep
         # working without churn.
@@ -4344,7 +4364,39 @@ class Database:
             b["live"] = b["mentions_live"] + b["hq_live"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
+            b.setdefault("replaced", 0)
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
+
+    def get_replaced_counts_for_client(self, client_id):
+        """Per-month count of comments delivered as 'replaced' (a replacement was provided
+        for a removed-but-recent comment), across Live Subs `comments` + `search_comments`,
+        for this client's brands. Returns {month: count}. Distinct from the pending
+        'replace' bucket."""
+        brand_ids = self.client_brand_ids(client_id)
+        if not brand_ids:
+            return {}
+        ph = ",".join("?" * len(brand_ids))
+        out = {}
+        q1 = f"""SELECT c.report_month AS m, COUNT(*) AS n
+                   FROM comments c LEFT JOIN posts p ON c.post_id = p.id
+                  WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
+                    AND ( c.brand_id IN ({ph})
+                          OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                          OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
+                  GROUP BY c.report_month"""
+        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
+            if r["m"]:
+                out[r["m"]] = out.get(r["m"], 0) + (r["n"] or 0)
+        q2 = f"""SELECT sc.report_month AS m, COUNT(*) AS n
+                   FROM search_comments sc LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+                  WHERE sc.status = 'replaced' AND sc.report_month IS NOT NULL
+                    AND ( sc.brand_id IN ({ph})
+                          OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})) )
+                  GROUP BY sc.report_month"""
+        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
+            if r["m"]:
+                out[r["m"]] = out.get(r["m"], 0) + (r["n"] or 0)
+        return out
 
     def update_live_stats(self, comment_id, source, upvotes, num_replies):
         """Persist a single Reddit engagement snapshot. Called from

@@ -34,6 +34,7 @@
            and re-deploy under another account before the campaign
            takes a hit. */
         .badge-replace { background: #3a2a0e; color: #ffb86b; }
+        .badge-replaced { background: #10331f; color: #46d160; }
         .badge-archived { background: #2a2a3a; color: #8888aa; }
         .badge-report { background: #0d3d3a; color: #9efbe0; }
         .badge-keyword { background: #0045AC; color: #7AAFFF; font-size: 0.6rem; }
@@ -1817,7 +1818,7 @@ function renderBrandDetail(data) {
                         <option value="deployed">Deployed</option>
                         <option value="paid">Paid</option>
                         <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="brand-comment-sub-filter" onchange="_brandsViewState.subFilter=this.value;renderBrandCommentTable()" class="text-sm">
@@ -2040,7 +2041,7 @@ function renderBrandCommentTable() {
     }
 
     const statusBadge = (s) => {
-        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', paid: 'badge-paid', deleted: 'badge-deleted', removed: 'badge-removed', draft: 'badge-draft' };
+        const map = { complete: 'badge-complete', assigned: 'badge-assigned', informed: 'badge-informed', deployed: 'badge-deployed', paid: 'badge-paid', deleted: 'badge-deleted', removed: 'badge-removed', replace: 'badge-replace', replaced: 'badge-replaced', report: 'badge-report', draft: 'badge-draft' };
         return `<span class="badge ${map[s] || 'badge-draft'}">${s}</span>`;
     };
 
@@ -3124,7 +3125,7 @@ async function renderCommentTreeTab(container) {
                 <option value="deployed">Deployed</option>
                 <option value="paid">Paid</option>
                 <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="comments-sort-filter" onchange="loadCommentTree()" class="w-36"><!-- sort change needs refetch -->
@@ -4715,7 +4716,7 @@ async function renderCommentManagementTab(container) {
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
                 <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 <option value="deleted">Deleted</option>
             </select>
             <select id="mgmt-brand-filter" onchange="loadManagedComments()" class="w-40">
@@ -5147,6 +5148,7 @@ function renderAccountCommentsPanel(username, cell, allComments) {
                     <option value="deployed" ${currentFilter==='deployed' ? 'selected' : ''}>Deployed</option>
                     <option value="removed" ${currentFilter==='removed' ? 'selected' : ''}>Removed</option>
                     <option value="replace" ${currentFilter==='replace' ? 'selected' : ''}>Replace</option>
+                    <option value="replaced" ${currentFilter==='replaced' ? 'selected' : ''}>Replaced</option>
                     <option value="complete" ${currentFilter==='complete' ? 'selected' : ''}>Complete</option>
                     <option value="deleted" ${currentFilter==='deleted' ? 'selected' : ''}>Deleted</option>
                 </select>
@@ -5358,7 +5360,7 @@ async function renderAllComments(el) {
                     <option value="deployed">Deployed</option>
                     <option value="paid">Paid</option>
                     <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                     <option value="archived">Archived</option>
                 </select>
             </div>
@@ -6989,7 +6991,7 @@ async function renderExport(el) {
                         <option value="informed">Informed</option>
                         <option value="deployed">Deployed</option>
                         <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                         <option value="deleted">Deleted</option>
                     </select>
                     <select id="export-cmt-brand" class="w-40">
@@ -8154,7 +8156,7 @@ async function renderLsubsPosts(c) {
                     <option value="informed">Informed</option>
                     <option value="report">Reported</option>
                     <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -8861,7 +8863,7 @@ async function renderLsubsComments(c) {
                     <option value="deployed">Deployed</option>
                     <option value="paid">Paid</option>
                     <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 </select>
             </label>
             <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -10293,7 +10295,7 @@ async function renderLsComments(c) {
                 <option value="paid">Paid</option>
                 <option value="report">Reported</option>
                 <option value="removed">Removed</option>
-                <option value="replace">Replace</option>
+                <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 <option value="archived">Archived</option>
             </select>
             <select id="ls-cf-month" onchange="lsFilterComments()" class="w-40"
@@ -12181,12 +12183,19 @@ async function showMarkReportedAllModal(scope) {
         <p class="text-xs text-gray-500 mb-3">If set, applied to <em>only</em> the batch's unbranded comments. Already-branded rows keep their brand untouched. Unbranded rows are <strong>skipped</strong> when no override is set.</p>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-2">${_monthOptionsHtml()}</select>
+        <label class="text-xs text-gray-400">Outcome</label>
+        <select id="rep-outcome" class="w-full mb-2" onchange="document.getElementById('rep-status-wrap').style.display = this.value==='replaced' ? 'none' : ''">
+            <option value="report" selected>Reported — live deployed/paid → report (live-checked first)</option>
+            <option value="replaced">Replaced — pending 'replace' → replaced (replacement provided)</option>
+        </select>
+        <div id="rep-status-wrap">
         <label class="text-xs text-gray-400">Status filter (only deployed/paid eligible)</label>
         <select id="rep-status" class="w-full mb-2">
             <option value="">All deployed/paid</option>
             <option value="deployed" ${filterContext.status === 'deployed' ? 'selected' : ''}>Only deployed</option>
             <option value="paid" ${filterContext.status === 'paid' ? 'selected' : ''}>Only paid</option>
         </select>
+        </div>
         <div class="flex gap-2 mt-3">
             <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')">Run</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
@@ -12196,12 +12205,13 @@ async function showMarkReportedAllModal(scope) {
 
 async function submitMarkReportedAll(scope) {
     const month = document.getElementById('rep-month').value;
+    const outcome = document.getElementById('rep-outcome')?.value || 'report';
     const status = document.getElementById('rep-status').value || null;
     const brandOverride = parseInt(document.getElementById('rep-brand').value) || null;
     if (!month) { toast('Pick a month', 'error'); return; }
-    const body = { report_month: month };
+    const body = { report_month: month, outcome };
     if (brandOverride) body.brand_id = brandOverride;
-    if (status) body.status = status;
+    if (status && outcome !== 'replaced') body.status = status;  // replaced forces status='replace' server-side
     if (scope === 'livesubs') {
         const bid = document.getElementById('lsubs-cmt-brand')?.value;
         // The header filter scopes WHICH comments are candidates;
@@ -12224,17 +12234,20 @@ async function submitMarkReportedAll(scope) {
                 api('/api/search/comments').then(r => { _lsComments = r; lsFilterComments(); }).catch(() => {});
             }
         };
+        const isReplaced = outcome === 'replaced';
         if (res && res.task_id) {
-            _addBgTask(res.task_id, 'Reporting (live-checking)');
-            _pollTask(res.task_id, 'Report', (result) => {
+            _addBgTask(res.task_id, isReplaced ? 'Marking replaced' : 'Reporting (live-checking)');
+            _pollTask(res.task_id, isReplaced ? 'Replaced' : 'Report', (result) => {
                 const r = result || {};
                 const updated = r.updated || 0, notLive = r.skipped_not_live || 0, br = r.brand_required || 0;
                 const extra = [notLive ? `${notLive} skipped (not live)` : '',
                                br ? `${br} unbranded` : ''].filter(Boolean).join(' · ');
-                toast(`Reported ${updated} live comment(s) to ${month}${extra ? ' · ' + extra : ''}`, 'success');
+                const verb = isReplaced ? 'Marked' : 'Reported';
+                const noun = isReplaced ? 'replaced' : 'live comment(s) to ' + month;
+                toast(`${verb} ${updated} ${noun}${extra ? ' · ' + extra : ''}`, 'success');
                 refresh();
             });
-            toast('Live-checking, then reporting the live ones…', 'info');
+            toast(isReplaced ? 'Marking the filtered replace comments as replaced…' : 'Live-checking, then reporting the live ones…', 'info');
         }
         closeModal();
     } catch (e) {

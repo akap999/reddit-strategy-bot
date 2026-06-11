@@ -8366,6 +8366,9 @@ def api_comment_to_report(cid):
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
     source = (data.get('source') or 'comment').strip()
+    # outcome: 'report' (deployed/paid → report, live-gated) or 'replaced' (replace →
+    # replaced, NO live gate — its source comment is already removed).
+    outcome = (data.get('outcome') or 'report').strip()
     brand_id = data.get('brand_id')
     try:
         brand_id = int(brand_id) if brand_id not in (None, '', 0) else None
@@ -8375,18 +8378,25 @@ def api_comment_to_report(cid):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
     if source not in ('comment', 'search_comment'):
         return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+    if outcome not in ('report', 'replaced'):
+        return jsonify({"error": "outcome must be 'report' or 'replaced'"}), 400
+    target_status = 'replaced' if outcome == 'replaced' else 'report'
+    allowed_from = ('replace',) if outcome == 'replaced' else ('deployed', 'paid')
     db = get_db()
     try:
-        # Live gate: only report a comment that's still live on Reddit. A non-live one is
-        # left at its current status (NOT moved to removed).
-        gate = _report_live_gate(db, [{"id": cid, "source": source}])
-        if not gate["live"]:
-            nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
-            return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
-                            "message": "left unchanged — not live on Reddit"}), 200
+        if outcome == 'report':
+            # Live gate: only report a comment that's still live on Reddit. A non-live one
+            # is left at its current status (NOT moved to removed). Replaced skips this —
+            # its source is a 'replace' (already removed) comment.
+            gate = _report_live_gate(db, [{"id": cid, "source": source}])
+            if not gate["live"]:
+                nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
+                return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
+                                "message": "left unchanged — not live on Reddit"}), 200
         result = db.move_comment_to_report(
             cid, source, month,
             actor_email=_admin_email(), brand_id=brand_id,
+            target_status=target_status, allowed_from=allowed_from,
         )
         if result is db.BRAND_REQUIRED:
             # Tell the UI which brands to offer. Empty list →
@@ -8396,7 +8406,8 @@ def api_comment_to_report(cid):
                             "candidates": candidates,
                             "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}), 422
         if result is None:
-            return jsonify({"error": "row not found or not in deployed/paid status"}), 422
+            _need = "replace" if outcome == 'replaced' else "deployed/paid"
+            return jsonify({"error": f"row not found or not in {_need} status"}), 422
         # Kick off a background fetch so the client dashboard picks
         # up upvotes/replies without the admin needing to click
         # anything else. Fire-and-forget — the report move is already
@@ -8645,9 +8656,19 @@ def api_bulk_to_report_filtered():
         brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
+    # outcome: 'report' (deployed/paid → report, live-gated) | 'replaced' (replace →
+    # replaced, no gate).
+    outcome = (data.get('outcome') or 'report').strip()
+    if outcome not in ('report', 'replaced'):
+        return jsonify({"error": "outcome must be 'report' or 'replaced'"}), 400
     status_filter = data.get('status')
-    if status_filter not in (None, 'deployed', 'paid', ''):
-        return jsonify({"error": "status must be deployed or paid or omitted"}), 400
+    if outcome == 'replaced':
+        eligible = ('replace',); target_status = 'replaced'
+        status_filter = 'replace'   # candidates = pending-replace comments
+    else:
+        eligible = ('deployed', 'paid'); target_status = 'report'
+        if status_filter not in (None, 'deployed', 'paid', ''):
+            return jsonify({"error": "status must be deployed or paid or omitted"}), 400
     # Capture request-scoped values before the background task (no request context inside).
     actor = _admin_email()
     sub_id = int(data['subreddit_id']) if data.get('subreddit_id') else None
@@ -8655,9 +8676,10 @@ def api_bulk_to_report_filtered():
     source = data.get('source') or None
     date = data.get('date') or None
 
-    # The candidate set can be large (up to 10k) and each row needs a Reddit liveness
-    # fetch, so this runs as a background task. Only LIVE comments are moved to report;
-    # non-live ones are left at their current status (never moved to removed).
+    # The candidate set can be large (up to 10k). For the REPORT outcome each row needs a
+    # Reddit liveness fetch, so it runs as a background task; only LIVE comments are moved
+    # (non-live left untouched). The REPLACED outcome skips the live gate (its source is
+    # already-removed 'replace' comments) but stays a task for symmetry / large batches.
     def task(_task_id=None):
         db = get_db()
         try:
@@ -8668,15 +8690,19 @@ def api_bulk_to_report_filtered():
             )
             items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
             ids = [{"id": r['id'], "source": r.get('source', 'comment')}
-                   for r in items if r.get('status') in ('deployed', 'paid')]
-            gate = _report_live_gate(db, ids, task_id=_task_id)
-            live = gate["live"]
+                   for r in items if r.get('status') in eligible]
+            if outcome == 'report':
+                gate = _report_live_gate(db, ids, task_id=_task_id)
+                move_ids = gate["live"]; skipped_not_live = len(gate["not_live"])
+            else:
+                move_ids = ids; skipped_not_live = 0
             out = db.bulk_move_to_report(
-                ids=live, report_month=month, actor_email=actor, brand_id_override=brand_id)
+                ids=move_ids, report_month=month, actor_email=actor, brand_id_override=brand_id,
+                target_status=target_status, allowed_from=eligible)
             out["candidates_considered"] = len(items)
-            out["skipped_not_live"] = len(gate["not_live"])
+            out["skipped_not_live"] = skipped_not_live
             try:
-                _spawn_report_engagement_fetch(_fetch_report_items(db, live))
+                _spawn_report_engagement_fetch(_fetch_report_items(db, move_ids))
             except Exception as e:
                 print(f"[bulk-to-report-filtered] auto-stats spawn failed: {e}", flush=True)
             return out

@@ -5258,9 +5258,9 @@ function renderAllCommentCard(c) {
     } else if (c.status === 'informed') {
         actionBtns = `<button class="btn btn-sm btn-primary" onclick="${_acAction(src, c.id, 'deploy')}">Deploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'reassign')}">Reassign</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'unassign')}">Unassign</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'copy')}">Copy</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button>`;
     } else if (c.status === 'deployed') {
-        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly client report">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="${_acAction(src, c.id, 'paid')}">Paid</button><button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly report — choose reported or replaced">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-accent" onclick="${_acAction(src, c.id, 'undeploy')}">Undeploy</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'paid') {
-        actionBtns = `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly client report">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
+        actionBtns = `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, '${src}')" title="Push into a monthly report — choose reported or replaced">📊 Report</button><button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="${_acAction(src, c.id, 'removed')}">Removed</button><button class="btn btn-sm btn-secondary" onclick="${_acAction(src, c.id, 'edit_link')}">Edit Link</button>`;
     } else if (c.status === 'report') {
         actionBtns = `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, '${src}')" title="Move back to previous status">Undo report</button>`;
     } else if (c.status === 'replaced') {
@@ -9002,7 +9002,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                     ${c.status === 'informed' ? `<button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
                     ${c.status === 'deployed' ? `<button class="btn btn-sm" style="background:#00A86B;color:white" onclick="markCommentPaid(${c.id})">Paid</button><button class="btn btn-sm" style="background:#8B0000;color:white" onclick="undeployComment(${c.id})">Undeploy</button>` : ''}
                     ${c.status === 'paid' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="lsubsUnmarkPaid(${c.id})" title="Revert this comment from paid back to deployed">↩ Undo paid</button>` : ''}
-                    ${(c.status === 'deployed' || c.status === 'paid') ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'comment')" title="Push this comment into a monthly client report">📊 Report</button>` : ''}
+                    ${(c.status === 'deployed' || c.status === 'paid') ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'comment')" title="Push this comment into a monthly report — choose reported or replaced">📊 Report</button>` : ''}
                     ${c.status === 'report' ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to deployed">Undo report</button>` : ''}
                     ${c.status === 'replaced' ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="reclassifyReport(${c.id}, 'comment', 'report')" title="Re-tag this replacement as a plain reported comment (live-checked first)">Mark as reported</button><button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'comment')" title="Move this comment back to deployed">Undo report</button>` : ''}
                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="markCommentRemoved(${c.id})">Removed</button>
@@ -10678,13 +10678,13 @@ function lsFilterComments() {
                                 ${c.status === 'deployed' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
                                     <button class="btn btn-sm" style="background:#00A86B;color:white" onclick="lsMarkPaid(${c.id})">Paid</button>
-                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly client report">📊 Report</button>
+                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly report — choose reported or replaced">📊 Report</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
                                 ${c.status === 'paid' ? `
                                     <a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>
-                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly client report">📊 Report</button>
+                                    <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showSendToReportModal(${c.id}, 'search_comment')" title="Push into a monthly report — choose reported or replaced">📊 Report</button>
                                     <button class="btn btn-sm" style="background:#4a1a2a;color:#ff6b9b" onclick="lsMarkRemoved(${c.id})">Removed</button>
                                     <button class="btn btn-sm btn-secondary" onclick="editDeployedLinkModal(${c.id}, 'search_comment')">Edit Link</button>
                                 ` : ''}
@@ -12150,7 +12150,12 @@ async function showSendToReportModal(cid, source) {
     // it couldn't infer one (lazy picker, second pass below).
     showModal(`
         <h3 class="text-xl font-bold mb-3">Send to Monthly Report</h3>
-        <p class="text-xs text-gray-400 mb-3">The comment moves from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code>. Dashboard visibility is determined by the comment's brand and which clients are linked to it.</p>
+        <p class="text-xs text-gray-400 mb-3">The comment moves from <code>${source === 'search_comment' ? 'search' : 'regular'}</code> deployed/paid → <code>report</code> or <code>replaced</code> (live-checked first). Dashboard visibility is determined by the comment's brand and which clients are linked to it.</p>
+        <label class="text-xs text-gray-400">Outcome</label>
+        <select id="rep-outcome-single" class="w-full mb-3">
+            <option value="report" selected>Reported — deployed/paid → report (live-checked first)</option>
+            <option value="replaced">Replaced — deployed/paid → replaced (live-checked first)</option>
+        </select>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
         <div id="rep-brand-section"></div>
@@ -12190,12 +12195,13 @@ async function _renderBrandPickerStage(candidates) {
 async function submitSendToReport(cid, source) {
     const month = document.getElementById('rep-month').value;
     if (!month) { toast('Pick a month', 'error'); return; }
+    const outcome = document.getElementById('rep-outcome-single')?.value || 'report';
     const brandPickerEl = document.getElementById('rep-brand');
     const brandId = brandPickerEl ? (parseInt(brandPickerEl.value) || null) : null;
     // If the picker is already on screen (second pass), require a pick.
     if (brandPickerEl && !brandId) { toast('Pick a brand first', 'error'); return; }
 
-    const body = { report_month: month, source };
+    const body = { report_month: month, source, outcome };
     if (brandId) body.brand_id = brandId;
 
     // Use raw fetch so we can inspect the 422 body (api() drops it).
@@ -12217,7 +12223,7 @@ async function submitSendToReport(cid, source) {
             // Live gate: comment wasn't live on Reddit → left at its current status.
             toast(`Left unchanged — not live on Reddit${payload.liveness ? ` (${payload.liveness})` : ''}`, 'info');
         } else {
-            toast(`Sent to ${month}`, 'success');
+            toast(`${outcome === 'replaced' ? 'Marked replaced' : 'Sent to report'} · ${month}`, 'success');
         }
         closeModal();
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);

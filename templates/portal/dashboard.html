@@ -72,7 +72,7 @@
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
             <span class="text-xs text-slate-500">Mentions</span>
           </div>
-          <div class="flex items-center gap-1.5 text-[11px]">
+          <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
             <span class="chip chip-live">{{ m.mentions_live }} live</span>
             {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
             {# Replace is a sub-set of Removed — already counted in
@@ -88,7 +88,7 @@
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
             <span class="text-xs text-slate-500">HQ Mentions</span>
           </div>
-          <div class="flex items-center gap-1.5 text-[11px]">
+          <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
             <span class="chip chip-live">{{ m.hq_live }} live</span>
             {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
             {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
@@ -309,7 +309,7 @@ function _renderCardBody(agg, status) {
         <span class="text-xs text-slate-500" data-kind>${kind === 'mentions' ? 'Mentions' : 'HQ Mentions'}</span>
         ${label ? `<span class="text-[11px] text-slate-400" data-label>${label}</span>` : ''}
       </div>
-      <div class="flex items-center gap-1.5 text-[11px]" data-chips>
+      <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0" data-chips>
         <span class="chip chip-live"><span data-live>${p.live}</span> live</span>
         ${p.removed ? `<span class="chip chip-removed"><span data-removed>${p.removed}</span> removed</span>` : ''}
         ${p.replace ? `<span class="chip chip-replace"><span data-replace>${p.replace}</span> replace</span>` : ''}

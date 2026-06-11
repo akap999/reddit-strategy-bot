@@ -6887,6 +6887,8 @@ def api_generate_search_hq_batch():
     threshold = data.get("relevance_threshold", 6)
     # Pre-consolidation parity for Live Search HQ batch — default ai_crawl off.
     ai_crawl = bool(data.get("ai_crawl", False))
+    dedup = bool(data.get("dedup", False))
+    exclude_subs = {(s or "").strip().lower() for s in (data.get("exclude_subs") or [])}
 
     if not post_ids:
         return jsonify({"error": "No post_ids provided"}), 400
@@ -6902,6 +6904,11 @@ def api_generate_search_hq_batch():
         brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
         if not brand:
             continue
+        if dedup:
+            if (post.get("subreddit") or "").strip().lower() in exclude_subs:
+                continue
+            if db_check.search_post_has_comments_for_brand(pid, post["brand_id"], hq=True):
+                continue
         valid_posts.append({
             "pid": pid, "post": post, "brand": brand,
             "brand_name": brand["name"],
@@ -6974,6 +6981,10 @@ def api_generate_search_comments_batch():
     num_comments = data.get("num_comments", 2)
     # Pre-consolidation parity for Live Search batch — default ai_crawl off.
     ai_crawl = bool(data.get("ai_crawl", False))
+    # Server-side dedup/exclude so the client doesn't pull the whole posts+comments
+    # tables to filter (that froze "Save & Generate All" on large datasets).
+    dedup = bool(data.get("dedup", False))
+    exclude_subs = {(s or "").strip().lower() for s in (data.get("exclude_subs") or [])}
 
     if not post_ids:
         return jsonify({"error": "No post_ids provided"}), 400
@@ -6990,6 +7001,11 @@ def api_generate_search_comments_batch():
         brand = db_check.get_brand(post["brand_id"]) if post.get("brand_id") else None
         if not brand:
             continue
+        if dedup:
+            if (post.get("subreddit") or "").strip().lower() in exclude_subs:
+                continue
+            if db_check.search_post_has_comments_for_brand(pid, post["brand_id"], hq=False):
+                continue
         # Stash the full brand dict so the worker can extract focus / any
         # other future field via cg._extract_brand_focus(vp["brand"]).
         valid_posts.append({

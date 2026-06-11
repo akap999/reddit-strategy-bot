@@ -9884,44 +9884,27 @@ async function _lsSaveAndGenerateAllInner(brandId) {
     // don't already have comments for the currently-targeted brand.
     // res.all_ids includes both newly-inserted rows and pre-existing rows
     // whose brand_id was just updated to the caller's brand.
-    const brandIdNum = parseInt(brandId);
-    const allIds = new Set(res.all_ids || res.saved_ids || []);
-    if (!allIds.size) {
+    const allIds = [...new Set(res.all_ids || res.saved_ids || [])];
+    if (!allIds.length) {
         toast('No posts to generate for', 'info');
         return;
     }
 
     try {
-        const saved = await api('/api/search/posts');
-        // Refresh the LS comments cache so hasCommentsForBrand is accurate
-        try { _lsComments = await api('/api/search/comments'); } catch(e) {}
-        const excludeSubs = lsGetExcludedSubs();
+        // Hand the saved IDs straight to the batch endpoint with server-side dedup —
+        // the server skips posts already commented for this brand + excluded subreddits.
+        // (Previously the client pulled the ENTIRE posts + comments tables to filter,
+        // which froze on large datasets and never reached generation.)
+        const excludeSubs = [...lsGetExcludedSubs()];
         const mode = document.getElementById('ls-gen-mode')?.value || 'regular';
-        // Brand-aware dedup is mode-aware: HQ mode skips posts that already
-        // have an HQ thread for this brand; regular mode skips posts that
-        // already have any comments for this brand. This lets a user run
-        // both kinds on the same post.
-        const cidx = _lsBuildCommentIndex(_lsComments);
-        const eligible = saved.filter(p =>
-            allIds.has(p.id) &&
-            p.brand_id &&
-            p.status !== 'generating' &&
-            p.status !== 'irrelevant' &&
-            !_lsHasCommentsForBrand(cidx, p.id, brandIdNum, mode) &&
-            !excludeSubs.has((p.subreddit || '').toLowerCase())
-        );
-        if (!eligible.length) {
-            toast(`Saved ${res.saved}${res.duplicates ? `, updated ${res.duplicates}` : ''} — none need new comments for this brand${mode === 'hq' ? ' (HQ)' : ''}`, 'info');
-            return;
-        }
         const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
         const generateUrl = mode === 'hq'
             ? '/api/search/posts/generate-hq-batch'
             : '/api/search/posts/generate-batch';
         const labelPrefix = mode === 'hq' ? 'HQ Gen' : 'Gen';
         runTask(generateUrl,
-            { post_ids: eligible.map(p => p.id), num_comments: numComments },
-            _batchGenComplete, `${labelPrefix}: ${eligible.length} posts`);
+            { post_ids: allIds, num_comments: numComments, dedup: true, exclude_subs: excludeSubs },
+            _batchGenComplete, `${labelPrefix}: up to ${allIds.length} posts`);
     } catch(e) { toast('Generation failed to start', 'error'); }
 }
 

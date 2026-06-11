@@ -7197,6 +7197,19 @@ class Database:
         self.conn.execute("UPDATE search_posts SET status = ? WHERE id = ?", (status, post_id))
         self.conn.commit()
 
+    def search_post_has_comments_for_brand(self, search_post_id, brand_id, hq=False):
+        """True if this search post already has a non-deleted comment for `brand_id` of the
+        given kind (hq vs regular). Mode-aware dedup for the batch generators — lets the
+        server skip already-covered posts WITHOUT the client pulling the whole comments
+        table. Single indexed lookup."""
+        kind = "comment_type = 'hq'" if hq else "(comment_type IS NULL OR comment_type != 'hq')"
+        row = self.conn.execute(
+            f"SELECT 1 FROM search_comments WHERE search_post_id = ? AND brand_id = ? "
+            f"AND status != 'deleted' AND {kind} LIMIT 1",
+            (search_post_id, brand_id)
+        ).fetchone()
+        return bool(row)
+
     def delete_search_post(self, post_id):
         # Decrement the global rotation counter once for each child search_comment
         # that still has an account attached. The UPDATE below does this in a

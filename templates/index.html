@@ -7121,7 +7121,27 @@ let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
 let _lsSavedPosts = [];
 let _lsComments = [];
+let _lsGenBusy = false;   // guards against double-spawning a Live Search generate batch
 let _lsFilteredComments = [];
+
+// Index comments once so brand-aware eligibility is O(1) per post instead of an
+// O(posts × comments) scan (which froze the UI on large datasets — the "Save & Generate
+// All takes forever to initiate" bug). Key: search_post_id -> Set of "brandId|kind".
+function _lsBuildCommentIndex(comments) {
+    const idx = new Map();
+    for (const c of (comments || [])) {
+        if (c.status === 'deleted') continue;
+        const kind = c.comment_type === 'hq' ? 'hq' : 'reg';
+        let s = idx.get(c.search_post_id);
+        if (!s) { s = new Set(); idx.set(c.search_post_id, s); }
+        s.add(`${c.brand_id}|${kind}`);
+    }
+    return idx;
+}
+function _lsHasCommentsForBrand(idx, postId, brandId, mode) {
+    const s = idx.get(postId);
+    return !!s && s.has(`${brandId}|${mode === 'hq' ? 'hq' : 'reg'}`);
+}
 let _lsSelectedSubs = null; // null = all selected (default)
 let _lsSubNoneExplicit = false; // true when user explicitly clicks "None"
 
@@ -9834,10 +9854,17 @@ async function lsSaveSelected() {
 }
 
 async function lsSaveAndGenerateAll() {
+    if (_lsGenBusy) { toast('Already working on a save & generate — hang on…', 'info'); return; }
     const brandId = document.getElementById('ls-brand').value;
     if (!brandId) { toast('Select a brand before saving & generating', 'error'); return; }
     if (!_lsSearchResults.length) { toast('No search results to save', 'error'); return; }
     if (!confirm(`Save all ${_lsSearchResults.length} posts and generate comments for each?`)) return;
+    _lsGenBusy = true;
+    try {
+    return await _lsSaveAndGenerateAllInner(brandId);
+    } finally { _lsGenBusy = false; }
+}
+async function _lsSaveAndGenerateAllInner(brandId) {
 
     // Step 1: Save all posts with the selected brand
     const posts = _lsSearchResults.map(r => ({
@@ -9874,15 +9901,13 @@ async function lsSaveAndGenerateAll() {
         // have an HQ thread for this brand; regular mode skips posts that
         // already have any comments for this brand. This lets a user run
         // both kinds on the same post.
-        const hasCommentsForBrand = (p) => _lsComments.some(c =>
-            c.search_post_id === p.id && c.brand_id === brandIdNum && c.status !== 'deleted'
-            && (mode === 'hq' ? c.comment_type === 'hq' : c.comment_type !== 'hq'));
+        const cidx = _lsBuildCommentIndex(_lsComments);
         const eligible = saved.filter(p =>
             allIds.has(p.id) &&
             p.brand_id &&
             p.status !== 'generating' &&
             p.status !== 'irrelevant' &&
-            !hasCommentsForBrand(p) &&
+            !_lsHasCommentsForBrand(cidx, p.id, brandIdNum, mode) &&
             !excludeSubs.has((p.subreddit || '').toLowerCase())
         );
         if (!eligible.length) {
@@ -10051,14 +10076,12 @@ async function lsGenerateAll() {
     // checks for HQ comments; regular mode checks for non-HQ comments —
     // so a user can run both modes on the same post.
     const mode = _lsGenMode();
-    const hasCommentsForBrand = (p) => _lsComments.some(c =>
-        c.search_post_id === p.id && c.brand_id === p.brand_id && c.status !== 'deleted'
-        && (mode === 'hq' ? c.comment_type === 'hq' : c.comment_type !== 'hq'));
+    const cidx = _lsBuildCommentIndex(_lsComments);
     const filtered = lsGetFilteredSaved().filter(p =>
         p.brand_id &&
         p.status !== 'generating' &&
         p.status !== 'irrelevant' &&
-        !hasCommentsForBrand(p) &&
+        !_lsHasCommentsForBrand(cidx, p.id, p.brand_id, mode) &&
         !excludeSubs.has((p.subreddit||'').toLowerCase()));
     if (!filtered.length) { toast(`No eligible posts (must have brand; no ${mode === 'hq' ? 'HQ ' : ''}comments yet for that brand; not generating/irrelevant/excluded)`, 'error'); return; }
     lsShowCapModal(mode, filtered);

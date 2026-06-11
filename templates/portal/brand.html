@@ -48,14 +48,16 @@
     <!-- Per-pipeline split. Each row only renders if the brand has
          deliverables in that pipeline this month. -->
     <div class="space-y-2.5 mb-3">
-      {% if m.mentions_total %}
+      {% if m.mentions_total or m.mentions_replaced %}
       <div class="flex items-baseline justify-between gap-3">
         <div class="flex items-baseline gap-2">
           <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
           <span class="text-xs text-slate-500">Mentions</span>
         </div>
-        <div class="flex items-center gap-1.5 text-[11px]">
-          <span class="chip chip-live">{{ m.mentions_live }} live</span>
+        <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
+          {# 'replaced' restores a deliverable → folded into live (LIVE, not TOTAL) + its own chip. #}
+          <span class="chip chip-live">{{ m.mentions_live + m.mentions_replaced }} live</span>
+          {% if m.mentions_replaced %}<span class="chip chip-replaced">{{ m.mentions_replaced }} replaced</span>{% endif %}
           {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
           {# Replace is already counted under Removed — surfaced
              separately so the admin sees redeploy-eligible rows. #}
@@ -63,14 +65,15 @@
         </div>
       </div>
       {% endif %}
-      {% if m.hq_total %}
+      {% if m.hq_total or m.hq_replaced %}
       <div class="flex items-baseline justify-between gap-3">
         <div class="flex items-baseline gap-2">
           <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
           <span class="text-xs text-slate-500">HQ Mentions</span>
         </div>
-        <div class="flex items-center gap-1.5 text-[11px]">
-          <span class="chip chip-live">{{ m.hq_live }} live</span>
+        <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
+          <span class="chip chip-live">{{ m.hq_live + m.hq_replaced }} live</span>
+          {% if m.hq_replaced %}<span class="chip chip-replaced">{{ m.hq_replaced }} replaced</span>{% endif %}
           {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
           {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
         </div>

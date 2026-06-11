@@ -4426,61 +4426,75 @@ class Database:
             bucket["mentions_removed"] += r["removed"] or 0
             bucket["mentions_replace"] += r["replace_cnt"] or 0
         # 'replaced' (replacement PROVIDED) — a delivered deliverable, distinct from the
-        # pending 'replace' bucket above. Counted via a focused query and merged per month
-        # so the intricate HQ-verdict logic above stays untouched.
-        replaced_by_month = self.get_replaced_counts_for_client(client_id)
-        for m, n in replaced_by_month.items():
+        # pending 'replace' bucket above. Counted via a focused query and merged per month,
+        # SPLIT by pipeline (mentions = search_comments, hq = comments) so each pipeline's
+        # card can show its own replaced chip — mirrors the By-Brand aggregate.
+        replaced_split = self.get_replaced_split_for_client(client_id)
+        for m, split in replaced_split.items():
             bucket = agg.setdefault(m, {
                 "month": m,
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
                 "mentions_replace": 0, "hq_total": 0, "hq_live": 0, "hq_removed": 0,
                 "hq_replace": 0,
             })
-            bucket["replaced"] = n
+            bucket["mentions_replaced"] = split.get("mentions", 0)
+            bucket["hq_replaced"] = split.get("hq", 0)
         # Back-compat aggregates so callers that read .total / .live
         # / .removed (older callsites + the brand overview page) keep
         # working without churn.
         for b in agg.values():
-            b.setdefault("replaced", 0)
+            b.setdefault("mentions_replaced", 0)
+            b.setdefault("hq_replaced", 0)
             # 'replaced' = a delivered replacement that restores an ALREADY-counted
             # deliverable (the removed original is already in total). So it counts toward
             # LIVE (the deliverable is live again) but NOT toward TOTAL (avoid double-count).
+            b["replaced"] = b["mentions_replaced"] + b["hq_replaced"]
             b["total"] = b["mentions_total"] + b["hq_total"]
             b["live"] = b["mentions_live"] + b["hq_live"] + b["replaced"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
-    def get_replaced_counts_for_client(self, client_id):
-        """Per-month count of comments delivered as 'replaced' (a replacement was provided
-        for a removed-but-recent comment), across Live Subs `comments` + `search_comments`,
-        for this client's brands. Returns {month: count}. Distinct from the pending
-        'replace' bucket."""
+    def get_replaced_split_for_client(self, client_id):
+        """Per-month count of 'replaced' deliverables for this client's brands, SPLIT by
+        pipeline: hq = Live Subs `comments`, mentions = `search_comments`. Returns
+        {month: {"mentions": n, "hq": n}}. 'replaced' = a delivered replacement for a
+        removed-but-recent comment; distinct from the pending 'replace' bucket."""
         brand_ids = self.client_brand_ids(client_id)
         if not brand_ids:
             return {}
         ph = ",".join("?" * len(brand_ids))
         out = {}
-        q1 = f"""SELECT c.report_month AS m, COUNT(*) AS n
-                   FROM comments c LEFT JOIN posts p ON c.post_id = p.id
-                  WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
-                    AND ( c.brand_id IN ({ph})
-                          OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
-                          OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
-                  GROUP BY c.report_month"""
-        for r in self.conn.execute(q1, brand_ids * 3).fetchall():
+        def _cell(m):
+            return out.setdefault(m, {"mentions": 0, "hq": 0})
+        # hq = comments
+        q_hq = f"""SELECT c.report_month AS m, COUNT(*) AS n
+                     FROM comments c LEFT JOIN posts p ON c.post_id = p.id
+                    WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
+                      AND ( c.brand_id IN ({ph})
+                            OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                            OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
+                    GROUP BY c.report_month"""
+        for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
             if r["m"]:
-                out[r["m"]] = out.get(r["m"], 0) + (r["n"] or 0)
-        q2 = f"""SELECT sc.report_month AS m, COUNT(*) AS n
-                   FROM search_comments sc LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
-                  WHERE sc.status = 'replaced' AND sc.report_month IS NOT NULL
-                    AND ( sc.brand_id IN ({ph})
-                          OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})) )
-                  GROUP BY sc.report_month"""
-        for r in self.conn.execute(q2, brand_ids * 2).fetchall():
+                _cell(r["m"])["hq"] += (r["n"] or 0)
+        # mentions = search_comments
+        q_men = f"""SELECT sc.report_month AS m, COUNT(*) AS n
+                      FROM search_comments sc LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
+                     WHERE sc.status = 'replaced' AND sc.report_month IS NOT NULL
+                       AND ( sc.brand_id IN ({ph})
+                             OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})) )
+                     GROUP BY sc.report_month"""
+        for r in self.conn.execute(q_men, brand_ids * 2).fetchall():
             if r["m"]:
-                out[r["m"]] = out.get(r["m"], 0) + (r["n"] or 0)
+                _cell(r["m"])["mentions"] += (r["n"] or 0)
         return out
+
+    def get_replaced_counts_for_client(self, client_id):
+        """Per-month TOTAL count of 'replaced' deliverables (both pipelines) for this
+        client's brands. Returns {month: count}. Kept as a thin wrapper over the split."""
+        return {m: (s.get("mentions", 0) + s.get("hq", 0))
+                for m, s in self.get_replaced_split_for_client(client_id).items()}
 
     def update_live_stats(self, comment_id, source, upvotes, num_replies):
         """Persist a single Reddit engagement snapshot. Called from
@@ -4925,9 +4939,17 @@ class Database:
 
             # Classify each HQ root for the reason text + verdict
             # selection.
-            live_hq = next(
+            # A truly-live HQ root = on Reddit with a working status. A 'replaced' root is
+            # ALSO live (the deliverable was restored via a replacement) but we surface it
+            # as its OWN verdict so the client report shows replacements distinctly rather
+            # than folding them silently into 'live'.
+            truly_live_hq = next(
                 (h for h in hq_roots
-                 if h["url"] and h["status"] not in ("removed", "replace")),
+                 if h["url"] and h["status"] in ("report", "deployed", "paid")),
+                None,
+            )
+            replaced_hq = next(
+                (h for h in hq_roots if h["url"] and h["status"] == "replaced"),
                 None,
             )
             replace_hq = next(
@@ -4936,20 +4958,26 @@ class Database:
             )
 
             reason = None
-            is_replace = False
+            verdict = None  # 'replaced'/'replace' set here; 'live'/'removed' resolved below
             if post_status == "removed":
                 reason = (f"post.status='removed' "
                           f"(prev_status={post.get('prev_status')!r})")
-            elif live_hq is not None:
+            elif truly_live_hq is not None:
                 # Healthy path — no verdict reason; falls through
                 # to the "all clear" branch below.
                 pass
+            elif replaced_hq is not None:
+                reason = (f"HQ root comment #{replaced_hq['id']} "
+                          f"status='replaced' (a replacement was delivered — the "
+                          f"deliverable is live again); no other HQ root is in a "
+                          f"plain-live state")
+                verdict = "replaced"
             elif replace_hq is not None:
                 reason = (f"HQ root comment #{replace_hq['id']} "
                           f"status='replace' (recent removal — "
                           f"eligible for redeploy); no other HQ "
                           f"root is currently live")
-                is_replace = True
+                verdict = "replace"
             elif not hq_roots:
                 reason = ("no deployed HQ root comment under this post "
                           "(no comment_type='hq' AND parent_comment_id "
@@ -4994,7 +5022,7 @@ class Database:
                 ) if hq_roots else "(no HQ root)"
             )
             if reason:
-                post["derived_status"] = "replace" if is_replace else "removed"
+                post["derived_status"] = verdict or "removed"
                 post["derived_status_reason"] = (
                     f"{reason} | post.status={post_status!r} | "
                     f"hq_roots: [{hq_brief}] | reported comments: "
@@ -5003,8 +5031,8 @@ class Database:
             else:
                 post["derived_status"] = "live"
                 post["derived_status_reason"] = (
-                    f"all clear — live HQ root #{live_hq['id']} "
-                    f"status={live_hq['status']!r} url=set | "
+                    f"all clear — live HQ root #{truly_live_hq['id']} "
+                    f"status={truly_live_hq['status']!r} url=set | "
                     f"post.status={post_status!r} | "
                     f"hq_roots: [{hq_brief}] | "
                     f"{len(cmts)} reported comment(s): {cmts_str}"
@@ -5067,7 +5095,7 @@ class Database:
                  LEFT JOIN brands pb ON p.brand_id = pb.id
                  WHERE {match_c}
                    AND c.report_month = ?
-                   AND c.status IN ('report', 'removed', 'replace')"""
+                   AND c.status IN ('report', 'removed', 'replace', 'replaced')"""
         params_q2 = (brand_ids * 2) + [month]
         q2 = f"""SELECT sc.id, sc.body, sc.status, sc.account_id, sc.brand_id,
                         sc.reddit_comment_url, sc.posted_at, sc.deployed_at,
@@ -5084,7 +5112,7 @@ class Database:
                  LEFT JOIN brands spb ON sp.brand_id = spb.id
                  WHERE {match_sc}
                    AND sc.report_month = ?
-                   AND sc.status IN ('report', 'removed', 'replace')"""
+                   AND sc.status IN ('report', 'removed', 'replace', 'replaced')"""
         rows = []
         rows.extend(dict(r) for r in self.conn.execute(q1, params_q1).fetchall())
         rows.extend(dict(r) for r in self.conn.execute(q2, params_q2).fetchall())

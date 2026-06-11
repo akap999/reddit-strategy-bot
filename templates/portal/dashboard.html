@@ -66,14 +66,17 @@
       <!-- Two-pipeline split. Show each pipeline only if it has
            any deliverables in this month. -->
       <div class="space-y-2.5 mb-3">
-        {% if m.mentions_total %}
+        {% if m.mentions_total or m.mentions_replaced %}
         <div class="flex items-baseline justify-between gap-3">
           <div class="flex items-baseline gap-2">
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.mentions_total }}</span>
             <span class="text-xs text-slate-500">Mentions</span>
           </div>
           <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-            <span class="chip chip-live">{{ m.mentions_live }} live</span>
+            {# 'replaced' restores a deliverable → folded into live (counts toward LIVE,
+               not TOTAL), and also shown as its own chip. #}
+            <span class="chip chip-live">{{ m.mentions_live + m.mentions_replaced }} live</span>
+            {% if m.mentions_replaced %}<span class="chip chip-replaced">{{ m.mentions_replaced }} replaced</span>{% endif %}
             {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
             {# Replace is a sub-set of Removed — already counted in
                mentions_removed. Surface it separately so the admin
@@ -82,24 +85,18 @@
           </div>
         </div>
         {% endif %}
-        {% if m.hq_total %}
+        {% if m.hq_total or m.hq_replaced %}
         <div class="flex items-baseline justify-between gap-3">
           <div class="flex items-baseline gap-2">
             <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;">{{ m.hq_total }}</span>
             <span class="text-xs text-slate-500">HQ Mentions</span>
           </div>
           <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-            <span class="chip chip-live">{{ m.hq_live }} live</span>
+            <span class="chip chip-live">{{ m.hq_live + m.hq_replaced }} live</span>
+            {% if m.hq_replaced %}<span class="chip chip-replaced">{{ m.hq_replaced }} replaced</span>{% endif %}
             {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
             {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
           </div>
-        </div>
-        {% endif %}
-        {# Replacements PROVIDED this month (status='replaced') — a delivered
-           outcome, distinct from the pending `replace` chips above. #}
-        {% if m.replaced %}
-        <div class="flex items-center justify-end">
-          <span class="chip chip-replaced">{{ m.replaced }} replaced</span>
         </div>
         {% endif %}
       </div>
@@ -244,18 +241,19 @@ function _aggregate(rows, monthFilter, statusFilter) {
   // Status filter narrows the "headline" number for each pipeline:
   // when 'live' / 'removed' is picked, the headline shifts to that
   // partition; 'all' shows the pipeline's total.
-  const pickHeadline = (live, removed, total) =>
-    statusFilter === 'live'    ? live :
-    statusFilter === 'removed' ? removed :
-                                 total;
+  const pickHeadline = (live, removed, replaced, total) =>
+    statusFilter === 'live'     ? live :
+    statusFilter === 'removed'  ? removed :
+    statusFilter === 'replaced' ? replaced :
+                                  total;
   return {
     mentions: {
       total: mTotalAll, live: mLiveAll, removed: mRemoved, replace: mReplace, replaced: mReplaced,
-      headline: pickHeadline(mLiveAll, mRemoved, mTotalAll),
+      headline: pickHeadline(mLiveAll, mRemoved, mReplaced, mTotalAll),
     },
     hq: {
       total: hqTotalAll, live: hqLiveAll, removed: hqRemoved, replace: hqReplace, replaced: hqReplaced,
-      headline: pickHeadline(hqLiveAll, hqRemoved, hqTotalAll),
+      headline: pickHeadline(hqLiveAll, hqRemoved, hqReplaced, hqTotalAll),
     },
   };
 }
@@ -294,6 +292,7 @@ function _statusLabel(status) {
   // the chip cleanly via the conditional render below.
   if (status === 'live') return 'live';
   if (status === 'removed') return 'removed';
+  if (status === 'replaced') return 'replaced';
   return '';
 }
 
@@ -349,6 +348,7 @@ function renderBrandCards() {
             <select data-card-status class="w-full text-xs px-2 py-1 border border-slate-200 rounded-md">
               <option value="all">All</option>
               <option value="live">Live</option>
+              <option value="replaced">Replaced</option>
               <option value="removed">Removed</option>
             </select>
           </div>

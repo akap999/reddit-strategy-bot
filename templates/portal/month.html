@@ -11,9 +11,12 @@
    pipeline total. #}
 {% set removed_mentions = search_comments | selectattr('status', 'equalto', 'removed') | list | length %}
 {% set replace_mentions = search_comments | selectattr('status', 'equalto', 'replace') | list | length %}
+{# 'replaced' = a delivered replacement — counts toward LIVE (the deliverable is live again). #}
+{% set replaced_mentions = search_comments | selectattr('status', 'equalto', 'replaced') | list | length %}
 {# HQ verdict (derived_status) is also mutually exclusive: a post
-   is exactly one of live / removed / replace. #}
+   is exactly one of live / replaced / removed / replace. #}
 {% set replace_hq = posts | selectattr('derived_status', 'equalto', 'replace') | list | length %}
+{% set replaced_hq = posts | selectattr('derived_status', 'equalto', 'replaced') | list | length %}
 {% set total_all = hq_count + mention_count %}
 
 <div class="mb-6 flex items-start justify-between flex-wrap gap-4">
@@ -41,12 +44,12 @@
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">HQ Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-hq">{{ hq_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5">posts{% if replace_hq %} · {{ replace_hq }} replace{% endif %}</div>
+    <div class="text-xs text-slate-400 mt-0.5">posts{% if replaced_hq %} · {{ replaced_hq }} replaced{% endif %}{% if replace_hq %} · {{ replace_hq }} replace{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-mentions">{{ mention_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions }} live{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}{% if replace_mentions %} · {{ replace_mentions }} replace{% endif %}</div>
+    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions + replaced_mentions }} live{% if replaced_mentions %} · {{ replaced_mentions }} replaced{% endif %}{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}{% if replace_mentions %} · {{ replace_mentions }} replace{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
@@ -55,7 +58,7 @@
   {% if client.monthly_target %}
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Target</div>
-    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-target-live">{{ hq_count + live_mentions }}</span><span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
+    <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;"><span id="kpi-target-live">{{ hq_count + live_mentions + replaced_mentions }}</span><span class="text-sm text-slate-400">/{{ client.monthly_target }}</span></div>
   </div>
   {% endif %}
 </div>
@@ -91,6 +94,7 @@
     <select id="flt-status" class="w-full text-sm px-2 py-1.5 border border-slate-200 rounded-md">
       <option value="">All</option>
       <option value="report">Live</option>
+      <option value="replaced">Replaced</option>
       <option value="removed">Removed</option>
       <option value="replace">Replace</option>
     </select>
@@ -140,13 +144,14 @@
       {% set post_short_date = post_date[:10] %}
       {% set derived = post.derived_status or 'live' %}
       {# data-status carries the actual derived state so the row
-         filter + KPI re-count treat live / removed / replace as
-         three mutually exclusive buckets. Maps:
-         - derived='live'    → data-status='report'
-         - derived='removed' → data-status='removed'
-         - derived='replace' → data-status='replace'
+         filter + KPI re-count treat live / replaced / removed / replace
+         as mutually exclusive buckets. Maps:
+         - derived='live'     → data-status='report'
+         - derived='replaced' → data-status='replaced'
+         - derived='removed'  → data-status='removed'
+         - derived='replace'  → data-status='replace'
       #}
-      {% set _row_status = 'report' if derived == 'live' else ('replace' if derived == 'replace' else 'removed') %}
+      {% set _row_status = 'report' if derived == 'live' else ('replaced' if derived == 'replaced' else ('replace' if derived == 'replace' else 'removed')) %}
       <tr data-row data-kind="hq" data-brand="{{ post.brand_name or '' }}" data-sub="{{ post.subreddit_name or '' }}" data-date="{{ post_date[:19] }}" data-title="{{ (post.title or '')|lower }}" data-status="{{ _row_status }}">
         <td data-label="Subreddit">
           {% if post.subreddit_name %}<span class="chip chip-sub">r/{{ post.subreddit_name }}</span>{% else %}—{% endif %}
@@ -176,6 +181,8 @@
           {% set reason = post.derived_status_reason or '' %}
           {% if derived == 'live' %}
             <span class="chip chip-live" title="{{ reason }}">Live</span>
+          {% elif derived == 'replaced' %}
+            <span class="chip chip-replaced" title="{{ reason }}">Replaced</span>
           {% elif derived == 'replace' %}
             <span class="chip chip-replace" title="{{ reason }}">Replace</span>
           {% else %}
@@ -241,6 +248,8 @@
         <td data-label="Status">
           {% if r.status == 'report' %}
             <span class="chip chip-live">Live</span>
+          {% elif r.status == 'replaced' %}
+            <span class="chip chip-replaced">Replaced</span>
           {% elif r.status == 'replace' %}
             <span class="chip chip-replace">Replace</span>
           {% else %}

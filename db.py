@@ -3361,7 +3361,7 @@ class Database:
                         sp.title as post_title, sp.id as p_id,
                         sp.subreddit as subreddit_name, b.name as brand_name,
                         sp.reddit_url as post_reddit_url,
-                        sp.prompt_version as post_prompt_version,
+                        NULL as post_prompt_version,
                         NULL as post_number
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
@@ -4406,11 +4406,14 @@ class Database:
         # / .removed (older callsites + the brand overview page) keep
         # working without churn.
         for b in agg.values():
-            b["total"] = b["mentions_total"] + b["hq_total"]
-            b["live"] = b["mentions_live"] + b["hq_live"]
+            b.setdefault("replaced", 0)
+            # 'replaced' = a gate-confirmed, delivered replacement → counts as a live,
+            # delivered mention. It's NOT in the mentions/hq buckets (those only count
+            # report/removed/replace), so adding it to live/total does not double-count.
+            b["total"] = b["mentions_total"] + b["hq_total"] + b["replaced"]
+            b["live"] = b["mentions_live"] + b["hq_live"] + b["replaced"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
-            b.setdefault("replaced", 0)
         return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
 
     def get_replaced_counts_for_client(self, client_id):

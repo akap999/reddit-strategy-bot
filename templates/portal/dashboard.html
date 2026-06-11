@@ -220,19 +220,26 @@ function _aggregate(rows, monthFilter, statusFilter) {
   // `replace` is a sub-count of `removed` — every replace row is
   // also counted under removed. The chip is rendered separately so
   // the admin sees how many "removed" rows are eligible for redeploy.
-  let mTotal = 0, mLive = 0, mRemoved = 0, mReplace = 0;
-  let hqTotal = 0, hqLive = 0, hqRemoved = 0, hqReplace = 0;
+  let mTotal = 0, mLive = 0, mRemoved = 0, mReplace = 0, mReplaced = 0;
+  let hqTotal = 0, hqLive = 0, hqRemoved = 0, hqReplace = 0, hqReplaced = 0;
   for (const r of rows) {
     if (monthFilter && r.month !== monthFilter) continue;
     mTotal += r.mentions_total || 0;
     mLive += r.mentions_live || 0;
     mRemoved += r.mentions_removed || 0;
     mReplace += r.mentions_replace || 0;
+    mReplaced += r.mentions_replaced || 0;
     hqTotal += r.hq_total || 0;
     hqLive += r.hq_live || 0;
     hqRemoved += r.hq_removed || 0;
     hqReplace += r.hq_replace || 0;
+    hqReplaced += r.hq_replaced || 0;
   }
+  // 'replaced' (delivered replacement) is a live, delivered mention → fold it into each
+  // pipeline's live + total (it's not in the report/removed/replace buckets, so no
+  // double-count). Keeps this tab consistent with the By Month view's live total.
+  const mLiveAll = mLive + mReplaced, mTotalAll = mTotal + mReplaced;
+  const hqLiveAll = hqLive + hqReplaced, hqTotalAll = hqTotal + hqReplaced;
   // Status filter narrows the "headline" number for each pipeline:
   // when 'live' / 'removed' is picked, the headline shifts to that
   // partition; 'all' shows the pipeline's total.
@@ -242,12 +249,12 @@ function _aggregate(rows, monthFilter, statusFilter) {
                                  total;
   return {
     mentions: {
-      total: mTotal, live: mLive, removed: mRemoved, replace: mReplace,
-      headline: pickHeadline(mLive, mRemoved, mTotal),
+      total: mTotalAll, live: mLiveAll, removed: mRemoved, replace: mReplace, replaced: mReplaced,
+      headline: pickHeadline(mLiveAll, mRemoved, mTotalAll),
     },
     hq: {
-      total: hqTotal, live: hqLive, removed: hqRemoved, replace: hqReplace,
-      headline: pickHeadline(hqLive, hqRemoved, hqTotal),
+      total: hqTotalAll, live: hqLiveAll, removed: hqRemoved, replace: hqReplace, replaced: hqReplaced,
+      headline: pickHeadline(hqLiveAll, hqRemoved, hqTotalAll),
     },
   };
 }
@@ -305,6 +312,7 @@ function _renderCardBody(agg, status) {
         <span class="chip chip-live"><span data-live>${p.live}</span> live</span>
         ${p.removed ? `<span class="chip chip-removed"><span data-removed>${p.removed}</span> removed</span>` : ''}
         ${p.replace ? `<span class="chip chip-replace"><span data-replace>${p.replace}</span> replace</span>` : ''}
+        ${p.replaced ? `<span class="chip chip-replaced"><span data-replaced>${p.replaced}</span> replaced</span>` : ''}
       </div>
     </div>
   `;

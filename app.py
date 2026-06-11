@@ -8398,8 +8398,11 @@ def api_comment_to_report(cid):
         return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
     if outcome not in ('report', 'replaced'):
         return jsonify({"error": "outcome must be 'report' or 'replaced'"}), 400
+    # Reported and Replaced are the same flow on live deployed/paid comments — only the
+    # final status label differs. (A 'replaced' comment is a fresh replacement comment
+    # the operator deployed, then categorizes as 'replaced' rather than 'report'.)
     target_status = 'replaced' if outcome == 'replaced' else 'report'
-    allowed_from = ('replace',) if outcome == 'replaced' else ('deployed', 'paid')
+    allowed_from = ('deployed', 'paid')
     db = get_db()
     try:
         # Live gate (both outcomes): only accept a comment that's actually live on Reddit.
@@ -8423,8 +8426,7 @@ def api_comment_to_report(cid):
                             "candidates": candidates,
                             "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}), 422
         if result is None:
-            _need = "replace" if outcome == 'replaced' else "deployed/paid"
-            return jsonify({"error": f"row not found or not in {_need} status"}), 422
+            return jsonify({"error": "row not found or not in deployed/paid status"}), 422
         # Kick off a background fetch so the client dashboard picks
         # up upvotes/replies without the admin needing to click
         # anything else. Fire-and-forget — the report move is already
@@ -8673,19 +8675,17 @@ def api_bulk_to_report_filtered():
         brand_id = None
     if not _valid_report_month(month):
         return jsonify({"error": "report_month must be YYYY-MM"}), 400
-    # outcome: 'report' (deployed/paid → report, live-gated) | 'replaced' (replace →
-    # replaced, no gate).
+    # outcome: 'report' or 'replaced' — SAME flow (deployed/paid → live-gated → target);
+    # only the final status label differs. ('replaced' = a fresh replacement comment the
+    # operator deployed, categorized as 'replaced' rather than 'report'.)
     outcome = (data.get('outcome') or 'report').strip()
     if outcome not in ('report', 'replaced'):
         return jsonify({"error": "outcome must be 'report' or 'replaced'"}), 400
+    target_status = 'replaced' if outcome == 'replaced' else 'report'
+    eligible = ('deployed', 'paid')
     status_filter = data.get('status')
-    if outcome == 'replaced':
-        eligible = ('replace',); target_status = 'replaced'
-        status_filter = 'replace'   # candidates = pending-replace comments
-    else:
-        eligible = ('deployed', 'paid'); target_status = 'report'
-        if status_filter not in (None, 'deployed', 'paid', ''):
-            return jsonify({"error": "status must be deployed or paid or omitted"}), 400
+    if status_filter not in (None, 'deployed', 'paid', ''):
+        return jsonify({"error": "status must be deployed or paid or omitted"}), 400
     # Capture request-scoped values before the background task (no request context inside).
     actor = _admin_email()
     sub_id = int(data['subreddit_id']) if data.get('subreddit_id') else None

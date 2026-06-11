@@ -3905,9 +3905,9 @@ class Database:
         ).fetchone()
         if not row or row["status"] not in ("report", "replaced"):
             return None
-        # Undoing a 'replaced' returns it to the pending 'replace' bucket (still needs a
-        # replacement); undoing a 'report' returns it to the live 'deployed' pipeline.
-        restore_to = "replace" if row["status"] == "replaced" else "deployed"
+        # Both 'report' and 'replaced' came from a live deployed/paid comment, so undo
+        # returns them to the live 'deployed' pipeline.
+        restore_to = "deployed"
         self.conn.execute(
             f"""UPDATE {table}
                 SET status = ?, prev_status = NULL,
@@ -4576,9 +4576,9 @@ class Database:
             key = (bid, month)
             return cells.setdefault(key, {
                 "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
-                "mentions_replace": 0,
+                "mentions_replace": 0, "mentions_replaced": 0,
                 "hq_total": 0, "hq_live": 0, "hq_removed": 0,
-                "hq_replace": 0,
+                "hq_replace": 0, "hq_replaced": 0,
             })
         for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
             slot = _cell(r["resolved_brand_id"], r["month"])
@@ -4664,6 +4664,36 @@ class Database:
                 slot["mentions_removed"] += r["cnt"]
             elif r["status"] == "replace":
                 slot["mentions_replace"] += r["cnt"]
+        # 'replaced' (delivered replacement) per (brand, month), split by pipeline. These
+        # rows are NOT in the report/removed/replace buckets above, so rolling them into
+        # live/total below never double-counts. Mirrors the months-view rollup so the two
+        # dashboard tabs agree.
+        q_replaced_sc = f"""
+            SELECT COALESCE(sc.brand_id, sp.brand_id) AS resolved_brand_id,
+                   sc.report_month AS month, COUNT(*) AS cnt
+              FROM search_comments sc JOIN search_posts sp ON sc.search_post_id = sp.id
+             WHERE sc.status = 'replaced' AND sc.report_month IS NOT NULL
+               AND (sc.brand_id IN ({ph}) OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})))
+             GROUP BY resolved_brand_id, sc.report_month
+        """
+        for r in self.conn.execute(q_replaced_sc, brand_ids * 2).fetchall():
+            _cell(r["resolved_brand_id"], r["month"])["mentions_replaced"] += r["cnt"]
+        q_replaced_c = f"""
+            SELECT CASE
+                     WHEN c.brand_id IS NOT NULL THEN c.brand_id
+                     WHEN p.brand_id IS NOT NULL THEN p.brand_id
+                     ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
+                   END AS resolved_brand_id,
+                   c.report_month AS month, COUNT(*) AS cnt
+              FROM comments c JOIN posts p ON c.post_id = p.id
+             WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
+               AND ( c.brand_id IN ({ph})
+                     OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
+                     OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
+             GROUP BY resolved_brand_id, c.report_month
+        """
+        for r in self.conn.execute(q_replaced_c, brand_ids * 3).fetchall():
+            _cell(r["resolved_brand_id"], r["month"])["hq_replaced"] += r["cnt"]
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
         names = {}
@@ -4684,15 +4714,22 @@ class Database:
                 "mentions_live": slot["mentions_live"],
                 "mentions_removed": slot["mentions_removed"],
                 "mentions_replace": slot["mentions_replace"],
+                "mentions_replaced": slot["mentions_replaced"],
                 "hq_total": slot["hq_total"],
                 "hq_live": slot["hq_live"],
                 "hq_removed": slot["hq_removed"],
                 "hq_replace": slot["hq_replace"],
+                "hq_replaced": slot["hq_replaced"],
             }
             # Back-compat aggregates so JS that still reads .total /
             # .live / .removed (or any older caller) keeps working.
-            row["total"] = row["mentions_total"] + row["hq_total"]
-            row["live"] = row["mentions_live"] + row["hq_live"]
+            # 'replaced' (delivered) rolls into live + total (it's a live mention; not in
+            # the report/removed/replace buckets, so no double-count) — consistent with
+            # the months-view rollup.
+            _replaced = row["mentions_replaced"] + row["hq_replaced"]
+            row["replaced"] = _replaced
+            row["total"] = row["mentions_total"] + row["hq_total"] + _replaced
+            row["live"] = row["mentions_live"] + row["hq_live"] + _replaced
             row["removed"] = row["mentions_removed"] + row["hq_removed"]
             row["replace"] = row["mentions_replace"] + row["hq_replace"]
             out.append(row)

@@ -4407,10 +4407,10 @@ class Database:
         # working without churn.
         for b in agg.values():
             b.setdefault("replaced", 0)
-            # 'replaced' = a gate-confirmed, delivered replacement → counts as a live,
-            # delivered mention. It's NOT in the mentions/hq buckets (those only count
-            # report/removed/replace), so adding it to live/total does not double-count.
-            b["total"] = b["mentions_total"] + b["hq_total"] + b["replaced"]
+            # 'replaced' = a delivered replacement that restores an ALREADY-counted
+            # deliverable (the removed original is already in total). So it counts toward
+            # LIVE (the deliverable is live again) but NOT toward TOTAL (avoid double-count).
+            b["total"] = b["mentions_total"] + b["hq_total"]
             b["live"] = b["mentions_live"] + b["hq_live"] + b["replaced"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
@@ -4728,7 +4728,8 @@ class Database:
             # the months-view rollup.
             _replaced = row["mentions_replaced"] + row["hq_replaced"]
             row["replaced"] = _replaced
-            row["total"] = row["mentions_total"] + row["hq_total"] + _replaced
+            # replaced restores an already-counted deliverable → into LIVE, NOT total.
+            row["total"] = row["mentions_total"] + row["hq_total"]
             row["live"] = row["mentions_live"] + row["hq_live"] + _replaced
             row["removed"] = row["mentions_removed"] + row["hq_removed"]
             row["replace"] = row["mentions_replace"] + row["hq_replace"]

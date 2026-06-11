@@ -238,8 +238,9 @@ function _aggregate(rows, monthFilter, statusFilter) {
   // 'replaced' (delivered replacement) is a live, delivered mention → fold it into each
   // pipeline's live + total (it's not in the report/removed/replace buckets, so no
   // double-count). Keeps this tab consistent with the By Month view's live total.
-  const mLiveAll = mLive + mReplaced, mTotalAll = mTotal + mReplaced;
-  const hqLiveAll = hqLive + hqReplaced, hqTotalAll = hqTotal + hqReplaced;
+  // replaced restores an already-counted deliverable → counts toward LIVE, NOT total.
+  const mLiveAll = mLive + mReplaced, mTotalAll = mTotal;
+  const hqLiveAll = hqLive + hqReplaced, hqTotalAll = hqTotal;
   // Status filter narrows the "headline" number for each pipeline:
   // when 'live' / 'removed' is picked, the headline shifts to that
   // partition; 'all' shows the pipeline's total.
@@ -301,7 +302,7 @@ function _statusLabel(status) {
 // active filters — clients with only one pipeline see one row.
 function _renderCardBody(agg, status) {
   const label = _statusLabel(status);
-  const row = (kind, p) => p.total === 0 ? '' : `
+  const row = (kind, p) => (p.total === 0 && !p.replaced) ? '' : `
     <div data-pipe="${kind}" class="flex items-baseline justify-between gap-3 py-1.5">
       <div class="flex items-baseline gap-2">
         <span class="text-2xl font-semibold text-slate-900" style="font-variant-numeric: tabular-nums;" data-headline>${p.headline}</span>

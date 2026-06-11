@@ -305,3 +305,121 @@ Return JSON only, exactly this shape:
             "fit": fit,
         })
     return out[:6]
+
+
+def generate_personas_for_regions(claude: ClaudeClient, name: str, domain_url: str,
+                                  category: str = "", audience: str = "",
+                                  use_cases=None, pain_points=None,
+                                  region_queries=None, existing_labels=None) -> dict:
+    """Grow the brand's persona roster to cover SEARCH REGIONS that no existing persona fits.
+
+    Given a list of region queries (e.g. "affordable side sleeper mattress under $1000") that
+    the current roster can't credibly answer, propose 1-3 NEW, distinct personas (same schema
+    as generate_brand_personas, all fit="yes" since they are built for these regions) and map
+    each unmatched region to the new persona that fits it.
+
+    Returns {"new_personas": [ {label, profile, trigger, goal, constraints, vocab, fit}, ... ],
+             "assignments": [ [region_query, persona_label], ... ]}.
+    Returns {"new_personas": [], "assignments": []} on failure — caller leaves those regions
+    persona-less rather than forcing a wrong match. No fabrication beyond what the brand
+    credibly serves."""
+    def _join(v):
+        if isinstance(v, list):
+            return "; ".join(str(x).strip() for x in v if str(x).strip())
+        return str(v or "").strip()
+    regions = [str(q).strip() for q in (region_queries or []) if str(q).strip()]
+    if not regions:
+        return {"new_personas": [], "assignments": []}
+    existing = [str(l).strip() for l in (existing_labels or []) if str(l).strip()]
+    existing_lower = {l.lower() for l in existing}
+    html = _fetch_homepage(domain_url)
+    page_text = _extract_visible_text(html, max_chars=4000)
+    page_section = (f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
+                    if page_text else
+                    "HOMEPAGE TEXT: (could not fetch — rely on the fields below + your "
+                    "confident knowledge of this brand.)")
+    rlist = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(regions))
+    existing_block = ("\n".join(f"  - {l}" for l in existing)
+                      if existing else "  (none yet)")
+    prompt = f"""These SEARCH REGIONS (recommendation questions) have NO fitting buyer persona in
+the brand's current roster — every existing persona is the wrong price tier / intent / use-case
+for them. Your job: define the NEW personas that genuinely DO ask these questions, so the brand's
+persona set grows to cover its real search demand.
+
+BRAND NAME: {name}
+BRAND URL: {domain_url or "(none)"}
+CATEGORY: {category or "(unknown)"}
+AUDIENCE: {audience or "(unknown)"}
+USE-CASES: {_join(use_cases) or "(unknown)"}
+PAIN-POINTS: {_join(pain_points) or "(unknown)"}
+
+{page_section}
+
+EXISTING PERSONAS (do NOT duplicate or reword these labels):
+{existing_block}
+
+UNCOVERED REGIONS:
+{rlist}
+
+Propose 1-3 NEW, DISTINCT personas (fewer is better — only as many as truly needed) that the
+brand can credibly be the answer for, each matching the concrete signals in these regions:
+price tier (budget/affordable/"under $X" vs premium/luxury), and any position / firmness /
+use-case / body-type / urgency cues. Ground them in the brand's real space — do NOT invent a
+persona the brand cannot serve; if a region is genuinely off-brand, simply leave it unmapped.
+Then map EACH region above to the one new persona that best fits it (omit a region if none of
+your new personas fit).
+
+Return JSON only, exactly this shape:
+{{
+  "new_personas": [
+    {{
+      "label": "2-4 word name, distinct from existing",
+      "profile": "who they are + situation, 1 line",
+      "trigger": "what makes them search",
+      "goal": "the job-to-be-done",
+      "constraints": "budget / urgency / firmness etc. (short)",
+      "vocab": "how THEY phrase it (a few terms)",
+      "fit": "yes"
+    }}
+  ],
+  "assignments": [ ["<region text, copied exactly from the list>", "<new persona label>"] ]
+}}"""
+    result = claude.call(prompt, max_tokens=1400, temperature=0.4)
+    if not isinstance(result, dict):
+        return {"new_personas": [], "assignments": []}
+    raw_personas = result.get("new_personas") if isinstance(result.get("new_personas"), list) else []
+    new_personas = []
+    new_lower = set()
+    for p in raw_personas:
+        if not isinstance(p, dict):
+            continue
+        label = str(p.get("label") or "").strip()
+        ll = label.lower()
+        if not label or ll in existing_lower or ll in new_lower:
+            continue  # skip blanks + duplicates of existing/just-added labels
+        new_lower.add(ll)
+        new_personas.append({
+            "label": label,
+            "profile": str(p.get("profile") or "").strip(),
+            "trigger": str(p.get("trigger") or "").strip(),
+            "goal": str(p.get("goal") or "").strip(),
+            "constraints": str(p.get("constraints") or "").strip(),
+            "vocab": str(p.get("vocab") or "").strip(),
+            "fit": "yes",
+        })
+    new_personas = new_personas[:3]
+    valid_labels = {p["label"].lower(): p["label"] for p in new_personas}
+    region_lower = {q.lower(): q for q in regions}
+    assignments = []
+    seen_regions = set()
+    raw_assign = result.get("assignments") if isinstance(result.get("assignments"), list) else []
+    for a in raw_assign:
+        if not isinstance(a, (list, tuple)) or len(a) < 2:
+            continue
+        rq = str(a[0]).strip()
+        lbl = str(a[1]).strip().lower()
+        canon_region = region_lower.get(rq.lower())
+        if canon_region and lbl in valid_labels and canon_region not in seen_regions:
+            assignments.append([canon_region, valid_labels[lbl]])
+            seen_regions.add(canon_region)
+    return {"new_personas": new_personas, "assignments": assignments}

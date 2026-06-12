@@ -414,6 +414,73 @@ def _comment_liveness_via_pullpush(comment_url, timeout=12):
         return None
 
 
+def _parse_comment_url(u):
+    """Return (post_url, comment_id) for a Reddit comment permalink, or (None, None) for /s/
+    share links / unparseable URLs. comment_id is lowercased. Used to group comments by their
+    parent post so a single post-feed fetch can confirm many comments at once."""
+    import re as _re
+    from urllib.parse import urlparse as _urlparse
+    if not u or "/s/" in u:
+        return (None, None)
+    u_clean = u.strip().split("?")[0].rstrip("/")
+    m = _re.search(
+        r"(/r/[^/]+/comments/[^/]+(?:/[^/]+)?)(?:/([A-Za-z0-9]{4,12}))?$",
+        u_clean,
+    )
+    if not m:
+        return (None, None)
+    post_path = m.group(1)
+    comment_id = (m.group(2) or "").lower()
+    try:
+        parsed = _urlparse(u_clean)
+        host = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else "https://www.reddit.com"
+    except Exception:
+        host = "https://www.reddit.com"
+    return (f"{host}{post_path}", comment_id)
+
+
+def _post_feed_present_comment_ids(post_url, timeout=15):
+    """Fetch a POST's comment RSS feed ONCE and return the set of comment ids present in it
+    (lowercased t1_<id> entries). Reddit's /r/<sub>/comments/<postid>/.rss returns up to ~100
+    comments in a single proxy-served response, so one fetch confirms many comments live at
+    once — the bulk-pre-pass signal the normal live-checker uses to avoid per-comment fetches.
+
+    Returns None when the feed can't be read (non-200 / not XML) — caller treats that as
+    INCONCLUSIVE (fall back to per-comment checks), NOT 'all removed'. Absence of a specific id
+    from a readable feed is also inconclusive (feed caps at ~100 / deep nesting)."""
+    import requests as _requests
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    if not post_url:
+        return None
+    m = _re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, _re.IGNORECASE)
+    if not m:
+        return None
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    rss_url = f"{base}{m.group(1)}/.rss"
+    try:
+        resp = _requests.get(
+            rss_url, params={"limit": 100},
+            headers={"User-Agent": REDDIT_USER_AGENT,
+                     "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
+            timeout=timeout, proxies={"http": None, "https": None},
+        )
+        if resp.status_code != 200 or not (resp.text or "").lstrip().startswith("<?xml"):
+            return None
+        root = _ET.fromstring(resp.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        present = set()
+        for e in root.findall("atom:entry", ns):
+            mm = _re.search(r"t1_(\w+)", (e.find("atom:id", ns).text or ""))
+            if mm:
+                present.add(mm.group(1).lower())
+        return present
+    except Exception as e:
+        print(f"[POST-FEED-RSS] fetch failed for {post_url}: {e}", flush=True)
+        return None
+
+
 def _reddit_comment_meta_via_rss(comment_url, timeout=15):
     """Fetch a comment's metadata via its permalink RSS feed — the
     cloud-IP-safe replacement for the JSON API that bulk-deploy relies
@@ -2407,26 +2474,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
     import re as _re_grp
     from urllib.parse import urlparse as _urlparse_grp
 
-    def _parse_comment_url(u):
-        """Return (post_url, comment_id) or (None, None)."""
-        if not u or "/s/" in u:
-            return (None, None)
-        u_clean = u.strip().split("?")[0].rstrip("/")
-        m = _re_grp.search(
-            r"(/r/[^/]+/comments/[^/]+(?:/[^/]+)?)(?:/([A-Za-z0-9]{4,12}))?$",
-            u_clean,
-        )
-        if not m:
-            return (None, None)
-        # Reconstruct the post URL on the same host as the original.
-        post_path = m.group(1)
-        comment_id = (m.group(2) or "").lower()
-        try:
-            parsed = _urlparse_grp(u_clean)
-            host = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else "https://www.reddit.com"
-        except Exception:
-            host = "https://www.reddit.com"
-        return (f"{host}{post_path}", comment_id)
+    # (_parse_comment_url + _post_feed_present_comment_ids are module-level helpers now —
+    #  shared with the report live-gate's bulk pre-pass.)
 
     # Group Live Subs items by parent post URL.
     post_groups = {}  # post_url → [(item, comment_id)]
@@ -2462,46 +2511,14 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             for el in node:
                 _walk_comment_tree(el, out)
 
-    import xml.etree.ElementTree as _ET_grp
-    _proxy_grp = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    _rss_base_grp = _proxy_grp.rstrip("/") if _proxy_grp else "https://www.reddit.com"
     for post_url, group in post_groups.items():
         if len(group) < 2:
             continue  # singleton — per-item path handles it
-        # Bulk pre-pass via the POST-LEVEL comment RSS. Reddit's JSON
-        # API is auth-gated for cloud IPs (403), so the old
-        # /comments/<id>.json fetch always failed and wasted ~12s of
-        # retries per post before falling to the per-item loop. The
-        # post's .rss feed returns up to ~50 comments in one call and
-        # IS served through the proxy. We use it to mark LIVE in bulk;
-        # any comment NOT found in the feed is left UNHANDLED so the
-        # per-item permalink-RSS check (definitive — distinguishes
-        # 'beyond the 50-cap' from 'actually removed') decides it.
-        present_ids = set()
-        feed_ok = False
-        try:
-            pm = _re_grp.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, _re_grp.IGNORECASE)
-            if pm:
-                rss_url = f"{_rss_base_grp}{pm.group(1)}/.rss"
-                resp = _requests.get(
-                    rss_url, params={"limit": 100},
-                    headers={"User-Agent": REDDIT_USER_AGENT,
-                             "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
-                    timeout=15, proxies={"http": None, "https": None},
-                )
-                if resp.status_code == 200 and (resp.text or "").lstrip().startswith("<?xml"):
-                    feed_ok = True
-                    root = _ET_grp.fromstring(resp.text)
-                    ns = {"atom": "http://www.w3.org/2005/Atom"}
-                    for e in root.findall("atom:entry", ns):
-                        m2 = _re_grp.search(r"t1_(\w+)", (e.find("atom:id", ns).text or ""))
-                        if m2:
-                            present_ids.add(m2.group(1).lower())
-        except Exception as e:
-            print(f"[{log_prefix}] bulk RSS fetch failed for {post_url}: {e}", flush=True)
-            feed_ok = False
-
-        if not feed_ok:
+        # Bulk pre-pass via the POST-LEVEL comment RSS (shared helper). One fetch returns up
+        # to ~100 comments under the post; any comment NOT found is left UNHANDLED so the
+        # per-item permalink check decides (distinguishes 'beyond the cap' from 'removed').
+        present_ids = _post_feed_present_comment_ids(post_url)
+        if present_ids is None:
             # Couldn't read the post feed — leave the whole group to the
             # per-item loop (which RSS-checks each comment individually).
             continue
@@ -3258,17 +3275,82 @@ def api_check_live(sid):
 
 @app.route("/api/search/comments/check-live", methods=["POST"])
 def api_check_live_search_comments():
-    """Check deployed search comments against Reddit to find removed/deleted ones.
-    Optional body: { comment_ids: [1,2,3] } to check only specific comments.
+    """Check search comments against Reddit to find removed/deleted (or restored) ones.
+
+    Body (either):
+      { comment_ids: [1,2,3] }              — explicit id list (legacy), OR
+      { filter: {mode, status?, brand_name?, search_post_id?, report_month?, subreddits?[]} }
+                                            — AUTHORITATIVE: the server re-queries ALL matching
+                                              comments itself (no dependence on the client's
+                                              loaded/paginated list), so "All Filtered" / "Removed"
+                                              truly covers every matching comment.
+
+    Only comments that have a Reddit URL are checkable; URL-less rows (e.g. removed-before-deploy)
+    are counted in `no_link_skipped` and never touched.
     """
     data = request.json or {}
     filter_ids = data.get("comment_ids")
+    flt = data.get("filter") or None
 
     def task():
         db = Database(DB_PATH)
         db.connect()
         db.initialize()
         try:
+            if flt is not None:
+                # Authoritative re-query from the DB (no LIMIT) — mirrors the client's
+                # lsFilterComments so the set is complete.
+                status = (flt.get("status") or "").strip() or None
+                mode = (flt.get("mode") or "").strip()
+                brand_name = (flt.get("brand_name") or "").strip() or None
+                search_post_id = flt.get("search_post_id") or None
+                report_month = (flt.get("report_month") or "").strip() or None
+                subs = flt.get("subreddits")
+                sub_set = set(subs) if isinstance(subs, list) and subs else None
+                try:
+                    search_post_id = int(search_post_id) if search_post_id else None
+                except (TypeError, ValueError):
+                    search_post_id = None
+                rows = db.list_search_comments(search_post_id=search_post_id, status=status)
+                matched = []
+                for r in rows:
+                    st = r.get("status")
+                    # Mirror lsFilterComments: hide deleted/archived unless explicitly asked.
+                    if status != "archived" and st in ("deleted", "archived"):
+                        continue
+                    if brand_name and (r.get("brand_name") or "") != brand_name:
+                        continue
+                    if sub_set is not None and (r.get("post_subreddit") or "") not in sub_set:
+                        continue
+                    if report_month and (r.get("report_month") or "") != report_month:
+                        continue
+                    # Mode refinement (server mirror of checkLiveLs).
+                    if mode == "removed" and st != "removed":
+                        continue
+                    if mode == "deployed" and st != "deployed":
+                        continue
+                    if mode == "paid" and not (r.get("paid_at") or st == "paid"):
+                        continue
+                    if mode == "fresh" and (r.get("last_live_check") or st not in ("deployed", "paid")):
+                        continue
+                    matched.append(r)
+                to_check = [r for r in matched if (r.get("reddit_comment_url") or "").strip()]
+                no_link = len(matched) - len(to_check)
+                items = []
+                for r in to_check:
+                    items.append({
+                        "id": r["id"], "source": "search_comment",
+                        "reddit_comment_url": r.get("reddit_comment_url"),
+                        "status": r.get("status") or "deployed",
+                        "account_id": r.get("account_id"),
+                        "subreddit": r.get("post_subreddit"),
+                        "brand_name": r.get("brand_name"),
+                    })
+                result = _check_live_batch(items, db, "CHECK-LIVE-SEARCH")
+                result["no_link_skipped"] = no_link
+                result["considered"] = len(matched)
+                return result
+            # Legacy explicit-id path.
             deployed = db.get_deployed_search_comment_urls()
             if filter_ids:
                 id_set = set(filter_ids)
@@ -8534,18 +8616,20 @@ def _report_live_gate(db, items, task_id=None):
     LIVE may be reported; everything else (removed / missing / no URL / fetch error) is left
     exactly as-is.
 
-    Uses the shared RSS-first `_classify_url_liveness` (RSS → PullPush → JSON, with retries).
-    PACES ~1s between comments so a bulk run doesn't burst-hit the proxy into rate-limiting
-    (the bug that made live comments read 'missing' and get skipped — matches the Check Live
-    loop's pacing).
+    Two-phase, mirroring the normal live-checker so the gate doesn't fire one request per
+    comment and rate-limit itself (the bug that left a lot of LIVE comments read as 'missing'):
+      1. BULK PRE-PASS — group Live Subs `comment` items by parent post and confirm many at
+         once from a single post-feed fetch (`_post_feed_present_comment_ids`).
+      2. PER-ITEM — only the leftovers (search comments, singletons, /s/, stragglers, unreadable
+         feeds) go through `_classify_url_liveness` (RSS → PullPush → JSON, retries), paced ~1s.
 
     Returns {"live": [{id, source}], "not_live": [{id, source, liveness}]}.
     Writes progress to the task when `task_id` is given.
     """
     import time as _t
     live, not_live = [], []
-    total = len(items or [])
-    done = 0
+    # Resolve each item's URL once (needed for both the pre-pass grouping and per-item check).
+    records = []
     for it in (items or []):
         try:
             cid = int(it.get("id"))
@@ -8556,17 +8640,12 @@ def _report_live_gate(db, items, task_id=None):
         row = db.conn.execute(
             f"SELECT reddit_comment_url FROM {table} WHERE id = ?", (cid,)).fetchone()
         url = ((row["reddit_comment_url"] if row else "") or "").strip()
-        liveness = "missing"
-        if url:
-            try:
-                liveness, _detail = _classify_url_liveness(url)
-            except Exception:
-                liveness = "missing"
-        if liveness == "live":
-            live.append({"id": cid, "source": src})
-        else:
-            not_live.append({"id": cid, "source": src, "liveness": liveness})
-        done += 1
+        records.append({"id": cid, "source": src, "url": url})
+    total = len(records)
+    done = 0
+    handled = set()  # (id, source) confirmed live by the bulk pre-pass
+
+    def _emit():
         if task_id:
             try:
                 db.update_task_progress(task_id, {
@@ -8574,8 +8653,49 @@ def _report_live_gate(db, items, task_id=None):
                     "live": len(live), "skipped": len(not_live)})
             except Exception:
                 pass
+
+    # --- Phase 1: bulk post-feed pre-pass (Live Subs comments only). One fetch per post
+    #     confirms up to ~100 comments live; absent ids stay UNHANDLED for the definitive
+    #     per-comment check (a post feed caps / nests, so absence != removed). ---
+    post_groups = {}
+    for rec in records:
+        if rec["source"] != "comment" or not rec["url"]:
+            continue
+        post_url, comment_id = _parse_comment_url(rec["url"])
+        if post_url and comment_id:
+            post_groups.setdefault(post_url, []).append((rec, comment_id))
+    for post_url, group in post_groups.items():
+        if len(group) < 2:
+            continue  # singleton — per-item path handles it (same network cost)
+        present = _post_feed_present_comment_ids(post_url)
+        if present is None:
+            continue  # feed unreadable → leave the whole group to the per-item loop
+        for rec, comment_id in group:
+            if comment_id in present:
+                live.append({"id": rec["id"], "source": rec["source"]})
+                handled.add((rec["id"], rec["source"]))
+                done += 1
+                _emit()
+        _t.sleep(0.5)
+
+    # --- Phase 2: per-item for everything the pre-pass didn't resolve. ---
+    remaining = [r for r in records if (r["id"], r["source"]) not in handled]
+    n = len(remaining)
+    for i, rec in enumerate(remaining):
+        liveness = "missing"
+        if rec["url"]:
+            try:
+                liveness, _detail = _classify_url_liveness(rec["url"])
+            except Exception:
+                liveness = "missing"
+        if liveness == "live":
+            live.append({"id": rec["id"], "source": rec["source"]})
+        else:
+            not_live.append({"id": rec["id"], "source": rec["source"], "liveness": liveness})
+        done += 1
+        _emit()
         # Pace between comments (not after the last) to avoid rate-limit bursts.
-        if done < total:
+        if i < n - 1:
             _t.sleep(1)
     return {"live": live, "not_live": not_live}
 

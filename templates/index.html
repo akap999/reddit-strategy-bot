@@ -5408,6 +5408,7 @@ function _liveCheckToast(result) {
     let msg = `Checked ${result.checked}: ${result.live} live, ${result.dead} dead`;
     if (result.restored) msg += `, ${result.restored} restored`;
     msg += `, ${result.errors} errors`;
+    if (result.no_link_skipped) msg += ` · ${result.no_link_skipped} skipped (no link)`;
     if (result.errors > 0 && result.error_details) {
         const d = result.error_details;
         const parts = [];
@@ -10700,6 +10701,7 @@ function lsFilterComments() {
                                     <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}
                                 ${c.status === 'removed' ? `
+                                    ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                                     <button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>
                                     <button class="btn btn-sm" style="background:#2a3a2a;color:#46d160" onclick="lsUnremoveComment(${c.id})">Unremove</button>
@@ -12782,19 +12784,29 @@ async function lsDeleteSelectedPostComments() {
 }
 
 async function checkLiveLs(mode) {
-    let pool = (_lsFilteredComments || []).filter(c => c.reddit_comment_url);
-    if (mode === 'deployed') pool = pool.filter(c => c.status === 'deployed');
-    else if (mode === 'removed') pool = pool.filter(c => c.status === 'removed');
-    else if (mode === 'paid') pool = pool.filter(c => c.paid_at || c.status === 'paid');
-    else if (mode === 'fresh') pool = pool.filter(c => !c.last_live_check && (c.status === 'deployed' || c.status === 'paid'));
-    // else: all filtered with URLs
-
-    if (!pool.length) { toast(`No ${mode || 'matching'} comments with URLs to check`, 'info'); return; }
-    const ids = pool.map(c => c.id);
+    // Send the ACTIVE filter to the server, which re-queries authoritatively (no dependence
+    // on the client's loaded list) — so "All Filtered" / "Removed" truly covers every matching
+    // comment, not just the ones currently rendered. The server skips URL-less rows and reports
+    // how many (no_link_skipped).
+    const brandName = document.getElementById('ls-cf-brand')?.value || null;
+    const status = document.getElementById('ls-cf-status')?.value || null;
+    const postId = document.getElementById('ls-cf-post')?.value || null;
+    const month = document.getElementById('ls-cf-month')?.value || null;
+    // Subreddit multi-select: only constrain when a strict subset is selected (null = all).
+    let subreddits = null;
+    try {
+        const allSubs = (typeof lsAllSubsInComments === 'function') ? lsAllSubsInComments() : [];
+        if (_lsSelectedSubs && allSubs.length && _lsSelectedSubs.size < allSubs.length) {
+            subreddits = Array.from(_lsSelectedSubs);
+        }
+    } catch (_) {}
+    const filter = { mode: mode || '', status, brand_name: brandName,
+                     search_post_id: postId ? parseInt(postId) : null,
+                     report_month: month, subreddits };
     const label = mode || 'filtered';
-    runTask('/api/search/comments/check-live', { comment_ids: ids }, (result) => {
+    runTask('/api/search/comments/check-live', { filter }, (result) => {
         toast(_liveCheckToast(result), result.errors > 0 ? 'warning' : 'success');
-    }, `Check Live (${ids.length} ${label})`);
+    }, `Check Live (${label})`);
 }
 
 async function lsDeleteAllComments() {

@@ -359,6 +359,61 @@ def _post_liveness_via_rss(post_url, timeout=15):
         return None
 
 
+def _comment_liveness_via_pullpush(comment_url, timeout=12):
+    """Best-effort liveness via the PullPush archive API — the fallback we consult ONLY when
+    the live signal (comment-permalink RSS) couldn't be fetched (proxy hiccup / rate-limit),
+    so a genuinely-live comment isn't lost to a flaky check.
+
+    Queries https://api.pullpush.io/reddit/comment/search?ids=<cid> (direct, NOT through the
+    Reddit proxy — PullPush is a separate host). Returns:
+      'live'    — a record exists with a real body (the comment was posted and not archived
+                  as removed/deleted)
+      'removed' — the record's body is '[removed]' / '[deleted]'
+      None      — no record / fetch error (inconclusive — caller should keep trying or skip)
+
+    CAVEAT: PullPush is an ARCHIVE, not live state. A very recent comment may not be ingested
+    yet (→ None), and a comment removed AFTER archival can still read 'live' here. It is only
+    a tie-breaker for the inconclusive case, never an override of a confirmed RSS verdict."""
+    import requests as _requests
+    if not comment_url:
+        return None
+    info = None
+    try:
+        from bulk_deploy import classify_reddit_url
+        info = classify_reddit_url(comment_url)
+    except Exception:
+        info = None
+    cid = ((info or {}).get("comment_id") or "").strip().lower()
+    if not cid:
+        # Fallback: last path segment of the URL.
+        seg = [s for s in comment_url.split("?")[0].rstrip("/").split("/") if s]
+        cid = (seg[-1].lower() if seg else "")
+    if not cid:
+        return None
+    try:
+        r = _requests.get(
+            "https://api.pullpush.io/reddit/comment/search",
+            params={"ids": cid},
+            headers={"User-Agent": REDDIT_USER_AGENT},
+            timeout=timeout,
+            proxies={"http": None, "https": None},
+        )
+        if r.status_code != 200:
+            return None
+        data = (r.json() or {}).get("data")
+        if not isinstance(data, list) or not data:
+            return None
+        body = ((data[0] or {}).get("body") or "").strip().lower()
+        if body in ("[removed]", "[deleted]"):
+            return "removed"
+        if body:
+            return "live"
+        return None
+    except Exception as e:
+        print(f"[PULLPUSH] liveness check failed for {comment_url}: {e}", flush=True)
+        return None
+
+
 def _reddit_comment_meta_via_rss(comment_url, timeout=15):
     """Fetch a comment's metadata via its permalink RSS feed — the
     cloud-IP-safe replacement for the JSON API that bulk-deploy relies
@@ -2563,7 +2618,26 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             _emit_progress()
             _time.sleep(1)
             continue
-        # else: rss_verdict is None (inconclusive) → fall through to JSON.
+        # RSS inconclusive (couldn't fetch) → PullPush archive fallback BEFORE the (usually
+        # 403 on cloud) JSON path, so a live comment isn't left unverified by a flaky proxy.
+        pp_verdict = _comment_liveness_via_pullpush(clean_url)
+        if pp_verdict == "live":
+            print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (PullPush archive — RSS unreachable)", flush=True)
+            _mark_live(item)
+            live += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
+            continue
+        elif pp_verdict == "removed":
+            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (PullPush archive body [removed]/[deleted])", flush=True)
+            _mark_dead(item)
+            dead += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
+            continue
+        # else: PullPush also inconclusive → fall through to JSON (then leave unchanged).
 
         # Extract path from URL (strip domain) and append .json
         import re as _re
@@ -8372,9 +8446,10 @@ def _classify_url_liveness(url):
     """Shared single-URL liveness probe — the SAME RSS-first signal the Check Live flow
     uses (see the check-live task's `_probe`). Reddit's JSON API is auth-gated (403) for
     cloud IPs, so a JSON-only check returns 'missing' for EVERYTHING; the comment-permalink
-    RSS feed is the reliable anonymous signal (present when live, absent when removed). JSON
-    stays as a fallback for environments where it's reachable. Resolves /s/ share links
-    first and retries once on a transient 'missing'.
+    RSS feed is the reliable anonymous signal (present when live, absent when removed). When
+    RSS can't be fetched we consult the PullPush archive, then the Reddit JSON API (for
+    residential-proxy envs). Resolves /s/ share links first and retries transient 'missing'
+    with backoff ("retry harder, then skip").
 
     Returns (liveness, detail) where liveness ∈ {'live','removed','missing','error'}.
     """
@@ -8403,9 +8478,18 @@ def _classify_url_liveness(url):
                 return ("live", "via comment-permalink RSS")
             if rss_v == "removed":
                 return ("removed", "comment id absent from its permalink RSS feed")
-            # RSS inconclusive → JSON fallback (works where the API is reachable).
+            # RSS couldn't fetch → PullPush archive fallback (separate host, not rate-limited
+            # with Reddit). Confirms a live/removed comment when the proxy is flaky.
+            pp = _comment_liveness_via_pullpush(resolved)
+            if pp == "live":
+                return ("live", "via PullPush archive (RSS unreachable)")
+            if pp == "removed":
+                return ("removed", "PullPush archive body is [removed]/[deleted]")
+            # Still inconclusive → Reddit JSON (only works on residential IPs). Call it cheaply
+            # (max_retries=1) so a guaranteed 403 on cloud doesn't burn ~30s of backoff.
             try:
-                meta = fetch_reddit_comment_meta(resolved, reddit_get=_reddit_get_json)
+                meta = fetch_reddit_comment_meta(
+                    resolved, reddit_get=lambda p: _reddit_get_json(p, max_retries=1))
                 return (classify_liveness(meta), None)
             except Exception as e:
                 return ("error", str(e))
@@ -8431,9 +8515,12 @@ def _classify_url_liveness(url):
             return ("error", str(e))
 
     liveness, detail = _probe()
-    if liveness == "missing":
-        # Most 'missing' verdicts are transient (proxy hiccup / soft rate-limit). Retry once.
-        _t.sleep(3)
+    # Most 'missing' verdicts are transient (proxy hiccup / soft rate-limit). Retry harder
+    # with backoff before giving up — RSS/PullPush usually recover on a second/third try.
+    for _wait in (4, 8):
+        if liveness != "missing":
+            break
+        _t.sleep(_wait)
         rlv, rdetail = _probe()
         if rlv != "missing":
             liveness, detail = rlv, rdetail
@@ -8447,12 +8534,15 @@ def _report_live_gate(db, items, task_id=None):
     LIVE may be reported; everything else (removed / missing / no URL / fetch error) is left
     exactly as-is.
 
-    Uses the shared RSS-first `_classify_url_liveness` (the JSON-only path always came back
-    'missing' on cloud IPs, which is why every comment was wrongly skipped as not-live).
+    Uses the shared RSS-first `_classify_url_liveness` (RSS → PullPush → JSON, with retries).
+    PACES ~1s between comments so a bulk run doesn't burst-hit the proxy into rate-limiting
+    (the bug that made live comments read 'missing' and get skipped — matches the Check Live
+    loop's pacing).
 
     Returns {"live": [{id, source}], "not_live": [{id, source, liveness}]}.
     Writes progress to the task when `task_id` is given.
     """
+    import time as _t
     live, not_live = [], []
     total = len(items or [])
     done = 0
@@ -8484,6 +8574,9 @@ def _report_live_gate(db, items, task_id=None):
                     "live": len(live), "skipped": len(not_live)})
             except Exception:
                 pass
+        # Pace between comments (not after the last) to avoid rate-limit bursts.
+        if done < total:
+            _t.sleep(1)
     return {"live": live, "not_live": not_live}
 
 
@@ -8856,11 +8949,25 @@ def api_bulk_to_report_filtered():
             # non-live ones are left at their current status (never moved to removed).
             gate = _report_live_gate(db, ids, task_id=_task_id)
             move_ids = gate["live"]; skipped_not_live = len(gate["not_live"])
+            # Breakdown of WHY rows were skipped, so a "nothing happened" run is legible:
+            # confirmed removed vs couldn't-verify (missing/error after RSS+PullPush+JSON).
+            removed_cnt = sum(1 for x in gate["not_live"] if x.get("liveness") == "removed")
+            unverified_cnt = skipped_not_live - removed_cnt
+            try:
+                print(f"[bulk-to-report-filtered] outcome={outcome} considered={len(items)} "
+                      f"eligible={len(ids)} live={len(move_ids)} skipped={skipped_not_live} "
+                      f"(removed={removed_cnt} unverified={unverified_cnt}) | not_live="
+                      + ", ".join(f"{x['id']}:{x.get('liveness')}" for x in gate["not_live"][:50]),
+                      flush=True)
+            except Exception:
+                pass
             out = db.bulk_move_to_report(
                 ids=move_ids, report_month=month, actor_email=actor, brand_id_override=brand_id,
                 target_status=target_status, allowed_from=eligible)
             out["candidates_considered"] = len(items)
             out["skipped_not_live"] = skipped_not_live
+            out["skipped_removed"] = removed_cnt
+            out["skipped_unverified"] = unverified_cnt
             try:
                 _spawn_report_engagement_fetch(_fetch_report_items(db, move_ids))
             except Exception as e:

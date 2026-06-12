@@ -12374,7 +12374,11 @@ async function submitMarkReportedAll(scope) {
             _pollTask(res.task_id, isReplaced ? 'Replaced' : 'Report', (result) => {
                 const r = result || {};
                 const updated = r.updated || 0, notLive = r.skipped_not_live || 0, br = r.brand_required || 0;
-                const extra = [notLive ? `${notLive} skipped (not live)` : '',
+                const rmv = r.skipped_removed || 0, unv = r.skipped_unverified || 0;
+                // Break the "not live" skips into confirmed-removed vs couldn't-verify so a
+                // "0 reported" run is legible (e.g. proxy flaky → unverified, not truly dead).
+                const skipDetail = notLive ? `${notLive} skipped (${[rmv ? `${rmv} removed` : '', unv ? `${unv} unverified` : ''].filter(Boolean).join(' · ') || 'not live'})` : '';
+                const extra = [skipDetail,
                                br ? `${br} unbranded` : ''].filter(Boolean).join(' · ');
                 const verb = isReplaced ? 'Marked' : 'Reported';
                 const noun = isReplaced ? 'replaced' : 'live comment(s) to ' + month;

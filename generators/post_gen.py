@@ -1160,7 +1160,10 @@ in the SAME order as the regions above (use [] for a region with no fit)."""
             anchor_summary=anchor_summary)
         gap_regions = (fan.get("rewrites") if fan else None) or []
         if not gap_regions and not manual_regions:
-            return {"error": "fan-out produced no rewrites"}
+            # Surface the real reason (invalid/retired model, bad key, low credit, rate-limit,
+            # JSON parse) instead of the opaque generic — ClaudeClient.call stashes last_error.
+            why = getattr(self.claude, "last_error", None)
+            return {"error": "AI fan-out failed: " + (why or "model returned no rewrites")}
         checklist = (fan.get("checklist") if fan else None) or []
         anchor = (fan.get("anchor") if fan else None) or ""
         # Manual regions FIRST (authoritative/priority), then the auto gap-fill regions.

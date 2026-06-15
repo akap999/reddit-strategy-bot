@@ -17,7 +17,9 @@ if os.path.exists(_env_path):
 
 # --- API Configuration ---
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+# Overridable via the CLAUDE_MODEL env var so a model retirement is a config change, not a
+# redeploy. Default = Sonnet 4.6 (successor to the retired claude-sonnet-4-20250514).
+DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # --- Authentication ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "")

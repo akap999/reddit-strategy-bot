@@ -5802,6 +5802,32 @@ class Database:
         )
         self.conn.commit()
 
+    def claim_periodic(self, key, interval_hours):
+        """Atomically claim a periodic job. Returns True iff at least `interval_hours` have
+        elapsed since the last claim stored under `key` (and stamps 'now' as the new value).
+
+        Safe across gunicorn workers / restarts: the conditional UPDATE runs under SQLite's
+        single-writer lock, so when several workers race, exactly ONE sees `value <= threshold`
+        and flips it — the rest get rowcount 0. Timestamps are ISO 'YYYY-MM-DD HH:MM:SS'
+        (UTC), which sorts chronologically so the lexical `<=` compare is correct."""
+        from datetime import datetime, timedelta
+        try:
+            hrs = float(interval_hours)
+        except (TypeError, ValueError):
+            hrs = 48.0
+        now = datetime.utcnow()
+        now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+        thresh_s = (now - timedelta(hours=hrs)).strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure the row exists (sentinel epoch → first call always claims).
+        self.conn.execute(
+            "INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1970-01-01 00:00:00')",
+            (key,))
+        cur = self.conn.execute(
+            "UPDATE app_meta SET value = ? WHERE key = ? AND value <= ?",
+            (now_s, key, thresh_s))
+        self.conn.commit()
+        return cur.rowcount == 1
+
     def list_stale_accounts(self):
         """Return usernames of accounts that look like they need a (re)fresh:
         never refreshed, stale >7 days, last refresh errored, or total karma < 10

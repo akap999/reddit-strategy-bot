@@ -11222,7 +11222,85 @@ function renderSettings(c) {
                 <button class="btn btn-sm btn-danger" id="ls-purge-del-btn" onclick="lsPurgeRun()" disabled>🗑 Delete</button>
             </div>
             <div id="ls-purge-result" class="text-sm text-gray-300"></div>
+        </div>
+
+        <div class="card p-5 mt-4" style="background:#1a1a1b;border:1px solid #343536;max-width:680px">
+            <h3 class="font-bold mb-1" style="color:#9efbe0">Auto status refresh (all clients)</h3>
+            <p class="text-xs text-gray-400 mb-3" style="line-height:1.5">
+                Automatically runs the same <b>Update status</b> live-check the client dashboard does —
+                across <b>every client, brand and month</b> — on a schedule, so removed/restored
+                comments stay accurate without anyone clicking. Runs in the background; the interval is
+                the minimum gap between runs.
+            </p>
+            <div class="flex gap-3 items-end flex-wrap mb-3">
+                <label class="text-xs text-gray-400 flex items-center gap-2" style="padding-bottom:6px">
+                    <input type="checkbox" id="clc-enabled"> Enabled
+                </label>
+                <label class="text-xs text-gray-400">Every (hours)
+                    <br><input type="number" id="clc-hours" min="1" max="720" value="48"
+                        style="width:90px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <button class="btn btn-sm btn-secondary" onclick="checkLiveCronSave()">Save</button>
+                <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="checkLiveCronRunNow()">▶ Run now</button>
+            </div>
+            <div id="clc-status" class="text-sm text-gray-400"></div>
         </div>`;
+    checkLiveCronLoad();
+}
+
+let _clcPollingTask = null;
+async function checkLiveCronLoad() {
+    try {
+        const r = await api('/api/settings/check-live-cron');
+        const en = document.getElementById('clc-enabled'); if (en) en.checked = !!r.enabled;
+        const hr = document.getElementById('clc-hours'); if (hr && r.interval_hours) hr.value = r.interval_hours;
+        const el = document.getElementById('clc-status');
+        if (!el) return;
+        const s = r.last_summary;
+        const lastLine = r.last_run
+            ? `Last run: <b>${r.last_run} UTC</b>` + (s
+                ? ` · ${s.month ? s.month + ' · ' : ''}${s.clients ?? '?'} clients · ${s.checked ?? 0} checked · ${s.live ?? 0} live · ${s.dead ?? 0} dead · ${s.restored ?? 0} restored${s.errors ? ' · ' + s.errors + ' errors' : ''}`
+                : '')
+            : 'Has not run yet.';
+        if (r.running) {
+            const p = r.progress || {};
+            const prog = p.total ? ` (${p.checked || 0}/${p.total})` : '';
+            el.innerHTML = `<span style="color:#46d160">● Running now${prog}…</span><br><span class="text-xs text-gray-500">${lastLine}</span>`;
+            // Attach one poller so the card flips to the final summary on completion.
+            if (r.task_id && _clcPollingTask !== r.task_id && typeof _pollTask === 'function') {
+                _clcPollingTask = r.task_id;
+                _pollTask(r.task_id, 'Auto status refresh', () => { _clcPollingTask = null; checkLiveCronLoad(); });
+            }
+        } else {
+            el.innerHTML = lastLine;
+        }
+    } catch (e) { /* surfaced by api() */ }
+}
+
+async function checkLiveCronSave() {
+    const enabled = document.getElementById('clc-enabled')?.checked;
+    const interval_hours = parseInt(document.getElementById('clc-hours')?.value) || 48;
+    try {
+        const r = await api('/api/settings/check-live-cron', { method: 'POST', body: { enabled, interval_hours } });
+        toast(`Saved — ${r.enabled ? 'enabled' : 'disabled'}, every ${r.interval_hours}h`, 'success');
+    } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); }
+}
+
+async function checkLiveCronRunNow() {
+    if (!confirm('Run the live-status refresh for ALL clients now? This can take a while.')) return;
+    try {
+        const r = await api('/api/settings/check-live-cron/run', { method: 'POST', body: {} });
+        if (r.task_id && typeof _pollTask === 'function') {
+            _addBgTask && _addBgTask(r.task_id, 'Refreshing all clients');
+            _pollTask(r.task_id, 'Status refresh', (result) => {
+                const x = result || {};
+                toast(`Refreshed ${x.clients ?? '?'} clients · ${x.checked ?? 0} checked · ${x.live ?? 0} live · ${x.dead ?? 0} dead · ${x.restored ?? 0} restored`, x.errors ? 'warning' : 'success');
+                checkLiveCronLoad();
+            });
+            toast('Started — refreshing all clients in the background…', 'info');
+        } else {
+            toast('Started', 'info');
+        }
+    } catch (e) { toast('Run failed: ' + (e.message || e), 'error'); }
 }
 async function lsPurgePreview() {
     const month = document.getElementById('ls-purge-month')?.value;

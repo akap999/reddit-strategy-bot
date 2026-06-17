@@ -198,7 +198,122 @@ def get_db():
             _maybe_kick_off_karma_backfill(db)
         except Exception as e:
             print(f"[karma-backfill] init error: {e}", flush=True)
+        try:
+            _maybe_start_cron_scheduler()
+        except Exception as e:
+            print(f"[cron-check-live] init error: {e}", flush=True)
     return db
+
+
+# ---------------------------------------------------------------------------
+# Auto "Update status" (live-check) for ALL clients — in-app cron.
+# Mirrors the dashboard's per-client "Update status" but spans every client,
+# on a schedule. Config + the run-claim lock live in app_meta so it fires once
+# per window across the 2 gunicorn workers and is tunable from Settings.
+# ---------------------------------------------------------------------------
+_cron_scheduler_started = False
+
+
+def run_check_live_all_clients(task_id=None, month=None):
+    """Run the live-check over EVERY client's reported deliverables for ONE month (the
+    CURRENT calendar month by default), deduped into a single batch. Same engine as the
+    manual per-client 'Update status' — scoped to the current month so the live dashboard
+    stays accurate without rechecking historical reports."""
+    from datetime import datetime as _dt
+    month = month or _dt.utcnow().strftime("%Y-%m")
+    bg = Database(DB_PATH)
+    bg.connect(); bg.initialize()
+    try:
+        clients = bg.list_clients()
+        seen = set()
+        items = []
+        for c in clients:
+            rows = bg.get_check_live_items_for_client_month(c["id"], month)
+            for it in _build_check_live_items(rows):
+                key = (it.get("source", "comment"), it.get("id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(it)
+        result = _check_live_batch(
+            items, bg, log_prefix=f"CRON-CHECK-LIVE-ALL m={month}", task_id=task_id)
+        result["clients"] = len(clients)
+        result["considered"] = len(items)
+        result["month"] = month
+        return result
+    finally:
+        try: bg.close()
+        except Exception: pass
+
+
+def _cron_check_live_task(_task_id=None):
+    """Tracked wrapper: runs the all-clients current-month refresh and records the summary.
+    Shared by the scheduler (auto) and the Settings 'Run now' button, so the run always
+    appears as a normal background task (pollable at /api/tasks/<id>) while in progress."""
+    res = run_check_live_all_clients(task_id=_task_id)
+    try:
+        bg = Database(DB_PATH); bg.connect()
+        bg.meta_set("cron_check_live_last_summary", json.dumps({
+            "at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "month": res.get("month"),
+            "clients": res.get("clients"), "considered": res.get("considered"),
+            "checked": res.get("checked"), "live": res.get("live"),
+            "dead": res.get("dead"), "restored": res.get("restored"),
+            "errors": res.get("errors"),
+        }))
+        bg.close()
+    except Exception:
+        pass
+    return res
+
+
+def _maybe_start_cron_scheduler():
+    """Start (once per worker process) a daemon thread that runs the all-clients live-check
+    on a cadence. Guarded by a module global; the actual fire is gated by an atomic DB claim
+    (`claim_periodic`) so only ONE worker runs it per window. Config (enabled / interval) is
+    read live from app_meta each cycle, so the Settings UI tunes it without a redeploy."""
+    global _cron_scheduler_started
+    if _cron_scheduler_started:
+        return
+    _cron_scheduler_started = True
+
+    def loop():
+        import time as _t
+        _t.sleep(120)  # let the app settle after boot
+        while True:
+            try:
+                db = Database(DB_PATH); db.connect(); db.initialize()
+                try:
+                    enabled = (db.meta_get("cron_check_live_enabled")
+                               or os.environ.get("CRON_CHECK_LIVE_ENABLED", "1"))
+                    try:
+                        hours = float(db.meta_get("cron_check_live_hours")
+                                      or os.environ.get("CRON_CHECK_LIVE_HOURS", "48"))
+                    except (TypeError, ValueError):
+                        hours = 48.0
+                    claimed = False
+                    if str(enabled).strip() not in ("0", "false", "False", "no", ""):
+                        claimed = db.claim_periodic("cron_check_live_last_run", hours)
+                finally:
+                    db.close()
+                if claimed:
+                    # Run as a tracked background task so it's pollable while in progress
+                    # (the Settings card + /api/tasks/<id> show live X/Y progress).
+                    tid = start_task("cron-check-live-all", _cron_check_live_task,
+                                     pass_task_id=True)
+                    try:
+                        db = Database(DB_PATH); db.connect()
+                        db.meta_set("cron_check_live_task_id", tid)
+                        db.close()
+                    except Exception:
+                        pass
+                    print(f"[cron-check-live] claimed — started tracked run task {tid}", flush=True)
+            except Exception as e:
+                print(f"[cron-check-live] loop error: {e}", flush=True)
+            _t.sleep(3600)  # re-check hourly; the DB claim enforces the real interval
+
+    threading.Thread(target=loop, daemon=True).start()
+    print("[cron-check-live] scheduler thread started", flush=True)
 
 # ---------------------------------------------------------------------------
 # Reddit proxy helper
@@ -3030,6 +3145,72 @@ def api_ls_purge():
         return jsonify(db.purge_untouched_search_posts(month, dry_run=False))
     finally:
         db.close()
+
+
+@app.route("/api/settings/check-live-cron", methods=["GET"])
+def api_check_live_cron_get():
+    """Current config + last-run summary for the auto 'Update status' cron (all clients)."""
+    db = get_db()
+    try:
+        enabled = db.meta_get("cron_check_live_enabled")
+        if enabled is None:
+            enabled = os.environ.get("CRON_CHECK_LIVE_ENABLED", "1")
+        try:
+            hours = int(float(db.meta_get("cron_check_live_hours")
+                              or os.environ.get("CRON_CHECK_LIVE_HOURS", "48")))
+        except (TypeError, ValueError):
+            hours = 48
+        summary = db.meta_get("cron_check_live_last_summary")
+        try:
+            summary = json.loads(summary) if summary else None
+        except (ValueError, TypeError):
+            summary = None
+        # Surface the in-flight run (auto OR 'Run now') so the UI can poll progress.
+        task_id = db.meta_get("cron_check_live_task_id")
+        task = db.get_task(task_id) if task_id else None
+        return jsonify({
+            "enabled": str(enabled).strip() not in ("0", "false", "False", "no", ""),
+            "interval_hours": hours,
+            "last_run": db.meta_get("cron_check_live_last_run"),
+            "last_summary": summary,
+            "task_id": task_id,
+            "running": bool(task and task.get("status") == "running"),
+            "progress": (task or {}).get("progress"),
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/check-live-cron", methods=["POST"])
+def api_check_live_cron_set():
+    """Persist the auto-refresh cron config (read live by the scheduler — no redeploy)."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled"))
+    try:
+        hours = int(data.get("interval_hours"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "interval_hours must be an integer"}), 400
+    hours = max(1, min(720, hours))  # clamp 1h .. 30d
+    db = get_db()
+    try:
+        db.meta_set("cron_check_live_enabled", "1" if enabled else "0")
+        db.meta_set("cron_check_live_hours", str(hours))
+        return jsonify({"ok": True, "enabled": enabled, "interval_hours": hours})
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/check-live-cron/run", methods=["POST"])
+def api_check_live_cron_run():
+    """Run the all-clients current-month live-check now (same work the cron does). Returns a
+    task_id (poll /api/tasks/<id>)."""
+    tid = start_task("settings-check-live-all", _cron_check_live_task, pass_task_id=True)
+    db = get_db()
+    try:
+        db.meta_set("cron_check_live_task_id", tid)
+    finally:
+        db.close()
+    return jsonify({"task_id": tid})
 
 
 @app.route("/api/check-live/runs/<int:run_id>", methods=["GET"])

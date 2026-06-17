@@ -227,7 +227,12 @@ def run_check_live_all_clients(task_id=None, month=None):
         clients = bg.list_clients()
         seen = set()
         items = []
+        brand_ids = set()
         for c in clients:
+            try:
+                brand_ids.update(bg.client_brand_ids(c["id"]))
+            except Exception:
+                pass
             rows = bg.get_check_live_items_for_client_month(c["id"], month)
             for it in _build_check_live_items(rows):
                 key = (it.get("source", "comment"), it.get("id"))
@@ -235,10 +240,33 @@ def run_check_live_all_clients(task_id=None, month=None):
                     continue
                 seen.add(key)
                 items.append(it)
+        # Also re-verify EVERY removed/replace comment for client brands (ANY month) so a
+        # comment Reddit has since restored flips back to live — the current-month scope above
+        # would otherwise never re-check prior-month removals. Snapshot of the removed set
+        # taken now; comments newly removed *during* this run were just checked and aren't
+        # re-checked again here.
+        removed_added = 0
+        for bid in brand_ids:
+            try:
+                rrows = bg.get_removed_comments(brand_id=bid)
+            except Exception:
+                rrows = []
+            for it in _build_check_live_items(rrows):
+                # MUST have a Reddit URL: a no-URL 'comment' would be flipped removed→deleted
+                # by _check_live_batch (it assumes 'never posted'). Skip those entirely.
+                if not (it.get("reddit_comment_url") or "").strip():
+                    continue
+                key = (it.get("source", "comment"), it.get("id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(it)
+                removed_added += 1
         result = _check_live_batch(
-            items, bg, log_prefix=f"CRON-CHECK-LIVE-ALL m={month}", task_id=task_id)
+            items, bg, log_prefix=f"CRON-CHECK-LIVE-ALL m={month} +removed", task_id=task_id)
         result["clients"] = len(clients)
         result["considered"] = len(items)
+        result["removed_rechecked"] = removed_added
         result["month"] = month
         return result
     finally:
@@ -3372,6 +3400,13 @@ def api_check_live_start():
                             return 'live', 'via comment-permalink RSS'
                         if rss_v == 'removed':
                             return 'removed', 'comment id absent from its permalink RSS feed'
+                        # RSS couldn't fetch → PullPush archive fallback (separate host) before
+                        # the cloud-403 JSON path, so a flaky proxy doesn't read live as 'missing'.
+                        pp_v = _comment_liveness_via_pullpush(resolved)
+                        if pp_v == 'live':
+                            return 'live', 'via PullPush archive (RSS unreachable)'
+                        if pp_v == 'removed':
+                            return 'removed', 'PullPush archive body is [removed]/[deleted]'
                         # rss_v is None (inconclusive) → try JSON as fallback.
                         if comment_id:
                             try:

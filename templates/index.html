@@ -2529,7 +2529,10 @@ function renderPostsFromCache() {
 async function showPostDetail(pid) {
     const post = await api(`/api/posts/${pid}`);
     const isReported = post.status === 'report';
-    const canReport = post.status === 'published' || post.status === 'paid';
+    const canReport = post.status === 'published' || post.status === 'paid' || post.status === 'deployed';
+    // Deploy is available pre-live AND on already-live posts (to edit/correct the post +
+    // HQ-anchor links). Excludes paid/report/removed so we don't downgrade those.
+    const canDeploy = ['draft', 'complete', 'published', 'deployed'].includes(post.status);
     // Subreddit name comes back as `subreddit_name` on /api/posts/<id>.
     // Surface it as a clickable r/<sub> ↗ link so the user can open
     // the subreddit on Reddit straight from the detail modal — same
@@ -2563,6 +2566,7 @@ async function showPostDetail(pid) {
                  Generate tab result panel, Comments tab card, etc.). -->
             <button class="btn btn-sm btn-accent" onclick="closeModal(); lsubsGenHqForPost(${post.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
             <button class="btn btn-sm btn-secondary" onclick="regeneratePostBody(${post.id}, this)" title="Rewrite the body for this same title (fresh take)">↻ Regenerate body</button>
+            ${canDeploy ? `<button class="btn btn-sm btn-primary" onclick="closeModal(); publishPost(${post.id})" title="Deploy / edit links — set the post link AND the HQ anchor comment link">🚀 Deploy</button>` : ''}
             ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
             ${isReported ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="closeModal(); undoReportThisPost(${post.id})">↺ Undo report</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
@@ -2590,14 +2594,31 @@ async function regeneratePostBody(pid, btn) {
     }
 }
 
+// Walk a post's comment tree (/api/posts/<pid>/comments) → the HQ anchor root's url ('' if none).
+async function _hqAnchorUrl(pid) {
+    try {
+        const tree = await api(`/api/posts/${pid}/comments`);
+        const stack = Array.isArray(tree) ? [...tree] : [];
+        while (stack.length) {
+            const n = stack.shift();
+            if (n && n.comment_type === 'hq' && !n.parent_comment_id) return n.reddit_comment_url || '';
+            if (n && Array.isArray(n.replies)) stack.push(...n.replies);
+        }
+    } catch (_) {}
+    return '';
+}
+
 async function publishPost(pid) {
-    const [accounts, post] = await Promise.all([api('/api/accounts'), api(`/api/posts/${pid}`)]);
+    const [accounts, post, hqUrl] = await Promise.all([api('/api/accounts'), api(`/api/posts/${pid}`), _hqAnchorUrl(pid)]);
     const ownerAccount = post.owner_account || '';
     let acctOpts = accounts.map(a => `<option value="${a.username}" ${a.username === ownerAccount ? 'selected' : ''}>${a.username}</option>`).join('');
     showModal(`
         <h3 class="text-lg font-bold mb-4">Publish Post</h3>
-        <p class="text-sm text-gray-400 mb-3">Paste the Reddit URL after manually posting:</p>
-        <input id="publish-url" placeholder="https://reddit.com/r/...">
+        <p class="text-sm text-gray-400 mb-3">Paste the Reddit links after manually posting:</p>
+        <label class="text-xs text-gray-400 block">Post link</label>
+        <input id="publish-url" placeholder="https://reddit.com/r/.../comments/..." value="${post.reddit_url || ''}">
+        <label class="text-xs text-gray-400 mt-3 block">HQ anchor comment link <span class="text-gray-600">(optional)</span></label>
+        <input id="publish-hq-url" placeholder="https://reddit.com/r/.../comments/.../<comment>/" value="${hqUrl}">
         <label class="text-xs text-gray-400 mt-3 block">Owner Account</label>
         <select id="publish-owner" class="w-full mb-2 bg-gray-800 text-white border border-gray-600 rounded px-3 py-2">
             <option value="">-- No Owner --</option>
@@ -2612,8 +2633,9 @@ async function publishPost(pid) {
 
 async function submitPublish(pid) {
     const url = document.getElementById('publish-url').value;
+    const hqUrl = (document.getElementById('publish-hq-url')?.value || '').trim();
     const ownerAcct = document.getElementById('publish-owner').value;
-    await api(`/api/posts/${pid}/publish`, { method: 'POST', body: { reddit_url: url, owner_account: ownerAcct } });
+    await api(`/api/posts/${pid}/publish`, { method: 'POST', body: { reddit_url: url, hq_reddit_url: hqUrl, owner_account: ownerAcct } });
     toast('Post marked as published', 'success');
     closeModal();
     _postsUpdateLocal(pid, { status: 'published', reddit_url: url, owner_account: ownerAcct, published_at: new Date().toISOString() });
@@ -8177,9 +8199,11 @@ async function renderLsubsPosts(c) {
                     <option value="">All status</option>
                     <option value="draft">Draft</option>
                     <option value="complete">Complete</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="informed">Informed</option>
+                    <option value="deployed">Deployed</option>
                     <option value="published">Published</option>
                     <option value="paid">Paid</option>
-                    <option value="informed">Informed</option>
                     <option value="report">Reported</option>
                     <option value="removed">Removed</option>
                 <option value="replace">Replace</option><option value="replaced">Replaced</option>
@@ -8213,6 +8237,7 @@ async function renderLsubsPosts(c) {
                 <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('comments')" title="Generate comments for selected posts (AI-crawl optimized)">Gen Comments (selected)</button>
                 <button class="btn btn-accent btn-sm" onclick="lsubsBatchGenerate('hq')" title="Generate HQ thread (1 main + 4 replies) for selected posts">Gen HQ (selected)</button>
                 <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllPostsModal()" title="Push every currently-filtered published/paid post (plus its eligible comments) into a monthly report">📊 Mark Reported All</button>
+                <button class="btn btn-sm" style="background:#0b5a52;color:#9efbe0" onclick="showMarkReportedAllModal('livesubs')" title="Comment-level (same as Live Search): push every deployed/paid comment for the filtered brand into a monthly report — choose reported or replaced">📊 Mark Reported All (comments)</button>
             </div>
         </div>
         <!-- Status-wise count pills for the loaded posts — mirrors the
@@ -11228,9 +11253,9 @@ function renderSettings(c) {
             <h3 class="font-bold mb-1" style="color:#9efbe0">Auto status refresh (all clients)</h3>
             <p class="text-xs text-gray-400 mb-3" style="line-height:1.5">
                 Automatically runs the same <b>Update status</b> live-check the client dashboard does —
-                across <b>every client, brand and month</b> — on a schedule, so removed/restored
-                comments stay accurate without anyone clicking. Runs in the background; the interval is
-                the minimum gap between runs.
+                across <b>every client and brand, for the current month</b> — on a schedule, so
+                removed/restored comments stay accurate without anyone clicking. Runs in the
+                background; the interval is the minimum gap between runs.
             </p>
             <div class="flex gap-3 items-end flex-wrap mb-3">
                 <label class="text-xs text-gray-400 flex items-center gap-2" style="padding-bottom:6px">
@@ -11243,8 +11268,68 @@ function renderSettings(c) {
                 <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="checkLiveCronRunNow()">▶ Run now</button>
             </div>
             <div id="clc-status" class="text-sm text-gray-400"></div>
+        </div>
+
+        <div class="card p-5 mt-4" style="background:#1a1a1b;border:1px solid #343536;max-width:680px">
+            <h3 class="font-bold mb-1" style="color:#9efbe0">Targeted status check</h3>
+            <p class="text-xs text-gray-400 mb-3" style="line-height:1.5">
+                Run the <b>Update status</b> live-check on a specific slice — pick a <b>brand</b>,
+                <b>month</b> and <b>status</b>. Restores comments Reddit has brought back and flags
+                ones it removed. Only comments with a Reddit link are checked. Runs in the background.
+            </p>
+            <div class="flex gap-3 items-end flex-wrap mb-3">
+                <label class="text-xs text-gray-400">Brand
+                    <br><select id="tlc-brand" class="text-xs" style="min-width:160px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"><option value="">All brands</option></select></label>
+                <label class="text-xs text-gray-400">Month
+                    <br><input type="month" id="tlc-month" value="${thisMonth}" max="${thisMonth}"
+                        style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <label class="text-xs text-gray-400 flex items-center gap-2" style="padding-bottom:6px">
+                    <input type="checkbox" id="tlc-allmonths"> All months</label>
+                <label class="text-xs text-gray-400">Status
+                    <br><select id="tlc-status" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px">
+                        <option value="">All</option>
+                        <option value="report">Live (reported)</option>
+                        <option value="removed">Removed</option>
+                        <option value="replace">Replace</option>
+                        <option value="replaced">Replaced</option>
+                    </select></label>
+                <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="targetedCheckRun()">▶ Run</button>
+            </div>
+            <div id="tlc-status-line" class="text-sm text-gray-400"></div>
         </div>`;
     checkLiveCronLoad();
+    targetedCheckLoad();
+}
+
+async function targetedCheckLoad() {
+    try {
+        const brands = await api('/api/brands/all');
+        const sel = document.getElementById('tlc-brand');
+        if (sel) sel.innerHTML = '<option value="">All brands</option>'
+            + (brands || []).map(b => `<option value="${b.id}">${b.name}</option>`).join('');
+    } catch (e) { /* surfaced by api() */ }
+}
+
+async function targetedCheckRun() {
+    const brand_id = document.getElementById('tlc-brand')?.value || null;
+    const allMonths = document.getElementById('tlc-allmonths')?.checked;
+    const month = allMonths ? null : (document.getElementById('tlc-month')?.value || null);
+    const status = document.getElementById('tlc-status')?.value || null;
+    const line = document.getElementById('tlc-status-line');
+    try {
+        const r = await api('/api/settings/check-live-targeted/run', { method: 'POST', body: { brand_id, month, status } });
+        if (r.task_id && typeof _pollTask === 'function') {
+            _addBgTask && _addBgTask(r.task_id, 'Targeted status check');
+            if (line) line.innerHTML = '<span style="color:#46d160">● Running…</span>';
+            _pollTask(r.task_id, 'Targeted check', (res) => {
+                const x = res || {};
+                const msg = `Checked ${x.considered ?? x.checked ?? 0} · ${x.live ?? 0} live · ${x.dead ?? 0} dead · ${x.restored ?? 0} restored${x.errors ? ' · ' + x.errors + ' errors' : ''}`;
+                if (line) line.textContent = msg;
+                toast(msg, x.errors ? 'warning' : 'success');
+            });
+            toast('Started — checking in the background…', 'info');
+        }
+    } catch (e) { toast('Run failed: ' + (e.message || e), 'error'); }
 }
 
 let _clcPollingTask = null;
@@ -12099,6 +12184,7 @@ async function showReportThisPostModal(postId) {
     // will actually be reported, or whether the post will be
     // recorded as Removed because no HQ root is deployed yet.
     let hqRoot = null;
+    let hqUrlPrefill = '';
     try {
         const tree = await api(`/api/posts/${postId}/comments`);
         const flat = [];
@@ -12114,6 +12200,9 @@ async function showReportThisPostModal(postId) {
             && (c.reddit_comment_url || '').trim() !== ''
             && (c.status === 'deployed' || c.status === 'paid')
         );
+        // Prefill the HQ field from the anchor regardless of status (it may not be deployed yet).
+        const hqAny = flat.find(c => c.comment_type === 'hq' && !c.parent_comment_id);
+        hqUrlPrefill = (hqAny && hqAny.reddit_comment_url) || '';
     } catch (e) {}
     const postTitle = postMeta?.title || '';
     const subreddit = postMeta?.subreddit_name || '';
@@ -12137,6 +12226,10 @@ async function showReportThisPostModal(postId) {
         </p>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-post-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <label class="text-xs text-gray-400">Post link <span class="text-gray-600">(optional — blank keeps existing)</span></label>
+        <input id="rep-post-url" class="w-full mb-2" placeholder="https://reddit.com/r/.../comments/..." value="${postMeta?.reddit_url || ''}">
+        <label class="text-xs text-gray-400">HQ anchor comment link <span class="text-gray-600">(optional)</span></label>
+        <input id="rep-post-hq-url" class="w-full mb-3" placeholder="https://reddit.com/r/.../comments/.../<comment>/" value="${hqUrlPrefill}">
         <div id="rep-post-brand-section"></div>
         ${previewBlock}
         <div class="flex gap-2 mt-4">
@@ -12159,8 +12252,12 @@ async function submitReportThisPost(postId) {
     // is unbranded.
     const brandSel = document.getElementById('rep-post-brand');
     const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;
+    const postUrl = (document.getElementById('rep-post-url')?.value || '').trim();
+    const hqUrl = (document.getElementById('rep-post-hq-url')?.value || '').trim();
     const body = { report_month: month };
     if (brandId) body.brand_id = brandId;
+    if (postUrl) body.post_reddit_url = postUrl;
+    if (hqUrl) body.hq_reddit_url = hqUrl;
     try {
         const res = await fetch(`/api/posts/${postId}/to-report`, {
             method: 'POST',
@@ -12361,7 +12458,10 @@ async function reclassifyReport(cid, source, to) {
 async function showMarkReportedAllModal(scope) {
     // scope: 'livesearch' (uses ls-cf-* filters) or 'livesubs' (uses lsubs-cmt-* filters)
     const filterContext = scope === 'livesubs' ? {
-        brand_id: document.getElementById('lsubs-cmt-brand')?.value || null,
+        // Reachable from the Comments tab (lsubs-cmt-brand) OR the Posts tab
+        // (lsubs-posts-brand) — fall back so the brand scopes either way.
+        brand_id: document.getElementById('lsubs-cmt-brand')?.value
+                  || document.getElementById('lsubs-posts-brand')?.value || null,
         status: document.getElementById('lsubs-cmt-status')?.value || null,
         source: 'comment',
     } : {
@@ -12427,7 +12527,8 @@ async function submitMarkReportedAll(scope) {
     // filter applies equally. Always honor it when set (else all deployed/paid match).
     if (status) body.status = status;
     if (scope === 'livesubs') {
-        const bid = document.getElementById('lsubs-cmt-brand')?.value;
+        const bid = document.getElementById('lsubs-cmt-brand')?.value
+                  || document.getElementById('lsubs-posts-brand')?.value;
         // The header filter scopes WHICH comments are candidates;
         // the override above sets WHAT brand unbranded rows get.
         // When both are set we still respect the override for unbranded;

@@ -339,6 +339,36 @@ class Database:
             )
         self.conn.commit()
 
+    def set_hq_anchor_url(self, post_id, url):
+        """Set the Reddit URL of a post's HQ ANCHOR comment (comment_type='hq',
+        parent_comment_id IS NULL) — so the post link and the HQ anchor link can be entered
+        from the same place when deploying/reporting a post.
+
+        Resolves the anchor regardless of status (prefers one that already has a URL, else the
+        earliest). If the anchor is still pre-deploy (draft/complete/assigned/informed) it's
+        DEPLOYED with this URL (status → 'deployed'); otherwise the URL is updated in place and
+        the status is preserved (never downgrades a deployed/paid/report row). Blank url or no
+        anchor → no-op. Returns the anchor comment id, or None."""
+        url = (url or "").strip()
+        if not url or not post_id:
+            return None
+        row = self.conn.execute(
+            """SELECT id, status FROM comments
+                WHERE post_id = ? AND comment_type = 'hq' AND parent_comment_id IS NULL
+                ORDER BY (CASE WHEN TRIM(COALESCE(reddit_comment_url,'')) != '' THEN 0 ELSE 1 END),
+                         COALESCE(posted_at, deployed_at, created_at)
+                LIMIT 1""",
+            (post_id,)
+        ).fetchone()
+        if not row:
+            return None
+        cid = row["id"]
+        if (row["status"] or "").lower() in ("draft", "complete", "assigned", "informed"):
+            self.deploy_comment(cid, url)          # sets url + deployed_at + status='deployed'
+        else:
+            self.update_comment_url(cid, url)      # url only; preserve deployed/paid/report/…
+        return cid
+
     # --- Post-Brand Junction ---
 
     def add_post_brands(self, post_id, brand_ids):
@@ -555,7 +585,11 @@ class Database:
         return results
 
     def get_post(self, post_id):
-        row = self.conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT p.*, (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) "
+            "AS reddit_url FROM posts p WHERE p.id = ?",
+            (post_id,)
+        ).fetchone()
         return dict(row) if row else None
 
     def update_post_status(self, post_id, status):
@@ -3226,6 +3260,49 @@ class Database:
         query = (f"SELECT * FROM ({q1} UNION ALL {q2}) combined "
                  "ORDER BY COALESCE(last_live_check, deployed_at, created_at) DESC, id DESC")
         rows = self.conn.execute(query, p1 + p2).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_check_live_items_by_filter(self, brand_id=None, month=None, status=None):
+        """Comments (both tables) matching optional brand_id / report_month / status, restricted
+        to rows that HAVE a Reddit URL — shaped for `_build_check_live_items`. Powers the Settings
+        'targeted status check' tool. The URL restriction is mandatory: `_check_live_batch` would
+        flip a no-URL comment to 'deleted', so only checkable (posted) rows are returned. With no
+        `status`, returns every non-deleted/archived row (which, after the URL filter, is the
+        deployed/paid/report/removed/replace/replaced set)."""
+        w1 = ["TRIM(COALESCE(c.reddit_comment_url, '')) != ''"]; p1 = []
+        w2 = ["TRIM(COALESCE(sc.reddit_comment_url, '')) != ''"]; p2 = []
+        if status:
+            w1.append("c.status = ?"); p1.append(status)
+            w2.append("sc.status = ?"); p2.append(status)
+        else:
+            w1.append("c.status NOT IN ('deleted','archived')")
+            w2.append("sc.status NOT IN ('deleted','archived')")
+        if month:
+            w1.append("c.report_month = ?"); p1.append(month)
+            w2.append("sc.report_month = ?"); p2.append(month)
+        if brand_id:
+            w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.brand_id = ?) "
+                      "OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?)))")
+            p1 += [brand_id, brand_id, brand_id]
+            w2.append("(sc.brand_id = ? OR (sc.brand_id IS NULL AND sp.brand_id = ?))")
+            p2 += [brand_id, brand_id]
+        where1 = " AND ".join(w1); where2 = " AND ".join(w2)
+        q1 = f"""SELECT c.id, 'comment' AS source, c.status, c.reddit_comment_url,
+                        c.account_id, s.name AS subreddit_name,
+                        COALESCE(b.name, pb.name) AS brand_name
+                 FROM comments c
+                 JOIN posts p ON c.post_id = p.id
+                 LEFT JOIN subreddits s ON p.subreddit_id = s.id
+                 LEFT JOIN brands b ON c.brand_id = b.id
+                 LEFT JOIN brands pb ON p.brand_id = pb.id
+                 WHERE {where1}"""
+        q2 = f"""SELECT sc.id, 'search_comment' AS source, sc.status, sc.reddit_comment_url,
+                        sc.account_id, sp.subreddit AS subreddit_name, b.name AS brand_name
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                 LEFT JOIN brands b ON sc.brand_id = b.id
+                 WHERE {where2}"""
+        rows = self.conn.execute(f"{q1} UNION ALL {q2}", p1 + p2).fetchall()
         return [dict(r) for r in rows]
 
     def get_live_comment_counts(self, brand_id=None, subreddit_id=None):

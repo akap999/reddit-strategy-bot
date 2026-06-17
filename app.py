@@ -227,12 +227,7 @@ def run_check_live_all_clients(task_id=None, month=None):
         clients = bg.list_clients()
         seen = set()
         items = []
-        brand_ids = set()
         for c in clients:
-            try:
-                brand_ids.update(bg.client_brand_ids(c["id"]))
-            except Exception:
-                pass
             rows = bg.get_check_live_items_for_client_month(c["id"], month)
             for it in _build_check_live_items(rows):
                 key = (it.get("source", "comment"), it.get("id"))
@@ -240,34 +235,42 @@ def run_check_live_all_clients(task_id=None, month=None):
                     continue
                 seen.add(key)
                 items.append(it)
-        # Also re-verify EVERY removed/replace comment for client brands (ANY month) so a
-        # comment Reddit has since restored flips back to live — the current-month scope above
-        # would otherwise never re-check prior-month removals. Snapshot of the removed set
-        # taken now; comments newly removed *during* this run were just checked and aren't
-        # re-checked again here.
-        removed_added = 0
-        for bid in brand_ids:
-            try:
-                rrows = bg.get_removed_comments(brand_id=bid)
-            except Exception:
-                rrows = []
-            for it in _build_check_live_items(rrows):
-                # MUST have a Reddit URL: a no-URL 'comment' would be flipped removed→deleted
-                # by _check_live_batch (it assumes 'never posted'). Skip those entirely.
-                if not (it.get("reddit_comment_url") or "").strip():
-                    continue
-                key = (it.get("source", "comment"), it.get("id"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                items.append(it)
-                removed_added += 1
         result = _check_live_batch(
-            items, bg, log_prefix=f"CRON-CHECK-LIVE-ALL m={month} +removed", task_id=task_id)
+            items, bg, log_prefix=f"CRON-CHECK-LIVE-ALL m={month}", task_id=task_id)
         result["clients"] = len(clients)
         result["considered"] = len(items)
-        result["removed_rechecked"] = removed_added
         result["month"] = month
+        return result
+    finally:
+        try: bg.close()
+        except Exception: pass
+
+
+def run_targeted_check_live(brand_id=None, month=None, status=None, task_id=None):
+    """Live-check a specific slice — comments matching the given brand / report_month / status
+    (any combination; None = no constraint on that axis). Only URL-bearing rows are checked
+    (never flips a no-URL comment to 'deleted'). Powers the Settings 'targeted status check'."""
+    bg = Database(DB_PATH)
+    bg.connect(); bg.initialize()
+    try:
+        rows = bg.get_check_live_items_by_filter(
+            brand_id=brand_id, month=(month or None), status=(status or None))
+        seen = set()
+        items = []
+        for it in _build_check_live_items(rows):
+            if not (it.get("reddit_comment_url") or "").strip():
+                continue
+            key = (it.get("source", "comment"), it.get("id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(it)
+        result = _check_live_batch(
+            items, bg,
+            log_prefix=f"TARGETED-CHECK-LIVE b={brand_id} m={month or '*'} s={status or '*'}",
+            task_id=task_id)
+        result["considered"] = len(items)
+        result["filter"] = {"brand_id": brand_id, "month": month, "status": status}
         return result
     finally:
         try: bg.close()
@@ -1479,6 +1482,7 @@ def api_publish_post(pid):
         data = request.json
         reddit_url = data.get("reddit_url", "")
         owner_account = data.get("owner_account", "")
+        hq_reddit_url = (data.get("hq_reddit_url") or "").strip()
         # If the post is currently in a monthly report, exit report cleanly
         # FIRST — this reverts its reported HQ anchor comment back to
         # 'deployed' so the anchor isn't stranded in 'report' (which would
@@ -1515,6 +1519,12 @@ def api_publish_post(pid):
                 print(f"[publish] posted_at fetch spawn failed pid={pid}: {e}", flush=True)
         if owner_account:
             db.set_post_owner(pid, owner_account)
+        # Same place can set the HQ anchor comment's link too (deploys the anchor).
+        if hq_reddit_url:
+            try:
+                db.set_hq_anchor_url(pid, hq_reddit_url)
+            except Exception as e:
+                print(f"[publish] set HQ anchor url failed pid={pid}: {e}", flush=True)
         return jsonify({"ok": True})
     finally:
         db.close()
@@ -3238,6 +3248,29 @@ def api_check_live_cron_run():
         db.meta_set("cron_check_live_task_id", tid)
     finally:
         db.close()
+    return jsonify({"task_id": tid})
+
+
+@app.route("/api/settings/check-live-targeted/run", methods=["POST"])
+def api_check_live_targeted_run():
+    """Live-check a specific slice chosen in Settings: optional brand_id / month (YYYY-MM) /
+    status. Returns a task_id (poll /api/tasks/<id>)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        brand_id = int(data["brand_id"]) if data.get("brand_id") else None
+    except (TypeError, ValueError):
+        brand_id = None
+    month = (data.get("month") or "").strip() or None
+    if month and not _valid_report_month(month):
+        return jsonify({"error": "month must be YYYY-MM"}), 400
+    status = (data.get("status") or "").strip() or None
+    if status and status not in ("report", "removed", "replace", "replaced", "deployed", "paid"):
+        return jsonify({"error": "invalid status"}), 400
+
+    def task(_task_id=None):
+        return run_targeted_check_live(brand_id=brand_id, month=month, status=status,
+                                       task_id=_task_id)
+    tid = start_task("settings-check-live-targeted", task, pass_task_id=True)
     return jsonify({"task_id": tid})
 
 
@@ -9045,11 +9078,20 @@ def api_post_to_report(pid):
                 comment_ids.add(int(c))
             except (TypeError, ValueError):
                 pass
+    post_reddit_url = (data.get('post_reddit_url') or '').strip()
+    hq_reddit_url = (data.get('hq_reddit_url') or '').strip()
     db = get_db()
     try:
-        post = db.conn.execute("SELECT id FROM posts WHERE id = ?", (pid,)).fetchone()
+        post = db.conn.execute("SELECT id, subreddit_id FROM posts WHERE id = ?", (pid,)).fetchone()
         if not post:
             return jsonify({"error": "post_not_found"}), 404
+        # Optionally (re)set the post link + HQ anchor link from the same modal, BEFORE the
+        # report move — so move_post_to_report's anchor lookup (needs url + deployed/paid)
+        # finds the now-deployed HQ root. Blank fields are ignored (never wipe an existing url).
+        if post_reddit_url:
+            db.link_url_to_post(pid, post_reddit_url, post["subreddit_id"])
+        if hq_reddit_url:
+            db.set_hq_anchor_url(pid, hq_reddit_url)
         result = db.move_post_to_report(
             pid, report_month=month,
             actor_email=_admin_email(),

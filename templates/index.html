@@ -2617,6 +2617,7 @@ async function showPostDetail(pid) {
             <button class="btn btn-sm btn-accent" onclick="closeModal(); lsubsGenHqForPost(${post.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
             <button class="btn btn-sm btn-secondary" onclick="regeneratePostBody(${post.id}, this)" title="Rewrite the body for this same title (fresh take)">↻ Regenerate body</button>
             ${canDeploy ? `<button class="btn btn-sm btn-primary" onclick="closeModal(); publishPost(${post.id})" title="Deploy / edit links — set the post link AND the HQ anchor comment link">🚀 Deploy</button>` : ''}
+            <button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="closeModal(); lsubsEditSubreddit(${post.id}, '${(subName || '').replace(/'/g, "\\'")}', ${post.brand_id || 'null'})" title="${subName ? 'Change which subreddit this post counts against' : 'Assign a subreddit to this post'}">📍 ${subName ? 'Change subreddit' : 'Assign subreddit'}</button>
             ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
             ${isReported ? `<button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="closeModal(); undoReportThisPost(${post.id})">↺ Undo report</button>` : ''}
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
@@ -8537,6 +8538,7 @@ async function _lsubsSubmitEditSub(pid, brandId) {
         closeModal();
         if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
         else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable(true);
+        else if (currentView === 'livesubs' && _lsubsTab === 'clusters') lsubsLoadClusters(true);
     } catch (e) {
         toast('Failed: ' + (e.message || e), 'error');
     }
@@ -12584,6 +12586,7 @@ async function undoReportThisPost(postId) {
         _lsubsExpandedPosts.add(String(postId));
         if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
         else if (currentView === 'livesubs' && _lsubsTab === 'generate') lsubsLoadTable(true);
+        else if (currentView === 'livesubs' && _lsubsTab === 'clusters') lsubsLoadClusters(true);
         else lsubsLoadComments(true);
     } catch (e) {
         toast('Failed: ' + (e.message || e), 'error');

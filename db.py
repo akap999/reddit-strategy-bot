@@ -6170,10 +6170,16 @@ class Database:
 
     def set_post_owner(self, post_id, username):
         row = self.conn.execute(
-            "SELECT owner_account FROM posts WHERE id = ?", (post_id,)
+            "SELECT owner_account, status FROM posts WHERE id = ?", (post_id,)
         ).fetchone()
         prior = row["owner_account"] if row else None
         self.conn.execute("UPDATE posts SET owner_account = ? WHERE id = ?", (username, post_id))
+        # Lifecycle: assigning an owner advances a pre-assignment post to 'assigned'
+        # (mirrors the comment lifecycle). Guarded to draft/complete so we NEVER
+        # downgrade an informed/deployed/paid/report/removed post — important because
+        # the publish flow and reassignment both call this on already-live posts.
+        if username and row and row["status"] in ("draft", "complete"):
+            self.conn.execute("UPDATE posts SET status = 'assigned' WHERE id = ?", (post_id,))
         if prior and prior != username:
             self._decrement_lifetime(prior)
         if username and username != prior:
@@ -6278,7 +6284,10 @@ class Database:
             (subreddit_id,)
         ).fetchall()
         cur = self.conn.execute(
-            "UPDATE posts SET owner_account = '' WHERE subreddit_id = ? AND status NOT IN ('published', 'informed') AND owner_account IS NOT NULL AND owner_account != ''",
+            "UPDATE posts SET owner_account = '', "
+            "status = CASE WHEN status = 'assigned' THEN 'complete' ELSE status END "
+            "WHERE subreddit_id = ? AND status NOT IN ('published', 'informed') "
+            "AND owner_account IS NOT NULL AND owner_account != ''",
             (subreddit_id,)
         )
         for r in freed:
@@ -6325,10 +6334,14 @@ class Database:
     def unassign_post_owner(self, post_id):
         """Remove owner_account from a post."""
         row = self.conn.execute(
-            "SELECT owner_account FROM posts WHERE id = ?", (post_id,)
+            "SELECT owner_account, status FROM posts WHERE id = ?", (post_id,)
         ).fetchone()
         prior = row["owner_account"] if row else None
         self.conn.execute("UPDATE posts SET owner_account = '' WHERE id = ?", (post_id,))
+        # Revert the owner-driven lifecycle bump: only an 'assigned' post goes back to
+        # 'complete'. Leave informed/deployed/paid/report/removed untouched.
+        if row and row["status"] == "assigned":
+            self.conn.execute("UPDATE posts SET status = 'complete' WHERE id = ?", (post_id,))
         if prior:
             self._decrement_lifetime(prior)
         self.conn.commit()

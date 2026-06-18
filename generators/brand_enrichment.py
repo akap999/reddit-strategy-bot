@@ -111,6 +111,7 @@ Extract the following fields. Be specific and concrete — vague answers are use
 - features: 4-6 key differentiating features or capabilities. Each is a short phrase.
 - competitors: 3-8 direct competitor brand/product NAMES (real names like "Notion", "Asana", "Linear"). These will be used in comparison-intent posts, so accuracy matters. If you're unsure, include fewer but only confident ones.
 - context_summary: A 2-3 sentence narrative describing what the brand is and who it serves. This replaces or augments the existing brand context field.
+- keywords: 6-12 concise search keywords/terms a real person would type about this brand's DOMAIN (single words or short 2-3 word phrases like "async standups", "remote team pm"). Do NOT include the brand name. These are used to match relevant Reddit threads, so favor the terms users actually search, not marketing language.
 
 Return JSON only, exactly this shape:
 {{
@@ -120,7 +121,8 @@ Return JSON only, exactly this shape:
   "pain_points": ["string", ...],
   "features": ["string", ...],
   "competitors": ["string", ...],
-  "context_summary": "string"
+  "context_summary": "string",
+  "keywords": ["string", ...]
 }}"""
 
 
@@ -157,6 +159,7 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         "features":        _as_list(result.get("features")),
         "competitors":     _as_list(result.get("competitors")),
         "context_summary": _as_str(result.get("context_summary")),
+        "keywords":        _as_list(result.get("keywords")),
         "_page_fetched":   bool(page_text),
     }
 

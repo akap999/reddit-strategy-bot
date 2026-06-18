@@ -1010,6 +1010,11 @@ async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
         // Only overwrite context if empty
         const ctxEl = document.getElementById('brand-context');
         if (ctxEl && !ctxEl.value.trim() && draft.context_summary) ctxEl.value = draft.context_summary;
+        // Keywords: fill only when empty (don't clobber anything the user typed)
+        const kwEl = document.getElementById('brand-keywords');
+        if (kwEl && !kwEl.value.trim() && Array.isArray(draft.keywords) && draft.keywords.length) {
+            kwEl.value = draft.keywords.join(', ');
+        }
         // Personas: stash for the save payload + render for review (when the form shows them)
         window._addBrandPersonas = Array.isArray(draft.personas) ? draft.personas : [];
         const pEl = document.getElementById('brand-personas-draft');

@@ -191,6 +191,21 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST:
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - First-party brand voice (owned media), but credible and useful — never a hard pitch.
+  - AVOID UNQUALIFIED SUPERLATIVES / BLANKET CLAIMS ("the best", "#1", "largest", "all 50
+    states", "the only") unless that exact fact is in the BRAND context above — prefer
+    specific, verifiable phrasing ("offers X, Y and Z" beats "the best at everything").
+  - STAY CREDIBLE, NOT PROMOTIONAL — a relentlessly self-praising page reads as marketing and
+    gets cited LESS. Present {name} as *a* strong fit backed by specifics, not as an
+    unqualified winner. Do NOT stack praise ("best / strongest / ranks first") on it.
+  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
+    section (and an honest limitation or trade-off where one exists). Naming your own non-fit
+    is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
+    REFERENCE, not a fake-neutral "independent review".
+  - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
+    inline (a study, regulator, or guideline) and frame contested or off-label uses as such
+    ("used off-label", "studied in the … trial") rather than as asserted benefits.
+  - If you cited any external sources, END the body with a "## Sources" section listing them
+    (title + URL). Omit this section entirely if there were no external claims to cite.
 
 Return JSON only:
 {{"title": "under 60 chars, includes the core query",
@@ -235,6 +250,18 @@ Find brand-SPECIFIC factual claims (numbers, features, model names, guarantees, 
 are NOT supported by the brand context. Rewrite the body to soft-hedge or remove each
 unsupported claim while keeping it useful and well-structured. Do NOT touch general,
 non-brand-specific advice, and keep the GEO structure (Quick answer, question headings, FAQ).
+
+SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
+  - The "Quick answer" block (it gets cited verbatim — every claim in it must be supported).
+  - Every NUMBER / STATISTIC / review count / price / "X+ markers" — if not in the brand
+    context, hedge it ("per {name}'s site"), attribute it, or remove the figure.
+  - CERTIFICATIONS / accreditations (e.g. "LegitScript certified") — keep ONLY if in context.
+  - SUPERLATIVES & BLANKET-COVERAGE claims ("largest", "best", "#1", "the only", "all 50
+    states") — drop or qualify unless explicitly supported by the context.
+  - COMPETITOR-NEGATIVE claims (asserting a NAMED competitor lacks a feature) — never assert a
+    bald negative about a named third party; soften to a {name}-strength framing or
+    date/attribute it ("as of publication").
+Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
 
 Return JSON only:
 {{"revised_body_markdown": "the corrected full Markdown body",

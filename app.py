@@ -1581,6 +1581,9 @@ def api_blog_export(blog_id):
         return jsonify({"error": "blog not found"}), 404
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
+    # EEAT dateline — rendered from the DB timestamp at export time (never baked into the
+    # body, so it can't go stale on edits and the model never invents a date).
+    updated = (blog.get("updated_at") or "")[:10]
     if fmt == "html":
         try:
             import markdown as _md
@@ -1588,10 +1591,12 @@ def api_blog_export(blog_id):
         except Exception:
             import html as _html
             inner = "<pre>" + _html.escape(body) + "</pre>"
+        dateline = f"<p><em>Last updated: {updated}</em></p>\n" if updated else ""
         page = (f"<!doctype html>\n<html><head><meta charset=\"utf-8\">"
-                f"<title>{title}</title></head>\n<body>\n{inner}\n</body></html>\n")
+                f"<title>{title}</title></head>\n<body>\n{dateline}{inner}\n</body></html>\n")
         return Response(page, mimetype="text/html")
-    return Response(body, mimetype="text/markdown")
+    md_out = (f"*Last updated: {updated}*\n\n{body}") if updated else body
+    return Response(md_out, mimetype="text/markdown")
 
 @app.route("/api/blogs/<int:blog_id>", methods=["DELETE"])
 def api_blog_delete(blog_id):

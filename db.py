@@ -123,6 +123,35 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_post_brands_post ON post_brands(post_id);
             CREATE INDEX IF NOT EXISTS idx_post_brands_brand ON post_brands(brand_id);
+
+            CREATE TABLE IF NOT EXISTS blogs (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand_id         INTEGER REFERENCES brands(id),
+                seed             TEXT NOT NULL,
+                title            TEXT,
+                meta_description TEXT,
+                keywords         TEXT,
+                body_markdown    TEXT,
+                linkedin_text    TEXT,
+                claims_flagged   TEXT,
+                status           TEXT DEFAULT 'draft',
+                prompt_version   TEXT,
+                created_at       TEXT DEFAULT (datetime('now')),
+                updated_at       TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS blog_platforms (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                blog_id       INTEGER NOT NULL REFERENCES blogs(id) ON DELETE CASCADE,
+                platform      TEXT NOT NULL,
+                published_url TEXT,
+                published_at  TEXT,
+                status        TEXT DEFAULT 'draft',
+                UNIQUE(blog_id, platform)
+            );
+            CREATE INDEX IF NOT EXISTS idx_blogs_brand ON blogs(brand_id);
+            CREATE INDEX IF NOT EXISTS idx_blogs_status ON blogs(status);
+            CREATE INDEX IF NOT EXISTS idx_blog_platforms_blog ON blog_platforms(blog_id);
         """)
         self.conn.commit()
         self._run_migrations()
@@ -902,6 +931,147 @@ class Database:
                 out.append({"query": q, "region": region, "source": source,
                             "variants": variants, "persona": persona})
         return out
+
+    # --- Blogs (GEO articles + per-platform publish tracking) ---
+
+    def save_blog(self, brand_id, seed, title="", meta_description="", keywords=None,
+                  body_markdown="", linkedin_text="", claims_flagged=None,
+                  status="draft", prompt_version=""):
+        """Insert a blog row. keywords/claims_flagged are stored as JSON. Returns id."""
+        cur = self.conn.execute(
+            """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
+                                  body_markdown, linkedin_text, claims_flagged, status,
+                                  prompt_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (brand_id, seed, title, meta_description,
+             json.dumps(keywords or []),
+             body_markdown, linkedin_text,
+             json.dumps(claims_flagged or []),
+             status, prompt_version),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_blog(self, blog_id):
+        """One blog with brand name + its platform rows. None if missing."""
+        row = self.conn.execute(
+            """SELECT b.*, br.name AS brand_name
+               FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id
+               WHERE b.id = ?""", (blog_id,)
+        ).fetchone()
+        if not row:
+            return None
+        blog = dict(row)
+        try:
+            blog["keywords"] = json.loads(blog.get("keywords") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            blog["keywords"] = []
+        try:
+            blog["claims_flagged"] = json.loads(blog.get("claims_flagged") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            blog["claims_flagged"] = []
+        prows = self.conn.execute(
+            "SELECT platform, published_url, published_at, status FROM blog_platforms "
+            "WHERE blog_id = ? ORDER BY platform", (blog_id,)
+        ).fetchall()
+        blog["platforms"] = [dict(p) for p in prows]
+        return blog
+
+    def get_all_blogs(self, brand_id=None, status=None):
+        """List blogs (newest first) + a compact platforms summary, with optional
+        brand/status filters."""
+        q = ("SELECT b.id, b.brand_id, b.seed, b.title, b.status, b.created_at, "
+             "b.updated_at, br.name AS brand_name "
+             "FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id WHERE 1=1")
+        params = []
+        if brand_id is not None:
+            q += " AND b.brand_id IS ?"; params.append(brand_id)
+        if status:
+            q += " AND b.status = ?"; params.append(status)
+        q += " ORDER BY b.created_at DESC, b.id DESC"
+        rows = [dict(r) for r in self.conn.execute(q, params).fetchall()]
+        if rows:
+            ids = [r["id"] for r in rows]
+            ph = ",".join("?" * len(ids))
+            prows = self.conn.execute(
+                f"SELECT blog_id, platform, published_url, status FROM blog_platforms "
+                f"WHERE blog_id IN ({ph})", ids
+            ).fetchall()
+            by_blog = {}
+            for p in prows:
+                by_blog.setdefault(p["blog_id"], []).append(dict(p))
+            for r in rows:
+                r["platforms"] = by_blog.get(r["id"], [])
+        return rows
+
+    def update_blog(self, blog_id, **fields):
+        """Patch blog columns. keywords/claims_flagged are JSON-encoded if passed as
+        list/dict. Always bumps updated_at. No-op when no known fields are given."""
+        allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
+                   "linkedin_text", "claims_flagged", "status", "prompt_version"}
+        sets, params = [], []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k in ("keywords", "claims_flagged") and not isinstance(v, str):
+                v = json.dumps(v or [])
+            sets.append(f"{k} = ?")
+            params.append(v)
+        if not sets:
+            return
+        sets.append("updated_at = datetime('now')")
+        params.append(blog_id)
+        self.conn.execute(f"UPDATE blogs SET {', '.join(sets)} WHERE id = ?", params)
+        self.conn.commit()
+
+    def update_blog_status(self, blog_id, status):
+        self.conn.execute(
+            "UPDATE blogs SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, blog_id))
+        self.conn.commit()
+
+    def delete_blog(self, blog_id):
+        """Delete a blog; blog_platforms cascade via FK (PRAGMA foreign_keys = ON).
+        Belt-and-suspenders: clear platform rows first in case the cascade is off."""
+        self.conn.execute("DELETE FROM blog_platforms WHERE blog_id = ?", (blog_id,))
+        cur = self.conn.execute("DELETE FROM blogs WHERE id = ?", (blog_id,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def _roll_blog_status(self, blog_id):
+        """Set blogs.status to 'published' when >=1 platform is published, else back to
+        'draft' (unless the blog was archived). Keeps the rollup honest."""
+        cur = self.conn.execute(
+            "SELECT status FROM blogs WHERE id = ?", (blog_id,)).fetchone()
+        if not cur or cur["status"] == "archived":
+            return
+        n = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM blog_platforms "
+            "WHERE blog_id = ? AND status = 'published'", (blog_id,)).fetchone()["n"]
+        self.update_blog_status(blog_id, "published" if n else "draft")
+
+    def upsert_blog_platform(self, blog_id, platform, published_url=None,
+                             status="published"):
+        """Mark a blog published (or update its live URL) on ONE platform. UNIQUE
+        (blog_id, platform) → insert-or-update, never duplicate. Rolls blog.status."""
+        self.conn.execute(
+            """INSERT INTO blog_platforms (blog_id, platform, published_url, published_at, status)
+               VALUES (?, ?, ?, datetime('now'), ?)
+               ON CONFLICT(blog_id, platform) DO UPDATE SET
+                   published_url = excluded.published_url,
+                   published_at  = excluded.published_at,
+                   status        = excluded.status""",
+            (blog_id, platform, published_url, status))
+        self.conn.commit()
+        self._roll_blog_status(blog_id)
+
+    def unpublish_blog_platform(self, blog_id, platform):
+        """Remove a platform's published mark. Rolls blog.status back if needed."""
+        self.conn.execute(
+            "DELETE FROM blog_platforms WHERE blog_id = ? AND platform = ?",
+            (blog_id, platform))
+        self.conn.commit()
+        self._roll_blog_status(blog_id)
 
     def delete_ai_search_cluster(self, brand_id, seed_norm):
         """Remove a cluster row (posts are kept). Returns rows deleted."""

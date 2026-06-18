@@ -1359,6 +1359,251 @@ def api_brand_focus_coverage(bid):
     return jsonify(coverage)
 
 # ---------------------------------------------------------------------------
+# API: Blogs (GEO articles + LinkedIn adaptations; manual export + publish track)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/blogs")
+def api_blogs_list():
+    db = get_db()
+    try:
+        return jsonify(db.get_all_blogs(
+            brand_id=request.args.get("brand_id", type=int),
+            status=request.args.get("status") or None,
+        ))
+    finally:
+        db.close()
+
+@app.route("/api/blogs/<int:blog_id>")
+def api_blog_get(blog_id):
+    db = get_db()
+    try:
+        blog = db.get_blog(blog_id)
+        if not blog:
+            return jsonify({"error": "blog not found"}), 404
+        return jsonify(blog)
+    finally:
+        db.close()
+
+@app.route("/api/blogs/suggest-keywords", methods=["POST"])
+def api_blog_suggest_keywords():
+    """Ranked query-variant set for a (brand, seed): reused AI-Search fan-out +
+    LLM expansion + manual. Runs inline (fast: cluster read + one LLM call)."""
+    from generators.blog_gen import BlogGenerator
+    data = request.get_json() or {}
+    brand_id = data.get("brand_id")
+    seed = (data.get("seed") or "").strip()
+    if not brand_id or not seed:
+        return jsonify({"error": "brand_id and seed are required"}), 400
+    db = get_db()
+    try:
+        brand = db.get_brand(brand_id)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        claude = ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
+        gen = BlogGenerator(claude, db)
+        kws = gen.suggest_keywords(brand, seed, manual=data.get("manual"))
+        return jsonify({"keywords": kws})
+    finally:
+        db.close()
+
+@app.route("/api/blogs/generate", methods=["POST"])
+def api_blog_generate():
+    """Generate a blog (article → verify → LinkedIn) in the background. Returns a
+    task_id; poll /api/tasks/<id> for {blog_id}."""
+    data = request.get_json() or {}
+    brand_id = data.get("brand_id")
+    seed = (data.get("seed") or "").strip()
+    keywords = data.get("keywords")
+    if not brand_id or not seed:
+        return jsonify({"error": "brand_id and seed are required"}), 400
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            brand = bg.get_brand(brand_id)
+            if not brand:
+                raise ValueError("brand not found")
+            claude = ClaudeClient(api_key)
+            blog = BlogGenerator(claude, bg).generate_blog(
+                brand, seed, extra_keywords=keywords)
+            if not blog:
+                raise ValueError(claude.last_error or "Blog generation failed")
+            blog_id = bg.save_blog(
+                brand_id, seed,
+                title=blog.get("title", ""),
+                meta_description=blog.get("meta_description", ""),
+                keywords=blog.get("keywords") or [],
+                body_markdown=blog.get("body_markdown", ""),
+                linkedin_text=blog.get("linkedin_text", ""),
+                claims_flagged=blog.get("claims_flagged") or [],
+                status="draft",
+                prompt_version=blog.get("prompt_version", ""),
+            )
+            return {"blog_id": blog_id}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_generate", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>/regenerate", methods=["POST"])
+def api_blog_regenerate(blog_id):
+    """Regenerate part of a blog ('article' | 'linkedin' | 'verify' | 'all') in the
+    background. Returns a task_id."""
+    data = request.get_json() or {}
+    part = (data.get("part") or "all").lower()
+    keywords = data.get("keywords")
+    if part not in ("article", "linkedin", "verify", "all"):
+        return jsonify({"error": "part must be article|linkedin|verify|all"}), 400
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            brand = bg.get_brand(blog.get("brand_id"))
+            if not brand:
+                raise ValueError("brand not found")
+            claude = ClaudeClient(api_key)
+            gen = BlogGenerator(claude, bg)
+            seed = blog.get("seed") or ""
+            article = {"title": blog.get("title") or "",
+                       "body_markdown": blog.get("body_markdown") or "",
+                       "keywords": blog.get("keywords") or []}
+            if part == "all":
+                fresh = gen.generate_blog(brand, seed, extra_keywords=keywords)
+                if not fresh:
+                    raise ValueError(claude.last_error or "Regeneration failed")
+                bg.update_blog(
+                    blog_id, title=fresh.get("title", ""),
+                    meta_description=fresh.get("meta_description", ""),
+                    keywords=fresh.get("keywords") or [],
+                    body_markdown=fresh.get("body_markdown", ""),
+                    linkedin_text=fresh.get("linkedin_text", ""),
+                    claims_flagged=fresh.get("claims_flagged") or [])
+            elif part == "article":
+                a = gen.generate_article(brand, seed, extra_keywords=keywords)
+                if not a:
+                    raise ValueError(claude.last_error or "Article regeneration failed")
+                v = gen.verify_claims(brand, a)
+                bg.update_blog(
+                    blog_id, title=a.get("title", ""),
+                    meta_description=a.get("meta_description", ""),
+                    keywords=a.get("keywords") or [],
+                    body_markdown=(v or {}).get("body_markdown") or a.get("body_markdown", ""),
+                    claims_flagged=(v or {}).get("flagged") or [])
+            elif part == "verify":
+                v = gen.verify_claims(brand, article)
+                if not v:
+                    raise ValueError(claude.last_error or "Verify pass failed")
+                bg.update_blog(blog_id, body_markdown=v["body_markdown"],
+                               claims_flagged=v["flagged"])
+            elif part == "linkedin":
+                li = gen.generate_linkedin(brand, seed, article)
+                bg.update_blog(blog_id, linkedin_text=li or "")
+            return {"blog_id": blog_id, "part": part}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_regenerate", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>", methods=["PATCH"])
+def api_blog_patch(blog_id):
+    """Manual edits to a blog's content fields."""
+    data = request.get_json() or {}
+    fields = {k: data[k] for k in
+              ("title", "meta_description", "keywords", "body_markdown", "linkedin_text")
+              if k in data}
+    if not fields:
+        return jsonify({"error": "no editable fields supplied"}), 400
+    db = get_db()
+    try:
+        if not db.get_blog(blog_id):
+            return jsonify({"error": "blog not found"}), 404
+        db.update_blog(blog_id, **fields)
+        return jsonify(db.get_blog(blog_id))
+    finally:
+        db.close()
+
+@app.route("/api/blogs/<int:blog_id>/publish", methods=["POST"])
+def api_blog_publish(blog_id):
+    """Mark a blog published (or update its live URL) on one platform."""
+    data = request.get_json() or {}
+    platform = (data.get("platform") or "").strip().lower()
+    url = (data.get("published_url") or "").strip()
+    if platform not in ("website", "linkedin"):
+        return jsonify({"error": "platform must be website|linkedin"}), 400
+    if not url:
+        return jsonify({"error": "published_url is required"}), 400
+    db = get_db()
+    try:
+        if not db.get_blog(blog_id):
+            return jsonify({"error": "blog not found"}), 404
+        db.upsert_blog_platform(blog_id, platform, published_url=url, status="published")
+        return jsonify(db.get_blog(blog_id))
+    finally:
+        db.close()
+
+@app.route("/api/blogs/<int:blog_id>/unpublish", methods=["POST"])
+def api_blog_unpublish(blog_id):
+    data = request.get_json() or {}
+    platform = (data.get("platform") or "").strip().lower()
+    if platform not in ("website", "linkedin"):
+        return jsonify({"error": "platform must be website|linkedin"}), 400
+    db = get_db()
+    try:
+        if not db.get_blog(blog_id):
+            return jsonify({"error": "blog not found"}), 404
+        db.unpublish_blog_platform(blog_id, platform)
+        return jsonify(db.get_blog(blog_id))
+    finally:
+        db.close()
+
+@app.route("/api/blogs/<int:blog_id>/export")
+def api_blog_export(blog_id):
+    """Export the website article as Markdown (format=md, default) or HTML
+    (format=html, via the `markdown` lib; falls back to a <pre> wrap if absent)."""
+    fmt = (request.args.get("format") or "md").lower()
+    db = get_db()
+    try:
+        blog = db.get_blog(blog_id)
+    finally:
+        db.close()
+    if not blog:
+        return jsonify({"error": "blog not found"}), 404
+    body = blog.get("body_markdown") or ""
+    title = blog.get("title") or "blog"
+    if fmt == "html":
+        try:
+            import markdown as _md
+            inner = _md.markdown(body, extensions=["tables", "fenced_code"])
+        except Exception:
+            import html as _html
+            inner = "<pre>" + _html.escape(body) + "</pre>"
+        page = (f"<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+                f"<title>{title}</title></head>\n<body>\n{inner}\n</body></html>\n")
+        return Response(page, mimetype="text/html")
+    return Response(body, mimetype="text/markdown")
+
+@app.route("/api/blogs/<int:blog_id>", methods=["DELETE"])
+def api_blog_delete(blog_id):
+    db = get_db()
+    try:
+        n = db.delete_blog(blog_id)
+        return jsonify({"deleted": n})
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # API: Posts
 # ---------------------------------------------------------------------------
 

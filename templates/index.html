@@ -124,6 +124,7 @@
             <div style="border-top:1px solid #343536;margin:8px 16px"></div>
             <a onclick="navigate('livesearch')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesearch" style="color:#0079D3">Live Search</a>
             <a onclick="navigate('livesubs')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="livesubs" style="color:#0079D3">Live Subreddits</a>
+            <a onclick="navigate('blogs')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="blogs" style="color:#c084fc">Blogs</a>
             <a onclick="navigate('analytics')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="analytics">Analytics</a>
             <a onclick="navigate('export')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="export">Export</a>
             <a onclick="navigate('calendar')" class="nav-item block px-5 py-3 text-sm cursor-pointer" data-view="calendar">Calendar</a>
@@ -574,7 +575,7 @@ function navigate(view) {
 
 function renderView(view) {
     const app = document.getElementById('app');
-    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients, checklive: renderCheckLive, settings: renderSettings };
+    const views = { dashboard: renderDashboard, subreddits: renderSubreddits, brands: renderBrands, posts: renderPosts, comments: renderComments, accounts: renderAccounts, allcomments: renderAllComments, livesearch: renderLiveSearch, livesubs: renderLiveSubreddits, blogs: renderBlogs, analytics: renderAnalytics, export: renderExport, calendar: renderCalendar, clients: renderClients, checklive: renderCheckLive, settings: renderSettings };
     (views[view] || views.dashboard)(app);
 }
 
@@ -11850,6 +11851,226 @@ async function _checkLiveDeleteRun(runId, name) {
     } catch (e) {
         toast('Delete failed: ' + (e.message || e), 'error');
     }
+}
+
+// =========================================================================
+// Blogs — first-party GEO articles + LinkedIn adaptations
+// =========================================================================
+let _blogBrands = [];
+let _blogSuggested = [];
+
+function _blogEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function renderBlogs(c) {
+    c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    let blogs = [];
+    try {
+        const [brands, list] = await Promise.all([api('/api/brands/all'), api('/api/blogs')]);
+        _blogBrands = Array.isArray(brands) ? brands : [];
+        blogs = Array.isArray(list) ? list : [];
+    } catch (e) {
+        c.innerHTML = `<p class="text-sm text-red-400">Failed to load: ${e.message || e}</p>`;
+        return;
+    }
+    const brandOpts = _blogBrands.map(b => `<option value="${b.id}">${_blogEsc(b.name)}</option>`).join('');
+    c.innerHTML = `
+        <div class="mb-4">
+            <h2 class="text-xl font-bold" style="color:#c084fc">Blogs</h2>
+            <p class="text-xs text-gray-400 mt-1">Generate first-party, GEO-first articles + a LinkedIn adaptation from a seed — built to be cited by AI answer engines (ChatGPT/Perplexity/Gemini) and to name the brand. Publishing is manual: generate → review/edit → export → paste the live URL back.</p>
+        </div>
+        <div class="card p-4 mb-5" style="border:1px solid #3b0764">
+            <h3 class="font-bold mb-2" style="color:#c084fc">Generate a blog</h3>
+            <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
+                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand">${brandOpts || '<option value="">No brands</option>'}</select></div>
+                <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
+            </div>
+            <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
+            <div class="flex gap-2 mt-3">
+                <button class="btn btn-sm btn-secondary" onclick="blogSuggestQueries()">Suggest queries</button>
+                <button class="btn btn-sm btn-primary" onclick="blogGenerate()">Generate →</button>
+            </div>
+            <div id="blog-suggested" class="mt-3"></div>
+        </div>
+        <div class="flex gap-2 mb-3">
+            <select id="blog-filter-brand" onchange="blogReload()"><option value="">All brands</option>${brandOpts}</select>
+            <select id="blog-filter-status" onchange="blogReload()"><option value="">All statuses</option><option value="draft">Draft</option><option value="published">Published</option><option value="archived">Archived</option></select>
+        </div>
+        <table>
+            <thead><tr><th>Title</th><th>Brand</th><th>Status</th><th>Platforms</th><th>Updated</th><th>Actions</th></tr></thead>
+            <tbody id="blog-rows">${blogs.map(_blogRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No blogs yet — generate one above.</td></tr>'}</tbody>
+        </table>`;
+}
+
+function _blogRow(b) {
+    const chips = (b.platforms || []).filter(p => p.status === 'published')
+        .map(p => `<a href="${_blogEsc(p.published_url || '#')}" target="_blank" class="badge" style="background:#0b3b2e;color:#6ee7b7" title="${_blogEsc(p.published_url||'')}">${p.platform}</a>`).join(' ')
+        || '<span class="text-xs text-gray-600">—</span>';
+    const upd = (b.updated_at || '').replace('T', ' ').slice(0, 16);
+    return `<tr>
+        <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span><div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
+        <td>${_blogEsc(b.brand_name || '—')}</td>
+        <td><span class="badge">${_blogEsc(b.status)}</span></td>
+        <td>${chips}</td>
+        <td class="text-xs text-gray-400">${upd}</td>
+        <td><div class="flex gap-1">
+            <button class="btn btn-sm btn-secondary" onclick="openBlog(${b.id})">Open</button>
+            <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="deleteBlog(${b.id})">Delete</button>
+        </div></td>
+    </tr>`;
+}
+
+async function blogReload() {
+    const bid = document.getElementById('blog-filter-brand')?.value;
+    const st = document.getElementById('blog-filter-status')?.value;
+    const qs = new URLSearchParams();
+    if (bid) qs.set('brand_id', bid);
+    if (st) qs.set('status', st);
+    try {
+        const blogs = await api('/api/blogs?' + qs.toString());
+        const tb = document.getElementById('blog-rows');
+        if (tb) tb.innerHTML = (blogs || []).map(_blogRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No blogs.</td></tr>';
+    } catch (e) {}
+}
+
+async function blogSuggestQueries() {
+    const brand_id = +document.getElementById('blog-gen-brand').value;
+    const seed = document.getElementById('blog-gen-seed').value.trim();
+    const manual = document.getElementById('blog-gen-kw').value.trim();
+    if (!brand_id || !seed) { toast('Pick a brand and enter a seed', 'error'); return; }
+    const box = document.getElementById('blog-suggested');
+    box.innerHTML = '<div class="spinner my-3"></div>';
+    try {
+        const r = await api('/api/blogs/suggest-keywords', { method: 'POST', body: { brand_id, seed, manual } });
+        _blogSuggested = r.keywords || [];
+    } catch (e) { box.innerHTML = ''; return; }
+    if (!_blogSuggested.length) {
+        box.innerHTML = '<p class="text-xs text-gray-500">No suggestions found — you can still Generate (the model will derive its own keywords).</p>';
+        return;
+    }
+    const srcColor = { manual: '#fbbf24', fanout: '#6ee7b7', expanded: '#93c5fd' };
+    box.innerHTML = `<p class="text-xs text-gray-400 mb-1">Tick the queries the article should target — each becomes a question heading + FAQ entry. Untick to drop.</p>
+        <div class="grid gap-1" style="grid-template-columns:1fr 1fr">${_blogSuggested.map(k => `
+            <label class="text-xs flex items-center gap-2 py-1 cursor-pointer">
+                <input type="checkbox" class="blog-kw-chk" data-q="${_blogEsc(k.query)}" checked>
+                <span class="badge" style="background:#1f2937;color:${srcColor[k.source] || '#cbd5e1'}">${_blogEsc(k.source)}</span>
+                ${_blogEsc(k.query)}${k.region ? ` <span class="text-gray-600">· ${_blogEsc(k.region)}</span>` : ''}
+            </label>`).join('')}</div>`;
+}
+
+function blogGenerate() {
+    const brand_id = +document.getElementById('blog-gen-brand').value;
+    const seed = document.getElementById('blog-gen-seed').value.trim();
+    if (!brand_id || !seed) { toast('Pick a brand and enter a seed', 'error'); return; }
+    let keywords = [];
+    const chks = document.querySelectorAll('.blog-kw-chk');
+    if (chks.length) {
+        chks.forEach(ch => { if (ch.checked) keywords.push(ch.dataset.q); });
+    } else {
+        const m = document.getElementById('blog-gen-kw').value.trim();
+        if (m) keywords = m;
+    }
+    runTask('/api/blogs/generate', { brand_id, seed, keywords }, (res) => {
+        blogReload();
+        if (res && res.blog_id) openBlog(res.blog_id);
+    }, 'Generating blog');
+}
+
+async function openBlog(id) {
+    let b;
+    try { b = await api('/api/blogs/' + id); } catch (e) { return; }
+    const platRows = ['website', 'linkedin'].map(pf => {
+        const p = (b.platforms || []).find(x => x.platform === pf);
+        const live = p && p.status === 'published';
+        return `<div class="flex items-center gap-2 mb-1">
+            <span style="width:72px" class="text-xs">${pf}</span>
+            <input id="blog-pub-${pf}" class="flex-1" placeholder="published URL" value="${live ? _blogEsc(p.published_url || '') : ''}">
+            ${live
+                ? `<button class="btn btn-sm" style="background:#0b3b2e;color:#6ee7b7" onclick="blogPublish(${id},'${pf}')">Update</button> <button class="btn btn-sm btn-secondary" onclick="blogUnpublish(${id},'${pf}')">Unpublish</button>`
+                : `<button class="btn btn-sm btn-primary" onclick="blogPublish(${id},'${pf}')">Mark published</button>`}
+        </div>`;
+    }).join('');
+    const claims = b.claims_flagged || [];
+    const claimNote = `<span class="${claims.length ? 'text-amber-400' : 'text-gray-500'}">Claims checked${claims.length ? ` · ${claims.length} adjusted` : ''}</span>`;
+    showModal(`
+        <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}</p>
+        <div class="space-y-2" style="max-height:60vh;overflow:auto">
+            <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
+            <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>
+            <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="blog-e-kw" value="${_blogEsc((b.keywords || []).join(', '))}"></div>
+            <div><label class="text-xs text-gray-400">Website body (Markdown)</label><textarea id="blog-e-body" rows="12">${_blogEsc(b.body_markdown || '')}</textarea></div>
+            <div><label class="text-xs text-gray-400">LinkedIn post</label><textarea id="blog-e-li" rows="6">${_blogEsc(b.linkedin_text || '')}</textarea></div>
+            <div class="card p-2" style="background:#1a1030"><div class="text-xs text-gray-400 mb-1">Publish (paste the live URL after you post it)</div>${platRows}</div>
+        </div>
+        <div class="flex flex-wrap gap-2 mt-3">
+            <button class="btn btn-sm btn-primary" onclick="blogSave(${id})">Save edits</button>
+            <button class="btn btn-sm btn-secondary" onclick="blogCopy('blog-e-body')">Copy MD</button>
+            <button class="btn btn-sm btn-secondary" onclick="blogCopy('blog-e-li')">Copy LinkedIn</button>
+            <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html" target="_blank">Export HTML</a>
+            <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md" target="_blank">Download MD</a>
+            <span class="flex-1"></span>
+            <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'article')">Regen article</button>
+            <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'linkedin')">Regen LinkedIn</button>
+            <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'verify')">Re-verify</button>
+            <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'all')">Regen all</button>
+        </div>`);
+}
+
+async function blogSave(id) {
+    const kw = document.getElementById('blog-e-kw').value.split(',').map(s => s.trim()).filter(Boolean);
+    try {
+        await api('/api/blogs/' + id, { method: 'PATCH', body: {
+            title: document.getElementById('blog-e-title').value,
+            meta_description: document.getElementById('blog-e-meta').value,
+            keywords: kw,
+            body_markdown: document.getElementById('blog-e-body').value,
+            linkedin_text: document.getElementById('blog-e-li').value,
+        }});
+        toast('Saved', 'success');
+        blogReload();
+    } catch (e) {}
+}
+
+function blogCopy(elId) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    navigator.clipboard.writeText(el.value).then(() => toast('Copied', 'success'), () => toast('Copy failed', 'error'));
+}
+
+async function blogPublish(id, platform) {
+    const url = (document.getElementById('blog-pub-' + platform).value || '').trim();
+    if (!url) { toast('Paste the live URL first', 'error'); return; }
+    try {
+        await api(`/api/blogs/${id}/publish`, { method: 'POST', body: { platform, published_url: url } });
+        toast(`Marked published on ${platform}`, 'success');
+        await openBlog(id);
+        blogReload();
+    } catch (e) {}
+}
+
+async function blogUnpublish(id, platform) {
+    try {
+        await api(`/api/blogs/${id}/unpublish`, { method: 'POST', body: { platform } });
+        toast(`Unpublished ${platform}`, 'info');
+        await openBlog(id);
+        blogReload();
+    } catch (e) {}
+}
+
+function blogRegen(id, part) {
+    runTask(`/api/blogs/${id}/regenerate`, { part }, () => {
+        openBlog(id);
+        blogReload();
+    }, `Regenerating ${part}`);
+}
+
+async function deleteBlog(id) {
+    if (!confirm('Delete this blog? This cannot be undone.')) return;
+    try {
+        await api('/api/blogs/' + id, { method: 'DELETE' });
+        toast('Deleted', 'info');
+        blogReload();
+    } catch (e) {}
 }
 
 async function renderClients(c) {

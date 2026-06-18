@@ -2616,6 +2616,13 @@ async function showPostDetail(pid) {
                  Generate tab result panel, Comments tab card, etc.). -->
             <button class="btn btn-sm btn-accent" onclick="closeModal(); lsubsGenHqForPost(${post.id})" title="Generate HQ thread (1 main + replies) for this post">Gen HQ</button>
             <button class="btn btn-sm btn-secondary" onclick="regeneratePostBody(${post.id}, this)" title="Rewrite the body for this same title (fresh take)">↻ Regenerate body</button>
+            ${post.owner_account
+                ? `<span class="text-xs text-gray-400" title="Assigned owner">👤 ${post.owner_account}</span>
+                   ${(!['informed','deployed','published','paid','report','removed'].includes(post.status)) ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="closeModal(); informPost(${post.id})">Inform</button>` : ''}
+                   <button class="btn btn-sm btn-secondary" onclick="assignPostOwner(${post.id})" title="Assign to a different account">Reassign</button>
+                   <button class="btn btn-sm btn-secondary" onclick="closeModal(); unassignPostOwner(${post.id})">Unassign</button>`
+                : `<button class="btn btn-sm btn-primary" onclick="assignPostOwner(${post.id})" title="Assign an owner account (advances status to 'assigned')">👤 Assign owner</button>
+                   <button class="btn btn-sm btn-secondary" onclick="autoAssignPost(${post.id})" title="Auto-assign the best-fit account">⚡ Auto</button>`}
             ${canDeploy ? `<button class="btn btn-sm btn-primary" onclick="closeModal(); publishPost(${post.id})" title="Deploy / edit links — set the post link AND the HQ anchor comment link">🚀 Deploy</button>` : ''}
             <button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="closeModal(); lsubsEditSubreddit(${post.id}, '${(subName || '').replace(/'/g, "\\'")}', ${post.brand_id || 'null'})" title="${subName ? 'Change which subreddit this post counts against' : 'Assign a subreddit to this post'}">📍 ${subName ? 'Change subreddit' : 'Assign subreddit'}</button>
             ${canReport ? `<button class="btn btn-sm" style="background:#0d9488;color:white" onclick="closeModal(); showReportThisPostModal(${post.id})">📊 Report this post</button>` : ''}
@@ -2758,7 +2765,11 @@ async function submitPostOwner(pid, username) {
     await api(`/api/posts/${pid}/owner`, { method: 'PUT', body: { username } });
     toast(`Post assigned to u/${username}`, 'success');
     closeModal();
+    // Status is set server-side (draft/complete → 'assigned', guarded); refetch shows
+    // the truth rather than guessing here.
     _postsUpdateLocal(pid, { owner_account: username });
+    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+    else if (currentView === 'livesubs' && _lsubsTab === 'clusters') lsubsLoadClusters(true);
 }
 
 async function unassignPostOwner(pid) {
@@ -2766,12 +2777,16 @@ async function unassignPostOwner(pid) {
     await api(`/api/posts/${pid}/unassign-owner`, { method: 'POST', body: {} });
     toast('Post owner removed', 'success');
     _postsUpdateLocal(pid, { owner_account: null });
+    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+    else if (currentView === 'livesubs' && _lsubsTab === 'clusters') lsubsLoadClusters(true);
 }
 
 async function informPost(pid) {
     await api(`/api/posts/${pid}/status`, { method: 'POST', body: { status: 'informed' } });
     toast('Post marked as informed', 'success');
     _postsUpdateLocal(pid, { status: 'informed' });
+    if (currentView === 'livesubs' && _lsubsTab === 'posts') lsubsLoadPosts(true);
+    else if (currentView === 'livesubs' && _lsubsTab === 'clusters') lsubsLoadClusters(true);
 }
 
 async function markPostPaid(pid) {

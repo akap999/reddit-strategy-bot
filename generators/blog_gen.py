@@ -182,10 +182,26 @@ SEED TOPIC (what the reader is asking): {seed}
 BRAND (first-party — you MAY name and recommend {name}):
 {block}
 
-WRITE THE ARTICLE BODY (Markdown), GEO-FIRST:
+EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
+title decision would make the page harder for an AI to extract a direct answer from, drop it and
+keep the extractable structure. When in doubt, choose the more extractable option.
+
+FIRST, classify the seed's INTENT, then LEAD the body with the dominant block that matches it (the
+backbone below is still mandatory in every case):
+  - comparison ("best X", "X vs Y", "alternative to Y") → lead with a COMPARISON TABLE + a short
+    per-option verdict.
+  - how-to ("how do I", "how to", "steps to") → lead with NUMBERED STEPS.
+  - definitional / does-it-work ("what is", "does X work") → lead with a crisp DEFINITION sentence
+    then concept Q&A (cite a primary source for any efficacy claim).
+  - evaluation ("is X worth it", "is X legit / safe") → lead with a CRITERIA CHECKLIST + evidence.
+  - otherwise → the default question-and-answer structure below.
+Pick exactly ONE dominant block. The dominant block MUST itself be extractable — a real Markdown
+numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
+
+WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
   - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names {name}
     as a fit. (AI engines lift this as the extractable answer.)
-  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed by ONE
+  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
   - Add a comparison table where it genuinely helps, and an "FAQ" section of Q&A pairs.
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
@@ -207,8 +223,19 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST:
   - If you cited any external sources, END the body with a "## Sources" section listing them
     (title + URL). Omit this section entirely if there were no external claims to cite.
 
+TITLE — MATCH THE PRIMARY QUERY (this is a top retrieval signal + a strong "this page answers this
+exact question" citation signal):
+  - Make the title match the primary target query as CLOSELY as possible — use the query's exact
+    wording when it is already a clean, well-formed phrase. Do NOT invent a "creative" headline.
+  - Only CLEANUP is allowed: fix typos/filler, normalize casing, trim to under 60 chars, and turn a
+    keyword fragment into its natural full-query form — never change the meaning. No keyword-stuffing,
+    no appended years.
+  - ALSO put the exact query phrasing (and its close variants) in the FIRST H2 (as a question) and in
+    the FAQ, so the liftable answer sits directly beneath the matching heading and the page still
+    covers the variant phrasings.
+
 Return JSON only:
-{{"title": "under 60 chars, includes the core query",
+{{"title": "matches the primary query, cleaned up, under 60 chars",
   "meta_description": "under 160 chars",
   "keywords": ["target queries + key terms this page should be cited for"],
   "body_markdown": "the full article in Markdown"}}"""

@@ -1080,6 +1080,18 @@ def api_create_subreddit():
 # API: Brands
 # ---------------------------------------------------------------------------
 
+def _persist_brand_personas(db, brand_id, data):
+    """If the add-brand payload carries a reviewed `personas` list (from Auto-analyze),
+    persist it onto the new brand. No-op when absent/empty/malformed — personas can
+    still be generated later (lazily on first generation or via Regenerate)."""
+    personas = data.get("personas")
+    if isinstance(personas, list) and personas:
+        try:
+            db.update_brand(brand_id, personas=json.dumps(personas))
+        except Exception as e:
+            print(f"[add-brand] persona persist skipped: {e}", flush=True)
+
+
 def _extract_brand_enrichment_fields(data):
     """Pull the 7 GEO enrichment fields out of a request payload.
 
@@ -1204,6 +1216,7 @@ def api_add_brand(sid):
             keywords=json.dumps(data.get("keywords", [])),
             **enrich_fields,
         )
+        _persist_brand_personas(db, bid, data)
         return jsonify({"id": bid})
     finally:
         db.close()
@@ -1222,6 +1235,7 @@ def api_add_brand_standalone():
             keywords=json.dumps(data.get("keywords", [])),
             **enrich_fields,
         )
+        _persist_brand_personas(db, bid, data)
         return jsonify({"id": bid})
     finally:
         db.close()
@@ -1249,9 +1263,9 @@ def api_enrich_brand_draft():
 
     Payload: { "name": str, "domain_url": str }
     Response: { category, audience, use_cases[], pain_points[], features[],
-                competitors[], context_summary, _page_fetched }
+                competitors[], context_summary, _page_fetched, personas[] }
     """
-    from generators.brand_enrichment import enrich_brand
+    from generators.brand_enrichment import enrich_brand, generate_brand_personas
     data = request.json or {}
     name = (data.get("name") or "").strip()
     domain_url = (data.get("domain_url") or "").strip()
@@ -1265,6 +1279,17 @@ def api_enrich_brand_draft():
             "error": "Enrichment failed — LLM returned no usable data. "
                      "Check the URL and try again, or fill fields manually."
         }), 502
+    # Auto-analyze does everything: also generate personas from the freshly-enriched
+    # fields so they're shown for review and saved with the brand. Graceful — a persona
+    # failure must never break the enrichment draft.
+    try:
+        draft["personas"] = generate_brand_personas(
+            claude, name, domain_url,
+            category=draft.get("category") or "", audience=draft.get("audience") or "",
+            use_cases=draft.get("use_cases"), pain_points=draft.get("pain_points")) or []
+    except Exception as e:
+        print(f"[enrich] persona generation skipped: {e}", flush=True)
+        draft["personas"] = []
     return jsonify(draft)
 
 @app.route("/api/brands/<int:bid>/enrich", methods=["POST"])

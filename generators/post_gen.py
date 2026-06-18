@@ -32,6 +32,27 @@ FIXED_REGIONS = [
 # sparse + region-unique regardless of what the model returns.
 MAX_FANOUT_REWRITES = 10
 
+# Generic region labels that add no distinguishing qualifier beyond the rewrite query
+# itself (bare axis names + placeholders). For these the query is authoritative, so we
+# do NOT enforce region fidelity. A brand-specific DESCRIPTIVE region (e.g. "agency
+# offering a free AI visibility audit") IS meaningful — for those we require the title
+# to keep the region's qualifier so it doesn't collapse onto a sibling region.
+_GENERIC_REGION_LABELS = {
+    "category / best tool", "category / top pick", "comparison / alternative",
+    "constraint", "use-case / workflow", "use case / workflow",
+    "persona / segment", "adjacent platform",
+}
+
+
+def _is_meaningful_region(region):
+    """True when a region label carries its own distinguishing intent (worth enforcing
+    on the title), False for placeholders ("(unsorted)", "(from posts)", …) and bare
+    axis names where the rewrite query already carries the specificity."""
+    r = (region or "").strip()
+    if not r or r.startswith("("):
+        return False
+    return r.lower() not in _GENERIC_REGION_LABELS
+
 # Shared BODY composition rules — used by both the batch generator
 # (_generate_candidates_for_intent) and the single-post regenerator (regenerate_body)
 # so they never drift. The headline rule is ASK ONCE: a real person states the request
@@ -323,7 +344,9 @@ class PostGenerator:
                 _anchor = coverage_focus.get("anchor") or None
                 _brand_kind = (primary_brand.get("category") or "").strip()
                 for gap_q in list(run_gaps)[:n_intent]:
-                    single_focus = {**coverage_focus, "rewrites": [gap_q]}
+                    _region = region_by_query.get(gap_q.strip().lower(), "")
+                    single_focus = {**coverage_focus, "rewrites": [gap_q],
+                                    "target_region": _region}
                     cands = self._generate_candidates_for_intent(
                         subreddit, brands, intent,
                         self._select_storylines_from_dist(merged_dist, 1),
@@ -339,7 +362,7 @@ class PostGenerator:
                         c["target_query"] = gap_q
                         c["ai_query_score"] = self._score_ai_query_relevance(
                             c["title"], c["body"], anchor=_anchor,
-                            target_query=gap_q, brand_kind=_brand_kind)
+                            target_query=gap_q, brand_kind=_brand_kind, region=_region)
                     cands = self._embedding_gate(cands)
                     best = self._select_cluster_best(cands, 1)
                     if not best:
@@ -407,10 +430,13 @@ class PostGenerator:
             _anchor = (coverage_focus.get("anchor") if coverage_focus else None) or None
             _brand_kind = (primary_brand.get("category") or "").strip()
             for c in candidates:
+                # target_query is now snapped to its canonical rewrite, so we can recover
+                # the region it belongs to and enforce region fidelity in the scorer too.
+                _c_region = region_by_query.get((c.get("target_query") or "").strip().lower(), "")
                 c["ai_query_score"] = self._score_ai_query_relevance(
                     c["title"], c["body"],
                     anchor=_anchor, target_query=c.get("target_query"),
-                    brand_kind=_brand_kind)
+                    brand_kind=_brand_kind, region=_c_region)
 
             # AI-Search mode: deterministic embedding relevance gate (drops posts that
             # drifted off their target_query; no-op without an embeddings key), then
@@ -1383,9 +1409,14 @@ Do this in your head, then return the merged result:
   3. Write ONE rewrite per region — phrased the way the engines actually search
      (short, keyword-ish, real intent), distinct from the others. VARY the phrasing
      across regions: use whatever wording a real searcher would for THAT region's
-     intent; do NOT force a "best …" shape on every region. HARD RULE: if two
-     rewrites would get essentially the SAME AI answer, keep only ONE. Aim for
-     ~5-8 rewrites TOTAL — fewer, distinct regions beat many synonyms.
+     intent; do NOT force a "best …" shape on every region. SELF-CONTAINED RULE: each
+     rewrite's `query` MUST itself express that region's DISTINGUISHING QUALIFIER — the
+     constraint / segment / use-case / qualifier that makes the region different from
+     its siblings (e.g. "free", "audit/report", "for small teams", "copyright-safe").
+     A query that drops its region's qualifier and reads generically (so it could
+     belong to any region) is WRONG — read on its own it must be unmistakably THIS
+     region. HARD RULE: if two rewrites would get essentially the SAME AI answer, keep
+     only ONE. Aim for ~5-8 rewrites TOTAL — fewer, distinct regions beat many synonyms.
   3b. For EACH region, also list its VARIANTS — the 2-5 close phrasings/paraphrases an
      engine would issue for that same intent (the different wordings that all map to
      this one region). These are the body-side retrieval surface for that region's thread.
@@ -1809,6 +1840,7 @@ Return JSON only: {{"body": "the new post body"}}"""
             _ck = [str(c).strip() for c in (coverage_focus.get("checklist") or []) if str(c).strip()]
             _anchor = (coverage_focus.get("anchor") or "").strip()
             _vbq = coverage_focus.get("variants_by_query") or {}
+            _target_region = (coverage_focus.get("target_region") or "").strip()
             if _rw or _ck:
                 # Show each rewrite WITH its own variant phrasings (the real ways that
                 # intent gets asked) so the post targeting it can pack them into the body.
@@ -1828,12 +1860,29 @@ Return JSON only: {{"body": "the new post body"}}"""
                         "generic phrasing (e.g. \"my videos\", \"content\") that drops the "
                         "anchor. A title that loses the anchor is a FAILED title.\n"
                     )
+                # Region fidelity (single-rewrite path): when this post targets ONE
+                # rewrite that belongs to a MEANINGFUL (descriptive, non-axis) region,
+                # require the title to keep that region's distinguishing qualifier so it
+                # can't collapse onto a sibling region (e.g. "free audit/report" → a
+                # generic "which agency…"). Skipped for bare axis/placeholder regions
+                # (the query is authoritative there) and multi-rewrite batches.
+                region_rule = ""
+                if len(_rw) == 1 and _is_meaningful_region(_target_region):
+                    region_rule = (
+                        f"REGION = \"{_target_region}\". This thread targets that SPECIFIC "
+                        "region. The title MUST preserve the region's DISTINGUISHING "
+                        "QUALIFIER — the constraint / segment / qualifier that makes it "
+                        "different from sibling regions (e.g. \"free\", \"audit/report\", "
+                        "\"for small teams\"). A title that stays on the anchor but DROPS "
+                        "the region's qualifier (so it reads like a generic version that "
+                        "could belong to another region) is a FAILED title.\n"
+                    )
                 coverage_block = (
                     "\n\nAI-SEARCH COVERAGE — this batch is part of a campaign to get the "
                     "brand recommended by AI engines (ChatGPT / Perplexity / Gemini), which "
                     "RE-WRITE a user's prompt into many sub-queries and retrieve SEMANTICALLY. "
                     "Your job is to BLANKET that query space, not match one phrasing.\n"
-                    f"{anchor_rule}"
+                    f"{anchor_rule}{region_rule}"
                     "REWRITE CLUSTER (the distinct sub-queries the engines fan out to):\n"
                     f"{rw_lines}\n"
                     "  • Each title must TARGET exactly ONE rewrite from this cluster, and "
@@ -2072,7 +2121,7 @@ Return JSON only:
 
         return result["posts"]
 
-    def _score_ai_query_relevance(self, title, body, anchor=None, target_query=None, brand_kind=None):
+    def _score_ai_query_relevance(self, title, body, anchor=None, target_query=None, brand_kind=None, region=None):
         """Score 0-10 combining (a) likelihood a real person types this query
         with (b) whether its natural answer is a PRODUCT/SERVICE RECOMMENDATION.
 
@@ -2110,6 +2159,19 @@ ENTITY-TYPE MATCH (relative to the brand — apply CONSERVATIVELY):
   comparisons (product vs product for a product brand; clinic vs clinic for a clinic).
   When unsure, do NOT apply this cap."""
 
+        region_block = ""
+        if region and _is_meaningful_region(region):
+            region_block = f"""
+
+REGION FIDELITY (the title must honor its region):
+  REGION = "{str(region).strip()}". This title is supposed to target that SPECIFIC
+  region. Cap the score at 4 when the title keeps the broad topic but DROPS the
+  region's DISTINGUISHING QUALIFIER — the constraint / segment / qualifier that
+  separates it from sibling regions (e.g. region is "free audit/report" but the title
+  reads as a generic "which agency can do X", losing "free" + "audit/report"). A title
+  that could equally belong to a different region of the same brand has lost its region.
+  Do NOT cap when the title clearly carries the region's qualifier. When unsure, do NOT cap."""
+
         anchor_block = ""
         if anchor:
             tq = f'\nThis title is supposed to target the cluster sub-query: "{target_query}".' if target_query else ""
@@ -2138,7 +2200,7 @@ Rate 0-10 on BOTH dimensions together:
 
 High (8-10): Clearly recommendation-seeking — a helpful AI would answer by NAMING a specific product / service / supplier to use or buy. Judge by the ANSWER the title would get, NOT by how it is worded: any phrasing qualifies as long as the natural answer is a specific recommendation. Do NOT favor a "best …" wording over equally-valid recommendation questions.
 Medium (5-7): Advice-seeking that MIGHT surface a product recommendation ("has anyone tried X", "what do you use for Y").
-Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}{entity_block}
+Low (1-4): Generic information / efficacy / how-it-works / "what to look for" / concept questions where the answer is an EXPLANATION rather than a product recommendation (e.g. "do X actually work", "how does X work", "what is X"); also rants, memes, very personal one-offs. CRITICAL: first-person VENTS, TESTIMONIALS and STATUS UPDATES that don't ASK for anything are NOT recommendation-seeking — score them 1-4 even if on-topic (e.g. "frustrated with traditional doctors dismissing X", "so tired of Y", "started using Z — game changer", "X changed my life", "finally found something that works"). A title only scores high if it explicitly asks for what to use/buy/try.{anchor_block}{region_block}{entity_block}
 
 Return JSON only:
 {{"score": 0-10, "reasoning": "brief explanation"}}"""

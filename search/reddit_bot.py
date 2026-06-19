@@ -231,8 +231,16 @@ class RedditSearchBot:
                 # Transient HTTP errors — backoff + retry.
                 if response.status_code in (429, 403, 500, 502, 503, 504):
                     if attempt < self.retry_attempts - 1:
-                        wait = self.retry_delay * (2 ** attempt)
-                        print(f"\n    ⏳ Reddit returned {response.status_code}. Retrying in {wait}s...", end=" ", flush=True)
+                        # Honor Retry-After when the server sends it; else
+                        # exponential backoff. Jitter so concurrent retries
+                        # (multi-sub / multi-keyword) don't re-collide.
+                        try:
+                            ra = float(response.headers.get("Retry-After") or 0)
+                        except (TypeError, ValueError):
+                            ra = 0
+                        wait = ra if ra > 0 else self.retry_delay * (2 ** attempt)
+                        wait += random.uniform(0, 1.0)
+                        print(f"\n    ⏳ Reddit returned {response.status_code}. Retrying in {wait:.1f}s...", end=" ", flush=True)
                         time.sleep(wait)
                         last_response = response
                         continue
@@ -713,8 +721,18 @@ class RedditSearchBot:
                 response = self._make_request(self.apis["pullpush"], params)
                 data = response.json()
             except Exception as e:
-                print(f"({e.__class__.__name__}: {str(e)[:50]})")
-                break
+                # One extra page-level retry before giving up. A transient blip
+                # (429/timeout after _make_request's own retries, or a bad-JSON
+                # body) shouldn't truncate the whole leg — that's what makes the
+                # result pool swing run-to-run. Keep whatever we already have.
+                print(f"({e.__class__.__name__}: {str(e)[:50]} — retrying page)")
+                time.sleep(1.5 + random.uniform(0, 1.0))
+                try:
+                    response = self._make_request(self.apis["pullpush"], params)
+                    data = response.json()
+                except Exception as e2:
+                    print(f"    pullpush page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
+                    break
 
             posts = data.get("data", [])
             if not posts:
@@ -778,8 +796,20 @@ class RedditSearchBot:
                     print(f"(Arctic-Shift error: {data['error'][:50]})")
                     break
             except Exception as e:
-                print(f"({e.__class__.__name__}: {str(e)[:50]})")
-                break
+                # One extra page-level retry before giving up (see pullpush
+                # rationale): a transient blip shouldn't truncate the leg and
+                # shrink the result pool. Keep whatever we already collected.
+                print(f"({e.__class__.__name__}: {str(e)[:50]} — retrying page)")
+                time.sleep(1.5 + random.uniform(0, 1.0))
+                try:
+                    response = self._make_request(self.apis["arctic"], params)
+                    data = response.json()
+                    if data.get("error"):
+                        print(f"(Arctic-Shift error: {data['error'][:50]})")
+                        break
+                except Exception as e2:
+                    print(f"    arctic page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
+                    break
 
             posts = data.get("data", [])
             if not posts:
@@ -829,6 +859,7 @@ class RedditSearchBot:
         max_scrutiny=None,
         db=None,
         db_path=None,
+        force_refresh=False,
     ):
         """
         Search Reddit for posts matching the given criteria.
@@ -858,6 +889,28 @@ class RedditSearchBot:
         Returns:
             List of post dicts.
         """
+        # Short-TTL result cache: an identical back-to-back search returns the
+        # SAME set instead of re-rolling the rate-limited upstream legs (which
+        # is what makes the count swing run-to-run, e.g. 3 then 10). Keyed by
+        # the result-affecting inputs only; `force_refresh` bypasses it.
+        _subs_for_key = subreddits if subreddits else ([subreddit] if subreddit else [])
+        cache_sig = json.dumps({
+            "kw": (keyword or "").strip().lower(),
+            "subs": sorted(s.strip().lower() for s in _subs_for_key),
+            "excl": sorted(s.strip().lower() for s in (excluded_subreddits or [])),
+            "minc": min_comments, "mins": min_score, "days": max_days_old,
+            "sort": sort_by, "order": sort_order, "limit": limit, "api": api,
+            "nsfw": nsfw, "ratio": min_upvote_ratio, "maxsub": max_subscribers,
+            "minsub": min_subscribers, "scrut": max_scrutiny,
+        }, sort_keys=True, default=str)
+        if not force_refresh:
+            with RedditSearchBot._result_cache_lock:
+                hit = RedditSearchBot._result_cache.get(cache_sig)
+                if hit and (time.time() - hit[0]) < RedditSearchBot._RESULT_CACHE_TTL:
+                    print(f"    ↩ result cache hit ({len(hit[1])} posts) — same query within "
+                          f"{RedditSearchBot._RESULT_CACHE_TTL}s", flush=True)
+                    return list(hit[1])
+
         # Build subreddit path (Reddit supports r/a+b+c syntax)
         if subreddits:
             subreddit_path = "+".join(s.strip() for s in subreddits)
@@ -1238,11 +1291,27 @@ class RedditSearchBot:
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
         # Equal distribution across subreddits when multiple are searched
-        return balance_posts_by_subreddit(filtered, limit, subreddits)
+        result = balance_posts_by_subreddit(filtered, limit, subreddits)
+        # Cache the assembled result so an identical re-run is consistent (and
+        # skips the upstream calls). The all-APIs-failed path returns earlier
+        # WITHOUT caching, so a transient total failure isn't locked in.
+        with RedditSearchBot._result_cache_lock:
+            RedditSearchBot._result_cache[cache_sig] = (time.time(), list(result))
+        return result
 
     # Class-level subscriber cache (persists across searches within same process)
     _sub_cache = {}  # sub_name_lower -> (subscriber_count, timestamp)
     _SUB_CACHE_TTL = 3600  # 1 hour
+
+    # Class-level short-TTL RESULT cache, shared across instances (each search
+    # builds a fresh bot). Keyed by the result-affecting search inputs so an
+    # identical back-to-back search returns the SAME set instead of re-rolling
+    # the rate-limited upstream legs — fixes run-to-run count swings (e.g. 3
+    # then 10) and cuts 429 load. Class-level lock because the per-instance
+    # `self._lock` doesn't protect cross-instance state.
+    _result_cache = {}  # signature -> (timestamp, results list)
+    _RESULT_CACHE_TTL = 600  # 10 minutes
+    _result_cache_lock = threading.Lock()
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
         # Reddit API is the only data source for subscriber counts.

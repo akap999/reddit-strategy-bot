@@ -9613,6 +9613,7 @@ function renderLsSearch(c) {
                         <div><label class="text-xs text-gray-400">Exclude Subreddits</label><input id="ls-exclude" placeholder="sub1, sub2, ..."></div>
                         <div><label class="text-xs text-gray-400">Min Subscribers</label><input id="ls-minsubs" type="number" placeholder="e.g. 500"></div>
                         <div><label class="text-xs text-gray-400">Max Subscribers</label><input id="ls-maxsubs" type="number" placeholder="e.g. 5000"></div>
+                        <div class="flex items-end"><label class="text-xs text-gray-400 flex items-center gap-2"><input id="ls-fresh" type="checkbox" style="width:auto"> Fresh results <span class="text-gray-600">(skip the 10-min cache — re-fetch live)</span></label></div>
                     </div>
                     <button class="btn btn-secondary btn-sm mt-3" onclick="lsSetLowScrutiny()" title="Preset: small subs, low moderation, exclude big mainstream subs">🎯 Apply Low-Scrutiny preset</button>
                 </div>
@@ -9862,6 +9863,7 @@ async function lsRunSearch() {
         sort_by: document.getElementById('ls-sort').value,
         sort_order: document.getElementById('ls-sortorder').value,
         limit: parseInt(document.getElementById('ls-limit').value) || 50,
+        force_refresh: document.getElementById('ls-fresh').checked,
         nsfw: nsfwVal === '' ? undefined : nsfwVal === 'true',
         min_upvote_ratio: isNaN(ratioVal) ? undefined : ratioVal,
         max_subscribers: isNaN(maxSubsVal) ? undefined : maxSubsVal,

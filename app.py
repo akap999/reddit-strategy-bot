@@ -7117,6 +7117,7 @@ def api_search_reddit():
                 min_subscribers=data.get("min_subscribers"),
                 max_scrutiny=data.get("max_scrutiny"),
                 db_path=DB_PATH,
+                force_refresh=bool(data.get("force_refresh")),
             )
 
             if keyword:

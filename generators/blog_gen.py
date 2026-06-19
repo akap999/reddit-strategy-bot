@@ -112,16 +112,27 @@ class BlogGenerator:
         return ("\n\n".join(out) + "\n\n") if out else ""
 
     # ------------------------------------------------------------ evidence sourcing
-    def _resolve_brand_domains(self, names):
-        """Ask the model for the official homepage domain of each brand name it's
-        confident about. Returns {name: bare-domain}; {} on failure. Used only for
-        competitors with no cached domain."""
+    def _resolve_brand_domains(self, names, seed=None, subject=None):
+        """Ask the model for the official homepage domain of each brand it's confident
+        about. Resolves both (a) the supplied competitor `names` missing a cached domain
+        AND (b) any OTHER brand/product named in the `seed`/title (e.g. "Botric vs
+        Profound" -> Profound), excluding `subject`. Returns {name: bare-domain}; {} on
+        failure."""
         names = [n for n in (names or []) if str(n).strip()]
-        if not names:
+        seed = (seed or "").strip()
+        subject = (subject or "").strip()
+        if not names and not seed:
             return {}
+        body = ""
+        if names:
+            body += "Names:\n" + "\n".join(f"- {n}" for n in names)
+        if seed:
+            excl = f" Do NOT include {subject} itself (the article is about it)." if subject else ""
+            body += (f"\n\nALSO extract every OTHER brand/product name mentioned in this article "
+                     f"topic and include it with its domain:{excl}\nTopic: \"{seed}\"")
         prompt = ("For each brand/product below, give its official homepage domain (bare, "
                   "no https://, no path). Include ONLY ones you are confident about; omit "
-                  "the rest. Names:\n" + "\n".join(f"- {n}" for n in names) +
+                  "the rest.\n" + body +
                   '\n\nReturn JSON only: {"domains": {"Name": "domain.com"}}')
         res = self.claude.call(prompt, max_tokens=400, temperature=0)
         dm = (res or {}).get("domains") if isinstance(res, dict) else None
@@ -163,14 +174,21 @@ class BlogGenerator:
         cached = cached if isinstance(cached, dict) else {}
         stored_domains = dict(cached)          # original (before model-resolution) — to detect new
         comp_names = _as_list(b.get("competitors"))
-        missing = [c for c in comp_names if c not in cached]
-        if missing:
-            cached = {**self._resolve_brand_domains(missing), **cached}
-        for cn in comp_names:
+        # Resolve domains for stored competitors missing one, AND extract any brand named
+        # in the seed/title (e.g. "Botric vs Profound" -> Profound) so it gets sourced even
+        # when it isn't a stored competitor yet.
+        resolved = self._resolve_brand_domains(
+            [c for c in comp_names if c not in cached], seed=seed, subject=subject)
+        cached = {**resolved, **cached}
+        # seed-named brands (newly discovered, not already a stored competitor) get priority
+        # so the comparison target is always fetched before older stored competitors.
+        seed_named = [n for n in resolved
+                      if n not in comp_names and n.strip().lower() != subject.lower()]
+        for cn in seed_named + comp_names:
             dom = (cached.get(cn) or "").strip()
             if dom:
                 targets.append((cn, dom, True))
-        # subject first, then up to 2 competitors
+        # subject first, then seed-named, then stored competitors — capped
         targets = targets[:_MAX_EVIDENCE_BRANDS]
 
         validated = {}   # competitor label -> bare domain that fetched + validated this run

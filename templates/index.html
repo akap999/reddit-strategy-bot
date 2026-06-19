@@ -965,7 +965,7 @@ async function showAddBrandModal(subId) {
                 <textarea id="brand-focus" rows="3" placeholder="fiberglass-free&#10;toxic-free | mattress, foam&#10;made in USA" style="font-family:inherit"></textarea>
             </div>
 
-            <details class="mt-2">
+            <details class="mt-2" open>
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">GEO fields (for intent-aware post generation) — click Enrich to auto-fill</summary>
                 <div class="space-y-2 mt-2 pl-1">
                     <div><label class="text-xs text-gray-400">Category</label><input id="brand-category" placeholder="e.g. project management SaaS for remote teams"></div>
@@ -1988,7 +1988,7 @@ async function editBrandContext(brandName) {
                 </div>
                 <div id="edit-brand-personas" class="mt-1">${_renderPersonasList(personas)}</div>
             </div>
-            <details class="mt-1">
+            <details class="mt-1" open>
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Blog byline & sources (EEAT — used on generated blogs)</summary>
                 <div class="space-y-2 mt-2 pl-1">
                     <div class="grid gap-2" style="grid-template-columns:1fr 1fr">

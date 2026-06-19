@@ -11983,10 +11983,15 @@ async function renderBlogs(c) {
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
             <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Source URLs (optional, one per line) <span class="text-gray-600">— competitor docs/pricing pages etc. to cite</span></label><textarea id="blog-gen-sources" rows="2" placeholder="https://competitor.com/pricing&#10;https://competitor.com/features" style="font-family:inherit"></textarea></div>
-                <div><label class="text-xs text-gray-400">Research notes (optional) <span class="text-gray-600">— real facts the article may cite</span></label><textarea id="blog-gen-notes" rows="2" placeholder="e.g. Competitor X raised \$20M Series A (TechCrunch, 2025)"></textarea></div>
+                <div><label class="text-xs text-gray-400">Source URLs (optional, one per line) <span class="text-gray-600">— competitor docs / pricing / testimonial or review page URLs to cite</span></label><textarea id="blog-gen-sources" rows="2" placeholder="https://competitor.com/pricing&#10;https://g2.com/products/competitor/reviews" style="font-family:inherit"></textarea></div>
+                <div><label class="text-xs text-gray-400">Research notes / testimonials (optional) <span class="text-gray-600">— real facts or a customer quote the article may cite</span></label><textarea id="blog-gen-notes" rows="2" placeholder="e.g. &quot;Cut our reporting time in half&quot; — Jane, VP Growth · or: Competitor X raised \$20M (TechCrunch 2025)"></textarea></div>
             </div>
             <p class="text-xs text-gray-500 mt-1">The brand's own site + known competitor sites are auto-fetched and cited; add URLs/notes here only to supplement.</p>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-websearch" checked>
+                🔎 Find independent third-party sources (web search)
+                <span class="text-gray-600">— G2 / reviews / news; uses paid web search (~a few ¢/article)</span>
+            </label>
             <div class="flex gap-2 mt-3">
                 <button class="btn btn-sm btn-secondary" onclick="blogSuggestQueries()">Suggest queries</button>
                 <button class="btn btn-sm btn-primary" onclick="blogGenerate()">Generate →</button>
@@ -12074,7 +12079,8 @@ function blogGenerate() {
     const source_urls = (document.getElementById('blog-gen-sources')?.value || '')
         .split('\n').map(s => s.trim()).filter(Boolean);
     const research_notes = (document.getElementById('blog-gen-notes')?.value || '').trim();
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes }, (res) => {
+    const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search }, (res) => {
         blogReload();
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');

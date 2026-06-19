@@ -1465,6 +1465,7 @@ def api_blog_generate():
         raw_urls = raw_urls.replace("\n", ",").split(",")
     source_urls = [u.strip() for u in (raw_urls or []) if str(u).strip()]
     research_notes = (data.get("research_notes") or "").strip()
+    use_web_search = bool(data.get("use_web_search"))
     if not brand_id or not seed:
         return jsonify({"error": "brand_id and seed are required"}), 400
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1481,7 +1482,8 @@ def api_blog_generate():
             claude = ClaudeClient(api_key)
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
-                source_urls=source_urls, research_notes=research_notes)
+                source_urls=source_urls, research_notes=research_notes,
+                use_web_search=use_web_search)
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             blog_id = bg.save_blog(
@@ -1495,6 +1497,7 @@ def api_blog_generate():
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
+                use_web_search=use_web_search,
             )
             return {"blog_id": blog_id}
         finally:
@@ -1531,14 +1534,17 @@ def api_blog_regenerate(blog_id):
             # Reuse the sources captured at generate time so regeneration stays grounded.
             stored_urls = blog.get("source_urls") or []
             stored_notes = blog.get("research_notes") or ""
+            stored_web = bool(blog.get("use_web_search"))
             evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
-                                            research_notes=stored_notes)
+                                            research_notes=stored_notes,
+                                            use_web_search=stored_web)
             article = {"title": blog.get("title") or "",
                        "body_markdown": blog.get("body_markdown") or "",
                        "keywords": blog.get("keywords") or []}
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
-                                          source_urls=stored_urls, research_notes=stored_notes)
+                                          source_urls=stored_urls, research_notes=stored_notes,
+                                          use_web_search=stored_web)
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(

@@ -18,10 +18,23 @@ from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
 
 PROMPT_VERSION = "blog-v2-evidence"
 
-# Common pages worth fetching beyond a brand's homepage, for real feature/pricing facts.
-_EVIDENCE_PATHS = ("", "/pricing", "/features", "/about")
+# Common pages worth fetching beyond a brand's homepage, for real feature/pricing facts
+# and on-site testimonials / case studies (curated, first-party — citable customer quotes).
+_EVIDENCE_PATHS = ("", "/pricing", "/features", "/about",
+                   "/testimonials", "/customers", "/case-studies", "/reviews")
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
+
+# Reputable INDEPENDENT domains for the optional web-search tier (Follow-up 7). Passed as
+# allowed_domains so discovered sources are third-party (these inherently exclude the
+# brands' own sites). Review sites + mainstream tech press.
+_THIRD_PARTY_DOMAINS = [
+    "g2.com", "capterra.com", "trustpilot.com", "getapp.com", "trustradius.com",
+    "softwareadvice.com", "producthunt.com", "gartner.com", "forrester.com",
+    "techcrunch.com", "theverge.com", "forbes.com", "businessinsider.com",
+    "reuters.com", "crunchbase.com", "wikipedia.org",
+]
+_MAX_WEB_SOURCES = 6              # cap third-party sources folded into evidence
 
 
 def _as_list(raw):
@@ -120,7 +133,8 @@ class BlogGenerator:
                     out[str(n).strip()] = d
         return out
 
-    def _gather_evidence(self, brand, seed, source_urls=None, research_notes=""):
+    def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
+                         use_web_search=False):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
         block string (or "" when nothing usable). Sources:
           - the subject brand's own site (always),
@@ -160,7 +174,10 @@ class BlogGenerator:
 
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
-            for path in _EVIDENCE_PATHS:
+            # Subject brand gets the full path set; competitors stay capped to a few
+            # high-value pages so total fetches per article stay bounded.
+            paths = _EVIDENCE_PATHS if not validate else ("", "/pricing", "/features", "/testimonials")
+            for path in paths:
                 txt = _fetch(f"https://{dom}{path}")
                 if not txt:
                     continue
@@ -183,6 +200,21 @@ class BlogGenerator:
         if notes:
             blocks.append({"label": "research notes (user-provided)", "url": "",
                            "text": notes[:_EVIDENCE_TEXT_CAP]})
+
+        # ----- optional: independent third-party sources via web search -----
+        if use_web_search:
+            comp_names = _as_list(b.get("competitors"))
+            who = ", ".join([subject] + comp_names[:3]) if subject else seed
+            brief = (f"Topic: {seed}. Brands: {who}. Find independent reviews, ratings, "
+                     "pricing, news or analyst coverage about these brands relevant to the topic.")
+            try:
+                for s in self.claude.search_sources(brief, allowed_domains=_THIRD_PARTY_DOMAINS)[:_MAX_WEB_SOURCES]:
+                    fact = (s.get("fact") or s.get("title") or "").strip()
+                    if s.get("url") and fact:
+                        blocks.append({"label": f"third-party · {s.get('title') or s['url']}",
+                                       "url": s["url"], "text": fact[:_EVIDENCE_TEXT_CAP]})
+            except Exception as e:
+                print(f"[blog_gen] web-search sources skipped: {e}")
 
         if not blocks:
             return ""
@@ -318,6 +350,8 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     section only if you cited nothing.
   - If no EVIDENCE is provided, keep claims to {name}'s own brand context and name competitors
     without asserting specifics about them.
+  - TESTIMONIALS: you may include at most ONE short customer quote ONLY if it appears in the
+    EVIDENCE — attribute it and cite [S#]. Never fabricate a testimonial and don't paste long blocks.
 
 EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
 title decision would make the page harder for an AI to extract a direct answer from, drop it and
@@ -482,12 +516,13 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         return (res.get("linkedin_text") or "").strip()
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
-                      research_notes=""):
+                      research_notes="", use_web_search=False):
         """Full pipeline: gather evidence → article → verify_claims → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated."""
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
-                                         research_notes=research_notes)
+                                         research_notes=research_notes,
+                                         use_web_search=use_web_search)
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence)
         if not article:

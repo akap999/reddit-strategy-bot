@@ -136,6 +136,7 @@ class Database:
                 claims_flagged   TEXT,
                 source_urls      TEXT,
                 research_notes   TEXT,
+                use_web_search   INTEGER DEFAULT 0,
                 status           TEXT DEFAULT 'draft',
                 prompt_version   TEXT,
                 created_at       TEXT DEFAULT (datetime('now')),
@@ -947,19 +948,21 @@ class Database:
 
     def save_blog(self, brand_id, seed, title="", meta_description="", keywords=None,
                   body_markdown="", linkedin_text="", claims_flagged=None,
-                  status="draft", prompt_version="", source_urls=None, research_notes=""):
+                  status="draft", prompt_version="", source_urls=None, research_notes="",
+                  use_web_search=0):
         """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. Returns id."""
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
-                                  research_notes, status, prompt_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  research_notes, use_web_search, status, prompt_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
              json.dumps(claims_flagged or []),
              json.dumps(source_urls or []),
              research_notes or "",
+             1 if use_web_search else 0,
              status, prompt_version),
         )
         self.conn.commit()
@@ -1026,7 +1029,7 @@ class Database:
         list/dict. Always bumps updated_at. No-op when no known fields are given."""
         allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
-                   "source_urls", "research_notes"}
+                   "source_urls", "research_notes", "use_web_search"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2131,6 +2134,9 @@ class Database:
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
+        if "use_web_search" not in blog_cols:
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN use_web_search INTEGER DEFAULT 0")
+            self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----
         post_cols3 = [r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()]

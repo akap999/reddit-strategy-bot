@@ -447,3 +447,65 @@ class ClaudeClient:
         except Exception as e:
             print(f"    API error: {e}")
             return None
+
+    def search_sources(self, brief, max_searches=4, allowed_domains=None):
+        """Use Anthropic's server-side `web_search` tool to find INDEPENDENT third-party
+        sources for `brief`. Returns a list of {title, url, fact} (deduped by url), or []
+        on ANY error — must never raise, so blog generation never breaks when off/failing.
+
+        web_search is a SERVER tool: Anthropic runs the searches inside this single
+        request and returns the completed message (search results + final text), so there
+        is no client-side tool loop to manage.
+        """
+        tool = {"type": "web_search_20250305", "name": "web_search",
+                "max_uses": int(max_searches)}
+        if allowed_domains:
+            tool["allowed_domains"] = list(allowed_domains)
+        prompt = (
+            f"{brief}\n\nFind INDEPENDENT third-party sources (review sites, news, analyst "
+            "pages — NOT the brands' own websites) that support specific factual claims for "
+            "the above. Use web search, then respond with JSON ONLY (no prose, no code "
+            'fences): {"sources": [{"title": "...", "url": "...", "fact": "one specific, '
+            'sourced fact this page supports"}]}. Include only sources you actually found; '
+            "omit anything you could not verify."
+        )
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                tools=[tool],
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            print(f"    web_search error: {e}", flush=True)
+            return []
+        # Concatenate the assistant's text blocks (the final JSON answer); the search
+        # result blocks are non-text and ignored here.
+        text = ""
+        try:
+            for block in (message.content or []):
+                if getattr(block, "type", None) == "text":
+                    text += block.text
+        except Exception:
+            text = ""
+        text = text.strip()
+        for fence in ("```json", "```"):
+            if text.startswith(fence):
+                text = text[len(fence):]
+        if text.endswith("```"):
+            text = text[:-3]
+        out, seen = [], set()
+        try:
+            data = json.loads(text.strip())
+            for s in (data.get("sources") or []):
+                if not isinstance(s, dict):
+                    continue
+                url = str(s.get("url") or "").strip()
+                if url and url.lower() not in seen:
+                    seen.add(url.lower())
+                    out.append({"title": str(s.get("title") or "").strip(),
+                                "url": url,
+                                "fact": str(s.get("fact") or "").strip()})
+        except (json.JSONDecodeError, TypeError, AttributeError) as e:
+            print(f"    web_search: could not parse sources JSON: {e}", flush=True)
+        return out

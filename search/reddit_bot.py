@@ -31,41 +31,45 @@ import json
 import csv
 import argparse
 import time
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=5):
-    """Cut a sorted list of posts down to `limit` with equal priority per
-    subreddit, AND never return more than `max_per_sub` posts from any
-    single subreddit.
+def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=None):
+    """Cut a sorted list of posts down to `limit`, spread evenly across the
+    requested subreddits so no single busy sub dominates the TOP of the list —
+    while still RETURNING UP TO `limit` posts whenever enough exist.
 
-    When multiple subreddits are requested, this takes up to
-    `min(limit // N, max_per_sub)` posts from each (preserving the input
-    order within each sub, which is assumed to already be sorted by
-    score / comments / date / relevance). Any remaining slots are filled
-    with the top-scoring overflow posts — but the per-sub cap is honored
-    during the fill too, so no subreddit can exceed `max_per_sub`.
+    Two rounds:
+      1. Even distribution — take up to `ceil(limit / N)` from each sub
+         (preserving input order, which is assumed already sorted by
+         score / comments / date / relevance). This is what prevents one
+         sub from monopolising the head of the results.
+      2. Fill — any leftover slots up to `limit` are filled from the
+         top-scoring overflow across all subs.
 
-    `max_per_sub` (default 5): hard cap on results per subreddit in a
-    multi-sub search, so one busy subreddit can't dominate the output.
-    Set to None to disable the cap (pure even-distribution).
+    `max_per_sub` (default None = no hard cap): optional ceiling on how many
+    posts ANY single sub may contribute (applied in BOTH rounds). Leave None
+    so the requested `limit` is actually reached; pass an int only when the
+    caller explicitly wants to constrain a busy sub. Historically this
+    defaulted to 5, which capped multi-sub searches far below the requested
+    limit (e.g. 3 subs × 5 = 15 even when 130+ posts were available) — hence
+    the default is now None.
 
     Single-sub / global (subreddits None or length 1) returns
-    `posts[:limit]` unchanged — the cap only applies when more than one
-    subreddit was explicitly requested (you searched ONE sub on purpose,
-    so you want its results).
+    `posts[:limit]` unchanged — you targeted one sub on purpose.
     """
-    # Single-sub / global searches: no per-sub cap (the user targeted
-    # one sub, or none, so spreading/capping doesn't apply).
+    # Single-sub / global searches: no per-sub spreading (the user targeted
+    # one sub, or none, so balancing doesn't apply).
     if not subreddits or len(subreddits) <= 1:
         return posts[:limit]
 
     n = len(subreddits)
-    per_sub = limit // n
-    if per_sub < 1:
-        per_sub = 1
-    # Apply the hard per-subreddit cap.
+    # ceil(limit / n): even target high enough that round 1 alone can reach
+    # `limit` (integer floor would systematically under-fill, e.g. 50//3=16 →
+    # only 48). Trimmed back to `limit` at the end.
+    per_sub = max(1, -(-limit // n))
     if max_per_sub is not None:
         per_sub = min(per_sub, max_per_sub)
 
@@ -83,6 +87,8 @@ def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=5):
         taken[sub] = len(head)
         leftover.extend(by_sub[sub][per_sub:])
 
+    # Round 2 — fill remaining slots from top-scoring overflow, honoring the
+    # optional hard cap (no cap by default, so we fill all the way to `limit`).
     remaining = limit - len(result)
     if remaining > 0 and leftover:
         leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
@@ -96,7 +102,9 @@ def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=5):
             result.append(p)
             taken[sub] = taken.get(sub, 0) + 1
             remaining -= 1
-    return result
+    # Round 1 with ceil can slightly overshoot (ceil(limit/n) * n ≥ limit);
+    # trim back to the requested limit.
+    return result[:limit]
 
 
 class RedditSearchBot:
@@ -168,6 +176,16 @@ class RedditSearchBot:
         if os.environ.get("REDDIT_RSS_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             self._reddit_rss_dead = True
             self._reddit_rss_dead_reason = "REDDIT_RSS_DISABLED env var is set"
+        # Visibility: on a cloud host (Railway sets RAILWAY_* / PORT) Reddit
+        # blocks the datacenter IP, so without a proxy the Reddit (JSON + RSS)
+        # legs silently fall through to Pullpush/Arctic only. Log it once so
+        # that state isn't invisible.
+        if not self.using_proxy and (os.environ.get("RAILWAY_ENVIRONMENT")
+                                     or os.environ.get("RAILWAY_PROJECT_ID")):
+            print("    ⚠ RedditSearchBot: no REDDIT_PROXY_URL on a cloud host — "
+                  "Reddit's IP wall will block direct JSON/RSS; results will rely "
+                  "on Pullpush/Arctic fallbacks. Set REDDIT_PROXY_URL to restore RSS.",
+                  flush=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -599,8 +617,17 @@ class RedditSearchBot:
             for rss_attempt in range(3):
                 resp = requests.get(url, params=params, headers=headers, timeout=20)
                 if resp.status_code == 429 and rss_attempt < 2:
-                    wait = 2 * (rss_attempt + 1)
-                    print(f"\n    ⏳ RSS 429 on {url} — retry {rss_attempt+1}/2 in {wait}s", flush=True)
+                    # Honor Retry-After when Reddit sends it; otherwise back off
+                    # exponentially. Add jitter so concurrent per-sub retries
+                    # don't re-collide in lockstep (which would just 429 again).
+                    try:
+                        wait = float(resp.headers.get("Retry-After") or 0)
+                    except (TypeError, ValueError):
+                        wait = 0
+                    if wait <= 0:
+                        wait = 2 * (rss_attempt + 1)
+                    wait += random.uniform(0, 1.0)
+                    print(f"\n    ⏳ RSS 429 on {url} — retry {rss_attempt+1}/2 in {wait:.1f}s", flush=True)
                     time.sleep(wait)
                     continue
                 break
@@ -922,11 +949,19 @@ class RedditSearchBot:
                                 if s.strip()]
                         batch = []
                         per_sub = max(needed_raw // max(len(subs), 1), 25)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 5)) as ex:
+                        # Reddit rate-limits RSS per-IP — firing every sub at
+                        # once trips 429 on ALL of them (each then returns 0).
+                        # Throttle: a small worker pool + a jittered per-sub
+                        # stagger so requests are spaced under the limit. RSS
+                        # is fast (~2s/100 posts), so this costs little.
+                        def _staggered_rss(idx, sub):
+                            time.sleep(idx * 0.7 + random.uniform(0, 0.3))
+                            return self._search_reddit_rss(
+                                keyword, sub, reddit_sort, time_filter, per_sub)
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 2)) as ex:
                             futures = [
-                                ex.submit(self._search_reddit_rss,
-                                          keyword, sub, reddit_sort, time_filter, per_sub)
-                                for sub in subs
+                                ex.submit(_staggered_rss, i, sub)
+                                for i, sub in enumerate(subs)
                             ]
                             for f in as_completed(futures):
                                 try:

@@ -1946,7 +1946,14 @@ async function editBrandContext(brandName) {
     try { personas = JSON.parse(first.personas || '[]'); } catch(e) {}
     let competitorDomains = {};
     try { competitorDomains = JSON.parse(first.competitor_domains || '{}') || {}; } catch(e) {}
-    const _cdText = Object.entries(competitorDomains).map(([n, d]) => `${n} | ${d}`).join('\n');
+    let competitorNames = [];
+    try { competitorNames = JSON.parse(first.competitors || '[]') || []; } catch(e) {}
+    // List EVERY competitor (union of names + domain map) as "Name | domain" — domain blank
+    // when unknown — so the user sees the full set and can fill gaps. Auto-analyze fills domains.
+    const _cdNames = [];
+    competitorNames.forEach(n => { const k = String(n).trim(); if (k && !_cdNames.includes(k)) _cdNames.push(k); });
+    Object.keys(competitorDomains).forEach(n => { const k = String(n).trim(); if (k && !_cdNames.includes(k)) _cdNames.push(k); });
+    const _cdText = _cdNames.map(n => `${n} | ${competitorDomains[n] || ''}`).join('\n');
     const _ev = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
 
     showModal(`

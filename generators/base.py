@@ -448,18 +448,23 @@ class ClaudeClient:
             print(f"    API error: {e}")
             return None
 
-    def search_sources(self, brief, max_searches=4, allowed_domains=None):
+    def search_sources(self, brief, max_searches=4, allowed_domains=None,
+                       blocked_domains=None):
         """Use Anthropic's server-side `web_search` tool to find INDEPENDENT third-party
         sources for `brief`. Returns a list of {title, url, fact} (deduped by url), or []
         on ANY error — must never raise, so blog generation never breaks when off/failing.
 
         web_search is a SERVER tool: Anthropic runs the searches inside this single
         request and returns the completed message (search results + final text), so there
-        is no client-side tool loop to manage.
+        is no client-side tool loop to manage. `allowed_domains` / `blocked_domains` are
+        mutually exclusive — pass at most one (we use blocked_domains to exclude the brands'
+        OWN sites and let the whole web answer, which surfaces real independent coverage).
         """
         tool = {"type": "web_search_20250305", "name": "web_search",
                 "max_uses": int(max_searches)}
-        if allowed_domains:
+        if blocked_domains:
+            tool["blocked_domains"] = list(blocked_domains)
+        elif allowed_domains:
             tool["allowed_domains"] = list(allowed_domains)
         prompt = (
             f"{brief}\n\nFind INDEPENDENT third-party sources (review sites, news, analyst "
@@ -508,4 +513,6 @@ class ClaudeClient:
                                 "fact": str(s.get("fact") or "").strip()})
         except (json.JSONDecodeError, TypeError, AttributeError) as e:
             print(f"    web_search: could not parse sources JSON: {e}", flush=True)
+        if not out:
+            print("    web_search: returned 0 usable sources for this brief", flush=True)
         return out

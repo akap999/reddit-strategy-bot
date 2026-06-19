@@ -161,6 +161,7 @@ class BlogGenerator:
         except (json.JSONDecodeError, TypeError):
             cached = {}
         cached = cached if isinstance(cached, dict) else {}
+        stored_domains = dict(cached)          # original (before model-resolution) — to detect new
         comp_names = _as_list(b.get("competitors"))
         missing = [c for c in comp_names if c not in cached]
         if missing:
@@ -172,6 +173,7 @@ class BlogGenerator:
         # subject first, then up to 2 competitors
         targets = targets[:_MAX_EVIDENCE_BRANDS]
 
+        validated = {}   # competitor label -> bare domain that fetched + validated this run
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
             # Subject brand gets the full path set; competitors stay capped to a few
@@ -183,8 +185,26 @@ class BlogGenerator:
                     continue
                 if validate and label.lower() not in txt.lower():
                     continue   # wrong/parked domain — skip rather than mis-cite
+                if validate:
+                    validated[label] = dom
                 blocks.append({"label": label, "url": f"https://{dom}{path}",
                                "text": txt[:_EVIDENCE_TEXT_CAP]})
+
+        # Accumulate: persist competitor domains that were newly resolved AND validated this
+        # run back onto the brand, so its competitor set grows (idempotent; validated only,
+        # never a wrong guess). Best-effort — write-back must never break generation.
+        new_doms = {k: v for k, v in validated.items() if stored_domains.get(k) != v}
+        if new_doms and b.get("id") is not None:
+            try:
+                merged = {**stored_domains, **new_doms}
+                names = _as_list(b.get("competitors"))
+                for k in new_doms:
+                    if k not in names:
+                        names.append(k)
+                self.db.update_brand(b["id"], competitor_domains=json.dumps(merged),
+                                     competitors=json.dumps(names))
+            except Exception as e:
+                print(f"[blog_gen] competitor write-back skipped: {e}")
 
         # ----- user-pasted source URLs (verbatim, no validation) -----
         for u in (source_urls or []):
@@ -202,13 +222,27 @@ class BlogGenerator:
                            "text": notes[:_EVIDENCE_TEXT_CAP]})
 
         # ----- optional: independent third-party sources via web search -----
+        # Search the whole web but BLOCK the brands' own domains (subject + known competitor
+        # domains) so results are genuinely independent (reviews/news/forums), not the brands'
+        # own marketing. The brand's OWN testimonials still come from the first-party fetch
+        # above, so nothing is lost when web search returns little.
         if use_web_search:
             comp_names = _as_list(b.get("competitors"))
             who = ", ".join([subject] + comp_names[:3]) if subject else seed
-            brief = (f"Topic: {seed}. Brands: {who}. Find independent reviews, ratings, "
-                     "pricing, news or analyst coverage about these brands relevant to the topic.")
+            own = []
+            if b.get("domain_url"):
+                own.append(re.sub(r"^https?://", "", b["domain_url"].strip()).rstrip("/").split("/")[0])
+            for dom in cached.values():
+                d = re.sub(r"^https?://", "", str(dom or "").strip()).rstrip("/").split("/")[0]
+                if d:
+                    own.append(d)
+            own = sorted(set(d for d in own if d))
+            prefer = ", ".join(_THIRD_PARTY_DOMAINS[:8])
+            brief = (f"Topic: {seed}. Brands: {who}. Find INDEPENDENT reviews, ratings, pricing, "
+                     "news or analyst coverage about these brands relevant to the topic. Prefer "
+                     f"reputable third-party sources (e.g. {prefer}); do NOT use the brands' own sites.")
             try:
-                for s in self.claude.search_sources(brief, allowed_domains=_THIRD_PARTY_DOMAINS)[:_MAX_WEB_SOURCES]:
+                for s in self.claude.search_sources(brief, blocked_domains=own)[:_MAX_WEB_SOURCES]:
                     fact = (s.get("fact") or s.get("title") or "").strip()
                     if s.get("url") and fact:
                         blocks.append({"label": f"third-party · {s.get('title') or s['url']}",

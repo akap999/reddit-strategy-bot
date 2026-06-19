@@ -1167,6 +1167,26 @@ def _extract_brand_enrichment_fields(data):
             out["focus"] = json.dumps(list(dedup.values()))
     if "enriched_at" in data:
         out["enriched_at"] = data.get("enriched_at")
+    # EEAT byline (brand-supplied, never fabricated) — plain string fields.
+    for sf in ("author_name", "author_title", "reviewer_name", "reviewer_title", "disclosure"):
+        if sf in data:
+            v = data.get(sf)
+            out[sf] = v.strip() if isinstance(v, str) else v
+    # competitor_domains: {name: domain} map (from Auto-analyze or manual edit), JSON-stored.
+    if "competitor_domains" in data:
+        v = data.get("competitor_domains")
+        if v is None:
+            out["competitor_domains"] = None
+        elif isinstance(v, dict):
+            cd = {}
+            for n, dom in v.items():
+                n = str(n).strip()
+                dom = str(dom or "").strip()
+                if n and dom:
+                    cd[n] = dom
+            out["competitor_domains"] = json.dumps(cd)
+        elif isinstance(v, str):
+            out["competitor_domains"] = v  # already JSON
     return out
 
 
@@ -1439,6 +1459,12 @@ def api_blog_generate():
     brand_id = data.get("brand_id")
     seed = (data.get("seed") or "").strip()
     keywords = data.get("keywords")
+    # Optional evidence inputs: source URLs (list or newline/comma string) + free-text notes.
+    raw_urls = data.get("source_urls")
+    if isinstance(raw_urls, str):
+        raw_urls = raw_urls.replace("\n", ",").split(",")
+    source_urls = [u.strip() for u in (raw_urls or []) if str(u).strip()]
+    research_notes = (data.get("research_notes") or "").strip()
     if not brand_id or not seed:
         return jsonify({"error": "brand_id and seed are required"}), 400
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1454,7 +1480,8 @@ def api_blog_generate():
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
             blog = BlogGenerator(claude, bg).generate_blog(
-                brand, seed, extra_keywords=keywords)
+                brand, seed, extra_keywords=keywords,
+                source_urls=source_urls, research_notes=research_notes)
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             blog_id = bg.save_blog(
@@ -1467,6 +1494,7 @@ def api_blog_generate():
                 claims_flagged=blog.get("claims_flagged") or [],
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
+                source_urls=source_urls, research_notes=research_notes,
             )
             return {"blog_id": blog_id}
         finally:
@@ -1500,11 +1528,17 @@ def api_blog_regenerate(blog_id):
             claude = ClaudeClient(api_key)
             gen = BlogGenerator(claude, bg)
             seed = blog.get("seed") or ""
+            # Reuse the sources captured at generate time so regeneration stays grounded.
+            stored_urls = blog.get("source_urls") or []
+            stored_notes = blog.get("research_notes") or ""
+            evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
+                                            research_notes=stored_notes)
             article = {"title": blog.get("title") or "",
                        "body_markdown": blog.get("body_markdown") or "",
                        "keywords": blog.get("keywords") or []}
             if part == "all":
-                fresh = gen.generate_blog(brand, seed, extra_keywords=keywords)
+                fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
+                                          source_urls=stored_urls, research_notes=stored_notes)
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -1515,10 +1549,10 @@ def api_blog_regenerate(blog_id):
                     linkedin_text=fresh.get("linkedin_text", ""),
                     claims_flagged=fresh.get("claims_flagged") or [])
             elif part == "article":
-                a = gen.generate_article(brand, seed, extra_keywords=keywords)
+                a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence)
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
-                v = gen.verify_claims(brand, a)
+                v = gen.verify_claims(brand, a, evidence=evidence)
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
@@ -1526,7 +1560,7 @@ def api_blog_regenerate(blog_id):
                     body_markdown=(v or {}).get("body_markdown") or a.get("body_markdown", ""),
                     claims_flagged=(v or {}).get("flagged") or [])
             elif part == "verify":
-                v = gen.verify_claims(brand, article)
+                v = gen.verify_claims(brand, article, evidence=evidence)
                 if not v:
                     raise ValueError(claude.last_error or "Verify pass failed")
                 bg.update_blog(blog_id, body_markdown=v["body_markdown"],

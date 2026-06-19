@@ -134,6 +134,8 @@ class Database:
                 body_markdown    TEXT,
                 linkedin_text    TEXT,
                 claims_flagged   TEXT,
+                source_urls      TEXT,
+                research_notes   TEXT,
                 status           TEXT DEFAULT 'draft',
                 prompt_version   TEXT,
                 created_at       TEXT DEFAULT (datetime('now')),
@@ -250,17 +252,21 @@ class Database:
     def add_brand(self, subreddit_id, name, domain_url="", context="", keywords="[]",
                   category=None, audience=None, use_cases=None, pain_points=None,
                   features=None, competitors=None, enriched_at=None,
-                  search_subreddits=None, focus=None):
+                  search_subreddits=None, focus=None, competitor_domains=None,
+                  author_name=None, author_title=None, reviewer_name=None,
+                  reviewer_title=None, disclosure=None):
         cur = self.conn.execute(
             """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
                                    category, audience, use_cases, pain_points,
                                    features, competitors, enriched_at, search_subreddits,
-                                   focus)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   focus, competitor_domains, author_name, author_title,
+                                   reviewer_name, reviewer_title, disclosure)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, name, domain_url, context, keywords,
              category, audience, use_cases, pain_points,
              features, competitors, enriched_at, search_subreddits,
-             focus)
+             focus, competitor_domains, author_name, author_title,
+             reviewer_name, reviewer_title, disclosure)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -269,7 +275,9 @@ class Database:
                      category=None, audience=None, use_cases=None, pain_points=None,
                      features=None, competitors=None, enriched_at=None,
                      search_subreddits=None, focus=None, learned_context=None,
-                     personas=None):
+                     personas=None, competitor_domains=None, author_name=None,
+                     author_title=None, reviewer_name=None, reviewer_title=None,
+                     disclosure=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -280,7 +288,10 @@ class Database:
             "competitors": competitors, "enriched_at": enriched_at,
             "search_subreddits": search_subreddits,
             "focus": focus, "learned_context": learned_context,
-            "personas": personas,
+            "personas": personas, "competitor_domains": competitor_domains,
+            "author_name": author_name, "author_title": author_title,
+            "reviewer_name": reviewer_name, "reviewer_title": reviewer_title,
+            "disclosure": disclosure,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -936,17 +947,19 @@ class Database:
 
     def save_blog(self, brand_id, seed, title="", meta_description="", keywords=None,
                   body_markdown="", linkedin_text="", claims_flagged=None,
-                  status="draft", prompt_version=""):
-        """Insert a blog row. keywords/claims_flagged are stored as JSON. Returns id."""
+                  status="draft", prompt_version="", source_urls=None, research_notes=""):
+        """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. Returns id."""
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
-                                  body_markdown, linkedin_text, claims_flagged, status,
-                                  prompt_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  body_markdown, linkedin_text, claims_flagged, source_urls,
+                                  research_notes, status, prompt_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
              json.dumps(claims_flagged or []),
+             json.dumps(source_urls or []),
+             research_notes or "",
              status, prompt_version),
         )
         self.conn.commit()
@@ -970,6 +983,10 @@ class Database:
             blog["claims_flagged"] = json.loads(blog.get("claims_flagged") or "[]")
         except (json.JSONDecodeError, TypeError):
             blog["claims_flagged"] = []
+        try:
+            blog["source_urls"] = json.loads(blog.get("source_urls") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            blog["source_urls"] = []
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1008,12 +1025,13 @@ class Database:
         """Patch blog columns. keywords/claims_flagged are JSON-encoded if passed as
         list/dict. Always bumps updated_at. No-op when no known fields are given."""
         allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
-                   "linkedin_text", "claims_flagged", "status", "prompt_version"}
+                   "linkedin_text", "claims_flagged", "status", "prompt_version",
+                   "source_urls", "research_notes"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
-            if k in ("keywords", "claims_flagged") and not isinstance(v, str):
+            if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
             sets.append(f"{k} = ?")
             params.append(v)
@@ -2091,10 +2109,27 @@ class Database:
             # list of {label, profile, trigger, goal, constraints, vocab, fit}.
             # fit ∈ {yes,maybe,no} = is the brand a credible answer for this persona.
             "personas":          "ALTER TABLE brands ADD COLUMN personas TEXT",
+            # Map of competitor name → official homepage domain (JSON), captured at
+            # Auto-analyze. Used by the blog generator to auto-fetch + cite competitor
+            # sites. `competitors` (names) stays as-is for existing consumers.
+            "competitor_domains": "ALTER TABLE brands ADD COLUMN competitor_domains TEXT",
+            # EEAT byline (brand-supplied, never fabricated) — rendered on blogs when set.
+            "author_name":       "ALTER TABLE brands ADD COLUMN author_name TEXT",
+            "author_title":      "ALTER TABLE brands ADD COLUMN author_title TEXT",
+            "reviewer_name":     "ALTER TABLE brands ADD COLUMN reviewer_name TEXT",
+            "reviewer_title":    "ALTER TABLE brands ADD COLUMN reviewer_title TEXT",
+            "disclosure":        "ALTER TABLE brands ADD COLUMN disclosure TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:
                 self.conn.execute(sql)
+                self.conn.commit()
+
+        # ----- blogs: evidence inputs (source URLs + research notes) -----
+        blog_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(blogs)").fetchall()]
+        for col in ("source_urls", "research_notes"):
+            if col not in blog_cols:
+                self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----

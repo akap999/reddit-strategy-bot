@@ -14,8 +14,14 @@ import json
 import re
 
 from generators.post_gen import PostGenerator
+from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
 
-PROMPT_VERSION = "blog-v1"
+PROMPT_VERSION = "blog-v2-evidence"
+
+# Common pages worth fetching beyond a brand's homepage, for real feature/pricing facts.
+_EVIDENCE_PATHS = ("", "/pricing", "/features", "/about")
+_MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
+_EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
 
 
 def _as_list(raw):
@@ -69,6 +75,122 @@ class BlogGenerator:
         if b.get("learned_context"):
             lines.append(f"Learned context: {b['learned_context']}")
         return name, url, "\n".join(lines)
+
+    def _byline_md(self, brand):
+        """EEAT byline + disclosure block (Markdown), or "" when the brand supplies none.
+        NEVER fabricated — rendered only from brand-supplied fields."""
+        b = brand or {}
+        bits = []
+        au = (b.get("author_name") or "").strip()
+        if au:
+            at = (b.get("author_title") or "").strip()
+            bits.append(f"By {au}" + (f", {at}" if at else ""))
+        rv = (b.get("reviewer_name") or "").strip()
+        if rv:
+            rt = (b.get("reviewer_title") or "").strip()
+            bits.append(f"Reviewed by {rv}" + (f", {rt}" if rt else ""))
+        line = " · ".join(bits)
+        disc = (b.get("disclosure") or "").strip()
+        out = []
+        if line:
+            out.append(f"*{line}*")
+        if disc:
+            out.append(f"*{disc}*")
+        return ("\n\n".join(out) + "\n\n") if out else ""
+
+    # ------------------------------------------------------------ evidence sourcing
+    def _resolve_brand_domains(self, names):
+        """Ask the model for the official homepage domain of each brand name it's
+        confident about. Returns {name: bare-domain}; {} on failure. Used only for
+        competitors with no cached domain."""
+        names = [n for n in (names or []) if str(n).strip()]
+        if not names:
+            return {}
+        prompt = ("For each brand/product below, give its official homepage domain (bare, "
+                  "no https://, no path). Include ONLY ones you are confident about; omit "
+                  "the rest. Names:\n" + "\n".join(f"- {n}" for n in names) +
+                  '\n\nReturn JSON only: {"domains": {"Name": "domain.com"}}')
+        res = self.claude.call(prompt, max_tokens=400, temperature=0)
+        dm = (res or {}).get("domains") if isinstance(res, dict) else None
+        out = {}
+        if isinstance(dm, dict):
+            for n, d in dm.items():
+                d = re.sub(r"^https?://", "", str(d or "").strip().lower()).rstrip("/").split("/")[0]
+                if str(n).strip() and d:
+                    out[str(n).strip()] = d
+        return out
+
+    def _gather_evidence(self, brand, seed, source_urls=None, research_notes=""):
+        """Fetch real, citable evidence for the article and return a formatted EVIDENCE
+        block string (or "" when nothing usable). Sources:
+          - the subject brand's own site (always),
+          - competitor sites (cached `competitor_domains`, else model-resolved),
+          - any user-pasted source_urls (verbatim),
+          - research_notes (user-provided).
+        Each brand domain → homepage + a few key pages (/pricing,/features,/about),
+        graceful on failure. A competitor page is kept only if the competitor's name
+        appears in it (validates we hit the right site)."""
+        b = brand or {}
+        subject = (b.get("name") or "").strip()
+        blocks = []   # {label, url, text}
+
+        def _fetch(url):
+            txt = _extract_visible_text(_fetch_homepage(url))
+            return (txt or "").strip()
+
+        # ----- subject + competitor domains -----
+        targets = []  # (label, domain, validate)
+        if b.get("domain_url"):
+            targets.append((subject, b["domain_url"].strip(), False))
+        try:
+            cached = json.loads(b.get("competitor_domains") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            cached = {}
+        cached = cached if isinstance(cached, dict) else {}
+        comp_names = _as_list(b.get("competitors"))
+        missing = [c for c in comp_names if c not in cached]
+        if missing:
+            cached = {**self._resolve_brand_domains(missing), **cached}
+        for cn in comp_names:
+            dom = (cached.get(cn) or "").strip()
+            if dom:
+                targets.append((cn, dom, True))
+        # subject first, then up to 2 competitors
+        targets = targets[:_MAX_EVIDENCE_BRANDS]
+
+        for label, dom, validate in targets:
+            dom = re.sub(r"^https?://", "", dom).rstrip("/")
+            for path in _EVIDENCE_PATHS:
+                txt = _fetch(f"https://{dom}{path}")
+                if not txt:
+                    continue
+                if validate and label.lower() not in txt.lower():
+                    continue   # wrong/parked domain — skip rather than mis-cite
+                blocks.append({"label": label, "url": f"https://{dom}{path}",
+                               "text": txt[:_EVIDENCE_TEXT_CAP]})
+
+        # ----- user-pasted source URLs (verbatim, no validation) -----
+        for u in (source_urls or []):
+            u = str(u).strip()
+            if not u:
+                continue
+            txt = _fetch(u)
+            if txt:
+                blocks.append({"label": "provided source", "url": u,
+                               "text": txt[:_EVIDENCE_TEXT_CAP]})
+
+        notes = (research_notes or "").strip()
+        if notes:
+            blocks.append({"label": "research notes (user-provided)", "url": "",
+                           "text": notes[:_EVIDENCE_TEXT_CAP]})
+
+        if not blocks:
+            return ""
+        parts = ["EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] and URL):"]
+        for i, bl in enumerate(blocks, 1):
+            src = f"{bl['label']}" + (f" — {bl['url']}" if bl["url"] else "")
+            parts.append(f"[S{i}] {src}\n{bl['text']}")
+        return "\n\n".join(parts)
 
     # ----------------------------------------------------------- keyword sourcing
     def _filter_relevant(self, seed, pairs, threshold=0.30, top=12):
@@ -155,12 +277,13 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         return out
 
     # ------------------------------------------------------------------- article
-    def generate_article(self, brand, seed, extra_keywords=None):
+    def generate_article(self, brand, seed, extra_keywords=None, evidence=""):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
-        entry) and are merged into the returned keywords. Returns
-        {title, meta_description, keywords, body_markdown} or None on failure.
-        Does NOT run the claims pass — generate_blog / the endpoint orchestrate that."""
+        entry) and are merged into the returned keywords. `evidence` is the formatted
+        EVIDENCE block from `_gather_evidence` — when present, factual claims must cite it.
+        Returns {title, meta_description, keywords, body_markdown} (body carries the
+        brand byline when supplied) or None on failure. Does NOT run the claims pass."""
         seed = (seed or "").strip()
         if not seed:
             return None
@@ -171,6 +294,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
             kw_block = ("\nTARGET QUERIES — the article MUST answer EACH of these. Make each a "
                         "question-shaped H2/H3 with a concise answer, and an FAQ entry:\n"
                         + "\n".join(f"- {k}" for k in kws) + "\n")
+        evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
         link = f" Link to {url} where it reads naturally." if url else ""
         prompt = f"""You are writing a FIRST-PARTY article published on {name}'s own site. The ONLY
 goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
@@ -181,6 +305,19 @@ SEED TOPIC (what the reader is asking): {seed}
 {kw_block}
 BRAND (first-party — you MAY name and recommend {name}):
 {block}
+{evidence_block}
+EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
+  - You may NAME any brand freely (listing it as an option / alternative needs no source).
+  - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
+    NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
+    above and cite it inline as [S#]. This applies to {name}'s OWN claims too.
+  - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
+    hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
+    positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
+  - END the body with a "## Sources" section listing every [S#] you cited (label + URL). Omit the
+    section only if you cited nothing.
+  - If no EVIDENCE is provided, keep claims to {name}'s own brand context and name competitors
+    without asserting specifics about them.
 
 EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
 title decision would make the page harder for an AI to extract a direct answer from, drop it and
@@ -249,34 +386,50 @@ Return JSON only:
             if k and kk not in seen:
                 seen.add(kk)
                 merged.append(k)
+        body = res.get("body_markdown") or ""
+        byline = self._byline_md(brand)        # "" unless the brand supplies author/reviewer/disclosure
+        if byline and body:
+            body = byline + body
         return {
             "title": (res.get("title") or "").strip(),
             "meta_description": (res.get("meta_description") or "").strip(),
             "keywords": merged,
-            "body_markdown": res.get("body_markdown") or "",
+            "body_markdown": body,
         }
 
-    def verify_claims(self, brand, article):
-        """Fact-check the draft against the brand's stored enrichment ONLY, hedging/
-        removing unsupported brand-specific claims. Returns {body_markdown, flagged} or
-        None on failure (caller keeps the original body)."""
+    def verify_claims(self, brand, article, evidence=""):
+        """Fact-check the draft against the brand context + supplied EVIDENCE, hedging/
+        removing unsupported claims. Returns {body_markdown, flagged} or None on failure
+        (caller keeps the original body)."""
         name, _url, block = self._brand_block(brand)
         body = (article or {}).get("body_markdown") or ""
         if not body.strip():
             return None
-        prompt = f"""Fact-check a FIRST-PARTY article about {name} against the brand context below.
+        evidence_block = (f"\nEVIDENCE (admissible support for claims — cite as [S#]):\n{evidence}\n"
+                          if (evidence or "").strip() else "")
+        prompt = f"""Fact-check a FIRST-PARTY article about {name} against the brand context + evidence below.
 Accuracy is what keeps the page citable by AI engines.
 
-BRAND CONTEXT (the ONLY source of truth for brand-specific claims):
+BRAND CONTEXT (source of truth for {name}'s own claims):
 {block}
-
+{evidence_block}
 ARTICLE (Markdown):
 {body}
 
-Find brand-SPECIFIC factual claims (numbers, features, model names, guarantees, prices) that
-are NOT supported by the brand context. Rewrite the body to soft-hedge or remove each
+PRESERVE any byline / disclosure italic lines at the very top verbatim.
+
+Find SPECIFIC factual claims (numbers, features, model names, guarantees, prices) that
+are NOT supported by the brand context OR the EVIDENCE. Rewrite the body to soft-hedge or remove each
 unsupported claim while keeping it useful and well-structured. Do NOT touch general,
 non-brand-specific advice, and keep the GEO structure (Quick answer, question headings, FAQ).
+
+EVIDENCE GATE (the top weakness reviewers flag — apply to EVERY named brand, not just in comparisons):
+  - Any specific claim about ANY named brand — features, pricing, numbers, "does / does NOT do X",
+    superiority ("stronger / more complete / better") — must be backed by the EVIDENCE and cite [S#].
+  - If a claim has no supporting evidence: DROP it, soften to a name-only mention, or (for {name}
+    only) reframe as {name}'s own positioning. NEVER keep an unsourced competitor claim and NEVER
+    use "not publicly documented" hedging.
+  - Ensure the "## Sources" section lists every [S#] cited.
 
 SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - The "Quick answer" block (it gets cited verbatim — every claim in it must be supported).
@@ -328,14 +481,18 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             return ""
         return (res.get("linkedin_text") or "").strip()
 
-    def generate_blog(self, brand, seed, extra_keywords=None):
-        """Full pipeline: article → verify_claims → LinkedIn. Returns the merged dict
-        (title, meta_description, keywords, body_markdown, claims_flagged, linkedin_text,
-        prompt_version) or None if the article couldn't be generated."""
-        article = self.generate_article(brand, seed, extra_keywords=extra_keywords)
+    def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
+                      research_notes=""):
+        """Full pipeline: gather evidence → article → verify_claims → LinkedIn. Returns
+        the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
+        linkedin_text, prompt_version) or None if the article couldn't be generated."""
+        evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
+                                         research_notes=research_notes)
+        article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
+                                        evidence=evidence)
         if not article:
             return None
-        v = self.verify_claims(brand, article)
+        v = self.verify_claims(brand, article, evidence=evidence)
         if v:
             article["body_markdown"] = v["body_markdown"]
             article["claims_flagged"] = v["flagged"]

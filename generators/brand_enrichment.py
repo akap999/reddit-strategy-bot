@@ -110,6 +110,7 @@ Extract the following fields. Be specific and concrete — vague answers are use
 - pain_points: 4-6 concrete pains the product addresses. Each item is a phrase ("tickets get lost between Slack and Jira"). These are the pains real users would complain about on Reddit.
 - features: 4-6 key differentiating features or capabilities. Each is a short phrase.
 - competitors: 3-8 direct competitor brand/product NAMES (real names like "Notion", "Asana", "Linear"). These will be used in comparison-intent posts, so accuracy matters. If you're unsure, include fewer but only confident ones.
+- competitor_domains: an object mapping each competitor NAME above to its official homepage domain (e.g. {"Notion": "notion.com", "Asana": "asana.com"}). Include ONLY domains you are confident are the official site; omit a competitor rather than guess. Bare domain, no https://, no path.
 - context_summary: A 2-3 sentence narrative describing what the brand is and who it serves. This replaces or augments the existing brand context field.
 - keywords: 6-12 concise search keywords/terms a real person would type about this brand's DOMAIN (single words or short 2-3 word phrases like "async standups", "remote team pm"). Do NOT include the brand name. These are used to match relevant Reddit threads, so favor the terms users actually search, not marketing language.
 
@@ -121,6 +122,7 @@ Return JSON only, exactly this shape:
   "pain_points": ["string", ...],
   "features": ["string", ...],
   "competitors": ["string", ...],
+  "competitor_domains": {{"Competitor Name": "domain.com", ...}},
   "context_summary": "string",
   "keywords": ["string", ...]
 }}"""
@@ -151,6 +153,19 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
     def _as_str(v):
         return str(v).strip() if v else ""
 
+    def _as_domain_map(v):
+        """Normalize competitor_domains to {name: bare-domain}. Strips scheme/path,
+        drops blanks. Tolerant of a non-dict (returns {})."""
+        out = {}
+        if isinstance(v, dict):
+            for name, dom in v.items():
+                n = str(name).strip()
+                d = str(dom or "").strip().lower()
+                d = re.sub(r"^https?://", "", d).rstrip("/").split("/")[0]
+                if n and d:
+                    out[n] = d
+        return out
+
     return {
         "category":        _as_str(result.get("category")),
         "audience":        _as_str(result.get("audience")),
@@ -158,6 +173,7 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         "pain_points":     _as_list(result.get("pain_points")),
         "features":        _as_list(result.get("features")),
         "competitors":     _as_list(result.get("competitors")),
+        "competitor_domains": _as_domain_map(result.get("competitor_domains")),
         "context_summary": _as_str(result.get("context_summary")),
         "keywords":        _as_list(result.get("keywords")),
         "_page_fetched":   bool(page_text),

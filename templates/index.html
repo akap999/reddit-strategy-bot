@@ -1944,6 +1944,10 @@ async function editBrandContext(brandName) {
 
     let personas = [];
     try { personas = JSON.parse(first.personas || '[]'); } catch(e) {}
+    let competitorDomains = {};
+    try { competitorDomains = JSON.parse(first.competitor_domains || '{}') || {}; } catch(e) {}
+    const _cdText = Object.entries(competitorDomains).map(([n, d]) => `${n} | ${d}`).join('\n');
+    const _ev = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -1977,6 +1981,19 @@ async function editBrandContext(brandName) {
                 </div>
                 <div id="edit-brand-personas" class="mt-1">${_renderPersonasList(personas)}</div>
             </div>
+            <details class="mt-1">
+                <summary class="text-xs text-gray-400 cursor-pointer select-none">Blog byline & sources (EEAT — used on generated blogs)</summary>
+                <div class="space-y-2 mt-2 pl-1">
+                    <div class="grid gap-2" style="grid-template-columns:1fr 1fr">
+                        <div><label class="text-xs text-gray-400">Author name</label><input id="edit-brand-author" value="${_ev(first.author_name)}" placeholder="e.g. Jane Doe"></div>
+                        <div><label class="text-xs text-gray-400">Author title</label><input id="edit-brand-author-title" value="${_ev(first.author_title)}" placeholder="e.g. Head of Growth"></div>
+                        <div><label class="text-xs text-gray-400">Reviewer name</label><input id="edit-brand-reviewer" value="${_ev(first.reviewer_name)}" placeholder="optional"></div>
+                        <div><label class="text-xs text-gray-400">Reviewer title</label><input id="edit-brand-reviewer-title" value="${_ev(first.reviewer_title)}" placeholder="optional"></div>
+                    </div>
+                    <div><label class="text-xs text-gray-400">Disclosure line <span class="text-gray-600">(shown on first-party comparisons)</span></label><input id="edit-brand-disclosure" value="${_ev(first.disclosure)}" placeholder="e.g. This comparison is published by ${_ev(brandName)}."></div>
+                    <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
+                </div>
+            </details>
         </div>
         <p class="text-xs text-gray-500 mt-3">Changes will apply to all ${brandInstances.length} instance(s) of this brand across subreddits.</p>
         <div class="flex gap-2 mt-4">
@@ -2033,6 +2050,14 @@ async function saveBrandContext(brandName) {
     // backend `_parse_focus_line` parses each line into the dict shape.
     const focus = focusRaw.split(/\n+/).map(s => s.trim()).filter(Boolean);
 
+    // Blog byline + competitor domains (EEAT / evidence sourcing).
+    const _val = id => (document.getElementById(id)?.value || '').trim();
+    const competitor_domains = {};
+    (_val('edit-brand-compdomains')).split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+        const [name, dom] = line.split('|').map(x => (x || '').trim());
+        if (name && dom) competitor_domains[name] = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    });
+
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
 
@@ -2044,6 +2069,12 @@ async function saveBrandContext(brandName) {
             keywords,
             search_subreddits,
             focus,
+            author_name: _val('edit-brand-author'),
+            author_title: _val('edit-brand-author-title'),
+            reviewer_name: _val('edit-brand-reviewer'),
+            reviewer_title: _val('edit-brand-reviewer-title'),
+            disclosure: _val('edit-brand-disclosure'),
+            competitor_domains,
         }});
     }
 
@@ -11951,6 +11982,11 @@ async function renderBlogs(c) {
                 <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
+            <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
+                <div><label class="text-xs text-gray-400">Source URLs (optional, one per line) <span class="text-gray-600">— competitor docs/pricing pages etc. to cite</span></label><textarea id="blog-gen-sources" rows="2" placeholder="https://competitor.com/pricing&#10;https://competitor.com/features" style="font-family:inherit"></textarea></div>
+                <div><label class="text-xs text-gray-400">Research notes (optional) <span class="text-gray-600">— real facts the article may cite</span></label><textarea id="blog-gen-notes" rows="2" placeholder="e.g. Competitor X raised \$20M Series A (TechCrunch, 2025)"></textarea></div>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">The brand's own site + known competitor sites are auto-fetched and cited; add URLs/notes here only to supplement.</p>
             <div class="flex gap-2 mt-3">
                 <button class="btn btn-sm btn-secondary" onclick="blogSuggestQueries()">Suggest queries</button>
                 <button class="btn btn-sm btn-primary" onclick="blogGenerate()">Generate →</button>
@@ -12035,7 +12071,10 @@ function blogGenerate() {
         const m = document.getElementById('blog-gen-kw').value.trim();
         if (m) keywords = m;
     }
-    runTask('/api/blogs/generate', { brand_id, seed, keywords }, (res) => {
+    const source_urls = (document.getElementById('blog-gen-sources')?.value || '')
+        .split('\n').map(s => s.trim()).filter(Boolean);
+    const research_notes = (document.getElementById('blog-gen-notes')?.value || '').trim();
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes }, (res) => {
         blogReload();
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
@@ -12057,9 +12096,11 @@ async function openBlog(id) {
     }).join('');
     const claims = b.claims_flagged || [];
     const claimNote = `<span class="${claims.length ? 'text-amber-400' : 'text-gray-500'}">Claims checked${claims.length ? ` · ${claims.length} adjusted` : ''}</span>`;
+    const srcCount = (b.source_urls || []).length + ((b.research_notes || '').trim() ? 1 : 0);
+    const srcNote = srcCount ? ` · <span class="text-gray-500" title="${_blogEsc((b.source_urls || []).join(', '))}">${srcCount} source${srcCount === 1 ? '' : 's'} (reused on regenerate)</span>` : '';
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}</p>
+        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}</p>
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>

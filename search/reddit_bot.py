@@ -239,7 +239,9 @@ class RedditSearchBot:
                         except (TypeError, ValueError):
                             ra = 0
                         wait = ra if ra > 0 else self.retry_delay * (2 ** attempt)
-                        wait += random.uniform(0, 1.0)
+                        # Cap the honored Retry-After so a large server value can't
+                        # stall a whole search for tens of seconds.
+                        wait = min(wait, 5.0) + random.uniform(0, 1.0)
                         print(f"\n    ⏳ Reddit returned {response.status_code}. Retrying in {wait:.1f}s...", end=" ", flush=True)
                         time.sleep(wait)
                         last_response = response
@@ -622,33 +624,42 @@ class RedditSearchBot:
             # the whole RSS leg for the run. Only a 403 (hard block)
             # latches dead.
             resp = None
-            for rss_attempt in range(3):
+            # ONE retry on a transient 429 before giving up (was 2). A throttled
+            # RSS leg is expensive and low-yield, so we fail fast and let the
+            # cooldown route subsequent searches straight to Pullpush/Arctic.
+            for rss_attempt in range(2):
                 resp = requests.get(url, params=params, headers=headers, timeout=20)
-                if resp.status_code == 429 and rss_attempt < 2:
-                    # Honor Retry-After when Reddit sends it; otherwise back off
-                    # exponentially. Add jitter so concurrent per-sub retries
-                    # don't re-collide in lockstep (which would just 429 again).
+                if resp.status_code == 429 and rss_attempt < 1:
+                    # Honor Retry-After when Reddit sends it (capped at 5s so a big
+                    # server value can't stall the whole search); else short backoff.
+                    # Jitter so concurrent per-sub retries don't re-collide.
                     try:
                         wait = float(resp.headers.get("Retry-After") or 0)
                     except (TypeError, ValueError):
                         wait = 0
                     if wait <= 0:
-                        wait = 2 * (rss_attempt + 1)
-                    wait += random.uniform(0, 1.0)
-                    print(f"\n    ⏳ RSS 429 on {url} — retry {rss_attempt+1}/2 in {wait:.1f}s", flush=True)
+                        wait = 2.0
+                    wait = min(wait, 5.0) + random.uniform(0, 0.5)
+                    print(f"\n    ⏳ RSS 429 on {url} — retry in {wait:.1f}s", flush=True)
                     time.sleep(wait)
                     continue
                 break
             if resp.status_code != 200:
                 print(f"\n    ⚠ Reddit RSS returned {resp.status_code} for {url}", flush=True)
                 # Only a persistent 403 means the wall expanded to RSS.
-                # 429 is transient throughput — never latch dead on it.
+                # 429 is transient throughput — never latch dead on it, but DO start
+                # a short cooldown so subsequent searches skip the slow RSS leg.
                 if resp.status_code == 403:
                     with self._lock:
                         if not self._reddit_rss_dead:
                             self._reddit_rss_dead = True
                             self._reddit_rss_dead_reason = "RSS returned 403 (hard block)"
                             print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_rss_dead_reason}", flush=True)
+                elif resp.status_code == 429:
+                    RedditSearchBot._reddit_rss_cooldown_until = (
+                        time.time() + RedditSearchBot._RSS_COOLDOWN_SECS)
+                    print(f"    ⏸ RSS throttled (429) — cooling down the RSS leg for "
+                          f"{RedditSearchBot._RSS_COOLDOWN_SECS}s", flush=True)
                 return []
             # Parse Atom XML.
             try:
@@ -975,6 +986,10 @@ class RedditSearchBot:
             if api_name == "reddit" and self._reddit_rss_dead:
                 print(f"    Skipping reddit RSS API (marked dead: {self._reddit_rss_dead_reason})", flush=True)
                 continue
+            if api_name == "reddit" and time.time() < RedditSearchBot._reddit_rss_cooldown_until:
+                left = int(RedditSearchBot._reddit_rss_cooldown_until - time.time())
+                print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
+                continue
 
             # Adaptive over-fetch: 5x when filters are active (they reject
             # 60-80% of raw posts), 2x otherwise.
@@ -1008,7 +1023,7 @@ class RedditSearchBot:
                         # stagger so requests are spaced under the limit. RSS
                         # is fast (~2s/100 posts), so this costs little.
                         def _staggered_rss(idx, sub):
-                            time.sleep(idx * 0.7 + random.uniform(0, 0.3))
+                            time.sleep(idx * 0.4 + random.uniform(0, 0.2))
                             return self._search_reddit_rss(
                                 keyword, sub, reddit_sort, time_filter, per_sub)
                         with ThreadPoolExecutor(max_workers=min(len(subs), 2)) as ex:
@@ -1312,6 +1327,16 @@ class RedditSearchBot:
     _result_cache = {}  # signature -> (timestamp, results list)
     _RESULT_CACHE_TTL = 600  # 10 minutes
     _result_cache_lock = threading.Lock()
+
+    # Class-level RSS cooldown (shared across instances). When the RSS leg gets
+    # rate-limited (429 after retries), we set this to a near-future timestamp and
+    # SKIP the RSS leg until it passes — going straight to Pullpush/Arctic, which
+    # is both faster AND higher-yield when RSS is throttled (a throttled RSS burns
+    # ~10s of retries and only partially fills the quota, cutting off Arctic). Auto-
+    # expires so a recovered RSS rejoins; a healthy RSS never trips it. Softer,
+    # auto-expiring sibling of the 403 `_reddit_rss_dead` latch.
+    _reddit_rss_cooldown_until = 0.0
+    _RSS_COOLDOWN_SECS = 90
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
         # Reddit API is the only data source for subscriber counts.

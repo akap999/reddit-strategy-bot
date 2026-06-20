@@ -112,15 +112,18 @@ class BlogGenerator:
         return ("\n\n".join(out) + "\n\n") if out else ""
 
     # ------------------------------------------------------------ evidence sourcing
-    def _resolve_brand_domains(self, names, seed=None, subject=None):
+    def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None):
         """Ask the model for the official homepage domain of each brand it's confident
         about. Resolves both (a) the supplied competitor `names` missing a cached domain
         AND (b) any OTHER brand/product named in the `seed`/title (e.g. "Botric vs
-        Profound" -> Profound), excluding `subject`. Returns {name: bare-domain}; {} on
-        failure."""
+        Profound" -> Profound), excluding `subject`. `subject_category` disambiguates
+        same-named companies (e.g. Profound the AI-search tool at tryprofound.com vs
+        Profound the market-research firm at profound.com) by anchoring on the subject's
+        space. Returns {name: bare-domain}; {} on failure."""
         names = [n for n in (names or []) if str(n).strip()]
         seed = (seed or "").strip()
         subject = (subject or "").strip()
+        subject_category = (subject_category or "").strip()
         if not names and not seed:
             return {}
         body = ""
@@ -130,9 +133,16 @@ class BlogGenerator:
             excl = f" Do NOT include {subject} itself (the article is about it)." if subject else ""
             body += (f"\n\nALSO extract every OTHER brand/product name mentioned in this article "
                      f"topic and include it with its domain:{excl}\nTopic: \"{seed}\"")
+        ctx = ""
+        if subject_category or subject:
+            who = f"{subject} ({subject_category})" if subject_category else subject
+            ctx = (f"\n\nIMPORTANT: these are competitors/alternatives to {who}. When a name is "
+                   "shared by multiple companies, choose the one operating in THAT SAME space — "
+                   "NOT a same-named company in an unrelated industry. Pick the domain whose "
+                   "product is actually a peer of the subject.")
         prompt = ("For each brand/product below, give its official homepage domain (bare, "
                   "no https://, no path). Include ONLY ones you are confident about; omit "
-                  "the rest.\n" + body +
+                  "the rest.\n" + body + ctx +
                   '\n\nReturn JSON only: {"domains": {"Name": "domain.com"}}')
         res = self.claude.call(prompt, max_tokens=400, temperature=0)
         dm = (res or {}).get("domains") if isinstance(res, dict) else None
@@ -174,22 +184,54 @@ class BlogGenerator:
         cached = cached if isinstance(cached, dict) else {}
         stored_domains = dict(cached)          # original (before model-resolution) — to detect new
         comp_names = _as_list(b.get("competitors"))
-        # Resolve domains for stored competitors missing one, AND extract any brand named
-        # in the seed/title (e.g. "Botric vs Profound" -> Profound) so it gets sourced even
-        # when it isn't a stored competitor yet.
+        seed_low = (seed or "").lower()
+
+        def _in_seed(nm):
+            nm = (nm or "").strip().lower()
+            return bool(nm) and nm in seed_low
+
+        # Resolve domains for: competitors missing a cached domain, PLUS any competitor
+        # named in the seed (re-resolve even if cached — a cached value for a seed-named
+        # brand is the most likely to be a stale wrong same-name guess, e.g. profound.com
+        # market-research cached for the AI-search Profound). The seed param also extracts
+        # brands the seed mentions that aren't stored competitors yet. Category-anchored so
+        # a same-named company in a different industry isn't picked.
+        to_resolve = [c for c in comp_names if (c not in cached) or _in_seed(c)]
         resolved = self._resolve_brand_domains(
-            [c for c in comp_names if c not in cached], seed=seed, subject=subject)
-        cached = {**resolved, **cached}
-        # seed-named brands (newly discovered, not already a stored competitor) get priority
-        # so the comparison target is always fetched before older stored competitors.
-        seed_named = [n for n in resolved
-                      if n not in comp_names and n.strip().lower() != subject.lower()]
-        for cn in seed_named + comp_names:
+            to_resolve, seed=seed, subject=subject, subject_category=b.get("category"))
+        # Seed-named / newly-extracted brands: fresh resolution WINS over any (stale) cache.
+        # Stored competitors not in the seed: cache wins; resolution only fills a gap.
+        for n, d in resolved.items():
+            if _in_seed(n) or n not in comp_names:
+                cached[n] = d
+            else:
+                cached.setdefault(n, d)
+        # Comparison/seed brands first (prioritized), then the rest — deduped.
+        seed_first = [n for n in resolved if (_in_seed(n) or n not in comp_names)
+                      and n.strip().lower() != subject.lower()]
+        ordered = []
+        for cn in seed_first + comp_names:
+            if cn not in ordered:
+                ordered.append(cn)
+        for cn in ordered:
             dom = (cached.get(cn) or "").strip()
             if dom:
                 targets.append((cn, dom, True))
-        # subject first, then seed-named, then stored competitors — capped
+        # subject first, then seed/comparison brands, then stored competitors — capped
         targets = targets[:_MAX_EVIDENCE_BRANDS]
+
+        # Topic terms for relevance validation: a competitor page must share some topical
+        # signal with the subject's space, not just contain the brand name — so a same-named
+        # off-topic site (profound.com market-research) is rejected in an AI-search compare.
+        _stop = {"with", "from", "that", "this", "your", "what", "best", "vs", "versus",
+                 "review", "reviews", "alternative", "alternatives", "compare", "comparison",
+                 "platform", "tool", "tools", "software", "company", "solution", "solutions",
+                 "pricing", "plan", "plans", "features", "free", "online", "service", "services"}
+        _topic_src = f"{b.get('category') or ''} {seed or ''}".lower()
+        topic_terms = {w for w in re.findall(r"[a-z]{4,}", _topic_src) if w not in _stop}
+        for _nm in [subject] + comp_names:           # drop brand-name tokens themselves
+            for w in re.findall(r"[a-z]{4,}", (_nm or "").lower()):
+                topic_terms.discard(w)
 
         validated = {}   # competitor label -> bare domain that fetched + validated this run
         for label, dom, validate in targets:
@@ -201,10 +243,25 @@ class BlogGenerator:
                 txt = _fetch(f"https://{dom}{path}")
                 if not txt:
                     continue
-                if validate and label.lower() not in txt.lower():
-                    continue   # wrong/parked domain — skip rather than mis-cite
                 if validate:
-                    validated[label] = dom
+                    low = txt.lower()
+                    if label.lower() not in low:
+                        continue   # wrong/parked domain — skip rather than mis-cite
+                    if label not in validated:
+                        # First page that names this competitor must also be on-topic —
+                        # rejects a same-named company in another industry. Once a domain
+                        # passes here, its other pages are accepted by name alone. Match on
+                        # whole words (a set intersection) — NOT substrings, or "search"
+                        # would spuriously match "re-search" on a market-research site.
+                        page_words = set(re.findall(r"[a-z]{4,}", low))
+                        # Require ≥2 distinct topic-word hits (or all, if fewer terms
+                        # exist) — a single generic word like "search" appears on a
+                        # market-research site too, so one match isn't enough to prove
+                        # it's the right same-named company.
+                        need = min(2, len(topic_terms))
+                        if topic_terms and len(topic_terms & page_words) < need:
+                            continue
+                        validated[label] = dom
                 blocks.append({"label": label, "url": f"https://{dom}{path}",
                                "text": txt[:_EVIDENCE_TEXT_CAP]})
 

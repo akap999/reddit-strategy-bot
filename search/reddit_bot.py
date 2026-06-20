@@ -699,7 +699,7 @@ class RedditSearchBot:
                 (datetime.utcnow() - timedelta(days=max_days_old)).timestamp()
             )
 
-        while len(results) < limit:
+        while len(results) < limit and page <= RedditSearchBot._MAX_PAGES:
             batch_size = min(100, limit - len(results))
             params = {
                 "size": batch_size,
@@ -789,8 +789,10 @@ class RedditSearchBot:
         results = []
         seen_ids = set()
         before_ts = None
+        pages = 0
 
-        while len(results) < limit:
+        while len(results) < limit and pages < RedditSearchBot._MAX_PAGES:
+            pages += 1
             batch_size = min(100, limit - len(results))
             params = {"query": keyword, "subreddit": subreddit, "limit": batch_size}
             if max_days_old:
@@ -991,11 +993,16 @@ class RedditSearchBot:
                 print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
                 continue
 
-            # Adaptive over-fetch: 5x when filters are active (they reject
-            # 60-80% of raw posts), 2x otherwise.
-            multiplier = 5 if has_strict_filters else 2
-            floor = 500 if has_strict_filters else 100
-            needed_raw = max((limit - len(filtered)) * multiplier, floor)
+            # Adaptive over-fetch, scaled to the requested limit (NOT a flat 500).
+            # Filters reject some raw posts, so fetch a multiple of what's still
+            # needed — but a flat floor of 500 made every filtered search paginate
+            # the slow Arctic/Pullpush legs to ~250-500 posts (≈20s) to return 40.
+            # 3× with a limit-scaled floor keeps ~2.5× headroom for rejection while
+            # cutting pagination to ~1-2 pages. Hard-capped so a huge limit can't
+            # blow it up.
+            multiplier = 4 if has_strict_filters else 2
+            floor = max(limit * 2, 100) if has_strict_filters else max(limit, 50)
+            needed_raw = min(max((limit - len(filtered)) * multiplier, floor), 250)
             try:
                 print(f"    Trying {api_name} API...", end=" ", flush=True)
 
@@ -1337,6 +1344,11 @@ class RedditSearchBot:
     # auto-expiring sibling of the 403 `_reddit_rss_dead` latch.
     _reddit_rss_cooldown_until = 0.0
     _RSS_COOLDOWN_SECS = 90
+
+    # Hard cap on pagination pages per leg (Pullpush/Arctic) — a latency backstop
+    # so a high needed_raw or a deep subreddit can never paginate the slow legs
+    # indefinitely. ~3 pages × 100 = up to ~300 raw, plenty for the over-fetch.
+    _MAX_PAGES = 3
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
         # Reddit API is the only data source for subscriber counts.

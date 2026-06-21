@@ -655,23 +655,25 @@ def _parse_comment_url(u):
     return (f"{host}{post_path}", comment_id)
 
 
-def _post_feed_present_comment_ids(post_url, timeout=15):
-    """Fetch a POST's comment RSS feed ONCE and return the set of comment ids present in it
-    (lowercased t1_<id> entries). Reddit's /r/<sub>/comments/<postid>/.rss returns up to ~100
-    comments in a single proxy-served response, so one fetch confirms many comments live at
-    once — the bulk-pre-pass signal the normal live-checker uses to avoid per-comment fetches.
+def _post_feed_scan(post_url, timeout=15):
+    """Fetch a POST's comment RSS feed ONCE and return
+    `(present_comment_ids | None, post_removed)`:
+      - present_comment_ids: lowercased t1_<id> comment ids that are LIVE in the feed
+        (removed/deleted comment shells excluded), or None when the feed can't be read.
+      - post_removed: True when the post's OWN t3_<postid> entry is a [removed]/[deleted]
+        shell (a removed POST keeps its comment tree, so the feed is still non-empty — the
+        post's own entry is the signal). False/None otherwise.
 
-    Returns None when the feed can't be read (non-200 / not XML) — caller treats that as
-    INCONCLUSIVE (fall back to per-comment checks), NOT 'all removed'. Absence of a specific id
-    from a readable feed is also inconclusive (feed caps at ~100 / deep nesting)."""
+    One fetch powers both the bulk live-confirm AND the orphaned-under-removed-post check."""
     import requests as _requests
     import re as _re
     import xml.etree.ElementTree as _ET
     if not post_url:
-        return None
-    m = _re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, _re.IGNORECASE)
+        return (None, False)
+    m = _re.search(r"(/r/[^/]+/comments/([a-z0-9]+))", post_url, _re.IGNORECASE)
     if not m:
-        return None
+        return (None, False)
+    pid = m.group(2).lower()
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
     rss_url = f"{base}{m.group(1)}/.rss"
@@ -682,25 +684,40 @@ def _post_feed_present_comment_ids(post_url, timeout=15):
                      "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
             timeout=timeout, proxies={"http": None, "https": None},
         )
+        if resp.status_code == 404:
+            return (None, True)   # post gone entirely
         if resp.status_code != 200 or not (resp.text or "").lstrip().startswith("<?xml"):
-            return None
+            return (None, False)
         root = _ET.fromstring(resp.text)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         present = set()
+        post_removed = False
         for e in root.findall("atom:entry", ns):
-            mm = _re.search(r"t1_(\w+)", (e.find("atom:id", ns).text or ""))
+            eid = (e.find("atom:id", ns).text or "")
+            if eid.lower() == f"t3_{pid}":
+                # The post's own entry — a [removed]/[deleted] shell means the post
+                # is gone, so every comment under it is effectively dead.
+                post_removed = _rss_entry_is_removed(e, ns)
+                continue
+            mm = _re.search(r"t1_(\w+)", eid)
             if not mm:
                 continue
-            # A removed/deleted comment still appears in the post feed as a
-            # blanked-out shell — don't count it as 'present/live'. Leaving it
-            # out drops it to the per-item permalink check, which marks it dead.
+            # A removed/deleted comment still appears as a blanked-out shell —
+            # don't count it as 'present/live'.
             if _rss_entry_is_removed(e, ns):
                 continue
             present.add(mm.group(1).lower())
-        return present
+        return (present, post_removed)
     except Exception as e:
         print(f"[POST-FEED-RSS] fetch failed for {post_url}: {e}", flush=True)
-        return None
+        return (None, False)
+
+
+def _post_feed_present_comment_ids(post_url, timeout=15):
+    """Backward-compatible wrapper around `_post_feed_scan` — returns just the set of
+    live comment ids present in the post feed (or None when unreadable)."""
+    present, _post_removed = _post_feed_scan(post_url, timeout=timeout)
+    return present
 
 
 def _reddit_comment_meta_via_rss(comment_url, timeout=15):
@@ -2999,6 +3016,21 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             else:
                 db.set_search_comment_live_check(item["id"])
 
+    def _resolve_live_or_orphaned(item, clean_url, via):
+        """A comment can be 'live' on its own permalink yet sit under a REMOVED
+        post (mod-removed posts keep their comment tree, so the comment shell
+        survives). That comment isn't surfaced in the sub → treat it as dead.
+        Confirms the parent post before accepting a 'live' verdict."""
+        nonlocal live, dead
+        src = item.get("source", "comment")
+        parent = _parse_comment_url(clean_url)[0]
+        if parent and _post_liveness_via_rss(parent) == "removed":
+            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (parent post gone; comment was {via}-live)", flush=True)
+            _mark_dead(item); dead += 1
+        else:
+            print(f"[{log_prefix}] #{item['id']} ({src}) LIVE ({via})", flush=True)
+            _mark_live(item); live += 1
+
     # =====================================================================
     # Bulk pre-pass for Live Subs comments. Many HQ threads have 4-8
     # comments under a single post; the per-item loop below would issue
@@ -3059,9 +3091,22 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         if len(group) < 2:
             continue  # singleton — per-item path handles it
         # Bulk pre-pass via the POST-LEVEL comment RSS (shared helper). One fetch returns up
-        # to ~100 comments under the post; any comment NOT found is left UNHANDLED so the
-        # per-item permalink check decides (distinguishes 'beyond the cap' from 'removed').
-        present_ids = _post_feed_present_comment_ids(post_url)
+        # to ~100 comments under the post AND the post's own removal state; any comment NOT
+        # found is left UNHANDLED so the per-item permalink check decides (distinguishes
+        # 'beyond the cap' from 'removed').
+        present_ids, post_removed = _post_feed_scan(post_url)
+        if post_removed:
+            # The PARENT POST is removed/deleted — every comment under it is dead
+            # (not surfaced in the sub), even though comment shells linger live.
+            print(f"[{log_prefix}] post removed → marking {len(group)} comment(s) dead: {post_url}", flush=True)
+            for item, _cid in group:
+                checked += 1
+                _mark_dead(item)
+                dead += 1
+                handled_ids.add(item["id"])
+                _emit_progress()
+            _time.sleep(0.5)
+            continue
         if present_ids is None:
             # Couldn't read the post feed — leave the whole group to the
             # per-item loop (which RSS-checks each comment individually).
@@ -3187,9 +3232,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         # inconclusive (None), fall through to the legacy JSON path.
         rss_verdict = _comment_liveness_via_rss(clean_url)
         if rss_verdict == "live":
-            print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (comment RSS)", flush=True)
-            _mark_live(item)
-            live += 1
+            # Live on its own permalink — but confirm the parent post isn't removed
+            # (a comment under a removed post is dead even though its shell lingers).
+            _resolve_live_or_orphaned(item, clean_url, "comment RSS")
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
@@ -3206,9 +3251,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         # 403 on cloud) JSON path, so a live comment isn't left unverified by a flaky proxy.
         pp_verdict = _comment_liveness_via_pullpush(clean_url)
         if pp_verdict == "live":
-            print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (PullPush archive — RSS unreachable)", flush=True)
-            _mark_live(item)
-            live += 1
+            _resolve_live_or_orphaned(item, clean_url, "PullPush archive — RSS unreachable")
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)

@@ -389,6 +389,27 @@ def _reddit_http_proxies():
     return {"http": p, "https": p}
 
 
+def _rss_entry_is_removed(entry, ns):
+    """True when an Atom comment <entry> is a removed/deleted SHELL.
+
+    Reddit keeps a comment's entry in both the permalink RSS and the post
+    comment RSS even after it's removed/deleted — it just blanks it out
+    (body '[removed]' or '[deleted]', author '[deleted]'). The liveness
+    checks key off id-presence, so without this they'd score these dead
+    comments as LIVE. Body is the reliable signal; a '[deleted]' author
+    corroborates."""
+    content_el = entry.find("atom:content", ns)
+    raw = (content_el.text or "") if content_el is not None else ""
+    text = re.sub(r"<[^>]+>", " ", raw)
+    text = re.sub(r"&[a-z#0-9]+;", " ", text)
+    text = " ".join(text.split()).strip().lower()
+    if text in ("[removed]", "[deleted]"):
+        return True
+    author_el = entry.find("atom:author/atom:name", ns)
+    author = (author_el.text or "").strip().lower() if author_el is not None else ""
+    return author in ("[deleted]", "/u/[deleted]", "u/[deleted]")
+
+
 def _comment_liveness_via_rss(comment_url, timeout=15):
     """Determine whether a specific Reddit comment is still live using
     its permalink RSS feed — the bypass for the JSON API being
@@ -452,7 +473,10 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
         for entry in root.findall("atom:entry", ns):
             eid = (entry.find("atom:id", ns).text or "")
             if cid in eid.lower():
-                return "live"
+                # Entry present — but Reddit keeps a removed/deleted comment
+                # in the feed as a blanked-out shell ([removed]/[deleted]
+                # body, '[deleted]' author). Don't score that as live.
+                return "removed" if _rss_entry_is_removed(entry, ns) else "live"
         # Feed parsed but our comment id isn't in it → removed/deleted.
         return "removed"
     except Exception as e:
@@ -619,8 +643,14 @@ def _post_feed_present_comment_ids(post_url, timeout=15):
         present = set()
         for e in root.findall("atom:entry", ns):
             mm = _re.search(r"t1_(\w+)", (e.find("atom:id", ns).text or ""))
-            if mm:
-                present.add(mm.group(1).lower())
+            if not mm:
+                continue
+            # A removed/deleted comment still appears in the post feed as a
+            # blanked-out shell — don't count it as 'present/live'. Leaving it
+            # out drops it to the per-item permalink check, which marks it dead.
+            if _rss_entry_is_removed(e, ns):
+                continue
+            present.add(mm.group(1).lower())
         return present
     except Exception as e:
         print(f"[POST-FEED-RSS] fetch failed for {post_url}: {e}", flush=True)

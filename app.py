@@ -291,6 +291,9 @@ def _cron_check_live_task(_task_id=None):
             "checked": res.get("checked"), "live": res.get("live"),
             "dead": res.get("dead"), "restored": res.get("restored"),
             "errors": res.get("errors"),
+            # Per-category breakdown (forbidden/rate_limited/timeout/...) so the
+            # Settings card can show WHY checks errored, not just the total.
+            "error_details": res.get("error_details") or {},
         }))
         bg.close()
     except Exception:
@@ -403,7 +406,10 @@ def _rss_entry_is_removed(entry, ns):
     text = re.sub(r"<[^>]+>", " ", raw)
     text = re.sub(r"&[a-z#0-9]+;", " ", text)
     text = " ".join(text.split()).strip().lower()
-    if text in ("[removed]", "[deleted]"):
+    # Comments read exactly '[deleted]'; a removed POST entry reads
+    # '[removed] submitted by /u/<author> [link] [comments]' — so match a
+    # leading marker, not only an exact string.
+    if text.startswith("[removed]") or text.startswith("[deleted]"):
         return True
     author_el = entry.find("atom:author/atom:name", ns)
     author = (author_el.text or "").strip().lower() if author_el is not None else ""
@@ -460,73 +466,113 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
         "User-Agent": REDDIT_USER_AGENT,
         "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
     }
-    try:
-        r = _requests.get(rss_url, headers=headers, timeout=timeout,
-                          proxies={"http": None, "https": None})
-        if r.status_code != 200:
-            return None
-        body = r.text or ""
-        if not body.lstrip().startswith("<?xml"):
-            return None
-        root = _ET.fromstring(body)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("atom:entry", ns):
-            eid = (entry.find("atom:id", ns).text or "")
-            if cid in eid.lower():
-                # Entry present — but Reddit keeps a removed/deleted comment
-                # in the feed as a blanked-out shell ([removed]/[deleted]
-                # body, '[deleted]' author). Don't score that as live.
-                return "removed" if _rss_entry_is_removed(entry, ns) else "live"
-        # Feed parsed but our comment id isn't in it → removed/deleted.
-        return "removed"
-    except Exception as e:
-        print(f"[COMMENT-RSS] liveness check failed for {comment_url}: {e}", flush=True)
-        return None
+    # Retry transient failures (non-200 / non-XML / network) before giving up.
+    # A single attempt that hiccups returns None → the caller falls to the
+    # cloud-IP-403 JSON path and counts an ERROR, even though the comment is
+    # perfectly readable on a retry. Honoring Retry-After (capped) handles 429.
+    import time as _t_rss
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = _requests.get(rss_url, headers=headers, timeout=timeout,
+                              proxies={"http": None, "https": None})
+            if r.status_code == 200:
+                body = r.text or ""
+                if body.lstrip().startswith("<?xml"):
+                    root = _ET.fromstring(body)
+                    ns = {"atom": "http://www.w3.org/2005/Atom"}
+                    for entry in root.findall("atom:entry", ns):
+                        eid = (entry.find("atom:id", ns).text or "")
+                        if cid in eid.lower():
+                            # Entry present — but Reddit keeps a removed/deleted
+                            # comment in the feed as a blanked-out shell
+                            # ([removed]/[deleted] body, '[deleted]' author).
+                            # Don't score that as live.
+                            return "removed" if _rss_entry_is_removed(entry, ns) else "live"
+                    # Feed parsed but our comment id isn't in it → removed.
+                    return "removed"
+                # 200 but not XML (challenge page) — retry.
+            # Non-200 (429/5xx/proxy hiccup) — back off and retry.
+            if attempt < 2:
+                wait = 2.0 * (attempt + 1)
+                try:
+                    ra = float(r.headers.get("Retry-After") or 0)
+                    if ra > 0:
+                        wait = min(ra, 5.0)
+                except (TypeError, ValueError):
+                    pass
+                _t_rss.sleep(wait)
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _t_rss.sleep(2.0 * (attempt + 1))
+    if last_err:
+        print(f"[COMMENT-RSS] liveness check failed for {comment_url}: {last_err}", flush=True)
+    return None
 
 
 def _post_liveness_via_rss(post_url, timeout=15):
     """Liveness check for a POST url via its comment RSS feed.
 
-    /r/<sub>/comments/<postid>/.rss returns Atom entries when the post
-    is live (the post itself + comments). A removed/deleted post
-    returns an empty feed (no entries) or a feed whose post entry body
-    is [removed]/[deleted].
+    /r/<sub>/comments/<postid>/.rss returns the post's own entry (t3_<postid>)
+    plus comment entries. A REMOVED/DELETED post keeps its comment tree (so the
+    feed is NOT empty) but its t3_ entry becomes a blanked-out shell
+    ('[removed]'/'[deleted]' body, '[deleted]' author) — so 'feed has entries =
+    live' is WRONG. We key off the post's own t3_ entry instead.
 
-    Returns 'live' / 'removed' / None(inconclusive).
+    Returns 'live' / 'removed' / None(inconclusive). Retries transient
+    failures (429 / proxy hiccup) so they don't read as inconclusive→error.
     """
     import requests as _requests
     import xml.etree.ElementTree as _ET
+    import time as _t_post
     if not post_url:
         return None
-    m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", post_url, re.IGNORECASE)
+    m = re.search(r"(/r/[^/]+/comments/([a-z0-9]+))", post_url, re.IGNORECASE)
     if not m:
         return None
+    post_path, pid = m.group(1), m.group(2).lower()
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    rss_url = f"{base}{m.group(1)}/.rss"
+    rss_url = f"{base}{post_path}/.rss"
     headers = {
         "User-Agent": REDDIT_USER_AGENT,
         "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
     }
-    try:
-        r = _requests.get(rss_url, params={"limit": 5}, headers=headers, timeout=timeout,
-                          proxies={"http": None, "https": None})
-        if r.status_code == 404:
-            return "removed"
-        if r.status_code != 200 or not (r.text or "").lstrip().startswith("<?xml"):
-            return None
-        root = _ET.fromstring(r.text)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        entries = root.findall("atom:entry", ns)
-        if not entries:
-            # Live posts return at least the post entry; an empty feed
-            # is a strong removed signal.
-            return "removed"
-        # Live: feed has entries. (We don't try to detect [removed]
-        # post bodies here — an empty feed is the reliable signal.)
-        return "live"
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            r = _requests.get(rss_url, params={"limit": 25}, headers=headers,
+                              timeout=timeout, proxies={"http": None, "https": None})
+            if r.status_code == 404:
+                return "removed"
+            if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
+                root = _ET.fromstring(r.text)
+                ns = {"atom": "http://www.w3.org/2005/Atom"}
+                entries = root.findall("atom:entry", ns)
+                if not entries:
+                    return "removed"
+                # The post's own entry carries the removal signal.
+                for e in entries:
+                    eid = (e.find("atom:id", ns).text or "").lower()
+                    if eid == f"t3_{pid}":
+                        return "removed" if _rss_entry_is_removed(e, ns) else "live"
+                # Post entry absent from its own feed → inconclusive; don't
+                # guess 'live' off the comment entries (that was the old bug).
+                return None
+            # Non-200 / non-XML — back off and retry.
+            if attempt < 2:
+                wait = 2.0 * (attempt + 1)
+                try:
+                    ra = float(r.headers.get("Retry-After") or 0)
+                    if ra > 0:
+                        wait = min(ra, 5.0)
+                except (TypeError, ValueError):
+                    pass
+                _t_post.sleep(wait)
+        except Exception:
+            if attempt < 2:
+                _t_post.sleep(2.0 * (attempt + 1))
+    return None
 
 
 def _comment_liveness_via_pullpush(comment_url, timeout=12):
@@ -3107,6 +3153,29 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             print(f"[{log_prefix}] Skipping #{item['id']} ({src}): not a comment URL: {clean_url}", flush=True)
             errors += 1
             error_details["bad_url"] += 1
+            continue
+
+        # POST url (no comment id) — e.g. HQ deliverables that are submissions,
+        # not comments. The comment-RSS logic can't classify these, so route
+        # them to the post-liveness check (which reads the post's own t3_ entry
+        # for a [removed]/[deleted] shell). A removed POST keeps its comment
+        # tree, so this must NOT fall through to the comment path.
+        _post_url_only, _cmt_id = _parse_comment_url(clean_url)
+        if not _cmt_id:
+            post_verdict = _post_liveness_via_rss(clean_url)
+            if post_verdict == "live":
+                print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (post RSS)", flush=True)
+                _mark_live(item); live += 1
+            elif post_verdict == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (post RSS — t3_ shell/absent)", flush=True)
+                _mark_dead(item); dead += 1
+            else:
+                print(f"[{log_prefix}] #{item['id']} ({src}) post liveness inconclusive", flush=True)
+                errors += 1
+                error_details["http_other"] += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
             continue
 
         # PRIMARY liveness check: comment-permalink RSS. Reddit's JSON

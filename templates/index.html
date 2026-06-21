@@ -11448,9 +11448,17 @@ async function checkLiveCronLoad() {
         const el = document.getElementById('clc-status');
         if (!el) return;
         const s = r.last_summary;
+        // Breakdown of the error bucket (forbidden/rate_limited/timeout/...) so
+        // it's clear WHY checks errored, not just the total.
+        const _errBreakdown = (s && s.error_details && Object.keys(s.error_details).length)
+            ? ' (' + Object.entries(s.error_details)
+                .filter(([, v]) => v > 0)
+                .map(([k, v]) => `${v} ${k.replace(/_/g, ' ')}`)
+                .join(', ') + ')'
+            : '';
         const lastLine = r.last_run
             ? `Last run: <b>${r.last_run} UTC</b>` + (s
-                ? ` · ${s.month ? s.month + ' · ' : ''}${s.clients ?? '?'} clients · ${s.checked ?? 0} checked · ${s.live ?? 0} live · ${s.dead ?? 0} dead · ${s.restored ?? 0} restored${s.errors ? ' · ' + s.errors + ' errors' : ''}`
+                ? ` · ${s.month ? s.month + ' · ' : ''}${s.clients ?? '?'} clients · ${s.checked ?? 0} checked · ${s.live ?? 0} live · ${s.dead ?? 0} dead · ${s.restored ?? 0} restored${s.errors ? ' · ' + s.errors + ' errors' + _errBreakdown : ''}`
                 : '')
             : 'Has not run yet.';
         if (r.running) {

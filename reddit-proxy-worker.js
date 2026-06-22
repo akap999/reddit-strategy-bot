@@ -1,19 +1,25 @@
-// Cloudflare Worker — Reddit API Proxy (v2: caching + serve-stale on 429)
-// Deploy: dash.cloudflare.com → Workers & Pages → create/edit Worker → paste → deploy.
-// Then set REDDIT_PROXY_URL on Railway to this Worker's URL.
+// Cloudflare Worker — Reddit API Proxy (v3: in-isolate cache + serve-stale on 429)
+// Deploy: dash.cloudflare.com → Workers & Pages → open your existing Worker →
+// Edit code → paste (replace all) → Deploy. URL stays the same, so REDDIT_PROXY_URL
+// on Railway is unchanged. No secrets, no KV, no custom domain needed.
 //
-// Why v2: Cloudflare Workers egress from SHARED Cloudflare IPs that Reddit
-// rate-limits collectively, so a heavy fan-out (many keywords × subs) 429-storms
-// anonymous requests. Reddit OAuth is NOT available for this project, so the
-// levers are: (1) CACHE responses so repeated sub-hits don't re-hit Reddit, and
-// (2) on a 429, retry once and otherwise SERVE A STALE cached copy instead of
-// propagating the 429. Both cut the effective request rate Reddit sees.
+// Why v3: this Worker runs on a *.workers.dev URL, where Cloudflare's Cache API
+// (caches.default) is a NO-OP. So we cache in a module-level Map that persists
+// across requests handled by the same isolate (best-effort, free, no limits).
+// Reddit OAuth is NOT available for this project, so the levers are: cache
+// responses (collapse repeat sub/query hits) and, on a 429, retry once then
+// SERVE A STALE cached copy instead of propagating the 429.
 
-const FRESH_TTL = 120;   // seconds a cached copy is considered "fresh"
-const STALE_TTL = 1800;  // seconds we keep a copy around to serve on 429 (stale-if-error)
+const FRESH_TTL = 120;    // seconds a cached copy is "fresh"
+const STALE_TTL = 1800;   // seconds we keep a copy to serve on 429 / 5xx
+const MAX_ENTRIES = 200;  // cap isolate memory (~200 × ≤400KB)
+const MAX_BODY = 400_000; // don't cache huge bodies
+
+// Module scope persists across requests in the same isolate (best-effort cache).
+const MEM = new Map(); // key -> { body, ct, ts }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request) {
     const url = new URL(request.url);
 
     // --- Resolve mode: follow redirects for /s/ short links, return final URL ---
@@ -36,18 +42,13 @@ export default {
       apiPath = apiPath.replace(/\/?(\?|$)/, ".json$1");
     }
     const redditUrl = "https://old.reddit.com" + apiPath;
-    const cache = caches.default;
-    // Cache key: the Worker URL+path (method GET). Identical sub/query requests
-    // across the app's many keyword fetches collapse to one upstream hit.
-    const cacheKey = new Request(url.toString(), { method: "GET" });
+    const key = apiPath;
+    const now = Date.now() / 1000;
 
-    // 1) Fresh cache hit → serve immediately (zero upstream load).
-    const cached = await cache.match(cacheKey);
-    if (cached) {
-      const age = parseInt(cached.headers.get("X-Proxy-Age-Epoch") || "0", 10);
-      if (age && Date.now() / 1000 - age < FRESH_TTL) {
-        return withHeader(cached, "X-Proxy-Cache", "HIT");
-      }
+    // 1) Fresh in-isolate hit → serve immediately (zero upstream load).
+    const entry = MEM.get(key);
+    if (entry && now - entry.ts < FRESH_TTL) {
+      return respond(entry.body, entry.ct, 200, "HIT");
     }
 
     // 2) Fetch upstream (retry once on 429, honoring a small Retry-After).
@@ -66,9 +67,9 @@ export default {
       await sleep(Math.min(ra > 0 ? ra * 1000 : 1500, 3000));
     }
 
-    // 3) On 429/5xx: serve a STALE cached copy if we have one (better than failing).
-    if ((resp.status === 429 || resp.status >= 500) && cached) {
-      return withHeader(cached, "X-Proxy-Cache", "STALE");
+    // 3) On 429/5xx: serve a STALE cached copy if we have one within STALE_TTL.
+    if ((resp.status === 429 || resp.status >= 500) && entry && now - entry.ts < STALE_TTL) {
+      return respond(entry.body, entry.ct, 200, "STALE");
     }
 
     const body = await resp.text();
@@ -77,36 +78,30 @@ export default {
     const isXml = body.trimStart().startsWith("<?xml");
     const outCT = isJson ? "application/json" : (isXml ? "application/atom+xml" : ct || "application/json");
 
-    const out = new Response(body, {
-      status: resp.status,
-      headers: {
-        "Content-Type": outCT,
-        "Access-Control-Allow-Origin": "*",
-        "X-Proxy-Original-CT": ct,
-        "X-Proxy-Cache": "MISS",
-        // Stamp time + a long s-maxage so cache.match keeps a stale copy for STALE_TTL.
-        "X-Proxy-Age-Epoch": String(Math.floor(Date.now() / 1000)),
-        "Cache-Control": `public, max-age=${STALE_TTL}`,
-      },
-    });
-
-    // 4) Cache only successful, real payloads (don't cache 429/HTML challenge pages).
-    if (resp.status === 200 && (isJson || isXml)) {
-      ctx.waitUntil(cache.put(cacheKey, out.clone()));
+    // 4) Cache only successful, real payloads (skip 429/HTML challenge/huge bodies).
+    if (resp.status === 200 && (isJson || isXml) && body.length <= MAX_BODY) {
+      MEM.delete(key);                       // move to most-recent (LRU-ish)
+      MEM.set(key, { body, ct: outCT, ts: now });
+      if (MEM.size > MAX_ENTRIES) MEM.delete(MEM.keys().next().value); // evict oldest
     }
-    return out;
+    return respond(body, outCT, resp.status, "MISS");
   },
 };
 
+function respond(body, ct, status, cacheState) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": ct,
+      "Access-Control-Allow-Origin": "*",
+      "X-Proxy-Cache": cacheState,
+    },
+  });
+}
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
   });
-}
-function withHeader(resp, k, v) {
-  const r = new Response(resp.body, resp);
-  r.headers.set(k, v);
-  return r;
 }
 function sleep(ms) { return new Promise((res) => setTimeout(res, ms)); }

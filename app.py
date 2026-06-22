@@ -7292,10 +7292,14 @@ def api_search_reddit():
 
         def _finish(res):
             # Cache the assembled result so an identical request is consistent for
-            # the TTL. Don't cache empty results — a transient total failure
-            # shouldn't be frozen. A force_refresh run still UPDATES the cache.
+            # the TTL — but only when it looks HEALTHY. A starved/partial run (a
+            # handful of posts from a throttled fetch) must NOT be frozen for 10
+            # min, or the user is stuck re-seeing 1–4 results. force_refresh still
+            # updates the cache.
             try:
-                if res and res.get("results"):
+                results = (res or {}).get("results") or []
+                lim = min(data.get("limit", 50), 200)
+                if len(results) >= min(lim, 10):
                     with _search_result_cache_lock:
                         _SEARCH_RESULT_CACHE[_req_sig] = (time.time(), res)
             except Exception:

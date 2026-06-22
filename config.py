@@ -81,3 +81,7 @@ FILLER_LEAD_DAYS = 3      # filler posts lead brand posts by this many days
 # --- Reddit ---
 REDDIT_USER_AGENT = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
 REDDIT_PROXY_URL = os.environ.get("REDDIT_PROXY_URL", "")  # Cloudflare Worker URL for Reddit proxy
+# Optional: Brave Search API key. When set, Live Search adds a `site:reddit.com`
+# discovery fallback leg (independent of Reddit's rate limits). No-op when unset.
+# Free key: https://brave.com/search/api
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")

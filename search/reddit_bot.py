@@ -134,7 +134,11 @@ class RedditSearchBot:
             "reddit": reddit_base or "https://www.reddit.com",
             "pullpush": "https://api.pullpush.io/reddit/search/submission",
             "arctic": "https://arctic-shift.photon-reddit.com/api/posts/search",
+            "brave": "https://api.search.brave.com/res/v1/web/search",
         }
+        # Optional Brave Search key — enables the `site:reddit.com` discovery
+        # fallback leg. No key → the leg is skipped entirely.
+        self.brave_key = os.environ.get("BRAVE_API_KEY", "")
         # Remember whether a proxy is in use — drives the
         # old.reddit.com fallback in _make_request.
         self.using_proxy = bool(reddit_base)
@@ -569,6 +573,11 @@ class RedditSearchBot:
         }
 
     def _search_reddit_rss(self, keyword, subreddit_path, sort, time_filter, limit):
+        """Concurrency-gated entry for Reddit RSS (see `_rss_sem`)."""
+        with RedditSearchBot._rss_sem:
+            return self._search_reddit_rss_impl(keyword, subreddit_path, sort, time_filter, limit)
+
+    def _search_reddit_rss_impl(self, keyword, subreddit_path, sort, time_filter, limit):
         """Reddit RSS search — the bypass for the IP/UA bot wall on
         the JSON endpoints. Hits /r/<sub>/search.rss when a sub is
         provided, /search.rss for global queries. Multi-sub (a+b+c)
@@ -696,6 +705,14 @@ class RedditSearchBot:
 
     def _search_pullpush(self, keyword, subreddit, sort_by, max_days_old, limit,
                          sort_order="desc"):
+        """Concurrency-gated entry for Pullpush — bounds total concurrent
+        Pullpush requests across all threads (see `_pullpush_sem`)."""
+        with RedditSearchBot._pullpush_sem:
+            return self._search_pullpush_impl(keyword, subreddit, sort_by,
+                                              max_days_old, limit, sort_order=sort_order)
+
+    def _search_pullpush_impl(self, keyword, subreddit, sort_by, max_days_old, limit,
+                              sort_order="desc"):
         """Pullpush.io with timestamp-based pagination — can exceed 100 results."""
         results = []
         seen_ids = set()
@@ -751,13 +768,11 @@ class RedditSearchBot:
                     response = self._make_request(self.apis["pullpush"], params)
                     data = response.json()
                 except Exception as e2:
-                    # Retries exhausted — cool the Pullpush leg down so subsequent
-                    # searches skip it instead of paying this same slow/throttled
-                    # round-trip again.
-                    RedditSearchBot._pullpush_cooldown_until = (
-                        time.time() + RedditSearchBot._PULLPUSH_COOLDOWN_SECS)
-                    print(f"    pullpush page retry failed ({e2.__class__.__name__}); keeping {len(results)} "
-                          f"— cooling down pullpush {RedditSearchBot._PULLPUSH_COOLDOWN_SECS}s")
+                    # Retries exhausted on this page — keep what we have and stop
+                    # paginating. (No leg-wide cooldown: on cloud IPs that removed
+                    # Pullpush as a fallback for the whole search and starved heavy
+                    # multi-sub searches. The global semaphore already bounds load.)
+                    print(f"    pullpush page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
                     break
 
             posts = data.get("data", [])
@@ -793,6 +808,15 @@ class RedditSearchBot:
         return results
 
     def _search_arctic(self, keyword, subreddit, max_days_old, limit):
+        """Concurrency-gated entry for Arctic — bounds total concurrent Arctic
+        requests across all threads (see `_arctic_sem`) so a big keyword×sub
+        fan-out queues into safe waves instead of 429-storming."""
+        if not subreddit:
+            return []
+        with RedditSearchBot._arctic_sem:
+            return self._search_arctic_impl(keyword, subreddit, max_days_old, limit)
+
+    def _search_arctic_impl(self, keyword, subreddit, max_days_old, limit):
         """Arctic-Shift API with timestamp-based pagination.
 
         NOTE: Arctic-Shift requires a subreddit filter when using text search.
@@ -863,6 +887,84 @@ class RedditSearchBot:
 
         return results
 
+    def _search_brave(self, keyword, subreddits, limit, max_days_old=None):
+        """Discovery fallback via the Brave Search API (`site:reddit.com`).
+
+        INDEPENDENT of Reddit's rate limits — returns Reddit post URLs from Brave's
+        web index. URL + title + snippet only (NO score / num_comments), so brave
+        posts are tagged `_source="brave"` and treated like RSS posts by the filters.
+        No key → []; any error → [] (never breaks the cascade)."""
+        if not self.brave_key or not (keyword or "").strip():
+            return []
+        # Map the day window to Brave's coarse freshness buckets.
+        freshness = None
+        if max_days_old:
+            if max_days_old <= 1:
+                freshness = "pd"
+            elif max_days_old <= 7:
+                freshness = "pw"
+            elif max_days_old <= 31:
+                freshness = "pm"
+            elif max_days_old <= 366:
+                freshness = "py"
+        want_subs = {str(s).strip().lower() for s in (subreddits or []) if str(s).strip()}
+        headers = {"X-Subscription-Token": self.brave_key,
+                   "Accept": "application/json", "Accept-Encoding": "gzip"}
+        results = []
+        seen = set()
+        url_re = re.compile(r"reddit\.com/r/([^/]+)/comments/([a-z0-9]+)", re.IGNORECASE)
+        try:
+            for page in range(2):  # ≤2 pages (free tier is rate-limited)
+                if len(results) >= limit:
+                    break
+                params = {"q": f"site:reddit.com {keyword}", "count": 20, "offset": page}
+                if freshness:
+                    params["freshness"] = freshness
+                resp = requests.get(self.apis["brave"], params=params, headers=headers,
+                                    timeout=15, proxies={"http": None, "https": None})
+                if resp.status_code != 200:
+                    print(f"    Brave search returned {resp.status_code}", flush=True)
+                    break
+                web = (resp.json() or {}).get("web") or {}
+                hits = web.get("results") or []
+                if not hits:
+                    break
+                for h in hits:
+                    u = (h.get("url") or "").strip()
+                    m = url_re.search(u)
+                    if not m:
+                        continue
+                    sub, pid = m.group(1), m.group(2).lower()
+                    if want_subs and sub.lower() not in want_subs:
+                        continue
+                    if pid in seen:
+                        continue
+                    seen.add(pid)
+                    # Brave's page_age is an ISO date when present; best-effort epoch.
+                    ts = 0
+                    page_age = h.get("page_age") or h.get("age")
+                    if page_age:
+                        try:
+                            ts = int(datetime.strptime(page_age[:10], "%Y-%m-%d").timestamp())
+                        except (ValueError, TypeError):
+                            ts = 0
+                    results.append({
+                        "id": pid, "subreddit": sub,
+                        "title": (h.get("title") or "").strip(),
+                        "url": f"https://www.reddit.com/r/{sub}/comments/{pid}/",
+                        "text": (h.get("description") or "").strip(),
+                        "score": 0, "comments": 0, "num_comments": 0,
+                        "timestamp": ts, "author": "", "_source": "brave",
+                    })
+                if len(hits) < 20:
+                    break
+                time.sleep(1.1)  # free tier ~1 req/s
+        except Exception as e:
+            print(f"    Brave search failed: {e}", flush=True)
+            return []
+        print(f"(brave: {len(results)} reddit posts)", end=" ", flush=True)
+        return results[:limit]
+
     # ------------------------------------------------------------------
     # Public search interface
     # ------------------------------------------------------------------
@@ -888,7 +990,14 @@ class RedditSearchBot:
         db=None,
         db_path=None,
         force_refresh=False,
+        keywords=None,
     ):
+        # `keywords` (optional): the ORIGINAL term list when `keyword` is a
+        # combined boolean-OR query. OR-capable legs (RSS/JSON) use the combined
+        # `keyword` (one query per sub — collapses the N×M fan-out to M). Arctic
+        # ignores boolean OR, so it fans out per-term — but bounded by a global
+        # call budget so a big keyword×sub combo can't 429-storm it.
+        _terms = [t for t in (keywords or []) if str(t).strip()]
         """
         Search Reddit for posts matching the given criteria.
 
@@ -990,6 +1099,11 @@ class RedditSearchBot:
         if api == "auto":
             apis_to_try = (["reddit", "arctic", "pullpush"] if subreddit_path
                            else ["reddit", "pullpush", "arctic"])
+            # Brave (site:reddit.com) is a DISCOVERY FALLBACK — last, and only when
+            # a key is set. The early-stop means it runs only if the metadata-rich
+            # legs underfill, so it adds no latency to the common case.
+            if self.brave_key:
+                apis_to_try.append("brave")
         else:
             apis_to_try = [api]
         filtered = []   # only posts that pass all filters
@@ -1017,10 +1131,6 @@ class RedditSearchBot:
             if api_name == "reddit" and time.time() < RedditSearchBot._reddit_rss_cooldown_until:
                 left = int(RedditSearchBot._reddit_rss_cooldown_until - time.time())
                 print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
-                continue
-            if api_name == "pullpush" and time.time() < RedditSearchBot._pullpush_cooldown_until:
-                left = int(RedditSearchBot._pullpush_cooldown_until - time.time())
-                print(f"    Skipping pullpush API (recently 429'd — cooling down {left}s)", flush=True)
                 continue
 
             # Adaptive over-fetch, scaled to the requested limit (NOT a flat 500).
@@ -1108,66 +1218,48 @@ class RedditSearchBot:
                             needed_raw, sort_order=sort_order,
                         )
                 elif api_name == "arctic":
+                    # Resolve the sub list (explicit, or discovered from prior legs
+                    # for a global search) and the TERM list (original terms when a
+                    # combined-OR query was passed, since Arctic ignores boolean OR).
                     if subreddit_path and "+" not in subreddit_path:
-                        # Single subreddit — query directly
-                        batch = self._search_arctic(
-                            keyword, subreddit_path, max_days_old, needed_raw
-                        )
-                    elif not subreddit_path:
-                        # Global search — discover subreddits from prior
-                        # results, then query Arctic-Shift per subreddit in parallel.
-                        discovered_subs = {}
-                        sub_counts = {}
-                        for post in filtered:
-                            sub = post.get("subreddit", "")
-                            if sub:
-                                key = sub.lower()
-                                discovered_subs[key] = sub
-                                sub_counts[key] = sub_counts.get(key, 0) + 1
-                        top_subs = sorted(
-                            sub_counts, key=sub_counts.get, reverse=True
-                        )[:10]
-
-                        batch = []
-                        per_sub = max(needed_raw // max(len(top_subs), 1), 50)
-                        if top_subs:
-                            # Arctic-Shift 429s ("Too many complex queries")
-                            # past ~5 concurrent. Cap at 4 — slightly
-                            # tighter than Pullpush since its rate limit is
-                            # stricter and complex queries (text + sub
-                            # filter) trigger it faster.
-                            with ThreadPoolExecutor(max_workers=min(len(top_subs), 4)) as ex:
-                                futures = [
-                                    ex.submit(self._search_arctic,
-                                              keyword, discovered_subs[sub_key],
-                                              max_days_old, per_sub)
-                                    for sub_key in top_subs
-                                ]
-                                for f in as_completed(futures):
-                                    try:
-                                        batch.extend(f.result() or [])
-                                    except Exception as e:
-                                        print(f"    per-sub fetch error (arctic-global): {e}")
-                            print(f"(queried {len(top_subs)} subs) ", end="")
+                        arctic_subs = [subreddit_path]
+                    elif subreddit_path:
+                        arctic_subs = [s.strip() for s in subreddit_path.split("+") if s.strip()]
                     else:
-                        # Multi-sub path (a+b+c) — query each individually in parallel.
-                        # Cap at 4 (was 8) — Arctic rate-limit. See
-                        # discover-global branch above for rationale.
-                        subs = [s.strip() for s in subreddit_path.split("+")
-                                if s.strip()]
-                        batch = []
-                        per_sub = max(needed_raw // max(len(subs), 1), 50)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 4)) as ex:
+                        sub_counts, disc = {}, {}
+                        for post in filtered:
+                            s = (post.get("subreddit") or "")
+                            if s:
+                                k = s.lower(); disc[k] = s; sub_counts[k] = sub_counts.get(k, 0) + 1
+                        arctic_subs = [disc[k] for k in
+                                       sorted(sub_counts, key=sub_counts.get, reverse=True)[:10]]
+                    arctic_terms = _terms if _terms else [keyword]
+                    # (sub, term) work-list, term-outer so EVERY sub is covered by the
+                    # first term(s); capped at a global budget so a big keyword×sub
+                    # combo can't 429-storm Arctic (it's a bounded supplement — RSS's
+                    # combined-OR query already covers all terms across all subs).
+                    _ARCTIC_BUDGET = max(limit, 30)
+                    pairs = [(sub, term) for term in arctic_terms for sub in arctic_subs][:_ARCTIC_BUDGET]
+                    batch = []
+                    if pairs:
+                        per_pair = max(needed_raw // max(len(pairs), 1), 25)
+                        with ThreadPoolExecutor(max_workers=min(len(pairs), 4)) as ex:
                             futures = [
-                                ex.submit(self._search_arctic,
-                                          keyword, sub, max_days_old, per_sub)
-                                for sub in subs
+                                ex.submit(self._search_arctic, term, sub, max_days_old, per_pair)
+                                for (sub, term) in pairs
                             ]
                             for f in as_completed(futures):
                                 try:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
-                                    print(f"    per-sub fetch error (arctic): {e}")
+                                    print(f"    per-pair fetch error (arctic): {e}")
+                        if len(arctic_terms) > 1 or not subreddit_path:
+                            print(f"(arctic {len(pairs)} sub×term queries) ", end="")
+                elif api_name == "brave":
+                    # One Brave query; filter to the requested subs client-side.
+                    brave_subs = ([s.strip() for s in subreddit_path.split("+") if s.strip()]
+                                  if subreddit_path else None)
+                    batch = self._search_brave(keyword, brave_subs, needed_raw, max_days_old)
                 else:
                     batch = []
 
@@ -1191,7 +1283,10 @@ class RedditSearchBot:
                     # 0/False). Skip those four filters for RSS posts so
                     # a min_comments=1 default doesn't reject 100% of
                     # them. Pullpush/Arctic posts keep full filtering.
-                    is_rss = post.get("_source") == "reddit_rss"
+                    # RSS and Brave posts carry no score/comments/nsfw/ratio
+                    # metadata — skip those filters for them (else a min_comments=1
+                    # default would reject 100%). Pullpush/Arctic keep full filtering.
+                    is_rss = post.get("_source") in ("reddit_rss", "brave")
                     if not is_rss:
                         if post["comments"] < min_comments:
                             rej["min_comments"] += 1
@@ -1391,6 +1486,16 @@ class RedditSearchBot:
     # so a high needed_raw or a deep subreddit can never paginate the slow legs
     # indefinitely. ~3 pages × 100 = up to ~300 raw, plenty for the over-fetch.
     _MAX_PAGES = 3
+
+    # GLOBAL per-host concurrency caps (shared across ALL keyword/sub threads of
+    # ALL in-flight searches). The nested keyword-pool × sub-pool executors can
+    # otherwise fire ~20 concurrent Arctic requests — well past Arctic's ~5
+    # limit → a 429-storm that returns almost nothing. These semaphores bound
+    # total concurrent requests per host so a big keyword×sub fan-out queues into
+    # safe waves instead of storming.
+    _arctic_sem = threading.Semaphore(4)
+    _pullpush_sem = threading.Semaphore(6)
+    _rss_sem = threading.Semaphore(3)
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
         # Reddit API is the only data source for subscriber counts.

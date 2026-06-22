@@ -3391,6 +3391,18 @@ Return JSON only:
             raise ValueError("Post not found for HQ root")
         brand = self.db.get_brand(root["brand_id"]) if root.get("brand_id") else None
         if not brand:
+            # Canonical resolution chain (same as the report flow's
+            # _resolve_post_brand): the post's OWN brand_id, then a
+            # single-brand post_brands junction. Reported / older HQ roots
+            # often have a NULL comment brand_id with the brand recorded on
+            # posts.brand_id — the old junction-only lookup missed those and
+            # raised "No brand found for HQ root's post".
+            resolved = self.db._resolve_post_brand(root["id"], "comment")
+            if resolved:
+                brand = self.db.get_brand(resolved)
+        if not brand:
+            # Last resort: first brand on a multi-brand junction (which
+            # _resolve_post_brand intentionally leaves ambiguous).
             brands = self.db.get_brands_for_post(post["id"])
             brand = brands[0] if brands else None
         if not brand:
@@ -3612,6 +3624,15 @@ Return JSON only:
         subreddit = self.db.get_subreddit(post["subreddit_id"])
         brand_for_avoid = None
         brands = self.db.get_brands_for_post(post["id"])
+        if not brands:
+            # Same canonical fallback as add_replies_to_hq_cluster: reported /
+            # older posts may carry their brand on posts.brand_id rather than
+            # the post_brands junction, so the junction-only lookup returns [].
+            resolved = self.db._resolve_post_brand(root["id"], "comment")
+            if resolved:
+                rb = self.db.get_brand(resolved)
+                if rb:
+                    brands = [rb]
         if brands:
             brand_for_avoid = brands[0]
         all_brand_names = [b["name"] for b in brands] or [""]

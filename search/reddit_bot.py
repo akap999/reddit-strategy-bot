@@ -73,15 +73,24 @@ def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=None):
     if max_per_sub is not None:
         per_sub = min(per_sub, max_per_sub)
 
+    # Deterministic rank: highest score first, ties broken by post id — so the
+    # output depends ONLY on the input SET, never on the (concurrent, jittered)
+    # order the posts were collected in. This is what stops the result count /
+    # selection from drifting run-to-run.
+    def _rank(p):
+        return (-(p.get("score") or 0), str(p.get("id") or ""))
+
     by_sub = {}
     for p in posts:
         key = (p.get("subreddit") or "").lower()
         by_sub.setdefault(key, []).append(p)
+    for sub in by_sub:
+        by_sub[sub].sort(key=_rank)
 
     result = []
     leftover = []
     taken = {}
-    for sub in by_sub:
+    for sub in sorted(by_sub):          # fixed sub order, not input-appearance order
         head = by_sub[sub][:per_sub]
         result.extend(head)
         taken[sub] = len(head)
@@ -91,7 +100,7 @@ def balance_posts_by_subreddit(posts, limit, subreddits, max_per_sub=None):
     # optional hard cap (no cap by default, so we fill all the way to `limit`).
     remaining = limit - len(result)
     if remaining > 0 and leftover:
-        leftover.sort(key=lambda x: x.get("score", 0), reverse=True)
+        leftover.sort(key=_rank)
         cap = max_per_sub if max_per_sub is not None else float("inf")
         for p in leftover:
             if remaining <= 0:
@@ -742,7 +751,13 @@ class RedditSearchBot:
                     response = self._make_request(self.apis["pullpush"], params)
                     data = response.json()
                 except Exception as e2:
-                    print(f"    pullpush page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
+                    # Retries exhausted — cool the Pullpush leg down so subsequent
+                    # searches skip it instead of paying this same slow/throttled
+                    # round-trip again.
+                    RedditSearchBot._pullpush_cooldown_until = (
+                        time.time() + RedditSearchBot._PULLPUSH_COOLDOWN_SECS)
+                    print(f"    pullpush page retry failed ({e2.__class__.__name__}); keeping {len(results)} "
+                          f"— cooling down pullpush {RedditSearchBot._PULLPUSH_COOLDOWN_SECS}s")
                     break
 
             posts = data.get("data", [])
@@ -965,7 +980,18 @@ class RedditSearchBot:
         )
         excluded_set = {s.lower() for s in (excluded_subreddits or [])}
 
-        apis_to_try = ["reddit", "pullpush", "arctic"] if api == "auto" else [api]
+        # Cascade order. For SUB-SCOPED searches, run Arctic BEFORE Pullpush:
+        # Arctic queries the named subs directly, is fast, and fills the limit —
+        # so the early-stop then skips Pullpush, which is slow and frequently
+        # returns 0 for niche subs (measured: 12 dead Pullpush calls = 73s wasted
+        # on a 4kw×3sub search). For GLOBAL (no-sub) searches keep Pullpush first,
+        # because Arctic's global mode needs a prior leg's results to discover
+        # which subs to query.
+        if api == "auto":
+            apis_to_try = (["reddit", "arctic", "pullpush"] if subreddit_path
+                           else ["reddit", "pullpush", "arctic"])
+        else:
+            apis_to_try = [api]
         filtered = []   # only posts that pass all filters
         seen_ids = set()
 
@@ -991,6 +1017,10 @@ class RedditSearchBot:
             if api_name == "reddit" and time.time() < RedditSearchBot._reddit_rss_cooldown_until:
                 left = int(RedditSearchBot._reddit_rss_cooldown_until - time.time())
                 print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
+                continue
+            if api_name == "pullpush" and time.time() < RedditSearchBot._pullpush_cooldown_until:
+                left = int(RedditSearchBot._pullpush_cooldown_until - time.time())
+                print(f"    Skipping pullpush API (recently 429'd — cooling down {left}s)", flush=True)
                 continue
 
             # Adaptive over-fetch, scaled to the requested limit (NOT a flat 500).
@@ -1310,6 +1340,10 @@ class RedditSearchBot:
         }
         if sort_by in sort_key_map:
             key = sort_key_map[sort_by]
+            # Deterministic tiebreaker: stable two-pass sort — first by id, then
+            # by the requested key — so equal-key posts always resolve the same
+            # way regardless of the order they were collected in.
+            filtered.sort(key=lambda x: str(x.get("id") or ""))
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
         # Equal distribution across subreddits when multiple are searched
@@ -1344,6 +1378,14 @@ class RedditSearchBot:
     # auto-expiring sibling of the 403 `_reddit_rss_dead` latch.
     _reddit_rss_cooldown_until = 0.0
     _RSS_COOLDOWN_SECS = 90
+
+    # Same idea for Pullpush: it frequently 429s / returns nothing for niche subs
+    # and grinds through retries (measured ~2-11s per dead call). When a call
+    # exhausts its retries on 429, cool the leg down so subsequent searches skip
+    # it instead of paying that latency again. Auto-expires; healthy Pullpush
+    # never trips it.
+    _pullpush_cooldown_until = 0.0
+    _PULLPUSH_COOLDOWN_SECS = 90
 
     # Hard cap on pagination pages per leg (Pullpush/Arctic) — a latency backstop
     # so a high needed_raw or a deep subreddit can never paginate the slow legs
@@ -1962,6 +2004,7 @@ class RedditSearchBot:
                             all_results.append(post)
                 except Exception as e:
                     print(f"    cascade fallback merge error: {e}")
+        all_results.sort(key=lambda x: str(x.get("id") or ""))
         all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         return balance_posts_by_subreddit(all_results, limit, subreddits)
 
@@ -2043,7 +2086,10 @@ class RedditSearchBot:
                 if i < len(keywords) - 1:
                     time.sleep(delay)
 
-        all_results.sort(key=lambda x: x["score"], reverse=True)
+        # Deterministic merge order (score desc, id) so the cross-keyword union
+        # doesn't depend on which keyword's thread finished first (as_completed).
+        all_results.sort(key=lambda x: str(x.get("id") or ""))
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
         return all_results
 
     @staticmethod

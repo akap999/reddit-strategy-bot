@@ -7211,6 +7211,43 @@ def api_search_reddit_debug_search():
     })
 
 
+# Endpoint-level Live Search result cache. Keyed by the REQUEST (the brand for
+# auto-brand — NOT the LLM-generated keywords — plus keyword(s) + subs + filters +
+# limit), so an identical search returns the byte-identical result for the TTL.
+# This is the determinism guarantee: it masks every run-to-run nondeterminism
+# source (auto-brand keyword churn, concurrent merge order, RSS-cooldown leg
+# toggling, jitter, filter-fetch flakiness) that the per-keyword bot cache can't.
+_SEARCH_RESULT_CACHE = {}      # signature -> (timestamp, result dict)
+_SEARCH_RESULT_TTL = 600       # 10 minutes
+_search_result_cache_lock = threading.Lock()
+
+
+def _search_request_signature(data):
+    """Stable cache key from the request body — the search SUBJECT plus all
+    result-affecting filters. Auto-brand keys on the brand id (so regenerated
+    keywords don't change the key); explicit keyword(s) key on their text."""
+    kw = (data.get("keyword") or "").strip().lower()
+    kws = data.get("keywords") or []
+    if data.get("auto_brand"):
+        subject = f"brand:{data.get('auto_brand')}"
+    elif kws:
+        subject = "kws:" + "|".join(sorted(str(k).strip().lower() for k in kws if str(k).strip()))
+    else:
+        subject = f"kw:{kw}"
+    return json.dumps({
+        "subject": subject,
+        "subreddit": (data.get("subreddit") or "").strip().lower(),
+        "subs": sorted((s or "").strip().lower() for s in (data.get("subreddits") or [])),
+        "excl": sorted((s or "").strip().lower() for s in (data.get("excluded_subreddits") or [])),
+        "minc": data.get("min_comments", 0), "mins": data.get("min_score", 0),
+        "days": data.get("max_days_old"), "sort": data.get("sort_by", "relevance"),
+        "order": data.get("sort_order", "desc"), "limit": min(data.get("limit", 50), 200),
+        "nsfw": data.get("nsfw"), "ratio": data.get("min_upvote_ratio"),
+        "maxsub": data.get("max_subscribers"), "minsub": data.get("min_subscribers"),
+        "scrut": data.get("max_scrutiny"),
+    }, sort_keys=True, default=str)
+
+
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
     """Run a Reddit keyword search via RedditSearchBot (background task).
@@ -7228,7 +7265,19 @@ def api_search_reddit():
     if not keyword and not keywords_list and not auto_brand:
         return jsonify({"error": "keyword, keywords, or auto_brand is required"}), 400
 
+    _force_refresh = bool(data.get("force_refresh"))
+    _req_sig = _search_request_signature(data)
+
     def task():
+        # Endpoint-level cache: an identical request returns the SAME result for
+        # the TTL — the determinism guarantee (see the cache comment above).
+        if not _force_refresh:
+            with _search_result_cache_lock:
+                hit = _SEARCH_RESULT_CACHE.get(_req_sig)
+                if hit and (time.time() - hit[0]) < _SEARCH_RESULT_TTL:
+                    print(f"    ↩ search result cache hit ({len(hit[1].get('results') or [])} posts)", flush=True)
+                    return hit[1]
+
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
         # Pass the project's script-style UA so Reddit treats the
         # search bot identically to every other Reddit call in the
@@ -7240,6 +7289,19 @@ def api_search_reddit():
         )
         task_db = Database(DB_PATH)
         task_db.connect()
+
+        def _finish(res):
+            # Cache the assembled result so an identical request is consistent for
+            # the TTL. Don't cache empty results — a transient total failure
+            # shouldn't be frozen. A force_refresh run still UPDATES the cache.
+            try:
+                if res and res.get("results"):
+                    with _search_result_cache_lock:
+                        _SEARCH_RESULT_CACHE[_req_sig] = (time.time(), res)
+            except Exception:
+                pass
+            return res
+
         try:
             requested_limit = min(data.get("limit", 50), 200)
             # Use db_path (not db instance) so the scrutiny pass can open
@@ -7264,7 +7326,7 @@ def api_search_reddit():
 
             if keyword:
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)
-                return {"results": results, "generated_keywords": None}
+                return _finish({"results": results, "generated_keywords": None})
 
             # Manual multi-keyword path
             if keywords_list:
@@ -7286,7 +7348,7 @@ def api_search_reddit():
                 # would favor whichever subs have higher-karma posts.
                 subs_list = data.get("subreddits")
                 trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
-                return {"results": trimmed, "generated_keywords": keywords_list}
+                return _finish({"results": trimmed, "generated_keywords": keywords_list})
 
             # Auto-brand path
             keywords, source = _resolve_brand_keywords(auto_brand, db=task_db)
@@ -7300,7 +7362,7 @@ def api_search_reddit():
             # Final cross-keyword balance — same rationale as the manual path.
             subs_list = data.get("subreddits")
             trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
-            return {"results": trimmed, "generated_keywords": keywords, "keywords_source": source}
+            return _finish({"results": trimmed, "generated_keywords": keywords, "keywords_source": source})
         finally:
             task_db.close()
 

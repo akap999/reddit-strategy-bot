@@ -1242,8 +1242,32 @@ class RedditSearchBot:
                     # covers all terms across all subs in M calls; Arctic (no OR)
                     # would fan out per-term (N×M) and is SLOW, so keep it a tight
                     # supplement. Single-keyword searches fan out per-sub as usual.
-                    _ARCTIC_BUDGET = 12 if _terms else max(limit, 30)
-                    pairs = [(sub, term) for term in arctic_terms for sub in arctic_subs][:_ARCTIC_BUDGET]
+                    if _terms and len(arctic_terms) > 1:
+                        # Combined-OR multi-keyword search. RSS covers all terms
+                        # across all subs in M calls; Arctic (no OR) is the FALLBACK
+                        # for when RSS is throttled (cloud IP / proxy 429) and returns
+                        # little. The old term-outer slice queried only the FIRST
+                        # keyword (term[0] × first 12 subs) -> near-0 when term[0] is
+                        # sparse. Instead ROUND-ROBIN the terms across every sub (two
+                        # offset passes) so the bounded budget spreads over ALL
+                        # keywords. Concurrency is still capped by _arctic_sem(4), and
+                        # a healthy RSS fills the limit first so the early-stop skips
+                        # this entirely -- it only runs (and only costs latency) in the
+                        # throttled case where we actually need the coverage.
+                        _ARCTIC_BUDGET = min(len(arctic_subs) * 2, 30)
+                        pairs = []
+                        for _pass in range(2):
+                            for _i, sub in enumerate(arctic_subs):
+                                term = arctic_terms[(_i + _pass) % len(arctic_terms)]
+                                pairs.append((sub, term))
+                        # de-dup while preserving order, then cap to the budget
+                        _seen_pairs = set()
+                        pairs = [p for p in pairs
+                                 if not (p in _seen_pairs or _seen_pairs.add(p))][:_ARCTIC_BUDGET]
+                    else:
+                        _ARCTIC_BUDGET = max(limit, 30)
+                        pairs = [(sub, term) for term in arctic_terms
+                                 for sub in arctic_subs][:_ARCTIC_BUDGET]
                     batch = []
                     if pairs:
                         per_pair = max(needed_raw // max(len(pairs), 1), 25)

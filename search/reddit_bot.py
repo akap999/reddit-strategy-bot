@@ -1238,7 +1238,11 @@ class RedditSearchBot:
                     # first term(s); capped at a global budget so a big keyword×sub
                     # combo can't 429-storm Arctic (it's a bounded supplement — RSS's
                     # combined-OR query already covers all terms across all subs).
-                    _ARCTIC_BUDGET = max(limit, 30)
+                    # For a combined-OR multi-keyword search the RSS leg already
+                    # covers all terms across all subs in M calls; Arctic (no OR)
+                    # would fan out per-term (N×M) and is SLOW, so keep it a tight
+                    # supplement. Single-keyword searches fan out per-sub as usual.
+                    _ARCTIC_BUDGET = 12 if _terms else max(limit, 30)
                     pairs = [(sub, term) for term in arctic_terms for sub in arctic_subs][:_ARCTIC_BUDGET]
                     batch = []
                     if pairs:
@@ -1391,31 +1395,39 @@ class RedditSearchBot:
         # multi-word keyword like "physiotherapy australia" matches a post
         # titled "physiotherapy clinic?" without requiring every word.
         # Opt out with REDDIT_KW_FILTER=0.
-        if (keyword and keyword.strip()
-                and os.environ.get("REDDIT_KW_FILTER", "1").strip().lower() not in ("0", "false", "no")):
+        if ((keyword and keyword.strip()) or _terms) and \
+                os.environ.get("REDDIT_KW_FILTER", "1").strip().lower() not in ("0", "false", "no"):
             import re as _kwre
-            raw_toks = [t.strip('"\'').lower()
-                        for t in _kwre.split(r"\s+", keyword.strip())]
-            toks = [t for t in raw_toks if t and t not in ("and", "or", "not")]
-            if toks:
-                pivot = max(toks, key=len)  # most distinctive token
-                kwpat = _kwre.compile(r"\b" + _kwre.escape(pivot) + r"\b", _kwre.IGNORECASE)
+            # For a combined-OR query keep a post matching ANY original term
+            # (a single pivot would wrongly drop posts matching the other terms);
+            # for a single keyword fall back to that keyword's most distinctive
+            # token. One pivot token per term so a multi-word term like
+            # "physiotherapy australia" matches "physiotherapy clinic?".
+            filter_terms = _terms if _terms else [keyword]
+            pats, labels = [], []
+            for term in filter_terms:
+                ttoks = [t.strip('"\'').lower() for t in _kwre.split(r"\s+", str(term).strip())]
+                ttoks = [t for t in ttoks if t and t not in ("and", "or", "not")]
+                if ttoks:
+                    pivot = max(ttoks, key=len)
+                    pats.append(_kwre.compile(r"\b" + _kwre.escape(pivot) + r"\b", _kwre.IGNORECASE))
+                    labels.append(pivot)
+            if pats:
                 before_kw = len(filtered)
                 kept = [p for p in filtered
-                        if kwpat.search((p.get("title", "") + " " + (p.get("text", "") or "")))]
+                        if any(pat.search((p.get("title", "") + " " + (p.get("text", "") or "")))
+                               for pat in pats)]
+                lbl = "|".join(labels[:6]) + ("…" if len(labels) > 6 else "")
                 if kept:
                     if before_kw - len(kept):
-                        print(f"    Keyword-presence filter ('{pivot}'): dropped "
-                              f"{before_kw - len(kept)} off-keyword posts, "
-                              f"{len(kept)} remain")
+                        print(f"    Keyword-presence filter ('{lbl}'): dropped "
+                              f"{before_kw - len(kept)} off-keyword posts, {len(kept)} remain")
                     filtered = kept
                 else:
-                    # Filter would wipe everything — likely the keyword is
-                    # only in comments / truncated bodies. Keep the set
-                    # rather than returning nothing.
-                    print(f"    Keyword-presence filter ('{pivot}'): would drop "
-                          f"all {before_kw} — keeping unfiltered (keyword likely "
-                          f"in comments or truncated RSS bodies)")
+                    # Filter would wipe everything — keep the set rather than
+                    # returning nothing (terms likely only in comments/truncated bodies).
+                    print(f"    Keyword-presence filter ('{lbl}'): would drop all "
+                          f"{before_kw} — keeping unfiltered")
 
         # Always compute scrutiny scores (annotate every result);
         # only drop posts when max_scrutiny is provided.
@@ -1495,7 +1507,7 @@ class RedditSearchBot:
     # safe waves instead of storming.
     _arctic_sem = threading.Semaphore(4)
     _pullpush_sem = threading.Semaphore(6)
-    _rss_sem = threading.Semaphore(3)
+    _rss_sem = threading.Semaphore(6)  # RSS is the primary leg for combined-OR; Worker serves-stale on 429
 
     def _filter_by_subscribers(self, results, max_subscribers, min_subscribers=None):
         # Reddit API is the only data source for subscriber counts.

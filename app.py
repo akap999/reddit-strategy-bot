@@ -7332,41 +7332,28 @@ def api_search_reddit():
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)
                 return _finish({"results": results, "generated_keywords": None})
 
-            # Manual multi-keyword path
+            # Manual multi-keyword path — ONE combined boolean-OR query instead of
+            # N per-keyword cascades. On the OR-capable legs (RSS/JSON) that's one
+            # query per sub (M calls), not N×M, so the RSS leg fills the limit and
+            # the cascade early-stop skips the slow legs. `keywords=` lets Arctic
+            # (no OR) fan out per-term as a bounded fallback + drives the relevance
+            # filter. search() balances internally.
             if keywords_list:
-                n = max(len(keywords_list), 1)
-                # Each keyword runs the full cascade with the full requested
-                # limit as its budget. Heavy cross-keyword overlap (e.g.
-                # "testosterone" and "TRT") shrinks unique results fast, so
-                # dividing the budget across keywords starves the output.
-                # Dedup + final balance below cap the response at requested_limit.
-                per_kw_limit = requested_limit
-                print(f"    Multi-keyword search: {n} keywords, per_kw_limit={per_kw_limit}")
-                print(f"    Keywords: {keywords_list}")
-                merged = bot.search_multiple_keywords(
-                    keywords_list, concurrent=True, limit=per_kw_limit, **common_filters
-                )
-                # Final cross-keyword balance: take up to (limit // N_subs)
-                # posts from each requested subreddit first, fill remainder
-                # with top-scoring overflow. Without this, merged[:limit]
-                # would favor whichever subs have higher-karma posts.
-                subs_list = data.get("subreddits")
-                trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
-                return _finish({"results": trimmed, "generated_keywords": keywords_list})
+                combined = RedditSearchBot.build_query(any_of=keywords_list)
+                print(f"    Multi-keyword search: {len(keywords_list)} keywords (combined OR)")
+                print(f"    Query: {combined}")
+                results = bot.search(keyword=combined, keywords=keywords_list,
+                                     limit=requested_limit, **common_filters)
+                return _finish({"results": results, "generated_keywords": keywords_list})
 
-            # Auto-brand path
+            # Auto-brand path — same combined-OR collapse.
             keywords, source = _resolve_brand_keywords(auto_brand, db=task_db)
-            n = max(len(keywords), 1)
-            per_kw_limit = requested_limit
-            print(f"    Auto-brand search: {n} keywords, per_kw_limit={per_kw_limit}, source={source}")
-            print(f"    Keywords: {keywords}")
-            merged = bot.search_multiple_keywords(
-                keywords, concurrent=True, limit=per_kw_limit, **common_filters
-            )
-            # Final cross-keyword balance — same rationale as the manual path.
-            subs_list = data.get("subreddits")
-            trimmed = balance_posts_by_subreddit(merged, requested_limit, subs_list)
-            return _finish({"results": trimmed, "generated_keywords": keywords, "keywords_source": source})
+            combined = RedditSearchBot.build_query(any_of=keywords)
+            print(f"    Auto-brand search: {len(keywords)} keywords (combined OR), source={source}")
+            print(f"    Query: {combined}")
+            results = bot.search(keyword=combined, keywords=keywords,
+                                 limit=requested_limit, **common_filters)
+            return _finish({"results": results, "generated_keywords": keywords, "keywords_source": source})
         finally:
             task_db.close()
 

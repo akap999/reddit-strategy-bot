@@ -1254,16 +1254,23 @@ class RedditSearchBot:
                         # a healthy RSS fills the limit first so the early-stop skips
                         # this entirely -- it only runs (and only costs latency) in the
                         # throttled case where we actually need the coverage.
-                        _ARCTIC_BUDGET = min(len(arctic_subs) * 2, 30)
-                        pairs = []
-                        for _pass in range(2):
+                        # Cover the FULL sub×term grid (the per-keyword baseline's
+                        # coverage), but ORDER it round-robin (term rotates per sub,
+                        # one offset pass after another) so even a budget cut still
+                        # spreads over ALL keywords and ALL subs. Capped at 96 so a
+                        # pathological combo can't run away; concurrency is bounded by
+                        # _arctic_sem(4) regardless, so a bigger budget only costs
+                        # latency in the throttled case (RSS underfilled) -- a healthy
+                        # RSS fills the limit first and the early-stop skips Arctic.
+                        _ARCTIC_BUDGET = min(len(arctic_subs) * len(arctic_terms), 96)
+                        pairs, _seen_pairs = [], set()
+                        for _pass in range(len(arctic_terms)):
                             for _i, sub in enumerate(arctic_subs):
                                 term = arctic_terms[(_i + _pass) % len(arctic_terms)]
-                                pairs.append((sub, term))
-                        # de-dup while preserving order, then cap to the budget
-                        _seen_pairs = set()
-                        pairs = [p for p in pairs
-                                 if not (p in _seen_pairs or _seen_pairs.add(p))][:_ARCTIC_BUDGET]
+                                if (sub, term) not in _seen_pairs:
+                                    _seen_pairs.add((sub, term))
+                                    pairs.append((sub, term))
+                        pairs = pairs[:_ARCTIC_BUDGET]
                     else:
                         _ARCTIC_BUDGET = max(limit, 30)
                         pairs = [(sub, term) for term in arctic_terms
@@ -1434,7 +1441,16 @@ class RedditSearchBot:
                 ttoks = [t for t in ttoks if t and t not in ("and", "or", "not")]
                 if ttoks:
                     pivot = max(ttoks, key=len)
-                    pats.append(_kwre.compile(r"\b" + _kwre.escape(pivot) + r"\b", _kwre.IGNORECASE))
+                    # Leading word-boundary only (no trailing \b) so plurals /
+                    # suffixed forms still match: "loan" -> loans/loaned,
+                    # "credit" -> credits, "installment" -> installments. The
+                    # leading \b still prevents substring noise ("loan" !~ "sloan").
+                    # Require a pivot of >=4 chars for the prefix form so a short
+                    # token can't over-match; shorter pivots keep the strict \b..\b.
+                    if len(pivot) >= 4:
+                        pats.append(_kwre.compile(r"\b" + _kwre.escape(pivot), _kwre.IGNORECASE))
+                    else:
+                        pats.append(_kwre.compile(r"\b" + _kwre.escape(pivot) + r"\b", _kwre.IGNORECASE))
                     labels.append(pivot)
             if pats:
                 before_kw = len(filtered)

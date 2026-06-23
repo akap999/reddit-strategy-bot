@@ -794,14 +794,27 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
         except Exception:
             return None
 
+    import time as _time
+    text = None
+    # Retry transient proxy failures (403/429 from the shared-IP block, non-XML
+    # challenge pages, network errors) before giving up. Reddit's block on the
+    # proxy's Cloudflare IP is INTERMITTENT, so a short backoff often gets a
+    # clean feed instead of falling straight through to 'missing' — which was
+    # making bulk deploy report reddit_fetch_failed for whole runs.
+    for _attempt in range(3):
+        try:
+            r = _requests.get(rss_url, params={"limit": 100}, headers=headers,
+                              timeout=timeout, proxies={"http": None, "https": None})
+            if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
+                text = r.text
+                break
+        except Exception:
+            pass
+        if _attempt < 2:
+            _time.sleep(1.0 * (_attempt + 1))   # 1s, then 2s
+    if text is None:
+        return out
     try:
-        r = _requests.get(rss_url, params={"limit": 100}, headers=headers,
-                          timeout=timeout, proxies={"http": None, "https": None})
-        if r.status_code != 200:
-            return out
-        text = r.text or ""
-        if not text.lstrip().startswith("<?xml"):
-            return out
         root = _ET.fromstring(text)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall("atom:entry", ns):

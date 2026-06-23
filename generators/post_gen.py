@@ -1227,12 +1227,26 @@ the SAME order as the regions above (use [] only for a region no persona fits)."
         return [p["label"] for p in new_personas if p.get("label")]
 
     def _ensure_personas(self, brands):
-        """Auto-generate the brand's personas once (cached on `brands.personas`) so the
-        fan-out lens has them. No-op when already present or generation fails — never
-        blocks generation. Brand-level (reused across all seeds/clusters)."""
+        """Auto-generate (and auto-UPGRADE) the brand's personas so the fan-out lens +
+        write-time voice have them. Generates when there are none; also REGENERATES when
+        the stored personas predate the pain_points/use_cases enrichment (none carry
+        either field) — so old brands self-heal the next time the workflow needs personas
+        (cluster build / AI-Search generate), with no manual re-enrich. No-op once they
+        carry the new fields, and on any failure (never blocks generation)."""
         b = brands[0] if isinstance(brands, list) else brands
-        if not b or self._parse_personas(brands):
+        if not b:
             return
+        _existing = self._parse_personas(brands)
+        # Up-to-date already → nothing to do. "Up-to-date" = at least one persona carries
+        # the enriched fields. Empty OR all-old-shape → (re)generate.
+        if _existing and any(
+            (isinstance(p, dict) and (p.get("pain_points") or p.get("use_cases")))
+            for p in _existing
+        ):
+            return
+        if _existing:
+            print(f"[post_gen] upgrading {len(_existing)} legacy persona(s) for brand "
+                  f"{b.get('id')} → adding pain_points/use_cases")
         try:
             from generators.brand_enrichment import generate_brand_personas
             personas = generate_brand_personas(

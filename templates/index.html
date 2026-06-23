@@ -1001,6 +1001,10 @@ async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
     try {
         const draft = await api('/api/brands/enrich', { method: 'POST', body: { name, domain_url: url } });
         const joinArr = a => Array.isArray(a) ? a.join('\n') : '';
+        // URL-only analyze: the backend derives the brand name from the homepage —
+        // fill the (empty) name field so the user never has to type it first.
+        const nameEl = document.getElementById('brand-name');
+        if (nameEl && !nameEl.value.trim() && draft.name) nameEl.value = draft.name;
         if (draft.category !== undefined) setVal('brand-category', draft.category || '');
         if (draft.audience !== undefined) setVal('brand-audience', draft.audience || '');
         setVal('brand-use-cases', joinArr(draft.use_cases));

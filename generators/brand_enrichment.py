@@ -97,13 +97,14 @@ Engine Optimization) content strategy. The goal is to write Reddit posts that mi
 the long-tail questions real users type into ChatGPT/Perplexity about this brand's
 domain — WITHOUT naming the brand itself.
 
-BRAND NAME: {name}
+BRAND NAME: {name or "(unknown — derive the brand's name from the homepage title/logo text or the domain)"}
 BRAND URL: {domain_url or "(none)"}
 
 {page_section}
 
 Extract the following fields. Be specific and concrete — vague answers are useless.
 
+- name: The brand's actual name as shown on its site (from the homepage title/logo, or the domain). Short — just the brand name. If a BRAND NAME was already given above, return it unchanged.
 - category: A precise product category, 3-8 words. Example: "project management SaaS for remote teams", "direct-to-consumer electric toothbrush". Not "software" or "product".
 - audience: The ideal customer profile (ICP). Who buys/uses this? Role, team size, industry, context. 1-2 sentences.
 - use_cases: 4-6 concrete jobs-to-be-done — what problems do users hire this product to solve? Each item should be a short phrase ("running async standups across timezones"), not a sentence.
@@ -116,6 +117,7 @@ Extract the following fields. Be specific and concrete — vague answers are use
 
 Return JSON only, exactly this shape:
 {{
+  "name": "string",
   "category": "string",
   "audience": "string",
   "use_cases": ["string", ...],
@@ -167,6 +169,9 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         return out
 
     return {
+        # Provided name wins; otherwise use the name the model derived from the
+        # homepage/domain so URL-only auto-analyze can fill the name field.
+        "name":            name or _as_str(result.get("name")),
         "category":        _as_str(result.get("category")),
         "audience":        _as_str(result.get("audience")),
         "use_cases":       _as_list(result.get("use_cases")),

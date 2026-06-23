@@ -1404,8 +1404,10 @@ def api_enrich_brand_draft():
     data = request.json or {}
     name = (data.get("name") or "").strip()
     domain_url = (data.get("domain_url") or "").strip()
-    if not name:
-        return jsonify({"error": "name is required"}), 400
+    # URL-only is allowed: enrich_brand derives the brand name from the homepage
+    # so the user doesn't have to type the name first. Require at least one.
+    if not name and not domain_url:
+        return jsonify({"error": "name or domain_url is required"}), 400
 
     claude = ClaudeClient(ANTHROPIC_API_KEY)
     draft = enrich_brand(claude, name, domain_url)
@@ -1414,12 +1416,14 @@ def api_enrich_brand_draft():
             "error": "Enrichment failed — LLM returned no usable data. "
                      "Check the URL and try again, or fill fields manually."
         }), 502
+    # Effective name = provided, else the name enrich_brand derived from the page.
+    eff_name = name or (draft.get("name") or "")
     # Auto-analyze does everything: also generate personas from the freshly-enriched
     # fields so they're shown for review and saved with the brand. Graceful — a persona
     # failure must never break the enrichment draft.
     try:
         draft["personas"] = generate_brand_personas(
-            claude, name, domain_url,
+            claude, eff_name, domain_url,
             category=draft.get("category") or "", audience=draft.get("audience") or "",
             use_cases=draft.get("use_cases"), pain_points=draft.get("pain_points")) or []
     except Exception as e:

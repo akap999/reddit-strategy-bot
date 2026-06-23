@@ -8510,19 +8510,15 @@ async function lsubsLoadPosts(silent = false) {
 // -------------------------------------------------------------------------
 
 async function _lsubsLookupPostBrand(pid) {
-    // Look up the brand for a post via /api/posts/all (live=1) and find the row.
+    // Resolve the post's brand via the dedicated per-post endpoint — full chain
+    // (post_brands junction -> posts.brand_id -> the post's branded comments),
+    // INDEPENDENT of is_live / pagination. The old approach scanned
+    // /api/posts/all?live=1 and find()'d by id, which returned null for is_live=0
+    // posts (e.g. ones that already have an HQ cluster) -> false "Post has no
+    // brand assigned" before any generation call.
     try {
-        const posts = await api(`/api/posts/all?live=1`);
-        const post = (posts || []).find(p => p.id === pid);
-        if (post) {
-            if (post.brands && post.brands.length) return post.brands[0].id;
-            // Reported/older posts carry their brand on posts.brand_id with an
-            // EMPTY post_brands junction, so post.brands is blank and the old
-            // check returned null -> "Post has no brand assigned" before any API
-            // call. Fall back to the post's own brand_id (in the /api/posts/all
-            // payload via SELECT p.*) so HQ / comment generation still resolves.
-            if (post.brand_id) return post.brand_id;
-        }
+        const r = await api(`/api/posts/${pid}/brand`);
+        if (r && r.brand_id) return r.brand_id;
     } catch (e) {}
     return null;
 }

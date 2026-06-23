@@ -1864,6 +1864,22 @@ def api_get_post(pid):
     finally:
         db.close()
 
+@app.route("/api/posts/<int:pid>/brand")
+def api_get_post_brand(pid):
+    """Resolve a single post's brand with the full fallback chain (post_brands
+    junction -> posts.brand_id -> the post's first branded comment), INDEPENDENT
+    of is_live / list pagination. Powers the Live Subs gen buttons so +HQ on an
+    is_live=0 post (e.g. one that already has an HQ cluster) still finds its
+    brand instead of toasting 'Post has no brand assigned'."""
+    db = get_db()
+    try:
+        eff = db.get_effective_post_brand(pid)
+        return jsonify({"brand_id": (eff or {}).get("id"),
+                        "brand_name": (eff or {}).get("name")})
+    finally:
+        db.close()
+
+
 @app.route("/api/posts/<int:pid>/regenerate-body", methods=["POST"])
 def api_regenerate_post_body(pid):
     """Rewrite a post's BODY for the SAME title (title never changes). Synchronous —

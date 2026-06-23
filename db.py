@@ -432,6 +432,32 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_effective_post_brand(self, post_id):
+        """Resolve a SINGLE post's brand with the full fallback chain, regardless
+        of is_live / list pagination — the one source of truth for "what brand is
+        this post associated with":
+          1) post_brands junction
+          2) the post's own posts.brand_id
+          3) the post's first comment carrying a non-null brand_id (e.g. an
+             already-generated HQ cluster stamps brand_id on its comments even
+             when the post row has no brand link)
+        Returns {"id","name"} or None. Used by GET /api/posts/<id>/brand and by
+        get_all_posts / get_posts_with_details."""
+        for sql, args in (
+            ("SELECT b.id AS id, b.name AS name FROM brands b "
+             "JOIN post_brands pb ON pb.brand_id = b.id "
+             "WHERE pb.post_id = ? ORDER BY b.name LIMIT 1", (post_id,)),
+            ("SELECT b.id AS id, b.name AS name FROM brands b "
+             "JOIN posts p ON p.brand_id = b.id WHERE p.id = ?", (post_id,)),
+            ("SELECT b.id AS id, b.name AS name FROM comments c "
+             "JOIN brands b ON b.id = c.brand_id "
+             "WHERE c.post_id = ? AND c.brand_id IS NOT NULL ORDER BY c.id LIMIT 1", (post_id,)),
+        ):
+            row = self.conn.execute(sql, args).fetchone()
+            if row:
+                return {"id": row["id"], "name": row["name"]}
+        return None
+
     # --- Posts ---
 
     def save_post(self, subreddit_id, brand_id, title, body, storyline,
@@ -562,23 +588,11 @@ class Database:
             #      row has no brand link. This is the "+HQ on an existing
             #      cluster" case that kept failing.
             if not p["brands"]:
-                fb = None
-                if p.get("brand_id"):
-                    fb = self.conn.execute(
-                        "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
-                    ).fetchone()
-                if not fb:
-                    fb = self.conn.execute(
-                        "SELECT b.id AS id, b.name AS name FROM comments c "
-                        "JOIN brands b ON b.id = c.brand_id "
-                        "WHERE c.post_id = ? AND c.brand_id IS NOT NULL "
-                        "ORDER BY c.id LIMIT 1",
-                        (p["id"],)
-                    ).fetchone()
-                if fb:
-                    p["brands"] = [{"id": fb["id"], "name": fb["name"]}]
+                eff = self.get_effective_post_brand(p["id"])
+                if eff:
+                    p["brands"] = [eff]
                     if not p.get("brand_names"):
-                        p["brand_names"] = fb["name"]
+                        p["brand_names"] = eff["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):
@@ -653,23 +667,11 @@ class Database:
             #      row has no brand link. This is the "+HQ on an existing
             #      cluster" case that kept failing.
             if not p["brands"]:
-                fb = None
-                if p.get("brand_id"):
-                    fb = self.conn.execute(
-                        "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
-                    ).fetchone()
-                if not fb:
-                    fb = self.conn.execute(
-                        "SELECT b.id AS id, b.name AS name FROM comments c "
-                        "JOIN brands b ON b.id = c.brand_id "
-                        "WHERE c.post_id = ? AND c.brand_id IS NOT NULL "
-                        "ORDER BY c.id LIMIT 1",
-                        (p["id"],)
-                    ).fetchone()
-                if fb:
-                    p["brands"] = [{"id": fb["id"], "name": fb["name"]}]
+                eff = self.get_effective_post_brand(p["id"])
+                if eff:
+                    p["brands"] = [eff]
                     if not p.get("brand_names"):
-                        p["brand_names"] = fb["name"]
+                        p["brand_names"] = eff["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):

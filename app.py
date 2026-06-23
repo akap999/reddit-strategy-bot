@@ -766,7 +766,14 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
 
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    rss_url = f"{base}/r/{sub}/comments/{post_id}/comment/{cid}/.rss"
+    # Use the POST-LEVEL comment feed, NOT the comment-permalink feed.
+    # Reddit redirects the permalink form (/comments/<post>/comment/<cid>/.rss)
+    # old.reddit -> new reddit, which 403s the proxy's cloud IP — so the old
+    # URL returned nothing and bulk-deploy scored every row 'missing'. The
+    # post feed (/comments/<post>/.rss?limit=100) is the same form Check Live's
+    # _post_feed_scan uses successfully; it carries every live comment's entry
+    # (t1_<cid>) with body + author, so we just locate <cid> within it.
+    rss_url = f"{base}/r/{sub}/comments/{post_id}/.rss"
     headers = {
         "User-Agent": REDDIT_USER_AGENT,
         "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
@@ -788,8 +795,8 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
             return None
 
     try:
-        r = _requests.get(rss_url, headers=headers, timeout=timeout,
-                          proxies={"http": None, "https": None})
+        r = _requests.get(rss_url, params={"limit": 100}, headers=headers,
+                          timeout=timeout, proxies={"http": None, "https": None})
         if r.status_code != 200:
             return out
         text = r.text or ""
@@ -799,7 +806,9 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall("atom:entry", ns):
             eid = (entry.findtext("atom:id", default="", namespaces=ns) or "")
-            if cid not in eid.lower():
+            # The post feed also carries the post's own t3_<postid> entry and
+            # every other comment; match ONLY this comment's t1_<cid> entry.
+            if f"t1_{cid}" not in eid.lower():
                 continue
             content = entry.findtext("atom:content", default="", namespaces=ns) or ""
             body = _strip_tags(content)

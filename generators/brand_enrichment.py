@@ -111,7 +111,7 @@ Extract the following fields. Be specific and concrete — vague answers are use
 - pain_points: 4-6 concrete pains the product addresses. Each item is a phrase ("tickets get lost between Slack and Jira"). These are the pains real users would complain about on Reddit.
 - features: 4-6 key differentiating features or capabilities. Each is a short phrase.
 - competitors: 3-8 direct competitor brand/product NAMES (real names like "Notion", "Asana", "Linear"). These will be used in comparison-intent posts, so accuracy matters. If you're unsure, include fewer but only confident ones.
-- competitor_domains: an object mapping each competitor NAME above to its official homepage domain (e.g. {"Notion": "notion.com", "Asana": "asana.com"}). Include ONLY domains you are confident are the official site; omit a competitor rather than guess. Bare domain, no https://, no path.
+- competitor_domains: an object mapping each competitor NAME above to its official homepage domain (e.g. {{"Notion": "notion.com", "Asana": "asana.com"}}). Include ONLY domains you are confident are the official site; omit a competitor rather than guess. Bare domain, no https://, no path.
 - context_summary: A 2-3 sentence narrative describing what the brand is and who it serves. This replaces or augments the existing brand context field.
 - keywords: 6-12 concise search keywords/terms a real person would type about this brand's DOMAIN (single words or short 2-3 word phrases like "async standups", "remote team pm"). Do NOT include the brand name. These are used to match relevant Reddit threads, so favor the terms users actually search, not marketing language.
 

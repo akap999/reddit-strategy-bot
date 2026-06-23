@@ -1410,7 +1410,14 @@ def api_enrich_brand_draft():
         return jsonify({"error": "name or domain_url is required"}), 400
 
     claude = ClaudeClient(ANTHROPIC_API_KEY)
-    draft = enrich_brand(claude, name, domain_url)
+    try:
+        draft = enrich_brand(claude, name, domain_url)
+    except Exception as e:
+        # Never let an unexpected raise (e.g. a prompt-template bug) become a
+        # messageless HTTP 500 — surface the reason so the toast is actionable.
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Enrichment crashed: {type(e).__name__}: {e}"}), 500
     if not draft:
         # Surface the ACTUAL reason (auth / model / JSON-parse / rate-limit)
         # instead of a generic message, so the toast tells us what to fix.

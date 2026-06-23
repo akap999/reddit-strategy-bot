@@ -553,6 +553,18 @@ class Database:
                 p["brands"] = brands
             else:
                 p["brands"] = []
+            # Junction empty but the post carries its brand on posts.brand_id
+            # (reported / manually-added posts) — surface it so brand lookups
+            # (HQ / comment generation) and the UI's Brands column resolve it
+            # instead of showing "no brand assigned".
+            if not p["brands"] and p.get("brand_id"):
+                b = self.conn.execute(
+                    "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
+                ).fetchone()
+                if b:
+                    p["brands"] = [{"id": b["id"], "name": b["name"]}]
+                    if not p.get("brand_names"):
+                        p["brand_names"] = b["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):
@@ -618,6 +630,18 @@ class Database:
                 p["brands"] = brands
             else:
                 p["brands"] = []
+            # Junction empty but the post carries its brand on posts.brand_id
+            # (reported / manually-added posts) — surface it so brand lookups
+            # (HQ / comment generation) and the UI's Brands column resolve it
+            # instead of showing "no brand assigned".
+            if not p["brands"] and p.get("brand_id"):
+                b = self.conn.execute(
+                    "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
+                ).fetchone()
+                if b:
+                    p["brands"] = [{"id": b["id"], "name": b["name"]}]
+                    if not p.get("brand_names"):
+                        p["brand_names"] = b["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):

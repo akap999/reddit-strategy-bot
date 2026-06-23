@@ -8508,7 +8508,15 @@ async function _lsubsLookupPostBrand(pid) {
     try {
         const posts = await api(`/api/posts/all?live=1`);
         const post = (posts || []).find(p => p.id === pid);
-        if (post && post.brands && post.brands.length) return post.brands[0].id;
+        if (post) {
+            if (post.brands && post.brands.length) return post.brands[0].id;
+            // Reported/older posts carry their brand on posts.brand_id with an
+            // EMPTY post_brands junction, so post.brands is blank and the old
+            // check returned null -> "Post has no brand assigned" before any API
+            // call. Fall back to the post's own brand_id (in the /api/posts/all
+            // payload via SELECT p.*) so HQ / comment generation still resolves.
+            if (post.brand_id) return post.brand_id;
+        }
     } catch (e) {}
     return null;
 }

@@ -4982,7 +4982,11 @@ def api_gen_posts():
             brands = [b for b in brands if b]  # filter None
             if not sub or not brands:
                 raise ValueError("Subreddit or brand(s) not found")
-            posts = post_gen.generate_posts(sub, brands, count)
+            posts = post_gen.generate_posts(
+                sub, brands, count,
+                follow_persona=bool(data.get("follow_persona")),
+                persona=data.get("persona"),
+            )
             return [
                 {
                     "id": p["id"],
@@ -5396,7 +5400,9 @@ def api_live_posts_generate():
                 sub, [brand_full], count=count,
                 intent_counts=intent_counts, context_only=context_only,
                 seed=seed, ai_search=ai_search, observed_queries=observed_queries,
-                target_rewrites=target_rewrites)
+                target_rewrites=target_rewrites,
+                follow_persona=bool(data.get("follow_persona")),
+                persona=data.get("persona"))
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles

@@ -255,7 +255,7 @@ def generate_brand_personas(claude: ClaudeClient, name: str, domain_url: str,
     can target only the personas this brand can credibly be the answer for.
 
     Returns a list (3-5) of:
-      {label, profile, trigger, goal, constraints, vocab, fit}
+      {label, profile, trigger, goal, constraints, vocab, pain_points[], use_cases[], fit}
     where fit ∈ {"yes","maybe","no"}. Returns [] on failure. No fabrication — when
     unsure whether the brand serves a persona, mark fit "no" rather than inventing.
     """
@@ -263,6 +263,13 @@ def generate_brand_personas(claude: ClaudeClient, name: str, domain_url: str,
         if isinstance(v, list):
             return "; ".join(str(x).strip() for x in v if str(x).strip())
         return str(v or "").strip()
+
+    def _aslist(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str) and v.strip():
+            return [v.strip()]
+        return []
     html = _fetch_homepage(domain_url)
     page_text = _extract_visible_text(html, max_chars=4000)
     page_section = (f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
@@ -303,11 +310,13 @@ Return JSON only, exactly this shape:
       "goal": "the job-to-be-done they want solved",
       "constraints": "budget / compliance / urgency / discretion etc. (short)",
       "vocab": "how THEY would phrase it (a few words/terms)",
+      "pain_points": ["3-5 concrete pains THIS persona specifically feels (short phrases)"],
+      "use_cases": ["3-5 jobs-to-be-done THIS persona hires the product for (short phrases)"],
       "fit": "yes" | "maybe" | "no"
     }}
   ]
 }}"""
-    result = claude.call(prompt, max_tokens=1400, temperature=0.4)
+    result = claude.call(prompt, max_tokens=2200, temperature=0.4)
     items = (result or {}).get("personas") if isinstance(result, dict) else None
     if not isinstance(items, list):
         return []
@@ -328,6 +337,8 @@ Return JSON only, exactly this shape:
             "goal": str(p.get("goal") or "").strip(),
             "constraints": str(p.get("constraints") or "").strip(),
             "vocab": str(p.get("vocab") or "").strip(),
+            "pain_points": _aslist(p.get("pain_points")),
+            "use_cases": _aslist(p.get("use_cases")),
             "fit": fit,
         })
     return out[:6]
@@ -405,12 +416,14 @@ Return JSON only, exactly this shape:
       "goal": "the job-to-be-done",
       "constraints": "budget / urgency / firmness etc. (short)",
       "vocab": "how THEY phrase it (a few terms)",
+      "pain_points": ["3-5 concrete pains THIS persona feels (short phrases)"],
+      "use_cases": ["3-5 jobs-to-be-done for THIS persona (short phrases)"],
       "fit": "yes"
     }}
   ],
   "assignments": [ ["<region text, copied exactly from the list>", "<new persona label>"] ]
 }}"""
-    result = claude.call(prompt, max_tokens=1400, temperature=0.4)
+    result = claude.call(prompt, max_tokens=2000, temperature=0.4)
     if not isinstance(result, dict):
         return {"new_personas": [], "assignments": []}
     raw_personas = result.get("new_personas") if isinstance(result.get("new_personas"), list) else []
@@ -424,6 +437,10 @@ Return JSON only, exactly this shape:
         if not label or ll in existing_lower or ll in new_lower:
             continue  # skip blanks + duplicates of existing/just-added labels
         new_lower.add(ll)
+        def _al(v):
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            return [str(v).strip()] if (isinstance(v, str) and v.strip()) else []
         new_personas.append({
             "label": label,
             "profile": str(p.get("profile") or "").strip(),
@@ -431,6 +448,8 @@ Return JSON only, exactly this shape:
             "goal": str(p.get("goal") or "").strip(),
             "constraints": str(p.get("constraints") or "").strip(),
             "vocab": str(p.get("vocab") or "").strip(),
+            "pain_points": _al(p.get("pain_points")),
+            "use_cases": _al(p.get("use_cases")),
             "fit": "yes",
         })
     new_personas = new_personas[:3]

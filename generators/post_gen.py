@@ -81,7 +81,8 @@ class PostGenerator:
 
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
-                       ai_search=False, observed_queries=None, target_rewrites=None):
+                       ai_search=False, observed_queries=None, target_rewrites=None,
+                       follow_persona=False, persona=None):
         """Generate GEO-style posts (posts NEVER mention target brands).
 
         `ai_search` (optional, default False): the new AI-Search semantic-coverage
@@ -175,6 +176,24 @@ class PostGenerator:
         # before the fan-out so it can ground/filter the regions. Cached + graceful.
         if ai_search:
             self._ensure_personas(brands)
+        # Resolve a picked persona for the DIRECT (non-cluster) path into its full dict,
+        # so its detail can ground the post writing when follow_persona is ON. Accepts a
+        # dict, a label, or an index into the brand's fit personas. None for cluster mode
+        # (cluster posts use their per-region assigned persona, not a single override).
+        persona_override = None
+        if follow_persona and persona not in (None, "", "(broad)") and not ai_search:
+            if isinstance(persona, dict):
+                persona_override = persona
+            else:
+                _pmap = self._persona_detail_map(brands)
+                _key = str(persona).strip().lower()
+                if _key in _pmap:
+                    persona_override = _pmap[_key]
+                else:
+                    try:
+                        persona_override = self._fit_personas(brands)[int(persona)]
+                    except (ValueError, TypeError, IndexError):
+                        persona_override = None
         seed_norm = self.db.normalize_seed(seed) if (ai_search and seed) else None
         if ai_search and seed_norm:
             bid = primary_brand["id"]
@@ -351,7 +370,8 @@ class PostGenerator:
                         subreddit, brands, intent,
                         self._select_storylines_from_dist(merged_dist, 1),
                         existing_titles, 2, context_only=context_only,
-                        seed_focus=None, coverage_focus=single_focus, facet_targets=None)
+                        seed_focus=None, coverage_focus=single_focus, facet_targets=None,
+                        follow_persona=follow_persona, persona_override=None)
                     if not cands:
                         print(f"[post_gen] AI-Search: no candidate for region «{gap_q[:60]}» — gap left open")
                         continue
@@ -403,6 +423,7 @@ class PostGenerator:
                 seed_focus=(None if ai_search else seed),
                 coverage_focus=intent_focus,
                 facet_targets=facet_targets,
+                follow_persona=follow_persona, persona_override=persona_override,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -507,6 +528,10 @@ class PostGenerator:
             # cluster came from) + the specific rewrite this post targets, so the
             # post-detail view can show what prompt it was generated for.
             ai_search_meta = None
+            if (not ai_search) and persona_override and persona_override.get("label"):
+                # Direct (non-cluster) post written as a picked persona — stamp it so the
+                # Live Subs persona tag shows and regenerate can reuse the same voice.
+                ai_search_meta = json.dumps({"persona": persona_override["label"]})
             if ai_search:
                 _pbq = (coverage_focus or {}).get("persona_by_query", {})
                 _tq = (post.get("target_query") or "").strip().lower()
@@ -978,6 +1003,31 @@ Return JSON only:
         return [p for p in self._parse_personas(brands)
                 if isinstance(p, dict) and p.get("label")
                 and str(p.get("fit", "")).strip().lower() in ("yes", "maybe")]
+
+    def _persona_detail_map(self, brands):
+        """{label.lower(): persona_dict} for the brand's personas — lets the writer
+        expand a region's assigned persona LABEL into its full detail."""
+        return {str(p.get("label", "")).strip().lower(): p
+                for p in self._parse_personas(brands)
+                if isinstance(p, dict) and p.get("label")}
+
+    @staticmethod
+    def _render_persona_voice(pd):
+        """Render a persona dict as a compact WRITE-AS instruction for the post prompt
+        (profile + pains + goal + vocab + trigger + constraints). '' when empty."""
+        if not isinstance(pd, dict) or not pd.get("label"):
+            return ""
+        parts = [f"{pd['label']}"]
+        if pd.get("profile"):     parts.append(pd["profile"])
+        pp = pd.get("pain_points") or []
+        if pp:                    parts.append("pains: " + "; ".join(pp[:4]))
+        uc = pd.get("use_cases") or []
+        if uc:                    parts.append("trying to: " + "; ".join(uc[:4]))
+        if pd.get("goal"):        parts.append("wants: " + pd["goal"])
+        if pd.get("trigger"):     parts.append("triggered by: " + pd["trigger"])
+        if pd.get("constraints"): parts.append("constraints: " + pd["constraints"])
+        if pd.get("vocab"):       parts.append("says it like: " + pd["vocab"])
+        return " — ".join(parts)
 
     def _assign_personas_to_regions(self, rewrites, brands):
         """FIT-RESPECTING persona→region assignment — a region only ever gets a persona that
@@ -1668,7 +1718,11 @@ Return JSON only: {{"labels": ["label for query 1", "label for query 2", "..."]}
         if meta.get("target_query"):
             focus.append(f"What this title is really asking for: {meta['target_query']}")
         if meta.get("persona") and meta.get("persona") != "(broad)":
-            focus.append(f"The kind of person asking: {meta['persona']}")
+            # Expand the persona LABEL into its full stored detail (pains/goal/vocab/…)
+            # so the rewritten body is in that persona's voice, not just label-aware.
+            _pv = self._render_persona_voice(
+                self._persona_detail_map(brands).get(str(meta["persona"]).strip().lower()))
+            focus.append("Write as this person: " + (_pv or str(meta["persona"])))
         focus_block = ("\n" + "\n".join(focus) + "\n") if focus else ""
         storyline = post.get("storyline") or "question"
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
@@ -1697,7 +1751,8 @@ Return JSON only: {{"body": "the new post body"}}"""
     def _generate_candidates_for_intent(self, subreddit, brands, intent, storylines,
                                         existing_titles, count, context_only=False,
                                         seed_focus=None, coverage_focus=None,
-                                        facet_targets=None):
+                                        facet_targets=None, follow_persona=False,
+                                        persona_override=None):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -1844,10 +1899,22 @@ Return JSON only: {{"body": "the new post body"}}"""
             if _rw or _ck:
                 # Show each rewrite WITH its own variant phrasings (the real ways that
                 # intent gets asked) so the post targeting it can pack them into the body.
+                # Persona voice per rewrite (only when "follow personas" is ON): expand the
+                # region's assigned persona LABEL into its full detail so the post is WRITTEN
+                # as that asker, not just tagged with the label afterward.
+                _pbq_voice = (coverage_focus or {}).get("persona_by_query", {}) if follow_persona else {}
+                _pdetail = self._persona_detail_map(brands) if follow_persona else {}
                 def _rw_line(r):
                     vs = [str(v).strip() for v in (_vbq.get(r.strip().lower()) or []) if str(v).strip()]
                     tail = f"   [also asked as: {'; '.join(vs[:6])}]" if vs else ""
-                    return f"  - {r}{tail}"
+                    ptail = ""
+                    if follow_persona:
+                        _plabel = str(_pbq_voice.get(r.strip().lower()) or "").strip()
+                        if _plabel and _plabel != "(broad)":
+                            _voice = self._render_persona_voice(_pdetail.get(_plabel.lower()))
+                            if _voice:
+                                ptail = f"\n      ↳ WRITE THIS ONE AS: {_voice}"
+                    return f"  - {r}{tail}{ptail}"
                 rw_lines = "\n".join(_rw_line(r) for r in _rw[:25])
                 ck_str = "; ".join(_ck[:25])
                 anchor_rule = ""
@@ -1937,8 +2004,28 @@ Return JSON only: {{"body": "the new post body"}}"""
                 )
                 coverage_json_field = ',\n            "target_query": "the ONE coverage target this title covers"'
 
+        # Persona voice (only when "follow personas" is ON):
+        #  - direct/override: one picked persona for the whole batch → write every post as them.
+        #  - cluster: each rewrite line carries a "↳ WRITE THIS ONE AS: …" note → honor it.
+        persona_block = ""
+        if follow_persona and persona_override:
+            _ov_voice = self._render_persona_voice(persona_override)
+            if _ov_voice:
+                persona_block = (
+                    "\n\nWRITE AS THIS PERSON — every post in this batch is asked by them; adopt "
+                    "their situation, pains, goals, and the way they phrase things (this shapes "
+                    "VOICE + concrete detail, not the topic):\n"
+                    f"  {_ov_voice}\n"
+                )
+        elif follow_persona and coverage_focus:
+            persona_block = (
+                "\n\nPERSONA VOICE — a rewrite above may carry a '↳ WRITE THIS ONE AS: …' note: "
+                "write THAT post as that person (their situation, pains, goals, vocabulary) while "
+                "still answering the rewrite. This shapes voice + detail, NOT which rewrite you target.\n"
+            )
+
         # Shared header + intent-specific tail
-        header = f"""{scope_line}{seed_block}{coverage_block}{facet_block}
+        header = f"""{scope_line}{seed_block}{coverage_block}{facet_block}{persona_block}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
 {brand_block}

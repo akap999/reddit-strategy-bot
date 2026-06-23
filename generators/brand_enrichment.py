@@ -55,7 +55,15 @@ def _fetch_homepage(domain_url: str, timeout: int = 10) -> str:
         resp = requests.get(
             url,
             headers={
-                "User-Agent": REDDIT_USER_AGENT,
+                # Browser UA (not the Reddit bot UA): some brand sites sit behind
+                # Cloudflare which 403s "SubredditStrategyBot/..." — that empty fetch
+                # made enrichment fall back to the brand NAME and describe the wrong
+                # same-named entity (e.g. landportal.com). A browser UA fetches the
+                # real page; it succeeds everywhere the bot UA did. Brand-homepage
+                # fetch only — unrelated to the Reddit legs.
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0.0.0 Safari/537.36"),
                 "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "en-US,en;q=0.9",
             },

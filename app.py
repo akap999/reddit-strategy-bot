@@ -1860,6 +1860,12 @@ def api_regenerate_post_body(pid):
         if not post:
             return jsonify({"error": "Not found"}), 404
         brands = db.get_brands_for_post(pid)
+        if not brands and post.get("brand_id"):
+            # Reported/older posts often carry the brand on posts.brand_id only
+            # (empty post_brands junction) — fall back to it.
+            pb = db.get_brand(post["brand_id"])
+            if pb:
+                brands = [pb]
         if not brands:
             return jsonify({"error": "post has no linked brand to ground the body"}), 400
         body = post_gen.regenerate_body(post, brands)
@@ -2358,6 +2364,15 @@ def api_regenerate_comment(cid):
         brand = None
         if comment.get("brand_id"):
             brand = db.get_brand(comment["brand_id"])
+        if not brand:
+            # Canonical resolution (post's OWN brand_id, then a single-brand
+            # junction) — same chain the report flow + HQ add-replies use.
+            # Reported/older comments often have a NULL brand_id with the brand
+            # on posts.brand_id, which the junction-only lookup missed -> the
+            # "No brand found" error on regenerate.
+            resolved = db._resolve_post_brand(cid, "comment")
+            if resolved:
+                brand = db.get_brand(resolved)
         if not brand:
             brands = db.get_brands_for_post(post["id"])
             brand = brands[0] if brands else None
@@ -5919,6 +5934,10 @@ def api_gen_op_replies():
             brand = None
             if data.get("brand_id"):
                 brand = db.get_brand(data["brand_id"])
+            if not brand and post.get("brand_id"):
+                # Reported/older posts often carry the brand on posts.brand_id
+                # only (empty post_brands junction).
+                brand = db.get_brand(post["brand_id"])
             if not brand:
                 brands = db.get_brands_for_post(post["id"])
                 brand = brands[0] if brands else None
@@ -5956,6 +5975,12 @@ def api_gen_reply_to_comment():
             return jsonify({"error": "Post not found"}), 404
 
         brand = db.get_brand(brand_id) if brand_id else None
+        if not brand:
+            # Canonical fallback: post's own brand_id / single-brand junction
+            # (reported posts often carry the brand on posts.brand_id only).
+            resolved = db._resolve_post_brand(comment_id, "comment")
+            if resolved:
+                brand = db.get_brand(resolved)
         if not brand:
             brands = db.get_brands_for_post(post["id"])
             brand = brands[0] if brands else None

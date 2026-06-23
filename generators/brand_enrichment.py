@@ -140,7 +140,9 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
     html = _fetch_homepage(domain_url)
     page_text = _extract_visible_text(html)
     prompt = _build_enrichment_prompt(name, domain_url, page_text)
-    result = claude.call(prompt, max_tokens=1500, temperature=0.3)
+    # 4000 (was 1500): the prompt asks for ~10 fields incl. competitor_domains;
+    # 1500 truncated the JSON mid-object -> JSONDecodeError -> None -> "failed".
+    result = claude.call(prompt, max_tokens=4000, temperature=0.3)
     if not isinstance(result, dict):
         return {}
 

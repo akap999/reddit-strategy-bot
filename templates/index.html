@@ -1026,7 +1026,9 @@ async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
         const msg = draft._page_fetched ? 'Analyzed from homepage — review and Save' : 'Analyzed (homepage unreachable — review carefully)';
         toast(msg, 'success');
     } catch (e) {
-        toast('Analyze failed', 'error');
+        // api() already toasted the server's real error message; surface it
+        // here too (don't mask it with a generic "Analyze failed").
+        toast('Analyze failed: ' + (e && e.message ? e.message : 'unknown error'), 'error');
     } finally {
         if (btn) { btn.innerHTML = original; btn.disabled = false; }
     }

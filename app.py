@@ -1412,9 +1412,13 @@ def api_enrich_brand_draft():
     claude = ClaudeClient(ANTHROPIC_API_KEY)
     draft = enrich_brand(claude, name, domain_url)
     if not draft:
+        # Surface the ACTUAL reason (auth / model / JSON-parse / rate-limit)
+        # instead of a generic message, so the toast tells us what to fix.
         return jsonify({
-            "error": "Enrichment failed — LLM returned no usable data. "
-                     "Check the URL and try again, or fill fields manually."
+            "error": "Enrichment failed: " + (
+                getattr(claude, "last_error", None)
+                or "LLM returned no usable data. Check the URL and try again, "
+                   "or fill fields manually.")
         }), 502
     # Effective name = provided, else the name enrich_brand derived from the page.
     eff_name = name or (draft.get("name") or "")

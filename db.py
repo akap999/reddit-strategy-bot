@@ -553,18 +553,32 @@ class Database:
                 p["brands"] = brands
             else:
                 p["brands"] = []
-            # Junction empty but the post carries its brand on posts.brand_id
-            # (reported / manually-added posts) — surface it so brand lookups
-            # (HQ / comment generation) and the UI's Brands column resolve it
-            # instead of showing "no brand assigned".
-            if not p["brands"] and p.get("brand_id"):
-                b = self.conn.execute(
-                    "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
-                ).fetchone()
-                if b:
-                    p["brands"] = [{"id": b["id"], "name": b["name"]}]
+            # Junction empty, but the post's brand is recoverable elsewhere —
+            # surface it so brand lookups (HQ / comment generation) and the UI's
+            # Brands column resolve it instead of showing "no brand assigned":
+            #   1) posts.brand_id (reported / manually-added posts)
+            #   2) the post's EXISTING comments' brand_id — an already-generated
+            #      HQ cluster stamps brand_id on its comments even when the post
+            #      row has no brand link. This is the "+HQ on an existing
+            #      cluster" case that kept failing.
+            if not p["brands"]:
+                fb = None
+                if p.get("brand_id"):
+                    fb = self.conn.execute(
+                        "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
+                    ).fetchone()
+                if not fb:
+                    fb = self.conn.execute(
+                        "SELECT b.id AS id, b.name AS name FROM comments c "
+                        "JOIN brands b ON b.id = c.brand_id "
+                        "WHERE c.post_id = ? AND c.brand_id IS NOT NULL "
+                        "ORDER BY c.id LIMIT 1",
+                        (p["id"],)
+                    ).fetchone()
+                if fb:
+                    p["brands"] = [{"id": fb["id"], "name": fb["name"]}]
                     if not p.get("brand_names"):
-                        p["brand_names"] = b["name"]
+                        p["brand_names"] = fb["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):
@@ -630,18 +644,32 @@ class Database:
                 p["brands"] = brands
             else:
                 p["brands"] = []
-            # Junction empty but the post carries its brand on posts.brand_id
-            # (reported / manually-added posts) — surface it so brand lookups
-            # (HQ / comment generation) and the UI's Brands column resolve it
-            # instead of showing "no brand assigned".
-            if not p["brands"] and p.get("brand_id"):
-                b = self.conn.execute(
-                    "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
-                ).fetchone()
-                if b:
-                    p["brands"] = [{"id": b["id"], "name": b["name"]}]
+            # Junction empty, but the post's brand is recoverable elsewhere —
+            # surface it so brand lookups (HQ / comment generation) and the UI's
+            # Brands column resolve it instead of showing "no brand assigned":
+            #   1) posts.brand_id (reported / manually-added posts)
+            #   2) the post's EXISTING comments' brand_id — an already-generated
+            #      HQ cluster stamps brand_id on its comments even when the post
+            #      row has no brand link. This is the "+HQ on an existing
+            #      cluster" case that kept failing.
+            if not p["brands"]:
+                fb = None
+                if p.get("brand_id"):
+                    fb = self.conn.execute(
+                        "SELECT id, name FROM brands WHERE id = ?", (p["brand_id"],)
+                    ).fetchone()
+                if not fb:
+                    fb = self.conn.execute(
+                        "SELECT b.id AS id, b.name AS name FROM comments c "
+                        "JOIN brands b ON b.id = c.brand_id "
+                        "WHERE c.post_id = ? AND c.brand_id IS NOT NULL "
+                        "ORDER BY c.id LIMIT 1",
+                        (p["id"],)
+                    ).fetchone()
+                if fb:
+                    p["brands"] = [{"id": fb["id"], "name": fb["name"]}]
                     if not p.get("brand_names"):
-                        p["brand_names"] = b["name"]
+                        p["brand_names"] = fb["name"]
             if not p.get("brand_names"):
                 p["brand_names"] = ""
             if not p.get("reddit_url"):

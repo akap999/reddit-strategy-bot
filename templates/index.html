@@ -5460,7 +5460,7 @@ function renderAllCommentCard(c) {
             ${c.comment_type === 'op_reply' ? '<span class="badge" style="background:#0e8a16;color:white">OP</span>' : ''}
             ${c.is_reply ? '<span class="badge" style="background:#343536;color:#D7DADC">reply</span>' : '<span class="badge" style="background:#1A1A1B;color:#D7DADC;border:1px solid #343536">direct</span>'}
             ${c.mentions_brand ? '<span class="badge" style="background:#FF4500;color:white;font-size:0.6rem">brand</span>' : ''}
-            ${c.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>` : ''}
+            ${c.report_month ? `<span class="badge" style="background:#0d3d3a;color:#9efbe0" title="Reported on ${c.report_added_at || '(date not recorded)'}">📊 ${c.report_month}${c.report_added_at ? ' · ' + String(c.report_added_at).slice(0, 10) : ''}</span>` : ''}
             ${kwPills}
             <span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}${c.status === 'deployed' && c.last_live_check ? '<span class="badge ml-1" style="background:#1a3320;color:#46d160">Live</span>' : ''}${c.status === 'deployed' && !c.last_live_check ? '<span class="badge ml-1" style="background:#2d2d2e;color:#818384">Unchecked</span>' : ''}
             ${c.account_id ? `<span class="text-xs font-medium" style="color:#FFD700">u/${c.account_id}</span>` : '<span class="text-xs text-gray-600 italic">unassigned</span>'}
@@ -9171,7 +9171,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                 ${c.comment_type === 'hq' ? '<span class="badge ml-1" style="background:#0e2a3d;color:#60a5fa">HQ</span>' : ''}
                 ${c.comment_type === 'op_reply' ? '<span class="badge ml-1" style="background:#3d2a0e;color:#ffb347">OP</span>' : ''}
                 ${c.focus_phrase ? `<span class="badge ml-1" style="background:${c.focus_hit === 1 ? '#0e3d1c;color:#9efbb4' : '#3d2e0e;color:#ffd166'}" title="${c.focus_hit === 1 ? 'Focus phrase paired with brand' : 'Focus phrase assigned but not paired with brand'}">↔ ${c.focus_phrase}</span>` : ''}
-                ${c.report_month ? `<span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>` : ''}
+                ${c.report_month ? `<span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="Reported on ${c.report_added_at || '(date not recorded)'}">📊 ${c.report_month}${c.report_added_at ? ' · ' + String(c.report_added_at).slice(0, 10) : ''}</span>` : ''}
             </td>
             <td class="text-xs">${c.account_id ? `<span style="color:#FFD635">u/${c.account_id}</span>` : '-'}</td>
             <td><span class="badge badge-${c.status}">${c.status}</span>${c.paid_at ? '<span class="badge ml-1" style="background:#00A86B;color:white">Paid</span>' : ''}</td>

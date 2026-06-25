@@ -7329,6 +7329,7 @@ def _search_request_signature(data):
         "nsfw": data.get("nsfw"), "ratio": data.get("min_upvote_ratio"),
         "maxsub": data.get("max_subscribers"), "minsub": data.get("min_subscribers"),
         "scrut": data.get("max_scrutiny"),
+        "wide": bool(data.get("reddit_wide", True)),
     }, sort_keys=True, default=str)
 
 
@@ -7410,6 +7411,9 @@ def api_search_reddit():
                 max_scrutiny=data.get("max_scrutiny"),
                 db_path=DB_PATH,
                 force_refresh=bool(data.get("force_refresh")),
+                # When named subs underfill the limit, top up Reddit-wide by keyword.
+                # Default ON for Live Search (only acts when subreddits are specified).
+                reddit_wide=bool(data.get("reddit_wide", True)),
             )
 
             if keyword:

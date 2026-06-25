@@ -991,6 +991,7 @@ class RedditSearchBot:
         db_path=None,
         force_refresh=False,
         keywords=None,
+        reddit_wide=False,
     ):
         # `keywords` (optional): the ORIGINAL term list when `keyword` is a
         # combined boolean-OR query. OR-capable legs (RSS/JSON) use the combined
@@ -1038,7 +1039,7 @@ class RedditSearchBot:
             "minc": min_comments, "mins": min_score, "days": max_days_old,
             "sort": sort_by, "order": sort_order, "limit": limit, "api": api,
             "nsfw": nsfw, "ratio": min_upvote_ratio, "maxsub": max_subscribers,
-            "minsub": min_subscribers, "scrut": max_scrutiny,
+            "minsub": min_subscribers, "scrut": max_scrutiny, "wide": bool(reddit_wide),
         }, sort_keys=True, default=str)
         if not force_refresh:
             with RedditSearchBot._result_cache_lock:
@@ -1495,6 +1496,43 @@ class RedditSearchBot:
 
         # Equal distribution across subreddits when multiple are searched
         result = balance_posts_by_subreddit(filtered, limit, subreddits)
+
+        # Reddit-wide top-up: the named subreddits didn't have enough matching posts
+        # to fill the limit → search ALL of Reddit by the same keyword(s) + filters
+        # and append fresh posts until the limit is reached. The named-sub results
+        # keep their priority/order; globals only fill the remaining tail. Opt-in via
+        # `reddit_wide` (the Live Search endpoint turns it on). No recursion loop: the
+        # inner call passes subreddits=None, so its own guard is False.
+        if reddit_wide and subreddit_path and api == "auto" and len(result) < limit:
+            seen_ids = {p.get("id") for p in result if p.get("id")}
+            needed = limit - len(result)
+            try:
+                global_hits = self.search(
+                    keyword, subreddit=None, subreddits=None,
+                    excluded_subreddits=excluded_subreddits,
+                    min_comments=min_comments, min_score=min_score,
+                    max_days_old=max_days_old, sort_by=sort_by, sort_order=sort_order,
+                    limit=min(needed * 2, 200), api="auto", nsfw=nsfw,
+                    min_upvote_ratio=min_upvote_ratio, max_subscribers=max_subscribers,
+                    min_subscribers=min_subscribers, max_scrutiny=max_scrutiny,
+                    db=db, db_path=db_path, force_refresh=force_refresh,
+                    keywords=keywords, reddit_wide=False,
+                )
+                added = 0
+                for p in global_hits:
+                    if len(result) >= limit:
+                        break
+                    pid = p.get("id")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        result.append(p)
+                        added += 1
+                if added:
+                    print(f"    Reddit-wide top-up: named subs had {len(result) - added}, "
+                          f"added {added} from all of Reddit (target {limit})")
+            except Exception as e:
+                print(f"    Reddit-wide top-up failed: {e}")
+
         # Cache the assembled result so an identical re-run is consistent (and
         # skips the upstream calls). The all-APIs-failed path returns earlier
         # WITHOUT caching, so a transient total failure isn't locked in.

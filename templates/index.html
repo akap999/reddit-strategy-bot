@@ -10877,12 +10877,12 @@ function lsFilterComments() {
                                 ` : ''}
                                 ${c.status === 'report' ? `
                                     <a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-secondary btn-sm">View</a>
-                                    <span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="In monthly report">📊 ${c.report_month}</span>
+                                    <span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="Reported on ${c.report_added_at || '(date not recorded)'}">📊 ${c.report_month}${c.report_added_at ? ' · ' + String(c.report_added_at).slice(0, 10) : ''}</span>
                                     <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}
                                 ${c.status === 'replaced' ? `
                                     <a href="${c.reddit_comment_url || '#'}" ${c.reddit_comment_url ? 'target="_blank"' : ''} class="btn btn-secondary btn-sm">View</a>
-                                    <span class="badge ml-1" style="background:#0d3d20;color:#9efbb0" title="Replacement in monthly report">♻ ${c.report_month}</span>
+                                    <span class="badge ml-1" style="background:#0d3d20;color:#9efbb0" title="Reported on ${c.report_added_at || '(date not recorded)'}">♻ ${c.report_month}${c.report_added_at ? ' · ' + String(c.report_added_at).slice(0, 10) : ''}</span>
                                     <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="reclassifyReport(${c.id}, 'search_comment', 'report')" title="Re-tag this replacement as a plain reported comment (live-checked first)">Mark as reported</button>
                                     <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}

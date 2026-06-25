@@ -3898,13 +3898,20 @@ function _postStatusDate(p) {
 }
 
 function _commentStatusDate(c) {
-    // Reported date (report_added_at) — shown for ANY status that's in a monthly
-    // report (report / replaced / removed / replace), so the date is visible even
-    // when the status changed after reporting. report_added_at exists only while a
-    // comment is in a report, so this safely takes priority.
-    if (c.report_added_at || c.report_month) {
-        const d = c.report_added_at ? String(c.report_added_at).substring(0, 10) : '';
-        return `<span class="text-xs text-gray-500" title="Reported on ${c.report_added_at || c.report_month}">Reported${d ? ' ' + d : ' ' + c.report_month}</span>`;
+    // Status-transition dates: removed/replace -> Removed, replaced -> Replaced,
+    // plus the Reported date when the comment is in a monthly report. Shown together
+    // (e.g. "Replaced 2026-06-12 · Reported 2026-06-04") so all status dates are
+    // visible. removed_at/replaced_at are stamped by DB triggers going forward.
+    {
+        const d = s => s ? String(s).substring(0, 10) : '';
+        const parts = [];
+        if ((c.status === 'removed' || c.status === 'replace') && c.removed_at) parts.push('Removed ' + d(c.removed_at));
+        if (c.status === 'replaced' && c.replaced_at) parts.push('Replaced ' + d(c.replaced_at));
+        if (c.report_added_at || c.report_month) parts.push('Reported ' + (c.report_added_at ? d(c.report_added_at) : c.report_month));
+        if (parts.length) {
+            const tip = `removed: ${c.removed_at || '—'} | replaced: ${c.replaced_at || '—'} | reported: ${c.report_added_at || c.report_month || '—'}`;
+            return `<span class="text-xs text-gray-500" title="${tip}">${parts.join(' · ')}</span>`;
+        }
     }
     if (c.paid_at) return `<span class="text-xs text-gray-500">Paid ${c.paid_at.substring(0,10)}</span>`;
     if (c.status === 'deployed' && c.deployed_at) return `<span class="text-xs text-gray-500">Deployed ${c.deployed_at.substring(0,10)}</span>`;

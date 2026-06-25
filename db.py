@@ -1704,6 +1704,11 @@ class Database:
             # report_month IS NOT NULL are written together.
             "report_month": "ALTER TABLE comments ADD COLUMN report_month TEXT",
             "report_added_at": "ALTER TABLE comments ADD COLUMN report_added_at TEXT",
+            # Transition timestamps — stamped by DB triggers (see _ensure_status_stamp_triggers)
+            # the first time a comment's status becomes removed/replace (removed_at) or
+            # replaced (replaced_at), independent of which code path made the change.
+            "removed_at": "ALTER TABLE comments ADD COLUMN removed_at TEXT",
+            "replaced_at": "ALTER TABLE comments ADD COLUMN replaced_at TEXT",
             # Direct client assignment — set when admin pushes a row
             # to report state. Replaces the previous "deduce client
             # from brand_id" approach which silently broke when
@@ -1839,6 +1844,8 @@ class Database:
             # migration. See the comments-table block for rationale.
             "report_month": "ALTER TABLE search_comments ADD COLUMN report_month TEXT",
             "report_added_at": "ALTER TABLE search_comments ADD COLUMN report_added_at TEXT",
+            "removed_at": "ALTER TABLE search_comments ADD COLUMN removed_at TEXT",
+            "replaced_at": "ALTER TABLE search_comments ADD COLUMN replaced_at TEXT",
             "report_client_id": "ALTER TABLE search_comments ADD COLUMN report_client_id INTEGER REFERENCES clients(id)",
             # See `comments` table for rationale. Same shape on
             # the search side so the portal can pull stats
@@ -2366,6 +2373,56 @@ class Database:
         except Exception as e:
             # Migrations must never block startup. Log and move on.
             print(f"[migrations] backfill_report_brand_ids failed: {e}", flush=True)
+
+        try:
+            self._ensure_status_stamp_triggers()
+        except Exception as e:
+            print(f"[migrations] status-stamp triggers failed: {e}", flush=True)
+
+    def _ensure_status_stamp_triggers(self):
+        """Stamp removed_at / replaced_at the first time a comment's status
+        transitions into the corresponding state — via DB TRIGGERS so EVERY code
+        path (manual mark, Check Live, report move, reclassify, raw SQL) is covered
+        without patching each call site. SQLite doesn't recurse triggers by default,
+        and the trigger updates a non-status column, so it can't re-fire.
+
+        Conventions:
+          - removed_at  ← status becomes 'removed' OR 'replace' (both = removed on
+                          Reddit; 'replace' is the redeploy-eligible sub-case).
+          - replaced_at ← status becomes 'replaced' (a replacement was reported).
+        Only stamps when the target column is still NULL (first transition wins).
+        Plus a one-time best-effort BACKFILL for existing rows where the date is
+        recoverable: replaced_at ← report_added_at for 'replaced' rows; removed_at ←
+        deleted_at for search_comments removed rows (search marks deleted_at on
+        removal). 'removed' comments have no recoverable removal date → left NULL."""
+        for tbl in ("comments", "search_comments"):
+            self.conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS {tbl}_stamp_removed_at
+                AFTER UPDATE OF status ON {tbl}
+                WHEN NEW.status IN ('removed', 'replace')
+                     AND (OLD.status IS NULL OR OLD.status NOT IN ('removed', 'replace'))
+                     AND NEW.removed_at IS NULL
+                BEGIN
+                    UPDATE {tbl} SET removed_at = datetime('now') WHERE id = NEW.id;
+                END;""")
+            self.conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS {tbl}_stamp_replaced_at
+                AFTER UPDATE OF status ON {tbl}
+                WHEN NEW.status = 'replaced'
+                     AND (OLD.status IS NULL OR OLD.status != 'replaced')
+                     AND NEW.replaced_at IS NULL
+                BEGIN
+                    UPDATE {tbl} SET replaced_at = datetime('now') WHERE id = NEW.id;
+                END;""")
+            # One-time backfill of what's recoverable (idempotent: only NULL targets).
+            self.conn.execute(f"""UPDATE {tbl} SET replaced_at = report_added_at
+                                  WHERE status = 'replaced' AND replaced_at IS NULL
+                                        AND report_added_at IS NOT NULL""")
+        # search_comments already stamps deleted_at when a comment is removed.
+        self.conn.execute("""UPDATE search_comments SET removed_at = deleted_at
+                             WHERE status IN ('removed', 'replace') AND removed_at IS NULL
+                                   AND deleted_at IS NOT NULL""")
+        self.conn.commit()
 
     def _backfill_report_brand_ids(self):
         """Legacy rows reported during the brief `report_client_id`

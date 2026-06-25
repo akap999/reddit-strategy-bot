@@ -10887,6 +10887,7 @@ function lsFilterComments() {
                                     <button class="btn btn-sm" style="background:#4a3a00;color:#FFD635" onclick="undoReport(${c.id}, 'search_comment')" title="Move back to previous status">Undo report</button>
                                 ` : ''}
                                 ${c.status === 'removed' ? `
+                                    ${c.report_month ? `<span class="badge ml-1" style="background:#0d3d3a;color:#9efbe0" title="Reported on ${c.report_added_at || '(date not recorded)'}">📊 ${c.report_month}${c.report_added_at ? ' · ' + String(c.report_added_at).slice(0, 10) : ''}</span>` : ''}
                                     ${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-secondary btn-sm">View</a>` : ''}
                                     <button class="btn btn-primary btn-sm" onclick="lsAssignComment(${c.id})">Auto</button>
                                     <button class="btn btn-accent btn-sm" onclick="lsManualAssignComment(${c.id})">Assign</button>

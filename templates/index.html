@@ -3898,6 +3898,14 @@ function _postStatusDate(p) {
 }
 
 function _commentStatusDate(c) {
+    // Reported date (report_added_at) — shown for ANY status that's in a monthly
+    // report (report / replaced / removed / replace), so the date is visible even
+    // when the status changed after reporting. report_added_at exists only while a
+    // comment is in a report, so this safely takes priority.
+    if (c.report_added_at || c.report_month) {
+        const d = c.report_added_at ? String(c.report_added_at).substring(0, 10) : '';
+        return `<span class="text-xs text-gray-500" title="Reported on ${c.report_added_at || c.report_month}">Reported${d ? ' ' + d : ' ' + c.report_month}</span>`;
+    }
     if (c.paid_at) return `<span class="text-xs text-gray-500">Paid ${c.paid_at.substring(0,10)}</span>`;
     if (c.status === 'deployed' && c.deployed_at) return `<span class="text-xs text-gray-500">Deployed ${c.deployed_at.substring(0,10)}</span>`;
     if (c.status === 'informed' && c.informed_at) return `<span class="text-xs text-gray-500">Informed ${c.informed_at.substring(0,10)}</span>`;

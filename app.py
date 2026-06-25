@@ -982,15 +982,53 @@ def run_task(task_id, func, *args, **kwargs):
             print(f"[TASK DB ERROR] {task_id}: {e2}", flush=True)
 
 _task_threads = {}  # task_id -> threading.Thread
+_inflight_lock = threading.Lock()
+_inflight_tasks = {}  # dedup_key -> task_id (only while RUNNING)
 
-def start_task(task_type, func, *args, pass_task_id=False, **kwargs):
+def start_task(task_type, func, *args, pass_task_id=False, dedup_key=None, **kwargs):
+    # In-flight dedup: if an identical generation for the same target is already
+    # RUNNING, return that task_id instead of spawning a duplicate. This stops a
+    # double-submit (page refresh re-firing the request, or a double-click) from
+    # running the generation twice and producing duplicate/double output. Only
+    # CONCURRENT duplicates are collapsed — a sequential re-generate (after the
+    # first finished) still starts fresh.
+    if dedup_key:
+        with _inflight_lock:
+            existing = _inflight_tasks.get(dedup_key)
+        if existing:
+            db = get_db()
+            try:
+                t = db.get_task(existing)
+            finally:
+                db.close()
+            if t and t.get("status") == "running":
+                print(f"[TASK] dedup: '{dedup_key}' already running as {existing} — reusing", flush=True)
+                return existing
+            # stale entry (task finished/gone) → drop it and start fresh
+            with _inflight_lock:
+                if _inflight_tasks.get(dedup_key) == existing:
+                    del _inflight_tasks[dedup_key]
+
     task_id = str(uuid.uuid4())
     db = get_db()
     db.create_task(task_id, task_type)
     db.close()
     if pass_task_id:
         kwargs["_task_id"] = task_id
-    t = threading.Thread(target=run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
+    if dedup_key:
+        with _inflight_lock:
+            _inflight_tasks[dedup_key] = task_id
+
+    def _runner():
+        try:
+            run_task(task_id, func, *args, **kwargs)
+        finally:
+            if dedup_key:
+                with _inflight_lock:
+                    if _inflight_tasks.get(dedup_key) == task_id:
+                        del _inflight_tasks[dedup_key]
+
+    t = threading.Thread(target=_runner, daemon=True)
     _task_threads[task_id] = t
     t.start()
     return task_id
@@ -4999,7 +5037,7 @@ def api_gen_posts():
         finally:
             db.close()
 
-    tid = start_task("posts", task)
+    tid = start_task("posts", task, dedup_key=f"posts:{data.get('subreddit_id')}:{sorted(data.get('brand_ids') or [])}:{count}:{data.get('seed') or ''}")
     return jsonify({"task_id": tid})
 
 @app.route("/api/generate/filler-posts", methods=["POST"])
@@ -5017,7 +5055,7 @@ def api_gen_filler_posts():
         finally:
             db.close()
 
-    tid = start_task("filler-posts", task)
+    tid = start_task("filler-posts", task, dedup_key=f"filler:{data.get('subreddit_id')}:{data.get('count', 3)}")
     return jsonify({"task_id": tid})
 
 
@@ -5855,7 +5893,7 @@ def api_gen_comments():
         finally:
             db.close()
 
-    tid = start_task("comments", task)
+    tid = start_task("comments", task, dedup_key=f"comments:{data.get('post_id')}")
     return jsonify({"task_id": tid})
 
 @app.route("/api/generate/hq-comment", methods=["POST"])
@@ -5889,7 +5927,7 @@ def api_gen_hq_comment():
         finally:
             db.close()
 
-    tid = start_task("hq-comment", task)
+    tid = start_task("hq-comment", task, dedup_key=f"hq-comment:{data.get('post_id')}:{data.get('brand_id')}")
     return jsonify({"task_id": tid})
 
 
@@ -5918,7 +5956,7 @@ def api_hq_add_replies(cid):
         finally:
             db.close()
 
-    tid = start_task("hq-add-replies", task)
+    tid = start_task("hq-add-replies", task, dedup_key=f"hq-add-replies:{cid}")
     return jsonify({"task_id": tid})
 
 
@@ -5987,7 +6025,7 @@ def api_gen_op_replies():
         finally:
             db.close()
 
-    tid = start_task("op-replies", task)
+    tid = start_task("op-replies", task, dedup_key=f"op-replies:{data.get('post_id')}")
     return jsonify({"task_id": tid})
 
 @app.route("/api/generate/reply-to-comment", methods=["POST"])

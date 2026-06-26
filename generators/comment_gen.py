@@ -2695,6 +2695,23 @@ Return JSON only:
             if not passed:
                 print(f"    [validate] comment {idx+1} dropped after {max_retries} retries")
 
+        # SAFETY NET: never silently return a 0-comment batch when generation DID
+        # produce content. If the validator rejected every comment (and retries
+        # couldn't save any), that's almost always over-rejection — return the
+        # originally generated bodies as best-effort drafts instead of nothing. The
+        # operator reviews comments before deploying, so a usable draft beats a
+        # confusing "Generated 0 comments". (Common on the organic / keep-alive path,
+        # where the strict brand-recommendation rubric used to drop the whole batch.)
+        if not final_bodies and bodies:
+            print(f"    [validate] all {len(bodies)} comments failed validation — "
+                  f"returning unvalidated best-effort drafts to avoid a 0-result batch")
+            return {
+                "generated_comments": bodies,
+                "_personas": personas,
+                "_structures": structures,
+                "strategies_used": strategies,
+            }
+
         return {
             "generated_comments": final_bodies,
             "_personas": final_personas,

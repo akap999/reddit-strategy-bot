@@ -667,20 +667,23 @@ def _process_tier1_row(db, source, row, url, meta, posted_at, liveness):
             "action": "already_removed",
         }
 
-    # Bulk deploy NEVER marks a comment removed. Only a Reddit-confirmed
-    # LIVE comment is flipped to 'deployed'; anything we can't confirm
-    # live — Reddit shows it removed/deleted ("removed") OR we couldn't
-    # verify it ("missing", e.g. fetch failed/unreachable) — is left
-    # exactly as-is in its current ('assigned'/'informed') state.
-    # Removed-detection is Check Live's job, not bulk deploy's.
-    if liveness != "live":
+    # A Tier-1 match means the sheet URL maps to THIS DB comment by URL /
+    # comment-id — strong evidence the human actually posted it. So we deploy
+    # unless Reddit POSITIVELY confirms it's gone:
+    #   - "removed"  -> leave assigned (Check Live owns removed-detection).
+    #   - "missing"  -> fetch failed / unreachable (the common cloud-IP 403 case)
+    #                   — this is NOT evidence of removal, so it must NOT block a
+    #                   URL-matched deploy. Deploy it; if it's truly gone, Check
+    #                   Live flips it to removed later.
+    #   - "live"     -> deploy.
+    if liveness == "removed":
         return {
             "source": source, "id": rid,
             "action": "left_assigned",
             "current_status": current_status, "liveness": liveness,
         }
 
-    # liveness == "live" — deploy.
+    # liveness is "live" or "missing" — deploy (the URL match is the evidence).
     try:
         if source == "comment":
             db.deploy_comment(rid, url, posted_at=posted_at)
@@ -937,6 +940,28 @@ def match_and_deploy_comment(db, classified: dict, *,
     if liveness == "missing" or body is None:
         if tier1_results:
             return _rollup_tier1(url, tier1_results, liveness, posted_at)
+        # Fetch failed (cloud-IP 403 etc.), so we can't body-match. But the sheet
+        # URL resolved to a real comment under a post we DO have, and if there's
+        # exactly ONE undeployed candidate under that post, the URL is almost
+        # certainly that comment -> deploy it (the URL is the evidence). Only
+        # genuine ambiguity (2+ candidates) stays no_match.
+        if len(candidates) == 1:
+            cand = candidates[0]
+            ck = cand["__kind"]
+            try:
+                if ck == "comment":
+                    db.deploy_comment(cand["id"], url, posted_at=posted_at)
+                else:
+                    db.deploy_search_comment(cand["id"], url, posted_at=posted_at)
+                _log_bulk_event(db, cand["id"], ck, url, "bulk_deployed",
+                                cand.get("status"), "deployed")
+                return {
+                    "url": url, "source": ck, "id": cand["id"],
+                    "action": "deployed", "tier": "post_singleton",
+                    "liveness": liveness,
+                }
+            except Exception as e:
+                return {"url": url, "kind": "comment", "action": "error", "reason": str(e)}
         return {
             "url": url, "kind": "comment", "action": "no_match",
             "reason": "reddit_fetch_failed_or_comment_unreachable",

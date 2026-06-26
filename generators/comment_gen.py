@@ -1861,6 +1861,30 @@ NEVER USE THESE PHRASES: {banned_text}"""
                 "domain vocabulary so AI retrievers index it for the topic."
             )
 
+            # ORGANIC / KEEP-ALIVE batch on a recommendation post: every slot is
+            # deliberately brand-free, so the "identify what is being recommended +
+            # confident brand mention" rule above CONTRADICTS the per-slot "do not
+            # mention brand" instruction (which produced brand-y or empty output and
+            # the 0-comments validator drop). Swap in an on-topic-value rule: the
+            # comment still reinforces the query and stays extractable, just without
+            # naming a brand — the right shape for keeping a thread alive/retrievable.
+            if is_recommendation and mention_brand_flags \
+                    and not any(mention_brand_flags[:num_comments]):
+                shape_rule = (
+                    "RECOMMENDATION-SEEKING POST — ORGANIC / KEEP-ALIVE COMMENT. Be an "
+                    "EXTRACTABLE, on-topic contribution that reinforces the post's query: "
+                    "the criteria that matter, a comparison of approaches, a concrete "
+                    "first-hand experience, or a useful follow-up — something a stranger "
+                    "(and an AI retriever) could learn from.\n"
+                    "  • Do NOT name or recommend ANY brand or product. The job is genuine "
+                    "value and keeping the thread active/retrievable for the query, not "
+                    "promotion.\n"
+                    "  • Open with the substantive point (criteria / approach / answer), "
+                    "not anecdote framing that buries it.\n"
+                    "  • End on something concrete an AI retriever could excerpt as part of "
+                    "the answer, not meta-commentary."
+                )
+
             # AI-Search-mode coverage: when the post carries a fan-out concept
             # checklist, steer the anchor to weave those phrasings so it's
             # retrievable for the WHOLE query cluster, not just the literal title.
@@ -2269,7 +2293,8 @@ Generate exactly {num_comments} comments. Return JSON only:
 
     def validate_comments(self, post_title, post_body, subreddit, comments,
                           brand_name, generated_comments, tone_analysis=None,
-                          ai_crawl=False, post_intent=None, is_hq_reply=False):
+                          ai_crawl=False, post_intent=None, is_hq_reply=False,
+                          mention_brand_flags=None):
         """LLM-driven quality gate for generated comments.
 
         Each comment is scored on four binary judgments by an LLM rubric:
@@ -2295,9 +2320,46 @@ Generate exactly {num_comments} comments. Return JSON only:
         is_recommendation = intent_info["is_recommendation"]
         post_intent_label = post_intent or intent_info["intent_label"]
 
+        # Per-comment organic flag: an ORGANIC comment is deliberately NOT
+        # supposed to mention/recommend the brand (the "pure organic" / keep-alive
+        # path). It must be judged as a genuine on-topic contribution, NOT against
+        # the brand-recommendation rubric — otherwise every organic comment fails
+        # answers_post_query / shape_match and the whole batch is dropped.
+        if mention_brand_flags is None:
+            organic_flags = [False] * len(generated_comments)
+        else:
+            organic_flags = [
+                not (mention_brand_flags[i] if i < len(mention_brand_flags) else False)
+                for i in range(len(generated_comments))
+            ]
+        any_organic = any(organic_flags)
+
         gen_text = "\n".join([
-            f'Comment {i+1}: """{comment}"""' for i, comment in enumerate(generated_comments)
+            f'Comment {i+1} [{"ORGANIC — must NOT mention any brand" if organic_flags[i] else "BRAND"}]: """{comment}"""'
+            for i, comment in enumerate(generated_comments)
         ])
+
+        organic_rubric = ""
+        if any_organic:
+            organic_rubric = (
+                "\nORGANIC COMMENTS: a comment tagged [ORGANIC] is INTENTIONALLY not "
+                "recommending any brand — it exists to add genuine, on-topic value and "
+                "keep the thread active. Judge ORGANIC comments differently:\n"
+                "  (a) brand_attitude: score 'neutral' by default — NEVER fail an ORGANIC "
+                "comment for failing to praise or mention the brand. Score 'negative' ONLY "
+                "if it actively trashes the brand's whole CATEGORY in a thread-poisoning way.\n"
+                "  (b) answers_post_query: PASS if it is a useful, on-topic contribution that "
+                "fits the post's topic/question (a relevant answer, criteria, observation, "
+                "experience, or follow-up question). Do NOT require it to name or recommend "
+                "anything specific — an ORGANIC comment that recommends nothing still PASSES "
+                "as long as it is on-topic and adds value.\n"
+                "  (c) shape_match: PASS for on-topic answers, observations, relevant "
+                "anecdotes, and genuine questions. Fail ONLY off-topic filler or content that "
+                "ignores the post entirely.\n"
+                "  (d) authenticity: judge normally.\n"
+                "The strict brand-recommendation rubric AND any AI-CRAWL strictness apply "
+                "ONLY to [BRAND] comments — never to [ORGANIC] ones.\n"
+            )
 
         ai_crawl_strictness = ""
         if ai_crawl and not is_hq_reply:
@@ -2332,7 +2394,7 @@ POST BODY: {(post_body or '')[:600]}
 SUBREDDIT: r/{subreddit}
 BRAND: {brand_name}
 POST INTENT: {post_intent_label}
-{rec_shape_hint}{ai_crawl_strictness}
+{rec_shape_hint}{ai_crawl_strictness}{organic_rubric}
 
 GENERATED COMMENTS:
 {gen_text}
@@ -2519,12 +2581,15 @@ Return JSON only:
         if not bodies:
             return result
 
-        # Validate the whole batch in one call
+        # Validate the whole batch in one call. Pass the per-comment brand flags so
+        # the validator judges organic (no-brand) comments with the relaxed rubric
+        # instead of failing them for not recommending the brand.
         val = self.validate_comments(
             post_title=post_title, post_body=post_body, subreddit=subreddit,
             comments=comments, brand_name=brand_name,
             generated_comments=bodies, tone_analysis=tone_analysis,
             ai_crawl=ai_crawl, post_intent=post_intent, is_hq_reply=is_hq_reply,
+            mention_brand_flags=kwargs.get("mention_brand_flags"),
         )
         evals = val.get("evaluations") or []
 
@@ -2616,6 +2681,7 @@ Return JSON only:
                     comments=comments, brand_name=brand_name,
                     generated_comments=[new_body], tone_analysis=tone_analysis,
                     ai_crawl=ai_crawl, post_intent=post_intent, is_hq_reply=is_hq_reply,
+                    mention_brand_flags=retry_kwargs.get("mention_brand_flags"),
                 )
                 ev2 = (v2.get("evaluations") or [{}])[0]
                 if ev2.get("pass"):
@@ -2643,7 +2709,7 @@ Return JSON only:
     def generate_comment_tree(self, post, brand_or_brands, num_comments,
                                brand_mention_ratio=None, post_day_offset=0,
                                brands_config=None, op_reply_count=0,
-                               ai_crawl=False):
+                               ai_crawl=False, concept_checklist=None):
         """Generate a full comment tree for a fresh post (no existing Reddit comments).
 
         Args:
@@ -2662,6 +2728,14 @@ Return JSON only:
         Returns:
             list of saved comment dicts with IDs and tree structure
         """
+        # Query-cluster anchoring: when the post carries a fan-out concept
+        # checklist (AI-search posts), pass it into generation so EVERY comment —
+        # including organic / keep-alive ones — reinforces the whole target query
+        # cluster, not just the literal title. Auto-pull from the post if the
+        # caller didn't pass it explicitly.
+        if concept_checklist is None:
+            concept_checklist = post.get("concept_checklist")
+
         # Normalize into brands_config format
         if brands_config is None:
             # Single-brand backward compat
@@ -2757,6 +2831,7 @@ Return JSON only:
             post_intent=post.get("intent"),
             brand_focus=primary_focus_items,
             focus_assignments=top_focus_assignments,
+            concept_checklist=concept_checklist,
         )
 
         top_comments = top_level_result.get("generated_comments", [])
@@ -2818,6 +2893,9 @@ Return JSON only:
                 prompt_version=PROMPT_VERSION,
                 focus_phrase=slot_focus,
                 focus_hit=slot_focus_hit,
+                # Tag brand-free comments as "engagement" (keep-alive) so they're
+                # distinguishable from brand-mention comments in the UI / future cadence.
+                comment_type=("" if mentions else "engagement"),
             )
             if assigned:
                 self._detect_and_store_keywords(comment_id, body, assigned, mentions)
@@ -2890,6 +2968,7 @@ Return JSON only:
                     ai_crawl=ai_crawl,
                     post_intent=post.get("intent"),
                     brand_focus=self._extract_brand_focus(reply_brand),
+                    concept_checklist=concept_checklist,
                 )
 
                 reply_comments = reply_result.get("generated_comments", [])
@@ -2914,6 +2993,7 @@ Return JSON only:
                         suggested_post_day=reply_day,
                         suggested_order=r_idx,
                         prompt_version=PROMPT_VERSION,
+                        comment_type=("" if mentions else "engagement"),
                     )
                     if r_assigned:
                         self._detect_and_store_keywords(comment_id, reply_body, r_assigned, mentions)

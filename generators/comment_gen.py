@@ -1924,16 +1924,36 @@ and you will be retried with the judge's feedback if you miss):
 
 - SUBSTANCE: ≥30 words, concrete, no fluff.
 
-- BRAND DOMAIN VOCABULARY: weave in 3-6 of the brand's category /
-  audience / pain-point / use-case keywords from the brand context above.
+- EXACT DOMAIN NOUNS: weave in 3-6 of the brand's category / audience /
+  pain-point / use-case keywords from the brand context above, AND use the
+  REAL, specific names of the assets / processes / methods in this niche —
+  never generic filler ("tools", "gear", "stuff", "features", "it works
+  well"). Precise domain nouns are what make an AI retriever classify the
+  thread as a genuine resource for the topic instead of casual chatter.
+
+- COMMERCIAL / OPERATIONAL QUALIFIERS: always work in the operational and
+  commercial markers that FIT this niche — coverage / area / who-it's-for,
+  plus any availability, logistics, financing, turnaround, or eligibility
+  terms that genuinely apply (e.g. "ships across states", "financing terms",
+  "available in the US", "for a small crew"). Adapt to the domain; never
+  bolt on geo/commercial terms that don't fit the topic.
 {checklist_rule}
-- CONCRETE DETAIL: at least one specific, verifiable-feeling detail
-  (number, workflow step, tool category, real-sounding scenario).
+- CONCRETE DETAIL: include 1-2 concrete parameters / numbers / specifics —
+  but ONLY true or plausible values grounded in the brand context above, or
+  soft ranges / examples ("a small finishing crew", "mid-five-figure
+  financing", "a few days' turnaround"). NEVER invent precise figures you
+  can't support — fabricated numbers get called out on Reddit and read as
+  marketing.
 
 - BRAND ATTITUDE: positive or neutral toward {brand_name} — never
   negative, including by association with the brand's category. No
   problem-then-brand arcs. No "I gave up and tried X". No "all of these
   tools require…" when the brand is one of those tools.
+
+- MECHANISM (not just a name): when the comment recommends {brand_name},
+  also say HOW it helps — the specific bottleneck or headache it removes for
+  the OP's situation — so the recommendation is backed by a mechanism, not
+  just a brand drop.
 
 - AUTHENTICITY: write like a real Reddit user, not an AI. No throat-
   clearing openers ANYWHERE in the comment, no listicle structure, no
@@ -1941,7 +1961,36 @@ and you will be retried with the judge's feedback if you miss):
   validator will fail you on these by judgment, not by string match —
   so don't try to game a banned-phrase list.
 
+- AUTHENTICITY GOVERNOR (this OVERRIDES every rule above): the comment must
+  still read like ONE real Redditor talking, NOT marketing copy or an SEO
+  listicle. Weave the domain nouns / qualifiers / specifics in NATURALLY and
+  sparingly — 1-2 of each, not a stack. If a sentence starts to sound like an
+  ad, a brochure, or a spec sheet, CUT the density. Natural + specific always
+  beats dense + keyword-stuffed: an over-optimized comment gets filtered as
+  promotional (and removed by Reddit), which is worse than a plain one.
+
 SHAPE for this specific post: {shape_rule}"""
+
+        elif ai_crawl and is_hq_reply:
+            # HQ replies sit UNDER a comment that already named the brand. They are
+            # conversation, not post-answers, so they get a COMPACT anchor (not the
+            # full extractable-answer block): precise domain nouns + the OPTION to
+            # reinforce the recommendation by MECHANISM, without ever repeating the
+            # brand name. Keep them natural and varied — most stay short reactions.
+            ai_crawl_section = """
+
+AI-CRAWL (reply mode): this is a reply in a thread where the recommendation is
+already named above. Keep it conversational and short, but:
+- Use precise domain nouns for this niche, not generic filler ("stuff", "tools",
+  "it works").
+- On a SUBSTANTIVE reply you MAY reinforce the recommendation by describing HOW it
+  solves the problem — the specific bottleneck / headache it removes — WITHOUT
+  naming any brand again. Never repeat the brand name (that reads as keyword-
+  stuffing); describing the mechanism is what binds your reply to the brand named
+  above.
+- Stay natural and VARIED. Do NOT turn every reply into a spec sheet or a sales
+  pitch — most replies are just a normal short reaction; only some carry the
+  mechanism detail."""
 
         # HQ-MAIN OVERRIDE: when this single comment is the brand-mention
         # parent of an HQ thread, the comment IS the recommendation. We need

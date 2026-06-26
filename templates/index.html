@@ -12803,42 +12803,52 @@ async function submitSendToReport(cid, source) {
     const body = { report_month: month, source, outcome };
     if (brandId) body.brand_id = brandId;
 
-    // Use raw fetch so we can inspect the 422 body (api() drops it).
-    let resp;
+    // Re-entrancy guard + immediate feedback — the gate does a quick liveness fetch,
+    // so block double-submits and tell the user something is happening right away.
+    if (window._sendingReport) return;
+    window._sendingReport = true;
+    toast('Checking…', 'info');
+
     try {
-        resp = await fetch(`/api/comments/${cid}/to-report`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-    } catch (e) {
-        toast('Network error: ' + (e.message || e), 'error');
-        return;
-    }
-    const payload = await resp.json().catch(() => ({}));
-
-    if (resp.ok) {
-        if (payload && payload.skipped) {
-            // Live gate: comment wasn't live on Reddit → left at its current status.
-            toast(`Left unchanged — not live on Reddit${payload.liveness ? ` (${payload.liveness})` : ''}`, 'info');
-        } else {
-            toast(`${outcome === 'replaced' ? 'Marked replaced' : 'Sent to report'} · ${month}`, 'success');
+        // Use raw fetch so we can inspect the 422 body (api() drops it).
+        let resp;
+        try {
+            resp = await fetch(`/api/comments/${cid}/to-report`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+        } catch (e) {
+            toast('Network error: ' + (e.message || e), 'error');
+            return;
         }
-        closeModal();
-        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
-        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+        const payload = await resp.json().catch(() => ({}));
+
+        if (resp.ok) {
+            if (payload && payload.skipped) {
+                // Live gate: comment wasn't live on Reddit → left at its current status.
+                toast(`Left unchanged — not live on Reddit${payload.liveness ? ` (${payload.liveness})` : ''}`, 'info');
+            } else {
+                toast(`${outcome === 'replaced' ? 'Marked replaced' : 'Sent to report'} · ${month}`, 'success');
+            }
+            closeModal();
+            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+            else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+                try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+            }
+            return;
         }
-        return;
-    }
 
-    if (resp.status === 422 && payload.error === 'brand_required') {
-        // Lazy picker: server told us it couldn't infer a brand.
-        await _renderBrandPickerStage(payload.candidates || []);
-        return;
-    }
+        if (resp.status === 422 && payload.error === 'brand_required') {
+            // Lazy picker: server told us it couldn't infer a brand.
+            await _renderBrandPickerStage(payload.candidates || []);
+            return;
+        }
 
-    toast('Failed: ' + (payload.error || payload.message || resp.statusText), 'error');
+        toast('Failed: ' + (payload.error || payload.message || resp.statusText), 'error');
+    } finally {
+        window._sendingReport = false;
+    }
 }
 
 async function undoReport(cid, source) {

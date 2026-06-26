@@ -9495,12 +9495,21 @@ def _classify_url_liveness(url):
     return (liveness, detail)
 
 
-def _report_live_gate(db, items, task_id=None):
+def _report_live_gate(db, items, task_id=None, allow_missing=False, fast=False):
     """NON-MUTATING liveness gate for the report flow. For each {id, source}, classify the
     comment's Reddit liveness — but NEVER change any row's status (unlike the regular
-    live-checker, which moves dead ones to 'removed'/'replace'). Only comments confirmed
-    LIVE may be reported; everything else (removed / missing / no URL / fetch error) is left
-    exactly as-is.
+    live-checker, which moves dead ones to 'removed'/'replace').
+
+    Two modes:
+      - Default (bulk): only comments confirmed LIVE are reportable; everything else
+        (removed / missing / no URL / fetch error) is left as-is.
+      - `allow_missing=True` (interactive single report): report unless the comment is
+        POSITIVELY confirmed dead. A 'missing'/'error' verdict — the cloud-IP proxy flaking
+        — must NOT block the operator, who is looking at a live comment. Only a confirmed
+        'removed'/'replace' is rejected.
+      - `fast=True` (interactive single report): use ONE cheap post-feed fetch per item
+        instead of the comment-permalink RSS → PullPush → JSON cascade with its 4s/8s
+        retry-harder loop (that cascade is what froze the single-report popup for 20-30s).
 
     Two-phase, mirroring the normal live-checker so the gate doesn't fire one request per
     comment and rate-limit itself (the bug that left a lot of LIVE comments read as 'missing'):
@@ -9540,6 +9549,43 @@ def _report_live_gate(db, items, task_id=None):
             except Exception:
                 pass
 
+    # Positively-confirmed dead states — the ONLY verdicts that ever block a report when
+    # allow_missing is on (a 'missing'/'error' there means "couldn't verify", not "gone").
+    _DEAD = {"removed", "replace", "replaced", "deleted", "gone"}
+
+    def _decide(liveness, rec):
+        if liveness == "live" or (allow_missing and liveness not in _DEAD):
+            live.append({"id": rec["id"], "source": rec["source"]})
+        else:
+            not_live.append({"id": rec["id"], "source": rec["source"], "liveness": liveness})
+
+    if fast:
+        # Interactive single / small report: ONE cheap post-feed fetch per item. The
+        # post-feed RSS form (/r/<sub>/comments/<postid>/.rss) is the reliable one AND
+        # reports whether the PARENT POST is removed — no permalink-RSS+PullPush+JSON
+        # cascade, no retry-harder sleeps, so the request returns in ~1-2s instead of
+        # hanging 20-30s. Paired with allow_missing so a flaky fetch doesn't false-skip.
+        for rec in records:
+            liveness = "missing"
+            if rec["url"]:
+                try:
+                    present, post_removed = _post_feed_scan(rec["url"], timeout=8)
+                    pcid = (_parse_comment_url(rec["url"])[1] or "").lower()
+                    if post_removed:
+                        liveness = "removed"
+                    elif present and pcid and pcid in present:
+                        liveness = "live"
+                    else:
+                        # Feed unreadable, or the comment id isn't in the (capped/nested)
+                        # top feed → inconclusive. allow_missing reports it anyway.
+                        liveness = "missing"
+                except Exception:
+                    liveness = "missing"
+            _decide(liveness, rec)
+            done += 1
+            _emit()
+        return {"live": live, "not_live": not_live}
+
     # --- Phase 1: bulk post-feed pre-pass (Live Subs comments only). One fetch per post
     #     confirms up to ~100 comments live; absent ids stay UNHANDLED for the definitive
     #     per-comment check (a post feed caps / nests, so absence != removed). ---
@@ -9574,10 +9620,7 @@ def _report_live_gate(db, items, task_id=None):
                 liveness, _detail = _classify_url_liveness(rec["url"])
             except Exception:
                 liveness = "missing"
-        if liveness == "live":
-            live.append({"id": rec["id"], "source": rec["source"]})
-        else:
-            not_live.append({"id": rec["id"], "source": rec["source"], "liveness": liveness})
+        _decide(liveness, rec)
         done += 1
         _emit()
         # Pace between comments (not after the last) to avoid rate-limit bursts.
@@ -9616,7 +9659,8 @@ def api_comment_to_report(cid):
         # Live gate (both outcomes): only accept a comment that's actually live on Reddit.
         # A non-live one is left at its current status (never moved to removed). For
         # 'replaced' this verifies the replacement at the comment's link is live.
-        gate = _report_live_gate(db, [{"id": cid, "source": source}])
+        gate = _report_live_gate(db, [{"id": cid, "source": source}],
+                                 allow_missing=True, fast=True)
         if not gate["live"]:
             nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
             return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
@@ -9668,7 +9712,8 @@ def api_comment_reclassify_report(cid):
     db = get_db()
     try:
         # Live gate: only relabel a comment that's still live on Reddit.
-        gate = _report_live_gate(db, [{"id": cid, "source": source}])
+        gate = _report_live_gate(db, [{"id": cid, "source": source}],
+                                 allow_missing=True, fast=True)
         if not gate["live"]:
             nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
             return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),

@@ -1852,32 +1852,80 @@ def api_blog_unpublish(blog_id):
 
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
-    """Export the website article as Markdown (format=md, default) or HTML
-    (format=html, via the `markdown` lib; falls back to a <pre> wrap if absent)."""
+    """Export the website article:
+      - format=md (default): Markdown with a Last-updated dateline.
+      - format=html: a SELF-CONTAINED, publish-ready HTML doc — Article + FAQPage JSON-LD embedded
+        in <head>, meta tags, a visible byline + published/updated dates, light CSS — downloaded as
+        an attachment.
+      - format=jsonld: just the Article + FAQPage JSON-LD (to spot-check the structured data)."""
+    import html as _html
     fmt = (request.args.get("format") or "md").lower()
     db = get_db()
     try:
         blog = db.get_blog(blog_id)
+        brand = db.get_brand(blog.get("brand_id")) if blog else None
     finally:
         db.close()
     if not blog:
         return jsonify({"error": "blog not found"}), 404
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
-    # EEAT dateline — rendered from the DB timestamp at export time (never baked into the
-    # body, so it can't go stale on edits and the model never invents a date).
+    desc = blog.get("meta_description") or ""
+    published = (blog.get("created_at") or "")[:10]
     updated = (blog.get("updated_at") or "")[:10]
+
+    from generators.blog_gen import build_blog_jsonld
+    jsonld_str = json.dumps(build_blog_jsonld(blog, brand), ensure_ascii=False, indent=2)
+    if fmt == "jsonld":
+        return Response(jsonld_str, mimetype="application/ld+json")
+
+    slug = (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "blog")[:60]
     if fmt == "html":
         try:
             import markdown as _md
             inner = _md.markdown(body, extensions=["tables", "fenced_code"])
         except Exception:
-            import html as _html
             inner = "<pre>" + _html.escape(body) + "</pre>"
-        dateline = f"<p><em>Last updated: {updated}</em></p>\n" if updated else ""
-        page = (f"<!doctype html>\n<html><head><meta charset=\"utf-8\">"
-                f"<title>{title}</title></head>\n<body>\n{dateline}{inner}\n</body></html>\n")
-        return Response(page, mimetype="text/html")
+        # Visible byline (from the brand, when set) + published/updated dates.
+        byline_bits = []
+        if brand:
+            au = (brand.get("author_name") or "").strip()
+            if au:
+                at = (brand.get("author_title") or "").strip()
+                byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
+            rv = (brand.get("reviewer_name") or "").strip()
+            if rv:
+                rt = (brand.get("reviewer_title") or "").strip()
+                byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
+        meta_byline = " · ".join(byline_bits)
+        dline = []
+        if published:
+            dline.append("Published: " + published)
+        if updated and updated != published:
+            dline.append("Updated: " + updated)
+        header = ""
+        if meta_byline:
+            header += f'<p class="byline">{meta_byline}</p>\n'
+        if dline:
+            header += f'<p class="dates">{" · ".join(dline)}</p>\n'
+        css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+               "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+               "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
+               "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
+               ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}")
+        head = (f'<meta charset="utf-8">\n'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+                f'<title>{_html.escape(title)}</title>\n'
+                + (f'<meta name="description" content="{_html.escape(desc)}">\n' if desc else "")
+                + (f'<meta name="author" content="{_html.escape(meta_byline)}">\n' if meta_byline else "")
+                + f'<style>{css}</style>\n'
+                + f'<script type="application/ld+json">\n{jsonld_str}\n</script>')
+        page = (f'<!doctype html>\n<html lang="en"><head>\n{head}\n</head>\n<body>\n'
+                f'{header}{inner}\n</body></html>\n')
+        resp = Response(page, mimetype="text/html")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.html"'
+        return resp
+
     md_out = (f"*Last updated: {updated}*\n\n{body}") if updated else body
     return Response(md_out, mimetype="text/markdown")
 

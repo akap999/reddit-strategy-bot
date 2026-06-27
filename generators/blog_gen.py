@@ -34,7 +34,7 @@ _THIRD_PARTY_DOMAINS = [
     "techcrunch.com", "theverge.com", "forbes.com", "businessinsider.com",
     "reuters.com", "crunchbase.com", "wikipedia.org",
 ]
-_MAX_WEB_SOURCES = 6              # cap third-party sources folded into evidence
+_MAX_WEB_SOURCES = 8              # cap independent third-party sources folded into evidence
 
 
 def _as_list(raw):
@@ -153,6 +153,60 @@ class BlogGenerator:
                 if str(n).strip() and d:
                     out[str(n).strip()] = d
         return out
+
+    def _gather_independent_sources(self, subject, competitors, seed, category, own_domains):
+        """Thorough multi-angle independent-source search (Follow-up 35). For the subject + the top
+        comparison competitor, run a TARGETED search per ANGLE (reviews / news+funding / analyst+
+        pricing), each as TWO passes — pass A on a reputable allowlist (guarantees an independent,
+        high-authority source), pass B broad-web with the brands' own sites blocked (niche-brand
+        fallback). Merge + dedup by url, capped at _MAX_WEB_SOURCES. Returns [{label,url,text}].
+        Never raises (each failing brief is skipped)."""
+        out, seen = [], set()
+        cat = (category or "").strip()
+        brands = [n for n in ([subject] + list(competitors or [])[:1]) if (n or "").strip()]
+        angles = [
+            "independent user REVIEWS and ratings (e.g. G2, Capterra, Trustpilot, TrustRadius)",
+            "NEWS, funding, launch or analyst coverage (e.g. TechCrunch, Reuters, PR Newswire, Forbes, Crunchbase)",
+            "third-party PRICING, comparison or analyst references",
+        ]
+
+        def _take(srcs):
+            for s in (srcs or []):
+                url = (s.get("url") or "").strip()
+                fact = (s.get("fact") or s.get("title") or "").strip()
+                if not url or not fact:
+                    continue
+                key = url.lower().split("?")[0].rstrip("/")
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"label": f"third-party · {s.get('title') or url}",
+                            "url": url, "text": fact[:_EVIDENCE_TEXT_CAP]})
+
+        for nm in brands:
+            for ang in angles:
+                if len(out) >= _MAX_WEB_SOURCES:
+                    break
+                brief = (f'Find {ang} about "{nm}"' + (f' ({cat})' if cat else "")
+                         + f'. Topic: {seed}. Prefer recent (2024-2025) coverage. It MUST be an '
+                           "INDEPENDENT third-party page, NOT the brand's own website.")
+                try:
+                    got = self.claude.search_sources(brief, max_searches=3,
+                                                     allowed_domains=_THIRD_PARTY_DOMAINS)
+                    if not got:
+                        # niche brand with no reputable page -> broad web, block the brands' own sites
+                        got = self.claude.search_sources(brief, max_searches=3,
+                                                         blocked_domains=own_domains)
+                    _take(got)
+                except Exception as e:
+                    print(f"[blog_gen] independent-source search ({nm} / {ang[:18]}) skipped: {e}", flush=True)
+            if len(out) >= _MAX_WEB_SOURCES:
+                break
+        if out:
+            print(f"[blog_gen] evidence: {len(out)} independent third-party source(s) found", flush=True)
+        else:
+            print("[blog_gen] evidence: NO independent third-party sources found", flush=True)
+        return out[:_MAX_WEB_SOURCES]
 
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
                          use_web_search=False, reddit_thread=None):
@@ -350,7 +404,6 @@ class BlogGenerator:
         # above, so nothing is lost when web search returns little.
         if use_web_search:
             comp_names = _as_list(b.get("competitors"))
-            who = ", ".join([subject] + comp_names[:3]) if subject else seed
             own = []
             if b.get("domain_url"):
                 own.append(re.sub(r"^https?://", "", b["domain_url"].strip()).rstrip("/").split("/")[0])
@@ -359,18 +412,8 @@ class BlogGenerator:
                 if d:
                     own.append(d)
             own = sorted(set(d for d in own if d))
-            prefer = ", ".join(_THIRD_PARTY_DOMAINS[:8])
-            brief = (f"Topic: {seed}. Brands: {who}. Find INDEPENDENT reviews, ratings, pricing, "
-                     "news or analyst coverage about these brands relevant to the topic. Prefer "
-                     f"reputable third-party sources (e.g. {prefer}); do NOT use the brands' own sites.")
-            try:
-                for s in self.claude.search_sources(brief, blocked_domains=own)[:_MAX_WEB_SOURCES]:
-                    fact = (s.get("fact") or s.get("title") or "").strip()
-                    if s.get("url") and fact:
-                        blocks.append({"label": f"third-party · {s.get('title') or s['url']}",
-                                       "url": s["url"], "text": fact[:_EVIDENCE_TEXT_CAP]})
-            except Exception as e:
-                print(f"[blog_gen] web-search sources skipped: {e}")
+            blocks.extend(self._gather_independent_sources(
+                subject, comp_names, seed, b.get("category") or "", own))
 
         if not blocks:
             return ""
@@ -514,6 +557,12 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     discussing this flagged …" — and cite it [S#]. Use it to corroborate sentiment / that {name} is
     recommended by real users; at most ONE short quoted line, attributed; NEVER invent comments beyond
     what's in the thread. Frame it as community discussion, not a raw link.
+  - PREFER INDEPENDENT SOURCES: the EVIDENCE may include "third-party ·" sources (independent reviews,
+    news/funding, analyst/pricing — NOT the brands' own sites). When present, LEAD your key claims with
+    them and aim to cite at least 2 DISTINCT independent sources (ideally a review + a news/funding item +
+    an analyst/pricing reference). A page backed only by vendor/first-party sources reads as marketing and
+    gets cited less; independent corroboration is what makes it verifiably neutral. (Still cite ONLY what is
+    actually in the EVIDENCE — never invent a source.)
 
 EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
 title decision would make the page harder for an AI to extract a direct answer from, drop it and
@@ -536,7 +585,10 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     as a fit. (AI engines lift this as the extractable answer.)
   - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-  - Add a comparison table where it genuinely helps, and an "FAQ" section of Q&A pairs.
+  - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end. Format the
+    FAQ STRICTLY as: each question is an H3 heading ending in "?" (e.g. "### Does {name} ship
+    nationwide?"), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (This
+    exact format is parsed into FAQPage structured data — keep it consistent.)
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - First-party brand voice (owned media), but credible and useful — never a hard pitch.
@@ -702,3 +754,112 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article)
         article["prompt_version"] = PROMPT_VERSION
         return article
+
+
+# ----------------------------------------------------------------------------- JSON-LD
+def _iso_dt(dt):
+    """SQLite datetime('now') (UTC, 'YYYY-MM-DD HH:MM:SS') -> ISO 8601. Date-only stays date."""
+    s = (dt or "").strip()
+    if not s:
+        return ""
+    s = s.replace(" ", "T")
+    if "T" in s and not s.endswith("Z"):
+        s += "Z"
+    return s
+
+
+def _parse_faq_pairs(body_md):
+    """Extract (question, answer) pairs from the article's FAQ section for FAQPage schema.
+    Tolerant: prefers the pinned `### <q>?` H3 convention; falls back to `**Q: …?**` / `**…?**`.
+    Returns a list of {"q","a"}."""
+    if not body_md:
+        return []
+    text = body_md
+    # Isolate the FAQ section (## FAQ … until the next ## section), else scan the whole body.
+    m = re.search(r"(?im)^\s*#{2,3}\s*FAQ\b.*?$", text)
+    faq = text[m.end():] if m else text
+    if m:
+        nxt = re.search(r"(?m)^\s*##\s+(?!#)", faq)
+        if nxt:
+            faq = faq[:nxt.start()]
+    pairs = []
+    h3 = list(re.finditer(r"(?m)^\s*###\s+(.+?)\s*$", faq))
+    if h3:
+        for i, mm in enumerate(h3):
+            q = mm.group(1).strip().strip("#").strip()
+            end = h3[i + 1].start() if i + 1 < len(h3) else len(faq)
+            a = re.sub(r"\s+", " ", faq[mm.end():end]).strip()
+            if q and a and q.endswith("?"):
+                pairs.append({"q": q, "a": a[:700]})
+    if pairs:
+        return pairs
+    for mm in re.finditer(r"(?m)^\s*\*\*(?:Q:\s*)?(.+?\?)\*\*\s*(.*)$", faq):
+        q = mm.group(1).strip()
+        a = re.sub(r"^A:\s*", "", (mm.group(2) or "").strip())
+        if q and a:
+            pairs.append({"q": q, "a": re.sub(r"\s+", " ", a)[:700]})
+    return pairs
+
+
+def build_blog_jsonld(blog, brand=None, page_url=""):
+    """Build an Article + FAQPage JSON-LD @graph for a blog (pure parsing, no LLM). Dates from
+    blog.created_at/updated_at; author = a Person (brand author_name) ELSE the brand Organization
+    (never fabricated); reviewer when set; publisher = brand Organization; FAQPage mainEntity parsed
+    from the body's FAQ section. Returns a dict ready for json.dumps."""
+    blog = blog or {}
+    brand = brand or {}
+    title = (blog.get("title") or "").strip()
+    desc = (blog.get("meta_description") or "").strip()
+    kws = blog.get("keywords")
+    if isinstance(kws, str):
+        try:
+            kws = json.loads(kws)
+        except Exception:
+            kws = [k.strip() for k in kws.split(",") if k.strip()]
+    kws = kws if isinstance(kws, list) else []
+    published = _iso_dt(blog.get("created_at"))
+    modified = _iso_dt(blog.get("updated_at")) or published
+    brand_name = (brand.get("name") or "").strip()
+    brand_url = (brand.get("domain_url") or "").strip()
+    if brand_url and not brand_url.startswith(("http://", "https://")):
+        brand_url = "https://" + brand_url
+    publisher = {"@type": "Organization", "name": brand_name or "Publisher"}
+    if brand_url:
+        publisher["url"] = brand_url
+    au = (brand.get("author_name") or "").strip()
+    if au:
+        author = {"@type": "Person", "name": au}
+        at = (brand.get("author_title") or "").strip()
+        if at:
+            author["jobTitle"] = at
+    else:
+        author = dict(publisher)  # Organization author — legitimate (the brand published it)
+    article = {"@type": "Article", "headline": title[:110], "description": desc,
+               "author": author, "publisher": publisher}
+    if kws:
+        article["keywords"] = ", ".join(str(k) for k in kws)
+    if published:
+        article["datePublished"] = published
+    if modified:
+        article["dateModified"] = modified
+    rv = (brand.get("reviewer_name") or "").strip()
+    if rv:
+        reviewer = {"@type": "Person", "name": rv}
+        rt = (brand.get("reviewer_title") or "").strip()
+        if rt:
+            reviewer["jobTitle"] = rt
+        article["reviewedBy"] = reviewer
+    if page_url:
+        article["mainEntityOfPage"] = {"@type": "WebPage", "@id": page_url}
+    graph = [article]
+    faqs = _parse_faq_pairs(blog.get("body_markdown") or "")
+    if faqs:
+        graph.append({
+            "@type": "FAQPage",
+            "mainEntity": [
+                {"@type": "Question", "name": f["q"],
+                 "acceptedAnswer": {"@type": "Answer", "text": f["a"]}}
+                for f in faqs
+            ],
+        })
+    return {"@context": "https://schema.org", "@graph": graph}

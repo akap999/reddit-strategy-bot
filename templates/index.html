@@ -12208,8 +12208,9 @@ async function openBlog(id) {
             <button class="btn btn-sm btn-primary" onclick="blogSave(${id})">Save edits</button>
             <button class="btn btn-sm btn-secondary" onclick="blogCopy('blog-e-body')">Copy MD</button>
             <button class="btn btn-sm btn-secondary" onclick="blogCopy('blog-e-li')">Copy LinkedIn</button>
-            <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html" target="_blank">Export HTML</a>
+            <a class="btn btn-sm btn-accent" href="/api/blogs/${id}/export?format=html" target="_blank" title="Publish-ready HTML with Article + FAQPage JSON-LD embedded">⬇ HTML + schema</a>
             <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md" target="_blank">Download MD</a>
+            <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=jsonld" target="_blank" title="View the Article + FAQPage JSON-LD">JSON-LD</a>
             <span class="flex-1"></span>
             <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'article')">Regen article</button>
             <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'linkedin')">Regen LinkedIn</button>

@@ -516,3 +516,53 @@ class ClaudeClient:
         if not out:
             print("    web_search: returned 0 usable sources for this brief", flush=True)
         return out
+
+    def find_official_domain(self, brand, context=""):
+        """Use the web_search tool to find a brand's OFFICIAL homepage domain (bare, no
+        scheme/path). Returns "" on any error/uncertainty — never raises.
+
+        Used to resolve a niche or same-named competitor to the RIGHT peer site (e.g.
+        Profound the AI-search tool -> tryprofound.com, NOT the famous same-named
+        profound.com) when the model's training-knowledge guess is unreliable."""
+        brand = (brand or "").strip()
+        if not brand:
+            return ""
+        tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+        ctx = f" It operates in this space: {context.strip()}." if (context or "").strip() else ""
+        prompt = (
+            f'Find the OFFICIAL homepage of the product/company "{brand}".{ctx} It MUST be '
+            "the brand's OWN website (its product homepage) — NOT a review site, directory, "
+            "app store, news article, social profile, or a same-named company in a different "
+            "industry. Use web search, then respond with JSON ONLY (no prose, no code "
+            'fences): {"domain": "example.com"} — bare domain, no https://, no path. If you '
+            'cannot confidently identify the official site, return {"domain": ""}.'
+        )
+        try:
+            message = self.client.messages.create(
+                model=self.model, max_tokens=600, tools=[tool],
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            print(f"    find_official_domain error: {e}", flush=True)
+            return ""
+        text = ""
+        try:
+            for block in (message.content or []):
+                if getattr(block, "type", None) == "text":
+                    text += block.text
+        except Exception:
+            text = ""
+        text = text.strip()
+        for fence in ("```json", "```"):
+            if text.startswith(fence):
+                text = text[len(fence):]
+        if text.endswith("```"):
+            text = text[:-3]
+        try:
+            data = json.loads(text.strip())
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return ""
+        dom = str((data or {}).get("domain") or "").strip().lower()
+        dom = dom.replace("https://", "").replace("http://", "").strip("/")
+        dom = dom.split("/")[0].strip()
+        return dom

@@ -199,6 +199,26 @@ class BlogGenerator:
         to_resolve = [c for c in comp_names if (c not in cached) or _in_seed(c)]
         resolved = self._resolve_brand_domains(
             to_resolve, seed=seed, subject=subject, subject_category=b.get("category"))
+        # Web-search-backed resolution for seed-named comparison brands: the training-
+        # knowledge resolver tends to pick the famous SAME-NAME domain (e.g. profound.com)
+        # for a niche brand; a live search finds the actual peer site (tryprofound.com).
+        # Override the resolved domain for any brand that's a comparison target in the seed.
+        if use_web_search:
+            seed_brands = [n for n in (list(resolved.keys()) + comp_names)
+                           if _in_seed(n) and (n or "").strip().lower() != subject.lower()]
+            for n in dict.fromkeys(seed_brands):
+                try:
+                    official = self.claude.find_official_domain(
+                        n, f"{b.get('category') or ''} {seed or ''}".strip())
+                except Exception:
+                    official = ""
+                if official and resolved.get(n) != official:
+                    print(f"[blog_gen] evidence: web-search resolved {n!r} -> {official} "
+                          f"(was {resolved.get(n) or 'unresolved'})", flush=True)
+                    resolved[n] = official
+        if resolved:
+            print("[blog_gen] evidence: resolved competitor domains: "
+                  + ", ".join(f"{n}={d}" for n, d in resolved.items()), flush=True)
         # Seed-named / newly-extracted brands: fresh resolution WINS over any (stale) cache.
         # Stored competitors not in the seed: cache wins; resolution only fills a gap.
         for n, d in resolved.items():
@@ -234,11 +254,15 @@ class BlogGenerator:
                 topic_terms.discard(w)
 
         validated = {}   # competitor label -> bare domain that fetched + validated this run
+        # Competitor paths: include product/platform pages so FEATURE facts are captured,
+        # not just pricing (the gap that left competitor feature rows "not confirmed").
+        _comp_paths = ("", "/pricing", "/features", "/product", "/platform",
+                       "/how-it-works", "/testimonials")
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
-            # Subject brand gets the full path set; competitors stay capped to a few
-            # high-value pages so total fetches per article stay bounded.
-            paths = _EVIDENCE_PATHS if not validate else ("", "/pricing", "/features", "/testimonials")
+            # Subject brand gets the full path set; competitors get the product-heavy set.
+            paths = _EVIDENCE_PATHS if not validate else _comp_paths
+            kept = 0
             for path in paths:
                 txt = _fetch(f"https://{dom}{path}")
                 if not txt:
@@ -246,6 +270,9 @@ class BlogGenerator:
                 if validate:
                     low = txt.lower()
                     if label.lower() not in low:
+                        if path == "":
+                            print(f"[blog_gen] evidence: {label} -> {dom} homepage fetched but "
+                                  f"brand name NOT on page (wrong/parked domain?)", flush=True)
                         continue   # wrong/parked domain — skip rather than mis-cite
                     if label not in validated:
                         # First page that names this competitor must also be on-topic —
@@ -260,10 +287,20 @@ class BlogGenerator:
                         # it's the right same-named company.
                         need = min(2, len(topic_terms))
                         if topic_terms and len(topic_terms & page_words) < need:
+                            print(f"[blog_gen] evidence: {label} -> {dom}{path} skipped — off-topic "
+                                  f"({len(topic_terms & page_words)}/{need} topic hits); likely the "
+                                  f"WRONG same-name domain", flush=True)
                             continue
                         validated[label] = dom
                 blocks.append({"label": label, "url": f"https://{dom}{path}",
                                "text": txt[:_EVIDENCE_TEXT_CAP]})
+                kept += 1
+            if validate:
+                if label in validated:
+                    print(f"[blog_gen] evidence: {label} -> {dom} OK ({kept} page(s) cited)", flush=True)
+                else:
+                    print(f"[blog_gen] evidence: {label} -> {dom} produced NO first-party evidence "
+                          f"(name/topic validation failed) — will be name-only ('not confirmed')", flush=True)
 
         # Accumulate: persist competitor domains that were newly resolved AND validated this
         # run back onto the brand, so its competitor set grows (idempotent; validated only,

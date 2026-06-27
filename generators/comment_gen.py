@@ -93,6 +93,12 @@ HQ_REPLY_STRUCTURES = {
     "question_plus_experience", "direct_answer",
 }
 
+# Generic placeholder "authors" we attach to a generated parent/sibling comment so
+# the generator knows what it's replying to. They are NOT real usernames, so the
+# reply prompt must never surface them as "u/<name>" (the model would echo
+# "yeah what u/community_member said"). Compared lowercased.
+_PLACEHOLDER_AUTHORS = {"community_member", "op", "commenter", "user", "someone", ""}
+
 # Each shape: tuple of (id, weight, persona-pool, structure-pool,
 # sent_target, lo_words, hi_words, angle).
 HQ_REPLY_SHAPES = [
@@ -210,6 +216,14 @@ def _allocate_reply_shapes(n, rng=None, ai_crawl=False):
             sid = "medium_add" if i % 2 == 0 else "short_add"
             shapes.append(_shape_to_dict(by_id[sid], rng))
             i += 1
+        # Assign DISTINCT personas across the batch so two parallel substantive
+        # replies don't share a voice and converge to near-identical text.
+        used = set()
+        for sh in shapes:
+            pool_set = by_id[sh["shape_id"]][2]
+            avail = sorted(p for p in pool_set if p not in used) or sorted(pool_set)
+            sh["persona_id"] = rng.choice(avail)
+            used.add(sh["persona_id"])
         rng.shuffle(shapes)
         return shapes
 
@@ -1519,8 +1533,14 @@ Return JSON only:
 
         comments_text = ""
         if comments:
+            def _author_label(a):
+                # Don't surface placeholder handles (e.g. our own thread's generated
+                # siblings tagged "community_member") — the model echoes them as
+                # "yeah what u/community_member said". Real handles render as u/<name>.
+                a = (a or "").strip()
+                return f"u/{a}" if a and a.lower() not in _PLACEHOLDER_AUTHORS else "another commenter"
             comments_text = "\n".join([
-                f'{i+1}. [Score: {c["score"]}] u/{c["author"]}: "{c["body"]}"'
+                f'{i+1}. [Score: {c["score"]}] {_author_label(c.get("author"))}: "{c["body"]}"'
                 for i, c in enumerate(comments[:15])
             ])
 
@@ -1674,10 +1694,23 @@ Return JSON only:
             reply_line = ""
             if idx in reply_targets:
                 target = reply_targets[idx]
-                reply_line = (
-                    f'\n    TARGET COMMENT by u/{target["author"]}: "{target["body"][:400]}"'
-                    f"\n    Write as if you clicked 'reply' on their comment. Respond to what THEY said specifically."
-                )
+                _tauthor = (target.get("author") or "").strip()
+                if _tauthor and _tauthor.lower() not in _PLACEHOLDER_AUTHORS:
+                    # Real commenter — fine to reference by handle.
+                    reply_line = (
+                        f'\n    TARGET COMMENT by u/{_tauthor}: "{target["body"][:400]}"'
+                        f"\n    Write as if you clicked 'reply' on their comment. Respond to what THEY said specifically."
+                    )
+                else:
+                    # Placeholder author (e.g. our own thread's generated parent). Do NOT
+                    # surface a fake username — the model would echo "what u/community_member
+                    # said". Reference the comment generically and forbid name-addressing.
+                    reply_line = (
+                        f'\n    TARGET COMMENT (the one you are replying to): "{target["body"][:400]}"'
+                        "\n    Write as if you clicked 'reply' on it. Respond to the POINT they made."
+                        " Do NOT address them by username, do NOT write 'u/...', and do NOT open"
+                        " with 'what they said' / 'yeah this' / 'same' — just react to the substance."
+                    )
 
             # Multi-brand: use per-comment brand assignment if available
             assigned = None
@@ -2013,6 +2046,9 @@ standalone answer):
   the specific bottleneck / headache — WITHOUT naming any brand again. Never repeat
   the brand name (reads as keyword-stuffing); the mechanism is what binds your reply
   to the brand named above.
+- OPENER: do NOT open with "yeah", "same", "this", "what they said", or "what u/X
+  said". Lead with your OWN angle — a specific detail, a question, or a mild qualifier
+  — and make your opener clearly different from the other replies in the thread.
 - AUTHENTICITY GOVERNOR (overrides all above): still read like one real Redditor
   replying in the thread, NOT marketing copy; VARY it from the other replies and weave
   the specifics in naturally. Natural + specific beats dense + spammy."""
@@ -3721,6 +3757,29 @@ Return JSON only:
             saved.append({"id": cid, "body": body, "parent_id": parent_c["id"]})
             print(f"    [add-replies] saved reply #{cid} → parent #{parent_c['id']}")
             return body
+
+        # AI-CRAWL: replies are SUBSTANTIVE (FU30), so running them in parallel lets
+        # concurrent workers NOT see each other's bodies — two same-shape replies then
+        # converge to VERBATIM duplicates (the bug the user hit). Generate them
+        # SEQUENTIALLY instead: each reply sees every prior new body via the
+        # in_thread_siblings "do NOT echo these" channel → no duplicates. The faster
+        # anchor+parallel path is kept for non-ai-crawl threads (short varied
+        # one-liners, low dup risk).
+        if ai_crawl:
+            seen_bodies = list(existing_reply_bodies)
+            for i in range(nr):
+                parent_c = parent_choices[i]
+                shape_i = reply_shapes[i] if i < len(reply_shapes) else _pick_reply_shape()
+                pid = shape_i["persona_id"]
+                sid = shape_i["structure_id"]
+                try:
+                    result = self.generate_comments(**_build_kwargs(parent_c, list(seen_bodies), shape_i))
+                    body = _save_reply(i, parent_c, pid, sid, result)
+                    if body:
+                        seen_bodies.append(body)
+                except Exception as e:
+                    print(f"    [add-replies] sequential exception i={i}: {e}")
+            return saved
 
         # ANCHOR-FIRST: generate the first new reply sequentially so the
         # remaining parallel workers can see its body and avoid echoing it.

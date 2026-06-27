@@ -517,6 +517,59 @@ class ClaudeClient:
             print("    web_search: returned 0 usable sources for this brief", flush=True)
         return out
 
+    def fetch_site_facts(self, domain, brand, brief, max_searches=2):
+        """FIRST-PARTY fallback: pull a brand's OWN concrete facts from its OWN site via the
+        server-side `web_search` tool pinned to that domain (allowed_domains=[domain]) — used
+        when a direct HTTP fetch of the site is blocked on a cloud IP. Reuses the same proven
+        web_search plumbing as `search_sources`. Returns a combined facts string (each line a
+        sourced fact), or "" on ANY error/empty — must never raise (generation continues)."""
+        domain = re.sub(r"^https?://", "", str(domain or "").strip().lower()).strip("/").split("/")[0]
+        brand = (brand or "").strip()
+        if not domain:
+            return ""
+        tool = {"type": "web_search_20250305", "name": "web_search",
+                "max_uses": int(max_searches), "allowed_domains": [domain]}
+        prompt = (
+            f'From {domain} — the OFFICIAL website of "{brand or domain}" — extract its concrete, '
+            f'specific facts relevant to: {brief}. Look across its pages (homepage, pricing, '
+            "products, shipping/returns, about, financing) and capture real specifics: pricing, "
+            "shipping/coverage, return/warranty policy, financing, products/brands carried, "
+            "locations, and contact details. Use web search restricted to that site, then respond "
+            'with JSON ONLY (no prose, no code fences): {"facts": ["one specific fact", "..."]}. '
+            "Include only facts actually stated on the site; omit anything you cannot find there."
+        )
+        try:
+            message = self.client.messages.create(
+                model=self.model, max_tokens=1500, tools=[tool],
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            print(f"    fetch_site_facts error ({domain}): {e}", flush=True)
+            return ""
+        text = ""
+        try:
+            for block in (message.content or []):
+                if getattr(block, "type", None) == "text":
+                    text += block.text
+        except Exception:
+            text = ""
+        text = text.strip()
+        for fence in ("```json", "```"):
+            if text.startswith(fence):
+                text = text[len(fence):]
+        if text.endswith("```"):
+            text = text[:-3]
+        facts = []
+        try:
+            data = json.loads(text.strip())
+            for f in (data.get("facts") or []):
+                v = str(f).strip()
+                if v:
+                    facts.append(v)
+        except (json.JSONDecodeError, TypeError, AttributeError) as e:
+            print(f"    fetch_site_facts: could not parse facts JSON ({domain}): {e}", flush=True)
+        return "\n".join(f"- {f}" for f in facts)
+
     def find_official_domain(self, brand, context=""):
         """Use the web_search tool to find a brand's OFFICIAL homepage domain (bare, no
         scheme/path). Returns "" on any error/uncertainty — never raises.

@@ -1777,17 +1777,19 @@ def api_blog_regenerate(blog_id):
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 v = gen.verify_claims(brand, a, evidence=evidence)
+                # Deterministic ## Sources rebuild (gen._evidence_blocks set by _gather_evidence above)
+                body = gen._rebuild_sources((v or {}).get("body_markdown") or a.get("body_markdown", ""))
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
                     keywords=a.get("keywords") or [],
-                    body_markdown=(v or {}).get("body_markdown") or a.get("body_markdown", ""),
+                    body_markdown=body,
                     claims_flagged=(v or {}).get("flagged") or [])
             elif part == "verify":
                 v = gen.verify_claims(brand, article, evidence=evidence)
                 if not v:
                     raise ValueError(claude.last_error or "Verify pass failed")
-                bg.update_blog(blog_id, body_markdown=v["body_markdown"],
+                bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(v["body_markdown"]),
                                claims_flagged=v["flagged"])
             elif part == "linkedin":
                 li = gen.generate_linkedin(brand, seed, article)
@@ -1850,6 +1852,28 @@ def api_blog_unpublish(blog_id):
     finally:
         db.close()
 
+def _normalize_md_lists(md_text):
+    """python-markdown (classic Markdown rules) won't treat a list that directly follows a
+    paragraph line — with no blank line between — as a list; it collapses the bullets into one
+    <p> as literal "- item" text. Insert a blank line before the first item of any such list so
+    it renders. Contiguous list items and fenced code blocks are left untouched."""
+    lines = (md_text or "").split("\n")
+    out = []
+    in_fence = False
+    list_re = re.compile(r"^\s*([-*+]\s+|\d+[.)]\s+)")
+    for line in lines:
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if (not in_fence and list_re.match(line) and out
+                and out[-1].strip() and not list_re.match(out[-1])):
+            out.append("")  # blank line so the list starts a new block
+        out.append(line)
+    return "\n".join(out)
+
+
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
     """Export the website article:
@@ -1883,7 +1907,7 @@ def api_blog_export(blog_id):
     if fmt == "html":
         try:
             import markdown as _md
-            inner = _md.markdown(body, extensions=["tables", "fenced_code"])
+            inner = _md.markdown(_normalize_md_lists(body), extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(body) + "</pre>"
         # Visible byline (from the brand, when set) + published/updated dates.

@@ -60,6 +60,7 @@ class BlogGenerator:
     def __init__(self, claude, db):
         self.claude = claude
         self.db = db
+        self._evidence_blocks = []   # set by _gather_evidence; read by _rebuild_sources
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -229,8 +230,12 @@ class BlogGenerator:
 
         # ----- subject + competitor domains -----
         targets = []  # (label, domain, validate)
+        web_resolved_names = set()   # competitor names whose domain came from find_official_domain
         if b.get("domain_url"):
             targets.append((subject, b["domain_url"].strip(), False))
+        else:
+            print(f"[blog_gen] evidence: subject {subject!r} has NO domain_url — "
+                  "no first-party source can be fetched", flush=True)
         try:
             cached = json.loads(b.get("competitor_domains") or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -266,6 +271,8 @@ class BlogGenerator:
                         n, f"{b.get('category') or ''} {seed or ''}".strip())
                 except Exception:
                     official = ""
+                if official:
+                    web_resolved_names.add(n)
                 if official and resolved.get(n) != official:
                     print(f"[blog_gen] evidence: web-search resolved {n!r} -> {official} "
                           f"(was {resolved.get(n) or 'unresolved'})", flush=True)
@@ -308,12 +315,15 @@ class BlogGenerator:
                 topic_terms.discard(w)
 
         validated = {}   # competitor label -> bare domain that fetched + validated this run
+        produced = set()  # labels (subject/competitor) that yielded ≥1 first-party block this run
+        target_dom = {}   # label -> bare domain used (for the web-search fallback below)
         # Competitor paths: include product/platform pages so FEATURE facts are captured,
         # not just pricing (the gap that left competitor feature rows "not confirmed").
         _comp_paths = ("", "/pricing", "/features", "/product", "/platform",
                        "/how-it-works", "/testimonials")
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
+            target_dom[label] = dom
             # Subject brand gets the full path set; competitors get the product-heavy set.
             paths = _EVIDENCE_PATHS if not validate else _comp_paths
             kept = 0
@@ -349,12 +359,49 @@ class BlogGenerator:
                 blocks.append({"label": label, "url": f"https://{dom}{path}",
                                "text": txt[:_EVIDENCE_TEXT_CAP]})
                 kept += 1
+            if kept:
+                produced.add(label)
             if validate:
                 if label in validated:
                     print(f"[blog_gen] evidence: {label} -> {dom} OK ({kept} page(s) cited)", flush=True)
                 else:
                     print(f"[blog_gen] evidence: {label} -> {dom} produced NO first-party evidence "
                           f"(name/topic validation failed) — will be name-only ('not confirmed')", flush=True)
+            else:  # subject (validate=False) — log its outcome (was previously silent)
+                if kept:
+                    print(f"[blog_gen] evidence: subject {label} -> {dom} OK ({kept} page(s))", flush=True)
+                else:
+                    print(f"[blog_gen] evidence: subject {label} -> {dom} fetched NOTHING "
+                          f"(blocked/empty) — web fallback {'on' if use_web_search else 'OFF'}", flush=True)
+
+        # FIRST-PARTY web-search fallback (Follow-up 36): when a direct HTTP fetch returned
+        # nothing (cloud-IP Cloudflare block), pull the brand's OWN facts from its OWN domain
+        # via the server-side web_search tool (runs on Anthropic's infra, not the blocked IP).
+        # Gated by use_web_search (paid). Scoped to the SUBJECT (its domain_url is trusted) and
+        # to competitors whose domain came from find_official_domain (topic-anchored) — never a
+        # cached/guessed competitor domain that failed validation (avoids citing a wrong site).
+        if use_web_search:
+            for label, dom, validate in targets:
+                if label in produced:
+                    continue
+                if validate and label not in web_resolved_names:
+                    continue
+                dom2 = target_dom.get(label) or re.sub(r"^https?://", "", dom).rstrip("/")
+                try:
+                    facts = self.claude.fetch_site_facts(dom2, label, seed)
+                except Exception as e:
+                    print(f"[blog_gen] evidence: {label} -> site-facts fallback error: {e}", flush=True)
+                    facts = ""
+                if facts:
+                    blocks.append({"label": label, "url": f"https://{dom2}",
+                                   "text": facts[:_EVIDENCE_TEXT_CAP]})
+                    produced.add(label)
+                    if validate:           # web-resolved competitor that produced facts → persist its domain
+                        validated.setdefault(label, dom2)
+                    print(f"[blog_gen] evidence: {label} -> {dom2} site-facts via web search "
+                          f"({len(facts)} chars) [direct fetch was blocked]", flush=True)
+                else:
+                    print(f"[blog_gen] evidence: {label} -> {dom2} site-facts fallback found nothing", flush=True)
 
         # Accumulate: persist competitor domains that were newly resolved AND validated this
         # run back onto the brand, so its competitor set grows (idempotent; validated only,
@@ -415,6 +462,10 @@ class BlogGenerator:
             blocks.extend(self._gather_independent_sources(
                 subject, comp_names, seed, b.get("category") or "", own))
 
+        # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
+        # article's ## Sources authoritatively. Always set (even when empty) so a stale value
+        # from a prior call on this instance can't leak in.
+        self._evidence_blocks = list(blocks)
         if not blocks:
             return ""
         parts = ["EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] and URL):"]
@@ -422,6 +473,40 @@ class BlogGenerator:
             src = f"{bl['label']}" + (f" — {bl['url']}" if bl["url"] else "")
             parts.append(f"[S{i}] {src}\n{bl['text']}")
         return "\n\n".join(parts)
+
+    def _rebuild_sources(self, body):
+        """Deterministically rebuild the article's ## Sources from the evidence map captured by
+        the last `_gather_evidence` call. Renumbers the [S#] markers the model actually used to a
+        contiguous [S1..Sn] (in order of first appearance), rewrites them inline, drops any
+        out-of-range / hallucinated index, and replaces the model's ## Sources with an
+        AUTHORITATIVE list (label — URL straight from the evidence, not model-typed). This is
+        what guarantees every cited source — brand site, competitor site, Reddit, third-party —
+        appears with the right URL and no numbering gaps. No-op when there's no evidence or
+        nothing was cited."""
+        blocks = getattr(self, "_evidence_blocks", None) or []
+        body = body or ""
+        if not body or not blocks:
+            return body
+        # Drop the model's own ## / ### Sources section (we rebuild it).
+        prose = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b.*", body, maxsplit=1)[0].rstrip()
+        used = []   # cited indices in order of first appearance, in range only
+        for m in re.finditer(r"\[S(\d+)\]", prose):
+            idx = int(m.group(1))
+            if 1 <= idx <= len(blocks) and idx not in used:
+                used.append(idx)
+        if not used:
+            return body   # nothing valid cited — leave the body untouched
+        remap = {old: i + 1 for i, old in enumerate(used)}
+        prose = re.sub(r"\[S(\d+)\]",
+                       lambda m: (f"[S{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else ""),
+                       prose)
+        lines = ["", "## Sources", ""]
+        for old in used:
+            bl = blocks[old - 1]
+            label = (bl.get("label") or "source").strip()
+            url = (bl.get("url") or "").strip()
+            lines.append(f"- [S{remap[old]}] {label}" + (f" — {url}" if url else ""))
+        return prose.rstrip() + "\n" + "\n".join(lines) + "\n"
 
     # ----------------------------------------------------------- keyword sourcing
     def _filter_relevant(self, seed, pairs, threshold=0.30, top=12):
@@ -542,6 +627,11 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
   - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
     NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
     above and cite it inline as [S#]. This applies to {name}'s OWN claims too.
+  - CITE {name}'s OWN SITE for {name}'s specifics. The EVIDENCE includes a source labeled "{name}"
+    (its own pages). Every specific fact you state about {name} — pricing, financing, shipping terms,
+    return/warranty policy, locations, brands/products carried, contact details — MUST cite that [S#],
+    and {name}'s site MUST appear in "## Sources". Do NOT let {name}'s own specifics ride uncited just
+    because it's a first-party article; an AI engine still wants a verifiable source for each fact.
   - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
     hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
     positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
@@ -591,6 +681,9 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     exact format is parsed into FAQPage structured data — keep it consistent.)
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
+  - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
+    (including a list that follows a bold lead-in like "**Best fit for:**"). A list placed on the
+    line directly under text does NOT render as a list — it collapses into one run-on paragraph.
   - First-party brand voice (owned media), but credible and useful — never a hard pitch.
   - AVOID UNQUALIFIED SUPERLATIVES / BLANKET CLAIMS ("the best", "#1", "largest", "all 50
     states", "the only") unless that exact fact is in the BRAND context above — prefer
@@ -751,6 +844,8 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             article["claims_flagged"] = v["flagged"]
         else:
             article["claims_flagged"] = []
+        # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
+        article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article)
         article["prompt_version"] = PROMPT_VERSION
         return article
@@ -788,7 +883,16 @@ def _parse_faq_pairs(body_md):
         for i, mm in enumerate(h3):
             q = mm.group(1).strip().strip("#").strip()
             end = h3[i + 1].start() if i + 1 < len(h3) else len(faq)
-            a = re.sub(r"\s+", " ", faq[mm.end():end]).strip()
+            a_raw = faq[mm.end():end]
+            # Stop at a thematic break (---, ***, ___) — it separates the FAQ from the
+            # next section (e.g. ## Sources) and must NOT leak into the last answer.
+            hr = re.search(r"(?m)^\s*([-*_])\1{2,}\s*$", a_raw)
+            if hr:
+                a_raw = a_raw[:hr.start()]
+            a = re.sub(r"\s+", " ", a_raw).strip()
+            # Strip inline [S#] citation markers — they're meaningless in isolated FAQPage
+            # schema and read as noise; tidy any double space they leave behind.
+            a = re.sub(r"\s*\[S\d+\]", "", a).strip()
             if q and a and q.endswith("?"):
                 pairs.append({"q": q, "a": a[:700]})
     if pairs:

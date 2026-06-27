@@ -5,7 +5,9 @@ user reviews in the UI before saving. Never persists directly.
 """
 
 import json
+import random
 import re
+import time
 from html.parser import HTMLParser
 
 import requests
@@ -44,36 +46,46 @@ class _VisibleTextExtractor(HTMLParser):
         return re.sub(r"\s+", " ", joined).strip()
 
 
-def _fetch_homepage(domain_url: str, timeout: int = 10) -> str:
-    """Fetch a brand's homepage HTML. Returns empty string on any failure."""
+def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str:
+    """Fetch a brand's homepage HTML. Returns empty string on any failure.
+
+    Retries a transient failure (connection error / timeout / non-200) with a short
+    jittered backoff — on a cloud host (Railway) a single naked GET often hits a
+    transient block, and one quick retry recovers it. A hard Cloudflare block stays
+    empty (the caller has a web-search fallback for that case)."""
     if not domain_url:
         return ""
     url = domain_url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                # Browser UA (not the Reddit bot UA): some brand sites sit behind
-                # Cloudflare which 403s "SubredditStrategyBot/..." — that empty fetch
-                # made enrichment fall back to the brand NAME and describe the wrong
-                # same-named entity (e.g. landportal.com). A browser UA fetches the
-                # real page; it succeeds everywhere the bot UA did. Brand-homepage
-                # fetch only — unrelated to the Reddit legs.
-                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/120.0.0.0 Safari/537.36"),
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        if resp.status_code == 200 and resp.text:
-            return resp.text
-    except requests.exceptions.RequestException as e:
-        print(f"[brand_enrichment] fetch error for {url}: {e}")
+    attempts = max(1, int(retries) + 1)
+    for i in range(attempts):
+        try:
+            resp = requests.get(
+                url,
+                headers={
+                    # Browser UA (not the Reddit bot UA): some brand sites sit behind
+                    # Cloudflare which 403s "SubredditStrategyBot/..." — that empty fetch
+                    # made enrichment fall back to the brand NAME and describe the wrong
+                    # same-named entity (e.g. landportal.com). A browser UA fetches the
+                    # real page; it succeeds everywhere the bot UA did. Brand-homepage
+                    # fetch only — unrelated to the Reddit legs.
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/120.0.0.0 Safari/537.36"),
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+        except requests.exceptions.RequestException as e:
+            if i == attempts - 1:
+                print(f"[brand_enrichment] fetch error for {url}: {e}")
+        if i < attempts - 1:
+            time.sleep(0.4 + random.uniform(0, 0.4))
     return ""
 
 

@@ -1619,6 +1619,49 @@ def api_blog_suggest_keywords():
     finally:
         db.close()
 
+
+def _blog_reddit_evidence(claude, db, reddit_url):
+    """Fetch a live Reddit thread (post body + top comments, incl. the brand comment) so a
+    blog can cite it as COMMUNITY social proof. Returns {subreddit,title,url,text} or None on
+    any failure (the blog then generates without it). Reuses CommentGenerator.fetch_comments
+    (RSS-via-proxy, cloud-IP safe)."""
+    url = (reddit_url or "").strip()
+    if not url or "reddit.com" not in url.lower() or "/comments/" not in url.lower():
+        return None
+    try:
+        from generators.comment_gen import CommentGenerator
+        proxy = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else None
+        cg = CommentGenerator(claude, db, reddit_base=proxy)
+        comments, post_body, _arch = cg.fetch_comments(url, limit=25)
+        sub = cg.extract_subreddit(url) or ""
+    except Exception as e:
+        print(f"[blog_gen] reddit thread fetch failed for {url}: {e}", flush=True)
+        return None
+    # Title from the URL slug (no extra fetch): /comments/<id>/<slug>/
+    title = ""
+    m = re.search(r"/comments/[a-z0-9]+/([^/?#]+)", url, re.IGNORECASE)
+    if m:
+        title = m.group(1).replace("_", " ").replace("-", " ").strip()
+    bodies = []
+    for c in (comments or [])[:18]:
+        bdy = (c.get("body") or "").strip()
+        if bdy:
+            bodies.append("- " + bdy)
+    if not (post_body or "").strip() and not bodies:
+        print(f"[blog_gen] reddit thread {url} returned no usable post/comments", flush=True)
+        return None
+    parts = []
+    if title:
+        parts.append(f'Thread title: "{title}"')
+    if (post_body or "").strip():
+        parts.append("Original post: " + post_body.strip()[:800])
+    if bodies:
+        parts.append("Comments from the discussion:\n" + "\n".join(bodies))
+    print(f"[blog_gen] reddit thread r/{sub}: post + {len(bodies)} comment(s) loaded as "
+          f"community evidence", flush=True)
+    return {"subreddit": sub, "title": title, "url": url, "text": "\n".join(parts)}
+
+
 @app.route("/api/blogs/generate", methods=["POST"])
 def api_blog_generate():
     """Generate a blog (article → verify → LinkedIn) in the background. Returns a
@@ -1634,6 +1677,7 @@ def api_blog_generate():
     source_urls = [u.strip() for u in (raw_urls or []) if str(u).strip()]
     research_notes = (data.get("research_notes") or "").strip()
     use_web_search = bool(data.get("use_web_search"))
+    reddit_url = (data.get("reddit_url") or "").strip()
     if not brand_id or not seed:
         return jsonify({"error": "brand_id and seed are required"}), 400
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1648,10 +1692,13 @@ def api_blog_generate():
             if not brand:
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
+            # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
+            # comment) so the article can cite it as community social proof.
+            reddit_thread = _blog_reddit_evidence(claude, bg, reddit_url) if reddit_url else None
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
-                use_web_search=use_web_search)
+                use_web_search=use_web_search, reddit_thread=reddit_thread)
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             blog_id = bg.save_blog(
@@ -1665,7 +1712,7 @@ def api_blog_generate():
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
-                use_web_search=use_web_search,
+                use_web_search=use_web_search, reddit_url=reddit_url,
             )
             return {"blog_id": blog_id}
         finally:
@@ -1703,16 +1750,19 @@ def api_blog_regenerate(blog_id):
             stored_urls = blog.get("source_urls") or []
             stored_notes = blog.get("research_notes") or ""
             stored_web = bool(blog.get("use_web_search"))
+            stored_reddit = (blog.get("reddit_url") or "").strip()
+            reddit_thread = _blog_reddit_evidence(claude, bg, stored_reddit) if stored_reddit else None
             evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
                                             research_notes=stored_notes,
-                                            use_web_search=stored_web)
+                                            use_web_search=stored_web,
+                                            reddit_thread=reddit_thread)
             article = {"title": blog.get("title") or "",
                        "body_markdown": blog.get("body_markdown") or "",
                        "keywords": blog.get("keywords") or []}
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
-                                          use_web_search=stored_web)
+                                          use_web_search=stored_web, reddit_thread=reddit_thread)
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(

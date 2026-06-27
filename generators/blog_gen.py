@@ -155,7 +155,7 @@ class BlogGenerator:
         return out
 
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
-                         use_web_search=False):
+                         use_web_search=False, reddit_thread=None):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
         block string (or "" when nothing usable). Sources:
           - the subject brand's own site (always),
@@ -333,6 +333,16 @@ class BlogGenerator:
             blocks.append({"label": "research notes (user-provided)", "url": "",
                            "text": notes[:_EVIDENCE_TEXT_CAP]})
 
+        # ----- live Reddit thread (community discussion: the brand's own live post +
+        #       comments, incl. the brand comment) — cited with a community angle -----
+        if isinstance(reddit_thread, dict) and (reddit_thread.get("text") or "").strip():
+            sub = (reddit_thread.get("subreddit") or "").strip()
+            blocks.append({
+                "label": f"community discussion · Reddit thread{f' in r/{sub}' if sub else ''}",
+                "url": (reddit_thread.get("url") or "").strip(),
+                "text": reddit_thread["text"][:_EVIDENCE_TEXT_CAP],
+            })
+
         # ----- optional: independent third-party sources via web search -----
         # Search the whole web but BLOCK the brands' own domains (subject + known competitor
         # domains) so results are genuinely independent (reviews/news/forums), not the brands'
@@ -498,6 +508,12 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     without asserting specifics about them.
   - TESTIMONIALS: you may include at most ONE short customer quote ONLY if it appears in the
     EVIDENCE — attribute it and cite [S#]. Never fabricate a testimonial and don't paste long blocks.
+  - COMMUNITY SOURCE: if the EVIDENCE includes a "community discussion" (a real Reddit thread with the
+    post + its comments), you MAY cite it as real-world SOCIAL PROOF with a NATURAL community framing —
+    e.g. "in a r/<sub> thread, contractors weighing nationwide options pointed to …", "pros on Reddit
+    discussing this flagged …" — and cite it [S#]. Use it to corroborate sentiment / that {name} is
+    recommended by real users; at most ONE short quoted line, attributed; NEVER invent comments beyond
+    what's in the thread. Frame it as community discussion, not a raw link.
 
 EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
 title decision would make the page harder for an AI to extract a direct answer from, drop it and
@@ -662,13 +678,17 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         return (res.get("linkedin_text") or "").strip()
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
-                      research_notes="", use_web_search=False):
+                      research_notes="", use_web_search=False, reddit_thread=None):
         """Full pipeline: gather evidence → article → verify_claims → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
-        linkedin_text, prompt_version) or None if the article couldn't be generated."""
+        linkedin_text, prompt_version) or None if the article couldn't be generated.
+
+        `reddit_thread` (optional) is a pre-fetched live thread {subreddit,title,url,text}
+        the article may cite as COMMUNITY social proof (the brand's own live post + comments)."""
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
                                          research_notes=research_notes,
-                                         use_web_search=use_web_search)
+                                         use_web_search=use_web_search,
+                                         reddit_thread=reddit_thread)
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence)
         if not article:

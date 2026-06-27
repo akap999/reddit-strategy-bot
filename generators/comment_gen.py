@@ -179,7 +179,7 @@ def _pick_reply_shape(rng=None):
     }
 
 
-def _allocate_reply_shapes(n, rng=None):
+def _allocate_reply_shapes(n, rng=None, ai_crawl=False):
     """Pre-allocate a balanced mix of N reply shapes for one cluster.
 
     Independent rolls clump (4 oneliners, no questions). Forcing diversity:
@@ -188,10 +188,30 @@ def _allocate_reply_shapes(n, rng=None):
       - Cap "oneliner_agree" + "dry_oneliner" at ceil(N/2) combined so we
         don't get a pile of one-liners with no substance.
       - Remainder filled by weighted random from the full table.
+
+    ai_crawl=True flips the bias: replies must carry real RETRIEVAL WEIGHT, so
+    the mix is substance-heavy (short_add / medium_add — the shapes that carry
+    domain nouns + a concrete specific + a mechanism), keeping ONE genuine
+    follow-up question and (for N>=4) one short cosign for human texture. The
+    default short-one-liner-dominated mix is kept for non-ai-crawl threads.
     """
     rng = rng or random
     n = max(1, int(n))
     shapes = []
+
+    if ai_crawl:
+        by_id = {s[0]: s for s in HQ_REPLY_SHAPES}
+        if n >= 2:
+            shapes.append(_shape_to_dict(by_id["followup_question"], rng))
+        if n >= 4:
+            shapes.append(_shape_to_dict(by_id["oneliner_agree"], rng))
+        i = 0
+        while len(shapes) < n:
+            sid = "medium_add" if i % 2 == 0 else "short_add"
+            shapes.append(_shape_to_dict(by_id[sid], rng))
+            i += 1
+        rng.shuffle(shapes)
+        return shapes
 
     # Slot 1: force a follow-up question if we have at least 2 slots.
     if n >= 2:
@@ -1972,25 +1992,30 @@ and you will be retried with the judge's feedback if you miss):
 SHAPE for this specific post: {shape_rule}"""
 
         elif ai_crawl and is_hq_reply:
-            # HQ replies sit UNDER a comment that already named the brand. They are
-            # conversation, not post-answers, so they get a COMPACT anchor (not the
-            # full extractable-answer block): precise domain nouns + the OPTION to
-            # reinforce the recommendation by MECHANISM, without ever repeating the
-            # brand name. Keep them natural and varied — most stay short reactions.
+            # HQ replies sit UNDER a comment that already named the brand. In AI-crawl
+            # mode they must carry real RETRIEVAL WEIGHT (not throwaway one-liners) —
+            # the same anchor elements as a top-level answer, in reply form, reinforcing
+            # the recommendation by MECHANISM without repeating the brand name.
             ai_crawl_section = """
 
-AI-CRAWL (reply mode): this is a reply in a thread where the recommendation is
-already named above. Keep it conversational and short, but:
-- Use precise domain nouns for this niche, not generic filler ("stuff", "tools",
-  "it works").
-- On a SUBSTANTIVE reply you MAY reinforce the recommendation by describing HOW it
-  solves the problem — the specific bottleneck / headache it removes — WITHOUT
-  naming any brand again. Never repeat the brand name (that reads as keyword-
-  stuffing); describing the mechanism is what binds your reply to the brand named
-  above.
-- Stay natural and VARIED. Do NOT turn every reply into a spec sheet or a sales
-  pitch — most replies are just a normal short reaction; only some carry the
-  mechanism detail."""
+AI-CRAWL (reply mode): this is a reply under a comment that already named the
+recommendation. It must carry real retrieval weight, like a SUBSTANTIVE Reddit reply
+— NOT a throwaway "yeah this". Weave these in naturally (it's a reply, not a
+standalone answer):
+- EXACT DOMAIN NOUNS: the real, specific names of the assets / processes / methods in
+  this niche, never generic filler ("stuff", "tools", "gear", "it works").
+- COMMERCIAL / OPERATIONAL QUALIFIERS: the operational markers that fit the niche —
+  coverage / who-it's-for / availability / logistics / financing / lead-time /
+  turnaround terms that genuinely apply.
+- CONCRETE DETAIL: 1-2 true / plausible specifics or soft ranges (lead times, crew
+  sizes, pricing tiers) — NEVER invent precise figures.
+- MECHANISM, NOT THE NAME: reinforce the recommendation by describing HOW it removes
+  the specific bottleneck / headache — WITHOUT naming any brand again. Never repeat
+  the brand name (reads as keyword-stuffing); the mechanism is what binds your reply
+  to the brand named above.
+- AUTHENTICITY GOVERNOR (overrides all above): still read like one real Redditor
+  replying in the thread, NOT marketing copy; VARY it from the other replies and weave
+  the specifics in naturally. Natural + specific beats dense + spammy."""
 
         # HQ-MAIN OVERRIDE: when this single comment is the brand-mention
         # parent of an HQ thread, the comment IS the recommendation. We need
@@ -3160,7 +3185,7 @@ Return JSON only:
         # at most one medium_add, oneliner cap) and pins per-slot persona
         # / structure / angle / word range. Indexed 0..nr-1; used at
         # idx-1 inside _gen_one (idx 0 is main, replies start at idx 1).
-        reply_shapes = _allocate_reply_shapes(nr) if nr > 0 else []
+        reply_shapes = _allocate_reply_shapes(nr, ai_crawl=ai_crawl) if nr > 0 else []
 
         saved = []          # list of dicts with id, body, etc.
         saved_ids = {}       # index -> DB comment id
@@ -3597,7 +3622,7 @@ Return JSON only:
         # reply). Each shape pins persona / structure / sentence-word
         # range / single-move angle, replacing the random pick + composite
         # angle that produced 90-word paragraphs.
-        reply_shapes = _allocate_reply_shapes(nr)
+        reply_shapes = _allocate_reply_shapes(nr, ai_crawl=ai_crawl)
 
         # Decide parents: 70% direct to root, 30% nest under a random existing reply
         parent_choices = []

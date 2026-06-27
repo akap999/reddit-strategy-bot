@@ -3660,13 +3660,11 @@ Return JSON only:
         # angle that produced 90-word paragraphs.
         reply_shapes = _allocate_reply_shapes(nr, ai_crawl=ai_crawl)
 
-        # Decide parents: 70% direct to root, 30% nest under a random existing reply
-        parent_choices = []
-        for _i in range(nr):
-            if existing_replies and random.random() < 0.30:
-                parent_choices.append(random.choice(existing_replies))
-            else:
-                parent_choices.append(root)
+        # Every new reply attaches DIRECTLY to the HQ brand-mention root comment —
+        # never nested under an existing reply. Keeps each reply shallow (level-1, in
+        # close proximity to the brand mention for retrieval/entity-binding) and
+        # clustered on the BM comment rather than buried under another reply.
+        parent_choices = [root for _ in range(nr)]
 
         saved = []
         next_order = max([c.get("suggested_order", 0) for c in cluster.values()] or [0]) + 1

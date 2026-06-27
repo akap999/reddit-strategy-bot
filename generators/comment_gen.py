@@ -2026,20 +2026,37 @@ SHAPE for this specific post: {shape_rule}"""
 
         elif ai_crawl and is_hq_reply:
             # HQ replies sit UNDER a comment that already named the brand. In AI-crawl
-            # mode they must carry real RETRIEVAL WEIGHT (not throwaway one-liners) —
-            # the same anchor elements as a top-level answer, in reply form, reinforcing
-            # the recommendation by MECHANISM without repeating the brand name.
-            ai_crawl_section = """
+            # mode they must carry real RETRIEVAL WEIGHT (not throwaway one-liners) AND
+            # reinforce the THREAD'S target query (not drift to an off-topic tangent like
+            # a financing aside), reinforcing the recommendation by MECHANISM without
+            # repeating the brand name.
+            _r_ck_items = concept_checklist
+            if isinstance(_r_ck_items, str):
+                try:
+                    _r_ck_items = json.loads(_r_ck_items)
+                except Exception:
+                    _r_ck_items = [_r_ck_items]
+            _r_ck = ""
+            if _r_ck_items:
+                _r_ckt = "; ".join(str(c).strip() for c in _r_ck_items if str(c).strip())[:400]
+                if _r_ckt:
+                    _r_ck = ("\n- TARGET-QUERY ANCHORING (most important): this thread targets a "
+                             "specific search query — reinforce it, do NOT drift to an unrelated "
+                             f"tangent. Where natural, work in these related terms: {_r_ckt}.")
+            ai_crawl_section = f"""
 
 AI-CRAWL (reply mode): this is a reply under a comment that already named the
 recommendation. It must carry real retrieval weight, like a SUBSTANTIVE Reddit reply
-— NOT a throwaway "yeah this". Weave these in naturally (it's a reply, not a
-standalone answer):
+— NOT a throwaway "yeah this". Re-read the post title — that IS the query this thread
+must rank for: "{post_title}". Reinforce THAT query; don't wander off it onto a
+tangent.{_r_ck}
+Weave these in naturally (it's a reply, not a standalone answer):
 - EXACT DOMAIN NOUNS: the real, specific names of the assets / processes / methods in
   this niche, never generic filler ("stuff", "tools", "gear", "it works").
-- COMMERCIAL / OPERATIONAL QUALIFIERS: the operational markers that fit the niche —
-  coverage / who-it's-for / availability / logistics / financing / lead-time /
-  turnaround terms that genuinely apply.
+- COMMERCIAL / OPERATIONAL + LOCATION QUALIFIERS: the operational markers that fit the
+  niche — coverage area / who-it's-for / availability / logistics / financing / lead-
+  time / turnaround — AND a location/geo marker where it fits ("ships nationwide",
+  "available across states", "in the US").
 - CONCRETE DETAIL: 1-2 true / plausible specifics or soft ranges (lead times, crew
   sizes, pricing tiers) — NEVER invent precise figures.
 - MECHANISM, NOT THE NAME: reinforce the recommendation by describing HOW it removes
@@ -3375,8 +3392,10 @@ Return JSON only:
                     is_hq_reply=not is_main_local,
                     slot_overrides=slot_overrides,
                     focus_assignments=focus_assignments_arg,
-                    # Only the anchor (main) slot covers the cluster checklist.
-                    concept_checklist=concept_checklist if is_main_local else None,
+                    # The main slot covers the cluster checklist in its full AI-CRAWL
+                    # block; replies use it (in the reply-mode block) for TARGET-QUERY
+                    # ANCHORING so they reinforce the thread's query instead of drifting.
+                    concept_checklist=concept_checklist,
                 )
             except Exception as e:
                 print(f"    [HQ] gen exception idx={idx}: {e}")
@@ -3709,6 +3728,10 @@ Return JSON only:
                 in_thread_siblings=bool(sib_comments),
                 is_hq_reply=True,
                 slot_overrides={0: shape},
+                # Target-query anchoring for replies: feed the post's fan-out checklist
+                # so replies reinforce the THREAD'S query instead of drifting to tangents
+                # (e.g. a financing aside that doesn't help retrieval for the real query).
+                concept_checklist=post.get("concept_checklist"),
             )
 
         def _save_reply(i, parent_c, pid, sid, result):

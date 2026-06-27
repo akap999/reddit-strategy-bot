@@ -2021,6 +2021,14 @@ and you will be retried with the judge's feedback if you miss):
   ad, a brochure, or a spec sheet, CUT the density. Natural + specific always
   beats dense + keyword-stuffed: an over-optimized comment gets filtered as
   promotional (and removed by Reddit), which is worse than a plain one.
+- FIRST-PERSON, NOT A PITCH: write from your OWN experience — "I/we", your actual
+  workflow or situation ("I've been doing X and…") — NOT a detached description of
+  the product or the market. The domain nouns + mechanism must come from someone who
+  DID the thing, not a reviewer. BANNED value-prop phrasing (these read as marketing):
+  "is what makes the difference", "a completely different workflow", "the bottleneck
+  (most/every) … are trying to solve", "game-changer", "the real challenge here",
+  "takes it to the next level". State your own concrete experience, don't declare the
+  product's value.
 
 SHAPE for this specific post: {shape_rule}"""
 
@@ -2066,6 +2074,13 @@ Weave these in naturally (it's a reply, not a standalone answer):
 - OPENER: do NOT open with "yeah", "same", "this", "what they said", or "what u/X
   said". Lead with your OWN angle — a specific detail, a question, or a mild qualifier
   — and make your opener clearly different from the other replies in the thread.
+- FIRST-PERSON, NOT A PITCH: write from your OWN experience — "I/we", your actual
+  workflow or situation ("I've been doing X and…") — NOT a detached description of the
+  product or the market. The domain nouns + mechanism must come from someone who DID
+  the thing, not a reviewer. BANNED value-prop phrasing (reads as marketing): "is what
+  makes the difference", "a completely different workflow", "the bottleneck (most/every)
+  … are trying to solve", "game-changer", "the real challenge here", "takes it to the
+  next level". State your own concrete experience, don't declare the product's value.
 - AUTHENTICITY GOVERNOR (overrides all above): still read like one real Redditor
   replying in the thread, NOT marketing copy; VARY it from the other replies and weave
   the specifics in naturally. Natural + specific beats dense + spammy."""

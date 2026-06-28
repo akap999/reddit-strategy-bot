@@ -4604,319 +4604,41 @@ class Database:
                 "skipped": skipped}
 
     def get_report_months_for_client(self, client_id):
-        """Distinct report_month values for a client's deliverables,
-        split per pipeline. Used by the portal dashboard's By Month
-        view.
+        """Per-month rollup of the client's report deliverables, split per
+        pipeline. Powers the portal dashboard's By Month view.
 
-        Each row carries Mentions (search_comments) and HQ Mentions
-        (Live Subs posts) counters separately. HQ Mentions are
-        counted at POST level (1 post = 1 HQ Mention regardless of
-        how many of its comments are reported); Mentions are counted
-        at comment level (1 search_comment = 1 Mention).
-
-        Returns: [{
-            month: 'YYYY-MM',
-            mentions_total, mentions_live, mentions_removed,
-            hq_total, hq_live, hq_removed,
-            # back-compat aggregates (sum of both pipelines):
-            total, live, removed,
-        }, ...]
-
-        `live` vs `removed` for HQ Mentions follows the derived rule
-        we use elsewhere: a post is removed iff `posts.status =
-        'removed'` OR any of its reported comments has
-        `status = 'removed'`. Otherwise live.
+        This is a THIN ROLLUP of `get_report_aggregate_for_client` (summed
+        across the client's brands, grouped by month) so By Month, By Brand,
+        the Brand page, and the Month page are guaranteed to agree — one
+        calculator, no drift. Each row carries the per-pipeline buckets
+        (mentions_* / hq_*) plus back-compat aggregates. Canonical invariant:
+        TOTAL = report+removed+replace+replaced; LIVE = report+replaced.
         """
-        brand_ids = self.client_brand_ids(client_id)
-        if not brand_ids:
-            return []
-        ph = ",".join("?" * len(brand_ids))
-        match_c = (
-            f"("
-            f"  c.brand_id IN ({ph})"
-            f"  OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
-            f"  OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph})))"
-            f")"
-        )
-        match_sc = (
-            f"("
-            f"  sc.brand_id IN ({ph})"
-            f"  OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph}))"
-            f")"
-        )
-        params_c = brand_ids * 3
-        params_sc = brand_ids * 2
-        # q_hq: one row per (month, post_id). is_removed = 1 iff
-        # ANY of:
-        #   - post.status = 'removed'
-        #   - any reported comment is status='removed'
-        #   - any reported comment is status='report' but has no
-        #     Reddit URL (= never actually posted)
-        #   - the post has no deployed HQ root (no Mention Link
-        #     anchor on Reddit)
-        # Mirrors derived_status used by the month-page chip — keep
-        # these two in sync.
-        # is_removed mirrors `get_posts_for_client_month`'s per-row
-        # helper — keep these two in sync. A post is "live" iff it
-        # has at least ONE HQ root (comment_type='hq' AND
-        # parent_comment_id IS NULL) with a Reddit URL whose status
-        # is not 'removed' / 'replace'. Otherwise it's removed.
-        # Non-HQ-root reported comments don't gate the verdict.
-        q_hq = f"""
-            SELECT c.report_month AS month,
-                   c.post_id AS post_id,
-                   MAX(CASE WHEN p.status = 'removed' THEN 1
-                            WHEN NOT EXISTS (
-                                SELECT 1 FROM comments hq
-                                 WHERE hq.post_id = c.post_id
-                                   AND hq.comment_type = 'hq'
-                                   AND hq.parent_comment_id IS NULL
-                                   AND hq.status NOT IN ('removed', 'replace')
-                                   AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
-                            ) THEN 1
-                            ELSE 0 END) AS is_removed,
-                   -- `is_replace` is a sub-count of `is_removed`:
-                   -- post is removed AND the verdict is driven by a
-                   -- 'replace' HQ root (rather than a hard removal or
-                   -- missing HQ). Surfaced as a separate chip on the
-                   -- dashboard cards so the admin can see how many of
-                   -- the "removed" deliverables are still eligible for
-                   -- redeploy.
-                   MAX(CASE
-                       WHEN p.status = 'removed' THEN 0
-                       WHEN EXISTS (
-                           SELECT 1 FROM comments hq
-                            WHERE hq.post_id = c.post_id
-                              AND hq.comment_type = 'hq'
-                              AND hq.parent_comment_id IS NULL
-                              AND hq.status NOT IN ('removed', 'replace')
-                              AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
-                       ) THEN 0
-                       WHEN EXISTS (
-                           SELECT 1 FROM comments hq
-                            WHERE hq.post_id = c.post_id
-                              AND hq.comment_type = 'hq'
-                              AND hq.parent_comment_id IS NULL
-                              AND hq.status = 'replace'
-                       ) THEN 1
-                       ELSE 0
-                   END) AS is_replace
-              FROM comments c
-              JOIN posts p ON c.post_id = p.id
-             WHERE {match_c}
-               AND c.report_month IS NOT NULL
-               AND c.status IN ('report', 'removed', 'replace')
-             GROUP BY c.report_month, c.post_id
-        """
-        # Counts are mutually exclusive — a single row is either
-        # live, removed, or replace (never two at once). This was a
-        # confusing UX before when `removed` included replace and
-        # the dashboard showed "12 removed · 4 replace" looking like
-        # 16 not-live rows when it was really 12 (4 of which are
-        # eligible for redeploy).
-        q_mentions = f"""
-            SELECT sc.report_month AS month,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN sc.status = 'report' THEN 1 ELSE 0 END) AS live,
-                   SUM(CASE WHEN sc.status = 'removed' THEN 1 ELSE 0 END) AS removed,
-                   SUM(CASE WHEN sc.status = 'replace' THEN 1 ELSE 0 END) AS replace_cnt
-              FROM search_comments sc
-              JOIN search_posts sp ON sc.search_post_id = sp.id
-             WHERE {match_sc}
-               AND sc.report_month IS NOT NULL
-               AND sc.status IN ('report', 'removed', 'replace')
-             GROUP BY sc.report_month
-        """
-        agg = {}
-        # Per-post seen set keyed by (month, post_id) so the post-
-        # only query below doesn't double-count a post that already
-        # showed up via its reported comments.
-        seen_posts = set()
-        for r in self.conn.execute(q_hq, params_c).fetchall():
-            m = r["month"]
+        agg = self.get_report_aggregate_for_client(client_id)
+        keys = ("mentions_total", "mentions_live", "mentions_removed",
+                "mentions_replace", "mentions_replaced",
+                "hq_total", "hq_live", "hq_removed", "hq_replace", "hq_replaced")
+        months = {}
+        for r in agg:
+            m = r.get("month")
             if not m:
                 continue
-            bucket = agg.setdefault(m, {
-                "month": m,
-                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
-                "mentions_replace": 0,
-                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
-                "hq_replace": 0,
-            })
-            bucket["hq_total"] += 1
-            seen_posts.add((m, r["post_id"]))
-            # Mutually exclusive buckets: a post is in EXACTLY ONE of
-            # live / removed / replace. is_removed=1 + is_replace=1
-            # means the verdict is 'replace'; is_removed=1 alone
-            # means strict 'removed'.
-            if r["is_replace"]:
-                bucket["hq_replace"] += 1
-            elif r["is_removed"]:
-                bucket["hq_removed"] += 1
-            else:
-                bucket["hq_live"] += 1
-        # Post-only follow-up: posts.status='report' that the main
-        # q_hq query missed because NO comment under the post is in
-        # ('report','removed','replace'). Two real cases land here:
-        #
-        #   (a) The new "1 post = 1 HQ Mention" flow flipped the
-        #       parent post to 'report' but the HQ root is still in
-        #       'deployed' / 'paid' (move_post_to_report doesn't
-        #       always touch the HQ comment). The HQ comment IS live
-        #       on Reddit with a URL — so the per-row helper marks
-        #       the post 'live', but the aggregate used to mark it
-        #       'removed' because it never inspected the HQ root.
-        #       That's the bug behind "8 live / 3 removed in tile
-        #       vs 9 live / 2 removed in detail".
-        #
-        #   (b) No HQ root exists at all (post was reported without
-        #       any HQ thread deployed). Correctly 'removed' because
-        #       there's no Mention Link to anchor to.
-        #
-        # Apply the same live / replace / removed classification used
-        # by q_hq above so the two queries agree.
-        q_hq_post_only = f"""
-            SELECT p.report_month AS month,
-                   p.id AS post_id,
-                   CASE WHEN EXISTS (
-                       SELECT 1 FROM comments hq
-                        WHERE hq.post_id = p.id
-                          AND hq.comment_type = 'hq'
-                          AND hq.parent_comment_id IS NULL
-                          AND hq.status NOT IN ('removed', 'replace')
-                          AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
-                   ) THEN 0 ELSE 1 END AS is_removed,
-                   CASE
-                       WHEN EXISTS (
-                           SELECT 1 FROM comments hq
-                            WHERE hq.post_id = p.id
-                              AND hq.comment_type = 'hq'
-                              AND hq.parent_comment_id IS NULL
-                              AND hq.status NOT IN ('removed', 'replace')
-                              AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
-                       ) THEN 0
-                       WHEN EXISTS (
-                           SELECT 1 FROM comments hq
-                            WHERE hq.post_id = p.id
-                              AND hq.comment_type = 'hq'
-                              AND hq.parent_comment_id IS NULL
-                              AND hq.status = 'replace'
-                       ) THEN 1
-                       ELSE 0
-                   END AS is_replace
-              FROM posts p
-             WHERE p.status = 'report'
-               AND p.report_month IS NOT NULL
-               AND (
-                 p.brand_id IN ({ph})
-                 OR p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))
-               )
-        """
-        for r in self.conn.execute(q_hq_post_only, brand_ids * 2).fetchall():
-            m = r["month"]
-            if not m or (m, r["post_id"]) in seen_posts:
-                continue
-            bucket = agg.setdefault(m, {
-                "month": m,
-                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
-                "mentions_replace": 0,
-                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
-                "hq_replace": 0,
-            })
-            bucket["hq_total"] += 1
-            # Mutually exclusive buckets — same priority as q_hq.
-            if r["is_replace"]:
-                bucket["hq_replace"] += 1
-            elif r["is_removed"]:
-                bucket["hq_removed"] += 1
-            else:
-                bucket["hq_live"] += 1
-            seen_posts.add((m, r["post_id"]))
-        for r in self.conn.execute(q_mentions, params_sc).fetchall():
-            m = r["month"]
-            if not m:
-                continue
-            bucket = agg.setdefault(m, {
-                "month": m,
-                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
-                "mentions_replace": 0,
-                "hq_total": 0, "hq_live": 0, "hq_removed": 0,
-                "hq_replace": 0,
-            })
-            bucket["mentions_total"] += r["total"] or 0
-            bucket["mentions_live"] += r["live"] or 0
-            bucket["mentions_removed"] += r["removed"] or 0
-            bucket["mentions_replace"] += r["replace_cnt"] or 0
-        # 'replaced' (replacement PROVIDED) — a delivered deliverable, distinct from the
-        # pending 'replace' bucket above. Counted via a focused query and merged per month,
-        # SPLIT by pipeline (mentions = search_comments, hq = comments) so each pipeline's
-        # card can show its own replaced chip — mirrors the By-Brand aggregate.
-        replaced_split = self.get_replaced_split_for_client(client_id)
-        for m, split in replaced_split.items():
-            bucket = agg.setdefault(m, {
-                "month": m,
-                "mentions_total": 0, "mentions_live": 0, "mentions_removed": 0,
-                "mentions_replace": 0, "hq_total": 0, "hq_live": 0, "hq_removed": 0,
-                "hq_replace": 0,
-            })
-            bucket["mentions_replaced"] = split.get("mentions", 0)
-            bucket["hq_replaced"] = split.get("hq", 0)
-        # Back-compat aggregates so callers that read .total / .live
-        # / .removed (older callsites + the brand overview page) keep
-        # working without churn.
-        for b in agg.values():
-            b.setdefault("mentions_replaced", 0)
-            b.setdefault("hq_replaced", 0)
-            # 'replaced' = a delivered replacement that restores an ALREADY-counted
-            # deliverable (the removed original is already in total). So it counts toward
-            # LIVE (the deliverable is live again) but NOT toward TOTAL (avoid double-count).
+            b = months.get(m)
+            if b is None:
+                b = {"month": m}
+                for k in keys:
+                    b[k] = 0
+                months[m] = b
+            for k in keys:
+                b[k] += r.get(k) or 0
+        # Back-compat aggregates — identical invariant to the By-Brand row.
+        for b in months.values():
             b["replaced"] = b["mentions_replaced"] + b["hq_replaced"]
             b["total"] = b["mentions_total"] + b["hq_total"]
             b["live"] = b["mentions_live"] + b["hq_live"] + b["replaced"]
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
-        return sorted(agg.values(), key=lambda x: x["month"], reverse=True)
-
-    def get_replaced_split_for_client(self, client_id):
-        """Per-month count of 'replaced' deliverables for this client's brands, SPLIT by
-        pipeline: hq = Live Subs `comments`, mentions = `search_comments`. Returns
-        {month: {"mentions": n, "hq": n}}. 'replaced' = a delivered replacement for a
-        removed-but-recent comment; distinct from the pending 'replace' bucket."""
-        brand_ids = self.client_brand_ids(client_id)
-        if not brand_ids:
-            return {}
-        ph = ",".join("?" * len(brand_ids))
-        out = {}
-        def _cell(m):
-            return out.setdefault(m, {"mentions": 0, "hq": 0})
-        # hq = comments
-        q_hq = f"""SELECT c.report_month AS m, COUNT(*) AS n
-                     FROM comments c LEFT JOIN posts p ON c.post_id = p.id
-                    WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
-                      AND ( c.brand_id IN ({ph})
-                            OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
-                            OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
-                    GROUP BY c.report_month"""
-        for r in self.conn.execute(q_hq, brand_ids * 3).fetchall():
-            if r["m"]:
-                _cell(r["m"])["hq"] += (r["n"] or 0)
-        # mentions = search_comments
-        q_men = f"""SELECT sc.report_month AS m, COUNT(*) AS n
-                      FROM search_comments sc LEFT JOIN search_posts sp ON sc.search_post_id = sp.id
-                     WHERE sc.status = 'replaced' AND sc.report_month IS NOT NULL
-                       AND ( sc.brand_id IN ({ph})
-                             OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})) )
-                     GROUP BY sc.report_month"""
-        for r in self.conn.execute(q_men, brand_ids * 2).fetchall():
-            if r["m"]:
-                _cell(r["m"])["mentions"] += (r["n"] or 0)
-        return out
-
-    def get_replaced_counts_for_client(self, client_id):
-        """Per-month TOTAL count of 'replaced' deliverables (both pipelines) for this
-        client's brands. Returns {month: count}. Kept as a thin wrapper over the split."""
-        return {m: (s.get("mentions", 0) + s.get("hq", 0))
-                for m, s in self.get_replaced_split_for_client(client_id).items()}
+        return sorted(months.values(), key=lambda x: x["month"], reverse=True)
 
     def update_live_stats(self, comment_id, source, upvotes, num_replies):
         """Persist a single Reddit engagement snapshot. Called from
@@ -4979,20 +4701,25 @@ class Database:
               END AS resolved_brand_id,
               c.report_month AS month,
               c.post_id AS post_id,
+              -- "Truly-live" = an HQ root on Reddit with a working status
+              -- (report/deployed/paid). MUST match get_posts_for_client_month's
+              -- `truly_live_hq` so the By-Brand/By-Month numbers equal the
+              -- month-page rows. (A 'replaced' root is NOT live here — it's its
+              -- own verdict below, mirroring derived_status.)
               MAX(CASE WHEN p.status = 'removed' THEN 1
                        WHEN NOT EXISTS (
                            SELECT 1 FROM comments hq
                             WHERE hq.post_id = c.post_id
                               AND hq.comment_type = 'hq'
                               AND hq.parent_comment_id IS NULL
-                              AND hq.status NOT IN ('removed', 'replace')
+                              AND hq.status IN ('report', 'deployed', 'paid')
                               AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                        ) THEN 1
                        ELSE 0 END) AS is_removed,
-              -- is_replace is a sub-count of is_removed (same logic as
-              -- the months aggregate). Surfaced separately so the
-              -- brand-card UI can show a Replace chip alongside Live /
-              -- Removed without changing the totals.
+              -- is_replaced / is_replace sub-classify a NOT-live post, in
+              -- derived_status priority (live > replaced > replace > removed).
+              -- 'replaced' = a delivered replacement (the deliverable is live
+              -- again) → counted in the TOTAL like any reported item.
               MAX(CASE
                   WHEN p.status = 'removed' THEN 0
                   WHEN EXISTS (
@@ -5000,7 +4727,27 @@ class Database:
                        WHERE hq.post_id = c.post_id
                          AND hq.comment_type = 'hq'
                          AND hq.parent_comment_id IS NULL
-                         AND hq.status NOT IN ('removed', 'replace')
+                         AND hq.status IN ('report', 'deployed', 'paid')
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = c.post_id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status = 'replaced'
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 1
+                  ELSE 0
+              END) AS is_replaced,
+              MAX(CASE
+                  WHEN p.status = 'removed' THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = c.post_id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status IN ('report', 'deployed', 'paid')
                          AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                   ) THEN 0
                   WHEN EXISTS (
@@ -5015,7 +4762,7 @@ class Database:
             FROM comments c
             JOIN posts p ON c.post_id = p.id
             WHERE c.report_month IS NOT NULL
-              AND c.status IN ('report', 'removed', 'replace')
+              AND c.status IN ('report', 'removed', 'replace', 'replaced')
               AND (
                 c.brand_id IN ({ph})
                 OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
@@ -5055,9 +4802,12 @@ class Database:
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["hq_total"] += 1
             seen_posts.add((r["resolved_brand_id"], r["month"], r["post_id"]))
-            # Mutually exclusive buckets — same rule as the months
-            # aggregate.
-            if r["is_replace"]:
+            # Mutually exclusive buckets in derived_status priority
+            # (live > replaced > replace > removed). hq_total counts the
+            # post once regardless, so it INCLUDES replaced.
+            if r["is_replaced"]:
+                slot["hq_replaced"] += 1
+            elif r["is_replace"]:
                 slot["hq_replace"] += 1
             elif r["is_removed"]:
                 slot["hq_removed"] += 1
@@ -5082,7 +4832,7 @@ class Database:
                    WHERE hq.post_id = p.id
                      AND hq.comment_type = 'hq'
                      AND hq.parent_comment_id IS NULL
-                     AND hq.status NOT IN ('removed', 'replace')
+                     AND hq.status IN ('report', 'deployed', 'paid')
                      AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
               ) THEN 0 ELSE 1 END AS is_removed,
               CASE
@@ -5091,7 +4841,26 @@ class Database:
                        WHERE hq.post_id = p.id
                          AND hq.comment_type = 'hq'
                          AND hq.parent_comment_id IS NULL
-                         AND hq.status NOT IN ('removed', 'replace')
+                         AND hq.status IN ('report', 'deployed', 'paid')
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 0
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = p.id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status = 'replaced'
+                         AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
+                  ) THEN 1
+                  ELSE 0
+              END AS is_replaced,
+              CASE
+                  WHEN EXISTS (
+                      SELECT 1 FROM comments hq
+                       WHERE hq.post_id = p.id
+                         AND hq.comment_type = 'hq'
+                         AND hq.parent_comment_id IS NULL
+                         AND hq.status IN ('report', 'deployed', 'paid')
                          AND TRIM(COALESCE(hq.reddit_comment_url, '')) != ''
                   ) THEN 0
                   WHEN EXISTS (
@@ -5117,7 +4886,9 @@ class Database:
                 continue
             slot = _cell(r["resolved_brand_id"], r["month"])
             slot["hq_total"] += 1
-            if r["is_replace"]:
+            if r["is_replaced"]:
+                slot["hq_replaced"] += 1
+            elif r["is_replace"]:
                 slot["hq_replace"] += 1
             elif r["is_removed"]:
                 slot["hq_removed"] += 1
@@ -5148,23 +4919,15 @@ class Database:
              GROUP BY resolved_brand_id, sc.report_month
         """
         for r in self.conn.execute(q_replaced_sc, brand_ids * 2).fetchall():
-            _cell(r["resolved_brand_id"], r["month"])["mentions_replaced"] += r["cnt"]
-        q_replaced_c = f"""
-            SELECT CASE
-                     WHEN c.brand_id IS NOT NULL THEN c.brand_id
-                     WHEN p.brand_id IS NOT NULL THEN p.brand_id
-                     ELSE (SELECT pb.brand_id FROM post_brands pb WHERE pb.post_id = p.id LIMIT 1)
-                   END AS resolved_brand_id,
-                   c.report_month AS month, COUNT(*) AS cnt
-              FROM comments c JOIN posts p ON c.post_id = p.id
-             WHERE c.status = 'replaced' AND c.report_month IS NOT NULL
-               AND ( c.brand_id IN ({ph})
-                     OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))
-                     OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))) )
-             GROUP BY resolved_brand_id, c.report_month
-        """
-        for r in self.conn.execute(q_replaced_c, brand_ids * 3).fetchall():
-            _cell(r["resolved_brand_id"], r["month"])["hq_replaced"] += r["cnt"]
+            slot = _cell(r["resolved_brand_id"], r["month"])
+            slot["mentions_replaced"] += r["cnt"]
+            # 'replaced' is a reported deliverable → it's part of the TOTAL
+            # (q_mentions above only counts report/removed/replace).
+            slot["mentions_total"] += r["cnt"]
+        # NOTE: HQ 'replaced' is NOT counted here at comment level. It is
+        # classified at POST level by q_hq / q_hq_post_only (is_replaced),
+        # matching get_posts_for_client_month.derived_status, so hq_total
+        # already includes replaced posts and the two surfaces agree.
         # Resolve brand names in one shot (one IN-clause per call).
         present_brand_ids = [bid for (bid, _m) in cells.keys() if bid is not None]
         names = {}
@@ -5194,12 +4957,14 @@ class Database:
             }
             # Back-compat aggregates so JS that still reads .total /
             # .live / .removed (or any older caller) keeps working.
-            # 'replaced' (delivered) rolls into live + total (it's a live mention; not in
-            # the report/removed/replace buckets, so no double-count) — consistent with
-            # the months-view rollup.
+            # Canonical invariant (shared by all four portal surfaces):
+            #   TOTAL = report + removed + replace + replaced   (mentions_total /
+            #           hq_total already include replaced)
+            #   LIVE  = report + replaced                       (currently standing)
+            # The four status sets are mutually exclusive, so TOTAL never
+            # double-counts. mentions_live / hq_live are report/live-only.
             _replaced = row["mentions_replaced"] + row["hq_replaced"]
             row["replaced"] = _replaced
-            # replaced restores an already-counted deliverable → into LIVE, NOT total.
             row["total"] = row["mentions_total"] + row["hq_total"]
             row["live"] = row["mentions_live"] + row["hq_live"] + _replaced
             row["removed"] = row["mentions_removed"] + row["hq_removed"]

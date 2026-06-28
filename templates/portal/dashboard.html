@@ -232,10 +232,10 @@ function _aggregate(rows, monthFilter, statusFilter) {
     hqReplace += r.hq_replace || 0;
     hqReplaced += r.hq_replaced || 0;
   }
-  // 'replaced' (delivered replacement) is a live, delivered mention → fold it into each
-  // pipeline's live + total (it's not in the report/removed/replace buckets, so no
-  // double-count). Keeps this tab consistent with the By Month view's live total.
-  // replaced restores an already-counted deliverable → counts toward LIVE, NOT total.
+  // Canonical invariant (shared by all four portal surfaces): TOTAL already
+  // includes 'replaced' — the server's mentions_total / hq_total are
+  // report+removed+replace+replaced — so do NOT add mReplaced/hqReplaced into
+  // the total again here. LIVE = report + replaced (currently standing).
   const mLiveAll = mLive + mReplaced, mTotalAll = mTotal;
   const hqLiveAll = hqLive + hqReplaced, hqTotalAll = hqTotal;
   // Status filter narrows the "headline" number for each pipeline:

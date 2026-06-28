@@ -10663,9 +10663,9 @@ def portal_brand(brand_id):
         # Keep the per-pipeline counts so the template can render
         # Mentions and HQ Mentions separately.
         agg = db.get_report_aggregate_for_client(cid)
-        keys = ("mentions_total", "mentions_live", "mentions_removed", "mentions_replaced",
-                "hq_total", "hq_live", "hq_removed", "hq_replaced",
-                "total", "live", "removed", "replaced")
+        keys = ("mentions_total", "mentions_live", "mentions_removed", "mentions_replace", "mentions_replaced",
+                "hq_total", "hq_live", "hq_removed", "hq_replace", "hq_replaced",
+                "total", "live", "removed", "replace", "replaced")
         per_month = {}
         for r in agg:
             if r['brand_id'] != brand_id:

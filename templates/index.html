@@ -8761,6 +8761,63 @@ async function _lsubsRunGenComments(pid) {
     } catch (e) { toast(`Failed to start generation: ${e.message}`, 'error'); }
 }
 
+// Generate an AI reply NESTED under a specific selected comment/reply.
+function lsubsGenReplyToComment(cid, pid) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Reply to this comment</h3>
+        <p class="text-xs text-gray-400 mb-3">Generate an AI reply nested directly under comment #${cid}. It will appear threaded beneath it.</p>
+        <div class="space-y-3">
+            <div>
+                <label class="text-xs text-gray-400">Number of replies</label>
+                <input type="number" id="lsubs-reply-count" value="1" min="1" max="5" class="w-full">
+            </div>
+            <div>
+                <label class="text-xs text-gray-400 block mb-1">Brand mentions</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-reply-bmode" value="none" checked>
+                    <span>Organic (no brand) <span class="text-xs text-gray-500">— on-topic reply, mentions no brand</span></span>
+                </label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" name="lsubs-reply-bmode" value="brand">
+                    <span>Mention the brand <span class="text-xs text-gray-500">— the reply may name/recommend the brand</span></span>
+                </label>
+            </div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" id="lsubs-reply-aicrawl" checked>
+                <span>AI-crawl optimized
+                    <span class="text-xs text-gray-500 block ml-6">Substantive, domain-vocabulary-rich phrasing tuned for AI-search retrieval.</span>
+                </span>
+            </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="_lsubsRunGenReply(${cid}, ${pid})">Generate</button>
+        </div>
+    `);
+}
+
+async function _lsubsRunGenReply(cid, pid) {
+    const num = parseInt(document.getElementById('lsubs-reply-count')?.value) || 1;
+    const aiCrawl = !!document.getElementById('lsubs-reply-aicrawl')?.checked;
+    const bmode = document.querySelector('input[name="lsubs-reply-bmode"]:checked')?.value || 'none';
+    closeModal();
+    const bid = await _lsubsLookupPostBrand(pid);
+    if (!bid) { toast('Post has no brand assigned', 'error'); return; }
+    try {
+        const { task_id } = await api(`/api/comments/${cid}/generate-reply`, {
+            method: 'POST',
+            body: { num_replies: num, ai_crawl: aiCrawl, mention_brand: bmode === 'brand', brand_id: bid },
+        });
+        toast(`Generating ${num} reply(ies) under comment #${cid}${aiCrawl ? ' (AI-crawl)' : ''}…`, 'info');
+        _addBgTask(task_id, 'Reply');
+        _pollTask(task_id, 'Reply', (result) => {
+            const n = _genResultComments(result).length;
+            toast(`Generated ${n} nested reply(ies)`, 'success');
+            if (currentView === 'livesubs' && _lsubsTab === 'comments') lsubsLoadComments(true);
+        });
+    } catch (e) { toast(`Failed to start reply generation: ${e.message}`, 'error'); }
+}
+
 // Open the Gen HQ modal (per-post). Lets the user pick the number of replies.
 function lsubsGenHqForPost(pid) {
     showModal(`
@@ -9209,6 +9266,7 @@ function _lsubsBuildCommentRowHtml(c, opts = {}) {
                 <div class="flex gap-1 flex-wrap" style="white-space:nowrap">
                     <button class="btn btn-sm btn-secondary" onclick="editComment(${c.id})">Edit</button>
                     <button class="btn btn-sm" style="background:#1a3d3d;color:#9efbf0" onclick="lsubsRegenComment(${c.id})" title="Re-roll this single comment with a fresh take">Regen</button>
+                    <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="lsubsGenReplyToComment(${c.id}, ${c.p_id})" title="Generate an AI reply nested under THIS comment">↳ Reply</button>
                     ${['deployed','paid','report','replace','removed'].includes(c.status) ? `${c.reddit_comment_url ? `<a href="${c.reddit_comment_url}" target="_blank" class="btn btn-sm btn-secondary" title="Open this comment on Reddit">↗ Reddit</a>` : ''}<button class="btn btn-sm" style="background:#26334a;color:#9ec4ff" onclick="editDeployedLinkModal(${c.id}, 'comment')" title="Edit the deployed Reddit link">Edit link</button>` : ''}
                     ${c.status === 'draft' || c.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="autoAssignComment(${c.id})">Auto</button><button class="btn btn-accent btn-sm" onclick="assignCommentPrompt(${c.id})">Assign</button>` : ''}
                     ${c.status === 'assigned' ? `<button class="btn btn-sm" style="background:#4a2a00;color:#FF8b60" onclick="informComment(${c.id})">Inform</button><button class="btn btn-primary btn-sm" onclick="deployCommentModal(${c.id})">Deploy</button><button class="btn btn-secondary btn-sm" onclick="reassignCommentPrompt(${c.id})">Reassign</button><button class="btn btn-secondary btn-sm" onclick="unassignComment(${c.id})">Unassign</button><button class="btn btn-accent btn-sm" onclick="copyCommentMessage(${c.id})">Copy</button>` : ''}
@@ -9349,17 +9407,35 @@ function _lsubsRenderComments() {
                 if (used.has(node.id)) return;
                 used.add(node.id);
                 cluster.push({ c: node, depth });
-                // Pull HQ children AND op_reply children — both belong to the
-                // cluster visually (op_reply is rendered with an OP badge).
-                const ch = sortKids((kids[node.id] || []).filter(
-                    k => k.comment_type === 'hq' || k.comment_type === 'op_reply'
-                ));
+                // Pull ALL children by parent_comment_id — HQ replies, op_replies, AND manual
+                // "↳ Reply" nested replies all belong under their parent in the cluster.
+                const ch = sortKids(kids[node.id] || []);
                 for (const k of ch) walk(k, depth + 1);
             };
             walk(root, 0);
             clusters.push(cluster);
         }
-        const organic = items.filter(it => !used.has(it.id));
+        // Organic = comments not in any HQ cluster. THREAD these too so a manual "↳ Reply"
+        // nests under its parent: build trees from organic roots (no parent, or parent not in
+        // this post / already consumed by an HQ cluster), pulling children with the same walk.
+        const byId = {}; for (const it of items) byId[it.id] = it;
+        const organicItems = items.filter(it => !used.has(it.id));
+        const organicRoots = organicItems.filter(it => {
+            const p = it.parent_comment_id;
+            return !p || !byId[p] || used.has(p);
+        });
+        const organic = [];   // list of flat trees: [[{c,depth},…], …]
+        for (const root of organicRoots) {
+            const flat = [];
+            const owalk = (node, depth) => {
+                if (used.has(node.id)) return;
+                used.add(node.id);
+                flat.push({ c: node, depth });
+                for (const k of sortKids(kids[node.id] || [])) owalk(k, depth + 1);
+            };
+            owalk(root, 0);
+            if (flat.length) organic.push(flat);
+        }
 
         // POST-LEVEL STATUS FILTER: a post card stays iff AT LEAST
         // ONE comment under it matches the status. We don't drop
@@ -9376,7 +9452,7 @@ function _lsubsRenderComments() {
             ? clusters.filter(cluster => matchHead(cluster[0].c))
             : clusters;
         const filteredOrganic = (dateFrom || dateTo)
-            ? organic.filter(matchHead)
+            ? organic.filter(tree => matchHead(tree[0].c))
             : organic;
         if (!postMatchesStatus || !postMatchesMonth) return '';
         if (hasAnyFilter && !filteredClusters.length && !filteredOrganic.length) {
@@ -9437,15 +9513,18 @@ function _lsubsRenderComments() {
                 </div>`;
         }).join('');
 
+        const organicCount = filteredOrganic.reduce((n, t) => n + t.length, 0);
         const organicHtml = filteredOrganic.length ? `
             <div class="mt-3">
-                <div class="text-xs text-gray-400 mb-1">Other comments · ${filteredOrganic.length}</div>
-                ${tableShell(filteredOrganic.map(c => _lsubsBuildCommentRowHtml(c)).join(''))}
+                <div class="text-xs text-gray-400 mb-1">Other comments · ${organicCount}</div>
+                ${tableShell(filteredOrganic.map(tree =>
+                    tree.map(node => _lsubsBuildCommentRowHtml(node.c, { depth: node.depth })).join('')
+                ).join(''))}
             </div>` : '';
 
         // Header counts reflect what's visible after filtering — the raw
         // `items.length` total would be misleading once filters are active.
-        const visibleCount = filteredClusters.reduce((n, cl) => n + cl.length, 0) + filteredOrganic.length;
+        const visibleCount = filteredClusters.reduce((n, cl) => n + cl.length, 0) + organicCount;
         const headerCount = hasAnyFilter
             ? `${visibleCount} of ${items.length} comment${items.length === 1 ? '' : 's'} match`
             : `${items.length} comment${items.length === 1 ? '' : 's'}`;

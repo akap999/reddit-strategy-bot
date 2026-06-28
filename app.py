@@ -6301,9 +6301,63 @@ def api_gen_op_replies():
     tid = start_task("op-replies", task, dedup_key=f"op-replies:{data.get('post_id')}")
     return jsonify({"task_id": tid})
 
+def _gen_one_reply_to_comment(db, comment_gen, comment, post, subreddit, brand,
+                              ai_crawl=False, mention_brand=False, siblings=None):
+    """Generate ONE reply to a specific comment and save it nested under that comment.
+    Returns (new_comment_id, body) or (None, None) on failure. `siblings` is the list of
+    bodies already generated in this batch, passed as in-thread siblings for dedup."""
+    from config import PROMPT_VERSION
+    mock_tone = {
+        "formality": "casual to semi-formal", "humor_style": "occasional dry humor",
+        "technical_level": "moderate", "common_phrases": [],
+        "overall_vibe": "helpful community discussion",
+        "sentence_structure": "mix of short and medium",
+        "capitalization": "mostly lowercase with normal caps",
+        "punctuation_style": "casual, minimal", "emotional_tone": "generally supportive",
+    }
+    mock_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250, "min_chars": 50, "max_chars": 600}
+    target = {
+        "body": comment["body"], "score": 5,
+        "author": comment.get("account_id") or "community_member",
+        "id": "", "permalink": "",
+    }
+    result = comment_gen._generate_with_validation(
+        post_title=post["title"], post_body=post.get("body", ""),
+        subreddit=subreddit["name"], comments=[target],
+        brand_name=brand["name"], brand_context=brand.get("context", ""),
+        num_comments=1, tone_analysis=mock_tone, comment_stats=mock_stats,
+        mention_brand_flags=[mention_brand], reply_targets={0: target},
+        relevance={"best_angle": "replying to comment", "natural_fit": 2},
+        brand_assignments=[brand if mention_brand else None],
+        all_brand_names=[brand["name"]],
+        post_intent=post.get("intent"),
+        ai_crawl=bool(ai_crawl),
+        in_thread_siblings=(siblings or False),
+    )
+    bodies = result.get("generated_comments", [])
+    if not bodies:
+        return None, None
+    body = bodies[0]
+    mentions = mention_brand and brand["name"].lower() in body.lower()
+    r_personas = result.get("_personas", [])
+    r_structures = result.get("_structures", [])
+    parent_day = comment.get("suggested_post_day", 0) or 0
+    new_id = db.save_comment(
+        post_id=post["id"], brand_id=brand["id"], body=body,
+        persona_id=r_personas[0] if r_personas else None,
+        structure_id=r_structures[0] if r_structures else None,
+        is_reply=1, parent_comment_id=comment["id"],
+        mentions_brand=1 if mentions else 0,
+        status="complete", suggested_post_day=parent_day + 1,
+        suggested_order=0, prompt_version=PROMPT_VERSION,
+        comment_type="reply",
+    )
+    return new_id, body
+
+
 @app.route("/api/generate/reply-to-comment", methods=["POST"])
 def api_gen_reply_to_comment():
-    """Generate a single reply to a specific existing comment."""
+    """Generate a single reply to a specific existing comment (synchronous)."""
     data = request.json
     comment_id = data.get("comment_id")
     brand_id = data.get("brand_id")
@@ -6317,15 +6371,11 @@ def api_gen_reply_to_comment():
         comment = db.get_comment(comment_id)
         if not comment:
             return jsonify({"error": "Comment not found"}), 404
-
         post = db.get_post(comment["post_id"])
         if not post:
             return jsonify({"error": "Post not found"}), 404
-
         brand = db.get_brand(brand_id) if brand_id else None
         if not brand:
-            # Canonical fallback: post's own brand_id / single-brand junction
-            # (reported posts often carry the brand on posts.brand_id only).
             resolved = db._resolve_post_brand(comment_id, "comment")
             if resolved:
                 brand = db.get_brand(resolved)
@@ -6334,90 +6384,67 @@ def api_gen_reply_to_comment():
             brand = brands[0] if brands else None
         if not brand:
             return jsonify({"error": "No brand found for this post"}), 400
-
         subreddit = db.get_subreddit(post["subreddit_id"])
 
         from generators.comment_gen import CommentGenerator
         from generators.base import ClaudeClient
-        from config import ANTHROPIC_API_KEY, PROMPT_VERSION
-        claude = ClaudeClient(ANTHROPIC_API_KEY)
-        comment_gen = CommentGenerator(db, claude)
-
-        mock_tone = {
-            "formality": "casual to semi-formal",
-            "humor_style": "occasional dry humor",
-            "technical_level": "moderate",
-            "common_phrases": [],
-            "overall_vibe": "helpful community discussion",
-            "sentence_structure": "mix of short and medium",
-            "capitalization": "mostly lowercase with normal caps",
-            "punctuation_style": "casual, minimal",
-            "emotional_tone": "generally supportive",
-        }
-        mock_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250, "min_chars": 50, "max_chars": 600}
-
-        target = {
-            "body": comment["body"],
-            "score": 5,
-            "author": comment.get("account_id") or "community_member",
-            "id": "",
-            "permalink": "",
-        }
-
-        result = comment_gen._generate_with_validation(
-            post_title=post["title"],
-            post_body=post.get("body", ""),
-            subreddit=subreddit["name"],
-            comments=[target],
-            brand_name=brand["name"],
-            brand_context=brand.get("context", ""),
-            num_comments=1,
-            tone_analysis=mock_tone,
-            comment_stats=mock_stats,
-            mention_brand_flags=[mention_brand],
-            reply_targets={0: target},
-            relevance={"best_angle": "replying to comment", "natural_fit": 2},
-            brand_assignments=[brand if mention_brand else None],
-            all_brand_names=[brand["name"]],
-            post_intent=post.get("intent"),
-            ai_crawl=bool(data.get("ai_crawl", False)),
-        )
-
-        bodies = result.get("generated_comments", [])
-        if not bodies:
+        from config import ANTHROPIC_API_KEY
+        comment_gen = CommentGenerator(ClaudeClient(ANTHROPIC_API_KEY), db)
+        new_id, body = _gen_one_reply_to_comment(
+            db, comment_gen, comment, post, subreddit, brand,
+            ai_crawl=bool(data.get("ai_crawl", False)), mention_brand=mention_brand)
+        if not new_id:
             return jsonify({"error": "Failed to generate reply"})
-
-        body = bodies[0]
-        mentions = mention_brand and brand["name"].lower() in body.lower()
-        r_personas = result.get("_personas", [])
-        r_structures = result.get("_structures", [])
-
-        # Use the parent's day + 1 for scheduling
-        parent_day = comment.get("suggested_post_day", 0) or 0
-
-        new_id = db.save_comment(
-            post_id=post["id"],
-            brand_id=brand["id"],
-            body=body,
-            persona_id=r_personas[0] if r_personas else None,
-            structure_id=r_structures[0] if r_structures else None,
-            is_reply=1,
-            parent_comment_id=comment_id,
-            mentions_brand=1 if mentions else 0,
-            status="complete",
-            suggested_post_day=parent_day + 1,
-            suggested_order=0,
-            prompt_version=PROMPT_VERSION,
-        )
-
-        return jsonify({
-            "ok": True,
-            "comment_id": new_id,
-            "body": body[:200],
-            "mentions_brand": mentions,
-        })
+        return jsonify({"ok": True, "comment_id": new_id, "body": body[:200],
+                        "mentions_brand": bool(mention_brand and brand["name"].lower() in body.lower())})
     finally:
         db.close()
+
+
+@app.route("/api/comments/<int:cid>/generate-reply", methods=["POST"])
+def api_gen_nested_reply(cid):
+    """Generate N AI replies NESTED under a specific comment/reply (background task).
+    The Live Subs '↳ Reply' button hits this. Body: {num_replies(1-5), ai_crawl, mention_brand, brand_id?}."""
+    data = request.json or {}
+    num_replies = max(1, min(5, int(data.get("num_replies", 1) or 1)))
+    ai_crawl = bool(data.get("ai_crawl", True))
+    mention_brand = bool(data.get("mention_brand", False))
+    brand_id = data.get("brand_id")
+
+    def task():
+        db, _claude, _, _, comment_gen = make_generators()
+        try:
+            comment = db.get_comment(cid)
+            if not comment:
+                raise ValueError("Comment not found")
+            post = db.get_post(comment["post_id"])
+            if not post:
+                raise ValueError("Post not found")
+            brand = db.get_brand(brand_id) if brand_id else None
+            if not brand:
+                resolved = db._resolve_post_brand(cid, "comment")
+                if resolved:
+                    brand = db.get_brand(resolved)
+            if not brand:
+                brands = db.get_brands_for_post(post["id"])
+                brand = brands[0] if brands else None
+            if not brand:
+                raise ValueError("No brand found for this comment")
+            subreddit = db.get_subreddit(post["subreddit_id"])
+            out, siblings = [], []
+            for _ in range(num_replies):
+                new_id, body = _gen_one_reply_to_comment(
+                    db, comment_gen, comment, post, subreddit, brand,
+                    ai_crawl=ai_crawl, mention_brand=mention_brand, siblings=siblings)
+                if new_id:
+                    out.append({"id": new_id, "body": body[:100]})
+                    siblings.append(body)
+            return out
+        finally:
+            db.close()
+
+    tid = start_task("gen-nested-reply", task, dedup_key=f"gen-nested-reply:{cid}")
+    return jsonify({"task_id": tid})
 
 
 @app.route("/api/generate/live-comments", methods=["POST"])

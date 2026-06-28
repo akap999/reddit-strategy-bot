@@ -1874,6 +1874,31 @@ def _normalize_md_lists(md_text):
     return "\n".join(out)
 
 
+def _linkify_md_urls(md_text):
+    """Wrap bare http(s):// URLs in <…> so python-markdown renders them as clickable <a> links —
+    it does NOT auto-link bare URLs, so the blog's ## Sources URLs were plain text. Skips URLs
+    already inside a markdown link `](url)`, an autolink `<url>`, or link text `[url]`; trims
+    trailing sentence punctuation out of the link; leaves fenced code blocks untouched."""
+    bare = re.compile(r"(?<![\(<\[])https?://[^\s<>)\]]+")
+    def _wrap(m):
+        u = m.group(0)
+        trail = ""
+        while u and u[-1] in ".,;:!?":
+            trail = u[-1] + trail
+            u = u[:-1]
+        return f"<{u}>{trail}"
+    out = []
+    in_fence = False
+    for line in (md_text or "").split("\n"):
+        s = line.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        out.append(line if in_fence else bare.sub(_wrap, line))
+    return "\n".join(out)
+
+
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
     """Export the website article:

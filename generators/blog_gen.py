@@ -505,7 +505,8 @@ class BlogGenerator:
             bl = blocks[old - 1]
             label = (bl.get("label") or "source").strip()
             url = (bl.get("url") or "").strip()
-            lines.append(f"- [S{remap[old]}] {label}" + (f" — {url}" if url else ""))
+            # <url> autolink → renders as a clickable <a> in the HTML/`.md` export (bare URLs don't).
+            lines.append(f"- [S{remap[old]}] {label}" + (f" — <{url}>" if url else ""))
         return prose.rstrip() + "\n" + "\n".join(lines) + "\n"
 
     # ----------------------------------------------------------- keyword sourcing

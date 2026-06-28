@@ -908,9 +908,12 @@ def _parse_faq_pairs(body_md):
 
 def build_blog_jsonld(blog, brand=None, page_url=""):
     """Build an Article + FAQPage JSON-LD @graph for a blog (pure parsing, no LLM). Dates from
-    blog.created_at/updated_at; author = a Person (brand author_name) ELSE the brand Organization
-    (never fabricated); reviewer when set; publisher = brand Organization; FAQPage mainEntity parsed
-    from the body's FAQ section. Returns a dict ready for json.dumps."""
+    blog.created_at/updated_at. Byline is resolved per-field as a PER-BLOG value overriding the
+    brand byline (author = a Person when a name resolves, ELSE the brand Organization — never
+    fabricated; reviewer/disclosure likewise). publisher = brand Organization (+logo when set);
+    Article gets image (blog image_url else brand logo_url), inLanguage, and — when page_url is
+    given — url + mainEntityOfPage. FAQPage mainEntity parsed from the body's FAQ section. All
+    enrichments are graceful (emitted only when the data exists). Returns a dict for json.dumps."""
     blog = blog or {}
     brand = brand or {}
     title = (blog.get("title") or "").strip()
@@ -928,33 +931,46 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
     brand_url = (brand.get("domain_url") or "").strip()
     if brand_url and not brand_url.startswith(("http://", "https://")):
         brand_url = "https://" + brand_url
+    logo_url = (brand.get("logo_url") or "").strip()
+    # Article image: a per-blog image_url if set, else the brand logo (only emitted when present).
+    image_url = (blog.get("image_url") or "").strip() or logo_url
+
+    # Per-field byline: a per-blog value OVERRIDES the brand byline; fall back to the brand's.
+    def _pick(field):
+        return (blog.get(field) or brand.get(field) or "").strip()
+
     publisher = {"@type": "Organization", "name": brand_name or "Publisher"}
     if brand_url:
         publisher["url"] = brand_url
-    au = (brand.get("author_name") or "").strip()
+    if logo_url:
+        publisher["logo"] = {"@type": "ImageObject", "url": logo_url}
+    au = _pick("author_name")
     if au:
         author = {"@type": "Person", "name": au}
-        at = (brand.get("author_title") or "").strip()
+        at = _pick("author_title")
         if at:
             author["jobTitle"] = at
     else:
         author = dict(publisher)  # Organization author — legitimate (the brand published it)
     article = {"@type": "Article", "headline": title[:110], "description": desc,
-               "author": author, "publisher": publisher}
+               "author": author, "publisher": publisher, "inLanguage": "en"}
+    if image_url:
+        article["image"] = image_url
     if kws:
         article["keywords"] = ", ".join(str(k) for k in kws)
     if published:
         article["datePublished"] = published
     if modified:
         article["dateModified"] = modified
-    rv = (brand.get("reviewer_name") or "").strip()
+    rv = _pick("reviewer_name")
     if rv:
         reviewer = {"@type": "Person", "name": rv}
-        rt = (brand.get("reviewer_title") or "").strip()
+        rt = _pick("reviewer_title")
         if rt:
             reviewer["jobTitle"] = rt
         article["reviewedBy"] = reviewer
     if page_url:
+        article["url"] = page_url
         article["mainEntityOfPage"] = {"@type": "WebPage", "@id": page_url}
     graph = [article]
     faqs = _parse_faq_pairs(blog.get("body_markdown") or "")

@@ -916,6 +916,7 @@ async function removeSubredditOwner(sid) {
 
 async function showAddBrandModal(subId) {
     window._addBrandPersonas = [];   // reset so personas don't leak between adds
+    window._addBrandByline = null;    // reset auto-fetched byline/logo between adds
     let allBrands = [];
     try { allBrands = await api('/api/brands/all'); } catch(e) {}
 
@@ -1023,6 +1024,15 @@ async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
         window._addBrandPersonas = Array.isArray(draft.personas) ? draft.personas : [];
         const pEl = document.getElementById('brand-personas-draft');
         if (pEl) pEl.innerHTML = _renderPersonasList(window._addBrandPersonas);
+        // Byline + logo auto-fetched from the brand's own site (real founder/owner/team; never
+        // invented). Stash for the save payload + populate any visible byline fields for review.
+        window._addBrandByline = {
+            author_name: draft.author_name || '', author_title: draft.author_title || '',
+            logo_url: draft.logo_url || '',
+        };
+        setVal('edit-brand-author', draft.author_name || '');
+        setVal('edit-brand-author-title', draft.author_title || '');
+        setVal('edit-brand-logo', draft.logo_url || '');
         const msg = draft._page_fetched ? 'Analyzed from homepage — review and Save' : 'Analyzed (homepage unreachable — review carefully)';
         toast(msg, 'success');
     } catch (e) {
@@ -1113,6 +1123,7 @@ async function submitAddBrand(subId) {
     if (Array.isArray(window._addBrandPersonas) && window._addBrandPersonas.length) {
         body.personas = window._addBrandPersonas;
     }
+    if (window._addBrandByline) Object.assign(body, window._addBrandByline);  // auto-fetched byline/logo
     await api(`/api/subreddits/${subId}/brands`, { method: 'POST', body });
     toast('Brand added!', 'success');
     closeModal();
@@ -1601,6 +1612,7 @@ async function renderBrands(el) {
 
 async function showAddBrandStandalone() {
     window._addBrandPersonas = [];   // reset so personas don't leak between adds
+    window._addBrandByline = null;    // reset auto-fetched byline/logo between adds
     const subs = subredditsCache || await api('/api/subreddits');
 
     let allBrands = [];
@@ -1699,6 +1711,7 @@ async function submitAddBrandStandalone() {
     if (Array.isArray(window._addBrandPersonas) && window._addBrandPersonas.length) {
         body.personas = window._addBrandPersonas;
     }
+    if (window._addBrandByline) Object.assign(body, window._addBrandByline);  // auto-fetched byline/logo
     if (subId) {
         await api(`/api/subreddits/${subId}/brands`, { method: 'POST', body });
     } else {
@@ -2004,6 +2017,7 @@ async function editBrandContext(brandName) {
                         <div><label class="text-xs text-gray-400">Reviewer title</label><input id="edit-brand-reviewer-title" value="${_ev(first.reviewer_title)}" placeholder="optional"></div>
                     </div>
                     <div><label class="text-xs text-gray-400">Disclosure line <span class="text-gray-600">(shown on first-party comparisons)</span></label><input id="edit-brand-disclosure" value="${_ev(first.disclosure)}" placeholder="e.g. This comparison is published by ${_ev(brandName)}."></div>
+                    <div><label class="text-xs text-gray-400">Logo URL <span class="text-gray-600">(for publisher schema / blog image fallback)</span></label><input id="edit-brand-logo" value="${_ev(first.logo_url)}" placeholder="https://…/logo.png"></div>
                     <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
                 </div>
             </details>
@@ -2090,6 +2104,7 @@ async function saveBrandContext(brandName) {
             reviewer_name: _val('edit-brand-reviewer'),
             reviewer_title: _val('edit-brand-reviewer-title'),
             disclosure: _val('edit-brand-disclosure'),
+            logo_url: _val('edit-brand-logo'),
             competitor_domains,
         }});
     }
@@ -12080,6 +12095,17 @@ async function renderBlogs(c) {
                 🔎 Find independent third-party sources (web search)
                 <span class="text-gray-600">— G2 / reviews / news; uses paid web search (~a few ¢/article)</span>
             </label>
+            <details class="mt-2">
+                <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default for this article)</summary>
+                <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
+                    <div><label class="text-xs text-gray-400">Author name</label><input id="blog-gen-author" placeholder="e.g. Jane Doe"></div>
+                    <div><label class="text-xs text-gray-400">Author title</label><input id="blog-gen-author-title" placeholder="e.g. Head of Growth"></div>
+                    <div><label class="text-xs text-gray-400">Reviewer name</label><input id="blog-gen-reviewer" placeholder="optional"></div>
+                    <div><label class="text-xs text-gray-400">Reviewer title</label><input id="blog-gen-reviewer-title" placeholder="optional"></div>
+                </div>
+                <div class="mt-2"><label class="text-xs text-gray-400">Disclosure line</label><input id="blog-gen-disclosure" placeholder="e.g. This comparison is published by the brand."></div>
+                <div class="mt-2"><label class="text-xs text-gray-400">Article image URL <span class="text-gray-600">(for Article schema image)</span></label><input id="blog-gen-image" placeholder="https://…/hero.jpg"></div>
+            </details>
             <div class="flex gap-2 mt-3">
                 <button class="btn btn-sm btn-secondary" onclick="blogSuggestQueries()">Suggest queries</button>
                 <button class="btn btn-sm btn-primary" onclick="blogGenerate()">Generate →</button>
@@ -12169,7 +12195,13 @@ function blogGenerate() {
     const research_notes = (document.getElementById('blog-gen-notes')?.value || '').trim();
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, reddit_url }, (res) => {
+    const _g = id => (document.getElementById(id)?.value || '').trim();
+    const byline = {
+        author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
+        reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
+        disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
+    };
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, reddit_url, ...byline }, (res) => {
         blogReload();
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
@@ -12202,6 +12234,17 @@ async function openBlog(id) {
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="blog-e-kw" value="${_blogEsc((b.keywords || []).join(', '))}"></div>
             <div><label class="text-xs text-gray-400">Website body (Markdown)</label><textarea id="blog-e-body" rows="12">${_blogEsc(b.body_markdown || '')}</textarea></div>
             <div><label class="text-xs text-gray-400">LinkedIn post</label><textarea id="blog-e-li" rows="6">${_blogEsc(b.linkedin_text || '')}</textarea></div>
+            <details>
+                <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default)</summary>
+                <div class="grid gap-2 mt-2" style="grid-template-columns:1fr 1fr">
+                    <div><label class="text-xs text-gray-400">Author name</label><input id="blog-e-author" value="${_blogEsc(b.author_name || '')}" placeholder="e.g. Jane Doe"></div>
+                    <div><label class="text-xs text-gray-400">Author title</label><input id="blog-e-author-title" value="${_blogEsc(b.author_title || '')}" placeholder="e.g. Head of Growth"></div>
+                    <div><label class="text-xs text-gray-400">Reviewer name</label><input id="blog-e-reviewer" value="${_blogEsc(b.reviewer_name || '')}" placeholder="optional"></div>
+                    <div><label class="text-xs text-gray-400">Reviewer title</label><input id="blog-e-reviewer-title" value="${_blogEsc(b.reviewer_title || '')}" placeholder="optional"></div>
+                </div>
+                <div class="mt-2"><label class="text-xs text-gray-400">Disclosure line</label><input id="blog-e-disclosure" value="${_blogEsc(b.disclosure || '')}" placeholder="e.g. This comparison is published by the brand."></div>
+                <div class="mt-2"><label class="text-xs text-gray-400">Article image URL <span class="text-gray-600">(Article schema image)</span></label><input id="blog-e-image" value="${_blogEsc(b.image_url || '')}" placeholder="https://…/hero.jpg"></div>
+            </details>
             <div class="card p-2" style="background:#1a1030"><div class="text-xs text-gray-400 mb-1">Publish (paste the live URL after you post it)</div>${platRows}</div>
         </div>
         <div class="flex flex-wrap gap-2 mt-3">
@@ -12222,12 +12265,16 @@ async function openBlog(id) {
 async function blogSave(id) {
     const kw = document.getElementById('blog-e-kw').value.split(',').map(s => s.trim()).filter(Boolean);
     try {
+        const _v = id => (document.getElementById(id)?.value || '');
         await api('/api/blogs/' + id, { method: 'PATCH', body: {
             title: document.getElementById('blog-e-title').value,
             meta_description: document.getElementById('blog-e-meta').value,
             keywords: kw,
             body_markdown: document.getElementById('blog-e-body').value,
             linkedin_text: document.getElementById('blog-e-li').value,
+            author_name: _v('blog-e-author'), author_title: _v('blog-e-author-title'),
+            reviewer_name: _v('blog-e-reviewer'), reviewer_title: _v('blog-e-reviewer-title'),
+            disclosure: _v('blog-e-disclosure'), image_url: _v('blog-e-image'),
         }});
         toast('Saved', 'success');
         blogReload();

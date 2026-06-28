@@ -1320,8 +1320,9 @@ def _extract_brand_enrichment_fields(data):
             out["focus"] = json.dumps(list(dedup.values()))
     if "enriched_at" in data:
         out["enriched_at"] = data.get("enriched_at")
-    # EEAT byline (brand-supplied, never fabricated) — plain string fields.
-    for sf in ("author_name", "author_title", "reviewer_name", "reviewer_title", "disclosure"):
+    # EEAT byline (brand-supplied, never fabricated) + logo URL (publisher schema) — string fields.
+    for sf in ("author_name", "author_title", "reviewer_name", "reviewer_title", "disclosure",
+               "logo_url"):
         if sf in data:
             v = data.get(sf)
             out[sf] = v.strip() if isinstance(v, str) else v
@@ -1478,6 +1479,16 @@ def api_enrich_brand_draft():
     except Exception as e:
         print(f"[enrich] persona generation skipped: {e}", flush=True)
         draft["personas"] = []
+    # Also fetch a REAL author (founder/owner/team) + logo from the brand's own site, for review.
+    # Graceful — a byline/logo failure must never break the enrichment draft.
+    try:
+        from generators.brand_enrichment import fetch_brand_byline_logo
+        bl = fetch_brand_byline_logo(claude, eff_name, domain_url)
+        draft["author_name"] = bl.get("author_name", "")
+        draft["author_title"] = bl.get("author_title", "")
+        draft["logo_url"] = bl.get("logo_url", "")
+    except Exception as e:
+        print(f"[enrich] byline/logo fetch skipped: {e}", flush=True)
     return jsonify(draft)
 
 @app.route("/api/brands/<int:bid>/enrich", methods=["POST"])
@@ -1662,6 +1673,40 @@ def _blog_reddit_evidence(claude, db, reddit_url):
     return {"subreddit": sub, "title": title, "url": url, "text": "\n".join(parts)}
 
 
+def _ensure_brand_byline_logo(claude, db, brand):
+    """Lazy auto-fill with a NEGATIVE CACHE: when a brand is missing an author byline OR a logo
+    AND it hasn't been attempted before, fetch a REAL author + logo from the brand's own site,
+    persist ONLY the empty fields (never clobber a manual value), and stamp `meta_autofetched_at`
+    so a not-found brand is never re-attempted on later generations. Returns the (possibly
+    refreshed) brand dict. Best-effort — any failure still stamps the marker (no retry storm).
+    The deliberate retry path is the user clicking Auto-analyze, which always re-fetches."""
+    if not isinstance(brand, dict) or brand.get("id") is None:
+        return brand
+    has_author = bool((brand.get("author_name") or "").strip())
+    has_logo = bool((brand.get("logo_url") or "").strip())
+    if (has_author and has_logo) or (brand.get("meta_autofetched_at") or "").strip():
+        return brand   # nothing missing, or already attempted (negative cache)
+    from generators.brand_enrichment import fetch_brand_byline_logo
+    found = {"author_name": "", "author_title": "", "logo_url": ""}
+    try:
+        found = fetch_brand_byline_logo(claude, brand.get("name") or "", brand.get("domain_url") or "")
+    except Exception as e:
+        print(f"[blog_gen] byline/logo auto-fetch skipped: {e}", flush=True)
+    updates = {"meta_autofetched_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}
+    if not has_author and found.get("author_name"):
+        updates["author_name"] = found["author_name"]
+        if found.get("author_title"):
+            updates["author_title"] = found["author_title"]
+    if not has_logo and found.get("logo_url"):
+        updates["logo_url"] = found["logo_url"]
+    try:
+        db.update_brand(brand["id"], **updates)
+        return db.get_brand(brand["id"]) or brand
+    except Exception as e:
+        print(f"[blog_gen] byline/logo persist skipped: {e}", flush=True)
+        return brand
+
+
 @app.route("/api/blogs/generate", methods=["POST"])
 def api_blog_generate():
     """Generate a blog (article → verify → LinkedIn) in the background. Returns a
@@ -1678,6 +1723,10 @@ def api_blog_generate():
     research_notes = (data.get("research_notes") or "").strip()
     use_web_search = bool(data.get("use_web_search"))
     reddit_url = (data.get("reddit_url") or "").strip()
+    # Optional per-blog byline override (falls back to the brand byline when blank).
+    byline = {k: (data.get(k) or "").strip() for k in
+              ("author_name", "author_title", "reviewer_name", "reviewer_title",
+               "disclosure", "image_url")}
     if not brand_id or not seed:
         return jsonify({"error": "brand_id and seed are required"}), 400
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1692,6 +1741,9 @@ def api_blog_generate():
             if not brand:
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
+            # Lazily fill a missing author/logo from the brand's own site (once; negative-cached)
+            # so the byline/schema are populated without the user re-enriching the brand.
+            brand = _ensure_brand_byline_logo(claude, bg, brand)
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
             reddit_thread = _blog_reddit_evidence(claude, bg, reddit_url) if reddit_url else None
@@ -1712,7 +1764,7 @@ def api_blog_generate():
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
-                use_web_search=use_web_search, reddit_url=reddit_url,
+                use_web_search=use_web_search, reddit_url=reddit_url, **byline,
             )
             return {"blog_id": blog_id}
         finally:
@@ -1744,6 +1796,7 @@ def api_blog_regenerate(blog_id):
             if not brand:
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
+            brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
             gen = BlogGenerator(claude, bg)
             seed = blog.get("seed") or ""
             # Reuse the sources captured at generate time so regeneration stays grounded.
@@ -1805,7 +1858,9 @@ def api_blog_patch(blog_id):
     """Manual edits to a blog's content fields."""
     data = request.get_json() or {}
     fields = {k: data[k] for k in
-              ("title", "meta_description", "keywords", "body_markdown", "linkedin_text")
+              ("title", "meta_description", "keywords", "body_markdown", "linkedin_text",
+               "author_name", "author_title", "reviewer_name", "reviewer_title",
+               "disclosure", "image_url")
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -1924,7 +1979,15 @@ def api_blog_export(blog_id):
     updated = (blog.get("updated_at") or "")[:10]
 
     from generators.blog_gen import build_blog_jsonld
-    jsonld_str = json.dumps(build_blog_jsonld(blog, brand), ensure_ascii=False, indent=2)
+    # Canonical URL from a published website platform — populates Article url + mainEntityOfPage
+    # (empty before the blog is published anywhere, which is fine).
+    page_url = ""
+    for p in (blog.get("platforms") or []):
+        if p.get("platform") == "website" and (p.get("published_url") or "").strip():
+            page_url = p["published_url"].strip()
+            break
+    jsonld_str = json.dumps(build_blog_jsonld(blog, brand, page_url=page_url),
+                            ensure_ascii=False, indent=2)
     if fmt == "jsonld":
         return Response(jsonld_str, mimetype="application/ld+json")
 
@@ -1936,18 +1999,22 @@ def api_blog_export(blog_id):
                                  extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(body) + "</pre>"
-        # Visible byline (from the brand, when set) + published/updated dates.
+        # Open source/citation links in a new tab (the only <a> tags are the linkified URLs).
+        inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
+        # Visible byline — a per-blog value overrides the brand byline; falls back to the brand's.
+        def _bp(field):
+            return ((blog.get(field) or (brand.get(field) if brand else "")) or "").strip()
         byline_bits = []
-        if brand:
-            au = (brand.get("author_name") or "").strip()
-            if au:
-                at = (brand.get("author_title") or "").strip()
-                byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
-            rv = (brand.get("reviewer_name") or "").strip()
-            if rv:
-                rt = (brand.get("reviewer_title") or "").strip()
-                byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
+        au = _bp("author_name")
+        if au:
+            at = _bp("author_title")
+            byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
+        rv = _bp("reviewer_name")
+        if rv:
+            rt = _bp("reviewer_title")
+            byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
         meta_byline = " · ".join(byline_bits)
+        disclosure = _bp("disclosure")
         dline = []
         if published:
             dline.append("Published: " + published)
@@ -1956,6 +2023,8 @@ def api_blog_export(blog_id):
         header = ""
         if meta_byline:
             header += f'<p class="byline">{meta_byline}</p>\n'
+        if disclosure:
+            header += f'<p class="byline"><em>{_html.escape(disclosure)}</em></p>\n'
         if dline:
             header += f'<p class="dates">{" · ".join(dline)}</p>\n'
         css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"

@@ -256,19 +256,19 @@ class Database:
                   features=None, competitors=None, enriched_at=None,
                   search_subreddits=None, focus=None, competitor_domains=None,
                   author_name=None, author_title=None, reviewer_name=None,
-                  reviewer_title=None, disclosure=None):
+                  reviewer_title=None, disclosure=None, logo_url=None):
         cur = self.conn.execute(
             """INSERT INTO brands (subreddit_id, name, domain_url, context, keywords,
                                    category, audience, use_cases, pain_points,
                                    features, competitors, enriched_at, search_subreddits,
                                    focus, competitor_domains, author_name, author_title,
-                                   reviewer_name, reviewer_title, disclosure)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   reviewer_name, reviewer_title, disclosure, logo_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, name, domain_url, context, keywords,
              category, audience, use_cases, pain_points,
              features, competitors, enriched_at, search_subreddits,
              focus, competitor_domains, author_name, author_title,
-             reviewer_name, reviewer_title, disclosure)
+             reviewer_name, reviewer_title, disclosure, logo_url)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -279,7 +279,7 @@ class Database:
                      search_subreddits=None, focus=None, learned_context=None,
                      personas=None, competitor_domains=None, author_name=None,
                      author_title=None, reviewer_name=None, reviewer_title=None,
-                     disclosure=None):
+                     disclosure=None, logo_url=None, meta_autofetched_at=None):
         """Update a brand's editable fields. Pass only the fields you want to change."""
         updates = []
         params = []
@@ -293,7 +293,8 @@ class Database:
             "personas": personas, "competitor_domains": competitor_domains,
             "author_name": author_name, "author_title": author_title,
             "reviewer_name": reviewer_name, "reviewer_title": reviewer_title,
-            "disclosure": disclosure,
+            "disclosure": disclosure, "logo_url": logo_url,
+            "meta_autofetched_at": meta_autofetched_at,
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1004,13 +1005,17 @@ class Database:
     def save_blog(self, brand_id, seed, title="", meta_description="", keywords=None,
                   body_markdown="", linkedin_text="", claims_flagged=None,
                   status="draft", prompt_version="", source_urls=None, research_notes="",
-                  use_web_search=0, reddit_url=""):
-        """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. Returns id."""
+                  use_web_search=0, reddit_url="", author_name="", author_title="",
+                  reviewer_name="", reviewer_title="", disclosure="", image_url=""):
+        """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. The byline
+        fields are optional per-blog overrides of the brand byline. Returns id."""
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
-                                  research_notes, use_web_search, reddit_url, status, prompt_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  research_notes, use_web_search, reddit_url, status, prompt_version,
+                                  author_name, author_title, reviewer_name, reviewer_title,
+                                  disclosure, image_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
@@ -1019,7 +1024,9 @@ class Database:
              research_notes or "",
              1 if use_web_search else 0,
              (reddit_url or "").strip(),
-             status, prompt_version),
+             status, prompt_version,
+             author_name or "", author_title or "", reviewer_name or "",
+             reviewer_title or "", disclosure or "", image_url or ""),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1085,7 +1092,9 @@ class Database:
         list/dict. Always bumps updated_at. No-op when no known fields are given."""
         allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
-                   "source_urls", "research_notes", "use_web_search", "reddit_url"}
+                   "source_urls", "research_notes", "use_web_search", "reddit_url",
+                   "author_name", "author_title", "reviewer_name", "reviewer_title",
+                   "disclosure", "image_url"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2185,15 +2194,24 @@ class Database:
             "reviewer_name":     "ALTER TABLE brands ADD COLUMN reviewer_name TEXT",
             "reviewer_title":    "ALTER TABLE brands ADD COLUMN reviewer_title TEXT",
             "disclosure":        "ALTER TABLE brands ADD COLUMN disclosure TEXT",
+            # Brand logo URL — feeds publisher.logo (+ an Article image fallback) in blog JSON-LD.
+            "logo_url":          "ALTER TABLE brands ADD COLUMN logo_url TEXT",
+            # Negative-cache marker: set once the byline/logo auto-fetch has been attempted, so
+            # the lazy fill (at blog-gen) never re-attempts a not-found brand. Distinct from
+            # enriched_at (a brand can be enriched but predate the byline/logo auto-fetch).
+            "meta_autofetched_at": "ALTER TABLE brands ADD COLUMN meta_autofetched_at TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:
                 self.conn.execute(sql)
                 self.conn.commit()
 
-        # ----- blogs: evidence inputs (source URLs + research notes) -----
+        # ----- blogs: evidence inputs (source URLs + research notes) + per-blog EEAT byline -----
+        # The byline cols mirror the brand-level ones and OVERRIDE them per-field when set, so an
+        # individual article can carry its own author/reviewer/disclosure; image_url feeds Article image.
         blog_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(blogs)").fetchall()]
-        for col in ("source_urls", "research_notes"):
+        for col in ("source_urls", "research_notes", "author_name", "author_title",
+                    "reviewer_name", "reviewer_title", "disclosure", "image_url"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

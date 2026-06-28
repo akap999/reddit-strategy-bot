@@ -102,6 +102,48 @@ def _extract_visible_text(html: str, max_chars: int = 6000) -> str:
     return parser.text()[:max_chars]
 
 
+def _extract_logo_url(html: str, domain_url: str) -> str:
+    """Best-effort brand image/logo URL from homepage HTML (no LLM). Prefers og:image,
+    then apple-touch-icon / <link rel=icon>, resolved to an absolute URL. "" if none."""
+    if not html:
+        return ""
+    base = (domain_url or "").strip()
+    if base and not base.startswith(("http://", "https://")):
+        base = "https://" + base
+    base = base.rstrip("/")
+
+    def _abs(u):
+        u = (u or "").strip()
+        if not u:
+            return ""
+        if u.startswith(("http://", "https://")):
+            return u
+        if u.startswith("//"):
+            return "https:" + u
+        if u.startswith("/"):
+            return base + u
+        return f"{base}/{u}" if base else u
+
+    # 1) og:image / twitter:image (a real share/brand image)
+    m = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*\bcontent=["\']([^"\']+)["\']', html, re.I)
+    if not m:
+        m = re.search(r'<meta[^>]*\bcontent=["\']([^"\']+)["\'][^>]*(?:property|name)=["\'](?:og:image|twitter:image)["\']', html, re.I)
+    if m:
+        u = _abs(m.group(1))
+        if u:
+            return u
+    # 2) apple-touch-icon / icon link
+    for rel in ("apple-touch-icon", "icon", "shortcut icon"):
+        lm = re.search(r'<link[^>]+rel=["\'][^"\']*' + re.escape(rel) + r'[^"\']*["\'][^>]*\bhref=["\']([^"\']+)["\']', html, re.I)
+        if not lm:
+            lm = re.search(r'<link[^>]*\bhref=["\']([^"\']+)["\'][^>]*rel=["\'][^"\']*' + re.escape(rel) + r'[^"\']*["\']', html, re.I)
+        if lm:
+            u = _abs(lm.group(1))
+            if u:
+                return u
+    return ""
+
+
 def _build_enrichment_prompt(name: str, domain_url: str, page_text: str) -> str:
     if page_text:
         page_section = f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
@@ -205,6 +247,68 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         "keywords":        _as_list(result.get("keywords")),
         "_page_fetched":   bool(page_text),
     }
+
+
+# Common pages that name a real founder / owner / team member.
+_BYLINE_PATHS = ("", "/about", "/about-us", "/team", "/our-team", "/leadership", "/company")
+
+
+def fetch_brand_byline_logo(claude: ClaudeClient, name: str, domain_url: str) -> dict:
+    """Extract a REAL author (founder / owner / named team member) + title and the brand's
+    logo URL from the brand's OWN site. Returns {author_name, author_title, logo_url} (any may
+    be "" — never fabricated, never raises). Author is identified by an LLM grounded ONLY in the
+    fetched pages; the logo is parsed from homepage HTML (no LLM)."""
+    out = {"author_name": "", "author_title": "", "logo_url": ""}
+    domain_url = (domain_url or "").strip()
+    if not domain_url:
+        return out
+    base = domain_url if domain_url.startswith(("http://", "https://")) else "https://" + domain_url
+    base = base.rstrip("/")
+    home_html = ""
+    texts = []
+    for path in _BYLINE_PATHS:
+        html = _fetch_homepage(base + path)
+        if not html:
+            continue
+        if path == "":
+            home_html = html
+        txt = _extract_visible_text(html, max_chars=4000)
+        if txt:
+            texts.append(f"[{path or '/'}] {txt}")
+        if len(texts) >= 4:
+            break
+    # Logo from the homepage HTML (fall back to any fetched page if homepage was blank).
+    try:
+        out["logo_url"] = _extract_logo_url(home_html, domain_url)
+    except Exception as e:
+        print(f"[brand_enrichment] logo extract skipped: {e}")
+    if not texts:
+        return out
+    prompt = (
+        f'Below is text from the website of "{name or domain_url}". Identify the brand\'s '
+        "founder, owner, CEO, or a clearly-named senior team member who could be credited as the "
+        "author/reviewer of the brand's articles, and their title/role.\n\n"
+        "STRICT RULES:\n"
+        "- Return a person ONLY if a real, specific human name is EXPLICITLY stated on these pages.\n"
+        "- NEVER invent, guess, or infer a name. If no real named person appears, return empty strings.\n"
+        "- Prefer the founder / owner / CEO; otherwise a named senior leader.\n\n"
+        "PAGES:\n" + "\n\n".join(texts)[:9000] +
+        '\n\nReturn JSON only: {"author_name": "", "author_title": ""}'
+    )
+    try:
+        res = claude.call(prompt, max_tokens=200, temperature=0)
+    except Exception as e:
+        print(f"[brand_enrichment] byline fetch error: {e}")
+        res = None
+    if isinstance(res, dict):
+        out["author_name"] = str(res.get("author_name") or "").strip()
+        out["author_title"] = str(res.get("author_title") or "").strip()
+        if not out["author_name"]:          # title without a name is meaningless
+            out["author_title"] = ""
+    print(f"[brand_enrichment] byline/logo for {name or domain_url}: "
+          f"author={out['author_name'] or '(none)'}, logo={'yes' if out['logo_url'] else 'no'}",
+          flush=True)
+    return out
 
 
 def enrich_brand_for_anchor(claude: ClaudeClient, name: str, domain_url: str, anchor: str) -> dict:

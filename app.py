@@ -1932,7 +1932,8 @@ def api_blog_export(blog_id):
     if fmt == "html":
         try:
             import markdown as _md
-            inner = _md.markdown(_normalize_md_lists(body), extensions=["tables", "fenced_code"])
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(body)),
+                                 extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(body) + "</pre>"
         # Visible byline (from the brand, when set) + published/updated dates.

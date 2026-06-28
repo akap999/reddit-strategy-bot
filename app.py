@@ -2014,30 +2014,39 @@ def api_blog_export(blog_id):
         # Visible byline — a per-blog value overrides the brand byline; falls back to the brand's.
         def _bp(field):
             return ((blog.get(field) or (brand.get(field) if brand else "")) or "").strip()
+        brand_name = (brand.get("name") if brand else "") or ""
+        # Logo (per-blog image_url else brand logo_url), upgraded to https to avoid mixed content.
+        logo = (blog.get("image_url") or "").strip() or ((brand.get("logo_url") or "").strip() if brand else "")
+        if logo.startswith("http://"):
+            logo = "https://" + logo[len("http://"):]
         byline_bits = []
         au = _bp("author_name")
         if au:
             at = _bp("author_title")
             byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
+        else:
+            # ALWAYS show a complete byline. When no real author was found/set (e.g. the site
+            # names no person), fall back to a truthful, role-bearing team attribution — the brand
+            # published it — rather than fabricating a fake human. Override per-brand/per-blog.
+            byline_bits.append("By the " + _html.escape(brand_name or "Editorial") + " Editorial Team")
         rv = _bp("reviewer_name")
         if rv:
             rt = _bp("reviewer_title")
             byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
         meta_byline = " · ".join(byline_bits)
-        if not meta_byline:
-            # ALWAYS show a byline. When no real author was found/set (e.g. the site names no
-            # person), fall back to a truthful team attribution — the brand published it — rather
-            # than fabricating a fake human. Override with a specific name/title in the brand
-            # editor or per-blog to replace this default.
-            _bn = (brand.get("name") if brand else "") or "the Editorial"
-            meta_byline = "By the " + _html.escape(_bn) + " Team"
+        # Disclosure: use the supplied one, else a default transparency line (first-party content).
         disclosure = _bp("disclosure")
+        if not disclosure and brand_name:
+            disclosure = f"This guide is published by {brand_name}, which sells the products discussed."
         dline = []
         if published:
             dline.append("Published: " + published)
         if updated and updated != published:
             dline.append("Updated: " + updated)
         header = ""
+        if logo:
+            header += (f'<p class="logo"><img src="{_html.escape(logo)}" '
+                       f'alt="{_html.escape(brand_name)} logo" loading="lazy"></p>\n')
         if meta_byline:
             header += f'<p class="byline">{meta_byline}</p>\n'
         if disclosure:
@@ -2048,7 +2057,8 @@ def api_blog_export(blog_id):
                "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
                "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
                "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
-               ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}")
+               ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}"
+               ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
         head = (f'<meta charset="utf-8">\n'
                 f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
                 f'<title>{_html.escape(title)}</title>\n'

@@ -934,6 +934,11 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
     logo_url = (brand.get("logo_url") or "").strip()
     # Article image: a per-blog image_url if set, else the brand logo (only emitted when present).
     image_url = (blog.get("image_url") or "").strip() or logo_url
+    # Prefer https in structured data (avoid http:// from an og:image).
+    if logo_url.startswith("http://"):
+        logo_url = "https://" + logo_url[len("http://"):]
+    if image_url.startswith("http://"):
+        image_url = "https://" + image_url[len("http://"):]
 
     # Per-field byline: a per-blog value OVERRIDES the brand byline; fall back to the brand's.
     def _pick(field):

@@ -1964,6 +1964,32 @@ def _linkify_md_urls(md_text):
     return "\n".join(out)
 
 
+def _inline_image_data_uri(url, timeout=6, max_bytes=1_200_000):
+    """Fetch an image and return a base64 `data:` URI so the exported HTML is FULLY self-contained.
+    A remote <img src="https://…"> frequently won't load in mobile file/email/preview viewers
+    (external images blocked, or no network from a file:// context) — inlining makes the logo
+    render everywhere, offline included. Returns "" on any failure / non-image / too-large, so the
+    caller falls back to the remote URL."""
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return ""
+    try:
+        import base64 as _b64
+        import requests as _rq
+        r = _rq.get(url, headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")},
+                    timeout=timeout)
+        ct = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if r.status_code != 200 or not ct.startswith("image/") or not r.content:
+            return ""
+        if len(r.content) > max_bytes:
+            return ""
+        return f"data:{ct};base64," + _b64.standard_b64encode(r.content).decode("ascii")
+    except Exception as e:
+        print(f"[blog export] logo inline failed for {url}: {e}", flush=True)
+        return ""
+
+
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
     """Export the website article:
@@ -2045,8 +2071,11 @@ def api_blog_export(blog_id):
             dline.append("Updated: " + updated)
         header = ""
         if logo:
-            header += (f'<p class="logo"><img src="{_html.escape(logo)}" '
-                       f'alt="{_html.escape(brand_name)} logo" loading="lazy"></p>\n')
+            # Inline the logo (base64) so it renders in mobile file/email viewers that block remote
+            # images; fall back to the remote URL if the fetch fails or it's too large.
+            logo_src = _inline_image_data_uri(logo) or logo
+            header += (f'<p class="logo"><img src="{_html.escape(logo_src)}" '
+                       f'alt="{_html.escape(brand_name)} logo"></p>\n')
         if meta_byline:
             header += f'<p class="byline">{meta_byline}</p>\n'
         if disclosure:

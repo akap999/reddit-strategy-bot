@@ -1674,18 +1674,28 @@ def _blog_reddit_evidence(claude, db, reddit_url):
 
 
 def _ensure_brand_byline_logo(claude, db, brand):
-    """Lazy auto-fill with a NEGATIVE CACHE: when a brand is missing an author byline OR a logo
-    AND it hasn't been attempted before, fetch a REAL author + logo from the brand's own site,
-    persist ONLY the empty fields (never clobber a manual value), and stamp `meta_autofetched_at`
-    so a not-found brand is never re-attempted on later generations. Returns the (possibly
-    refreshed) brand dict. Best-effort — any failure still stamps the marker (no retry storm).
-    The deliberate retry path is the user clicking Auto-analyze, which always re-fetches."""
+    """Lazy auto-fill with a NEGATIVE CACHE: when a brand is missing an author byline or logo,
+    fetch a REAL author + logo from the brand's own site, persist ONLY the empty fields (never
+    clobber a manual value), and stamp `meta_autofetched_at`. Returns the (possibly refreshed)
+    brand dict. Best-effort. The deliberate retry path is Auto-analyze, which always re-fetches.
+
+    Cache semantics, tuned so it self-heals yet doesn't hammer:
+      - no `domain_url`  → can't fetch; skip WITHOUT caching (set a website → next gen fetches).
+      - logo present + marker set → genuine "no named author"; cached (don't re-fetch every gen).
+      - logo MISSING → almost always means the site was never reached (a real site has an
+        og:image/icon), i.e. a failed/blocked fetch, NOT "not found" → retry until reachable."""
     if not isinstance(brand, dict) or brand.get("id") is None:
         return brand
     has_author = bool((brand.get("author_name") or "").strip())
     has_logo = bool((brand.get("logo_url") or "").strip())
-    if (has_author and has_logo) or (brand.get("meta_autofetched_at") or "").strip():
-        return brand   # nothing missing, or already attempted (negative cache)
+    if has_author and has_logo:
+        return brand   # nothing missing
+    if not (brand.get("domain_url") or "").strip():
+        print(f"[blog_gen] byline/logo auto-fetch skipped: brand {brand.get('id')} has no "
+              "domain_url (set it to enable author/logo + own-site sourcing)", flush=True)
+        return brand   # no site to fetch from — do NOT cache; self-heals once a domain is set
+    if has_logo and (brand.get("meta_autofetched_at") or "").strip():
+        return brand   # site was reachable (we have a logo); don't re-fetch just to seek an author
     from generators.brand_enrichment import fetch_brand_byline_logo
     found = {"author_name": "", "author_title": "", "logo_url": ""}
     try:

@@ -2024,6 +2024,13 @@ def api_blog_export(blog_id):
             rt = _bp("reviewer_title")
             byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
         meta_byline = " · ".join(byline_bits)
+        if not meta_byline:
+            # ALWAYS show a byline. When no real author was found/set (e.g. the site names no
+            # person), fall back to a truthful team attribution — the brand published it — rather
+            # than fabricating a fake human. Override with a specific name/title in the brand
+            # editor or per-blog to replace this default.
+            _bn = (brand.get("name") if brand else "") or "the Editorial"
+            meta_byline = "By the " + _html.escape(_bn) + " Team"
         disclosure = _bp("disclosure")
         dline = []
         if published:

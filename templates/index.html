@@ -7809,7 +7809,7 @@ function renderLsubsGenerate(c) {
                 </label>
                 <label class="text-xs text-gray-400 flex items-center gap-1" id="lsubs-gen-hq-replies-wrap" style="display:none">
                     HQ replies
-                    <input type="number" id="lsubs-gen-hq-replies" value="5" min="1" max="15" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px;width:60px">
+                    <input type="number" id="lsubs-gen-hq-replies" value="5" min="0" max="15" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px;width:60px">
                 </label>
                 <!-- Optional SEED: expand generation AROUND an existing prompt /
                      several / a keyword or platform. Leave blank for normal
@@ -8181,7 +8181,8 @@ async function lsubsGeneratePosts(force = false) {
                 // on the Posts tab.
                 const autoHq = !!document.getElementById('lsubs-gen-with-hq')?.checked;
                 if (autoHq && _keptArr.length) {
-                    const nr = parseInt(document.getElementById('lsubs-gen-hq-replies')?.value) || 5;
+                    const _nrV = parseInt(document.getElementById('lsubs-gen-hq-replies')?.value, 10);
+                    const nr = (Number.isFinite(_nrV) && _nrV >= 0) ? _nrV : 5;  // allow 0 = main comment only
                     let started = 0;
                     for (const p of _keptArr) {
                         try {
@@ -8479,6 +8480,14 @@ async function renderLsubsPosts(c) {
                     <option value="">All months</option>
                 </select>
             </label>
+            <label class="text-xs text-gray-400 flex items-center gap-1" title="Filter by where the post came from">
+                Source
+                <select id="lsubs-posts-source" onchange="lsubsLoadPosts()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All sources</option>
+                    <option value="3rd">3rd party only</option>
+                    <option value="own">Generated only</option>
+                </select>
+            </label>
             <div class="ml-auto flex items-center gap-2">
                 <label class="text-xs text-gray-400"><input type="checkbox" id="lsubs-posts-selectall" onchange="lsubsToggleSelectAll(this.checked)" class="mr-1"> Select All</label>
                 <label class="text-xs text-gray-400 flex items-center gap-1">
@@ -8505,7 +8514,8 @@ async function renderLsubsPosts(c) {
     // month is restored inside lsubsLoadPosts once its options are populated).
     { const f = _lsubsUI.posts || {};
       const st = document.getElementById('lsubs-posts-status'); if (st && f.status) st.value = f.status;
-      const it = document.getElementById('lsubs-posts-intent'); if (it && f.intent) it.value = f.intent; }
+      const it = document.getElementById('lsubs-posts-intent'); if (it && f.intent) it.value = f.intent;
+      const so = document.getElementById('lsubs-posts-source'); if (so && f.source) so.value = f.source; }
     lsubsLoadPosts();
 }
 
@@ -8582,12 +8592,15 @@ async function lsubsLoadPosts(silent = false) {
         if (_moEl && !_moEl.value && _lsubsUI.posts && _lsubsUI.posts.month) _moEl.value = _lsubsUI.posts.month;
         const month = _moEl?.value || '';
         const intent = document.getElementById('lsubs-posts-intent')?.value || '';
+        const source = document.getElementById('lsubs-posts-source')?.value || '';
         // Persist the current Posts filters (brand is shared).
         _lsubsUI.brand = bid || '';
-        _lsubsUI.posts = { status: status || '', intent: intent || '', month: month || '' };
+        _lsubsUI.posts = { status: status || '', intent: intent || '', month: month || '', source: source || '' };
         _lsubsSaveUI();
         if (intent) posts = posts.filter(p => (p.intent || '') === intent);
         if (month) posts = posts.filter(p => (p.report_month || '') === month);
+        if (source === '3rd') posts = posts.filter(p => p.is_third_party);
+        else if (source === 'own') posts = posts.filter(p => !p.is_third_party);
         // Render status pills before the empty-state short-circuit so
         // they update even when the current filter has no matches.
         lsubsRenderPostCounts(posts);
@@ -8899,7 +8912,7 @@ function lsubsGenHqForPost(pid) {
         <div class="space-y-3">
             <div>
                 <label class="text-xs text-gray-400">Number of replies (under the main reply)</label>
-                <input type="number" id="lsubs-hq-replies" value="5" min="1" max="15" class="w-full">
+                <input type="number" id="lsubs-hq-replies" value="5" min="0" max="15" class="w-full">
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" id="lsubs-hq-aicrawl" checked>
@@ -8916,7 +8929,8 @@ function lsubsGenHqForPost(pid) {
 }
 
 async function _lsubsRunGenHq(pid) {
-    const replies = parseInt(document.getElementById('lsubs-hq-replies')?.value) || 5;
+    const _hqR = parseInt(document.getElementById('lsubs-hq-replies')?.value, 10);
+    const replies = (Number.isFinite(_hqR) && _hqR >= 0) ? _hqR : 5;  // allow 0 = main comment only
     const aiCrawl = !!document.getElementById('lsubs-hq-aicrawl')?.checked;
     closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
@@ -8951,7 +8965,7 @@ async function lsubsGenHqForKept() {
         <div class="space-y-3">
             <div>
                 <label class="text-xs text-gray-400">Number of replies per post</label>
-                <input type="number" id="lsubs-hq-batch-replies" value="5" min="1" max="15" class="w-full">
+                <input type="number" id="lsubs-hq-batch-replies" value="5" min="0" max="15" class="w-full">
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" id="lsubs-hq-batch-aicrawl" checked>
@@ -8969,7 +8983,8 @@ async function lsubsGenHqForKept() {
 
 async function _lsubsRunGenHqForKept() {
     const kept = (_lsubsLastResult && _lsubsLastResult.kept) || [];
-    const replies = parseInt(document.getElementById('lsubs-hq-batch-replies')?.value) || 5;
+    const _bhqR = parseInt(document.getElementById('lsubs-hq-batch-replies')?.value, 10);
+    const replies = (Number.isFinite(_bhqR) && _bhqR >= 0) ? _bhqR : 5;  // allow 0 = main comment only
     const aiCrawl = !!document.getElementById('lsubs-hq-batch-aicrawl')?.checked;
     closeModal();
     let started = 0;
@@ -9248,7 +9263,15 @@ async function renderLsubsComments(c) {
                     <option value="">All months</option>
                 </select>
             </label>
-            <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status, date and month filters">Clear filters</button>
+            <label class="text-xs text-gray-400 flex items-center gap-1" title="Filter to posts by where they came from">
+                Source
+                <select id="lsubs-cmt-source" onchange="_lsubsRenderComments()" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:4px 8px">
+                    <option value="">All sources</option>
+                    <option value="3rd">3rd party only</option>
+                    <option value="own">Generated only</option>
+                </select>
+            </label>
+            <button class="btn btn-sm btn-secondary" onclick="lsubsClearCmtFilters()" title="Clear status, date, month and source filters">Clear filters</button>
             <button class="btn btn-sm" style="background:#1a3d2a;color:#9efbb4" onclick="showBulkDeployModal('')" title="Bulk-deploy comments from a sheet — matches across both Live Subs and Live Search pipelines">Bulk Deploy from Sheet</button>
             <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="showMarkReportedAllModal('livesubs')" title="Push every currently-filtered deployed/paid comment into a monthly report">Mark Reported All</button>
             <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="showCheckLiveLogs()" title="Activity log of removals + restores from Live Checker and Bulk Deploy">Activity Log</button>
@@ -9265,7 +9288,8 @@ async function renderLsubsComments(c) {
     { const f = _lsubsUI.cmt || {};
       const st = document.getElementById('lsubs-cmt-status'); if (st && f.status) st.value = f.status;
       const fr = document.getElementById('lsubs-cmt-date-from'); if (fr && f.from) fr.value = f.from;
-      const to = document.getElementById('lsubs-cmt-date-to'); if (to && f.to) to.value = f.to; }
+      const to = document.getElementById('lsubs-cmt-date-to'); if (to && f.to) to.value = f.to;
+      const so = document.getElementById('lsubs-cmt-source'); if (so && f.source) so.value = f.source; }
     lsubsLoadComments();
 }
 
@@ -9305,6 +9329,7 @@ function lsubsClearCmtFilters() {
     const f = document.getElementById('lsubs-cmt-date-from'); if (f) f.value = '';
     const t = document.getElementById('lsubs-cmt-date-to'); if (t) t.value = '';
     const mo = document.getElementById('lsubs-cmt-month'); if (mo) mo.value = '';
+    const so = document.getElementById('lsubs-cmt-source'); if (so) so.value = '';
     _lsubsRenderComments();
 }
 
@@ -9428,10 +9453,11 @@ function _lsubsRenderComments() {
     const dateFrom = document.getElementById('lsubs-cmt-date-from')?.value || '';
     const dateTo = document.getElementById('lsubs-cmt-date-to')?.value || '';
     const monthFilter = document.getElementById('lsubs-cmt-month')?.value || '';
+    const sourceFilter = document.getElementById('lsubs-cmt-source')?.value || '';
     // Persist the current Comments filters (brand is shared, saved in lsubsLoadComments).
-    _lsubsUI.cmt = { status: statusFilter, from: dateFrom, to: dateTo, month: monthFilter };
+    _lsubsUI.cmt = { status: statusFilter, from: dateFrom, to: dateTo, month: monthFilter, source: sourceFilter };
     _lsubsSaveUI();
-    const hasAnyFilter = !!(statusFilter || dateFrom || dateTo || monthFilter);
+    const hasAnyFilter = !!(statusFilter || dateFrom || dateTo || monthFilter || sourceFilter);
     const matchHead = (c) => {
         if (dateFrom || dateTo) {
             const d = (c.created_at || '').substring(0, 10);
@@ -9528,7 +9554,10 @@ function _lsubsRenderComments() {
         const filteredOrganic = (dateFrom || dateTo)
             ? organic.filter(tree => matchHead(tree[0].c))
             : organic;
-        if (!postMatchesStatus || !postMatchesMonth) return '';
+        // Source filter is POST-LEVEL (3rd-party vs generated).
+        const postMatchesSource = !sourceFilter
+            || (sourceFilter === '3rd' ? !!g.post_is_third_party : !g.post_is_third_party);
+        if (!postMatchesStatus || !postMatchesMonth || !postMatchesSource) return '';
         if (hasAnyFilter && !filteredClusters.length && !filteredOrganic.length) {
             return '';
         }

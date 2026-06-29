@@ -466,7 +466,8 @@ class Database:
                   image_prompt=None, image_url=None, ai_query_score=0,
                   is_custom=0, is_filler=0, status="draft",
                   suggested_post_day=0, prompt_version=None, brand_ids=None,
-                  intent=None, concept_checklist=None, ai_search_meta=None):
+                  intent=None, concept_checklist=None, ai_search_meta=None,
+                  is_third_party=0):
         # Inherit is_live from the parent subreddit so list/aggregation queries
         # can cheaply filter live vs. regular without re-joining subreddits.
         sub_row = self.conn.execute(
@@ -487,12 +488,12 @@ class Database:
             """INSERT INTO posts (subreddit_id, brand_id, title, body, storyline,
                image_prompt, image_url, ai_query_score, is_custom, is_filler,
                status, suggested_post_day, prompt_version, intent, is_live,
-               concept_checklist, ai_search_meta, post_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               concept_checklist, ai_search_meta, post_number, is_third_party)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (subreddit_id, brand_id, title, body, storyline,
              image_prompt, image_url, ai_query_score, is_custom, is_filler,
              status, suggested_post_day, prompt_version, intent, is_live,
-             concept_checklist, ai_search_meta, post_number)
+             concept_checklist, ai_search_meta, post_number, is_third_party)
         )
         post_id = cur.lastrowid
         # Populate junction table
@@ -2240,6 +2241,13 @@ class Database:
         if "ai_search_meta" not in post_cols3:
             self.conn.execute("ALTER TABLE posts ADD COLUMN ai_search_meta TEXT")
             self.conn.commit()
+        # ----- posts: is_third_party — 1 if the post is an EXISTING Reddit
+        #       thread imported by URL (not bot-generated). We never deploy the
+        #       post (it's already live); only its comments are deployed,
+        #       anchored to the imported thread URL in post_urls. -----
+        if "is_third_party" not in post_cols3:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN is_third_party INTEGER DEFAULT 0")
+            self.conn.commit()
         # ----- posts: post_number — a stable per-brand sequential number
         #       (1,2,3...) over LIVE posts, in creation order. Replaces the old
         #       "suggested_post_day" recommendation in the Live Subs UI. Same
@@ -3762,7 +3770,8 @@ class Database:
                         s.name as subreddit_name, b.name as brand_name,
                         (SELECT pu.reddit_url FROM post_urls pu WHERE pu.post_id = p.id LIMIT 1) as post_reddit_url,
                         p.prompt_version as post_prompt_version,
-                        p.post_number as post_number
+                        p.post_number as post_number,
+                        p.is_third_party as post_is_third_party
                  FROM comments c
                  JOIN posts p ON c.post_id = p.id
                  LEFT JOIN subreddits s ON p.subreddit_id = s.id
@@ -3784,7 +3793,8 @@ class Database:
                         sp.subreddit as subreddit_name, b.name as brand_name,
                         sp.reddit_url as post_reddit_url,
                         NULL as post_prompt_version,
-                        NULL as post_number
+                        NULL as post_number,
+                        0 as post_is_third_party
                  FROM search_comments sc
                  JOIN search_posts sp ON sc.search_post_id = sp.id
                  LEFT JOIN brands b ON sc.brand_id = b.id

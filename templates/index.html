@@ -20,6 +20,7 @@
         .badge-published { background: #1a3320; color: #46d160; }
         .badge-brand { background: #3a1a00; color: #FF8b60; }
         .badge-filler { background: #2D2D2E; color: #818384; }
+        .badge-3rd-party { background: #2a3a0e; color: #c9e57f; }
         .badge-available { background: #1a3320; color: #46d160; }
         .badge-taken { background: #4a1a1a; color: #ff6b6b; }
         .badge-assigned { background: #3a2a00; color: #FFD635; }
@@ -185,6 +186,14 @@ function _aiModeBadge(p) {
     const pv = (p && p.prompt_version) || '';
     if (!pv.includes('ai-search')) return '';
     return ` <span class="badge" style="background:#1e1b4b;color:#a5b4fc;border:1px solid #4338ca" title="Generated with AI Search mode (semantic-coverage fan-out)">🎯 AI</span>`;
+}
+
+// 3rd-party posts are EXISTING Reddit threads imported by URL (not bot-generated).
+// Badge them everywhere Live Subs posts show so they're never mistaken for ours.
+// Gate on is_third_party (posts list + comments queries both surface it).
+function _thirdPartyBadge(p) {
+    if (!p || !p.is_third_party) return '';
+    return ` <span class="badge badge-3rd-party" title="Existing Reddit thread imported by URL — we only add comments under it (the post is already live)">3rd party</span>`;
 }
 
 async function resolveRedditUrl(url) {
@@ -7823,6 +7832,7 @@ function renderLsubsGenerate(c) {
                 </label>
                 <button class="btn btn-accent" onclick="lsubsGeneratePosts()" id="lsubs-gen-btn" disabled style="font-size:0.95rem;padding:8px 22px">🤖 Generate Posts</button>
                 <button class="btn btn-secondary" onclick="lsubsShowCustomModal()" id="lsubs-custom-btn" disabled>+ Custom Post (title kept as-is)</button>
+                <button class="btn btn-secondary" onclick="lsubsShowThirdPartyModal()" id="lsubs-thirdparty-btn" disabled title="Import an EXISTING Reddit thread by URL, then run the normal HQ/comment workflow on it">+ 3rd-party post (import by URL)</button>
                 <button class="btn btn-secondary btn-sm" onclick="lsubsGenerateFiller()" id="lsubs-filler-btn" disabled title="Generate non-brand filler posts to mix into the schedule">Generate Filler</button>
             </div>
             <div id="lsubs-fit-warn" class="mt-3 text-xs" style="display:none"></div>
@@ -7896,6 +7906,7 @@ function lsubsOnBrandChange() {
     const customBtn = document.getElementById('lsubs-custom-btn');
     const fillerBtn = document.getElementById('lsubs-filler-btn');
     const addBtn = document.getElementById('lsubs-sub-add-btn');
+    const thirdBtn = document.getElementById('lsubs-thirdparty-btn');
     if (!bid) {
         subEl.disabled = true;
         subEl.innerHTML = '<option value="">Pick a brand first…</option>';
@@ -7904,12 +7915,15 @@ function lsubsOnBrandChange() {
         if (customBtn) customBtn.disabled = true;
         if (fillerBtn) fillerBtn.disabled = true;
         if (addBtn) addBtn.disabled = true;
+        if (thirdBtn) thirdBtn.disabled = true;
         _lsubsSubreddits = [];
         document.getElementById('lsubs-table').innerHTML = '';
         return;
     }
     // Enable the custom-add button once a brand is picked.
     if (addBtn) addBtn.disabled = false;
+    // 3rd-party import needs only a brand (the subreddit comes from the URL).
+    if (thirdBtn) thirdBtn.disabled = false;
     api(`/api/brands/${bid}/live-subreddits`).then(res => {
         _lsubsSubreddits = res.subreddits || [];
         // Stash per-sub deployed / reported counts so the option
@@ -8031,7 +8045,7 @@ function lsubsRenderTable(posts) {
                         ? `<a href="https://www.reddit.com/r/${p.subreddit_name}" target="_blank" style="color:#FF8b60" title="Open on Reddit">r/${p.subreddit_name}</a> <button class="btn btn-sm btn-secondary" style="padding:0 6px" onclick="lsubsEditSubreddit(${p.id}, '${(p.subreddit_name||'').replace(/'/g,"\\'")}', ${p.brand_id||'null'})" title="Change subreddit">✎</button>`
                         : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${p.brand_id||'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
                     <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
-                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}</td>
+                    <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}${_thirdPartyBadge(p)}</td>
                     <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                     <td class="text-gray-400">${p.storyline || ''}</td>
                     <td>${p.ai_query_score || '-'}</td>
@@ -8343,6 +8357,65 @@ async function lsubsSubmitCustom(force) {
     }, 2000);
 }
 
+function lsubsShowThirdPartyModal() {
+    const { bid } = lsubsContext();
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Import a 3rd-party Reddit post</h3>
+        <p class="text-xs text-gray-400 mb-3">Paste the URL of an <strong>existing</strong> Reddit thread (not one of ours). We'll pull in its real title + body and add it to this brand's Live Subs posts, tagged <span class="badge badge-3rd-party">3rd party</span>. The thread stays as-is on Reddit — you then run <strong>+ HQ</strong> / <strong>+ Cmts</strong> to add comments under it.</p>
+        <div>
+            <label class="text-xs text-gray-400">Reddit thread URL</label>
+            <input id="lsubs-tp-url" type="text" class="w-full" placeholder="https://www.reddit.com/r/Subreddit/comments/abc123/some_thread_title/" style="font-family:inherit">
+        </div>
+        <div class="flex gap-2 mt-4 justify-end">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="lsubsSubmitThirdParty()">Import post</button>
+        </div>
+    `);
+}
+
+async function lsubsSubmitThirdParty() {
+    const { bid } = lsubsContext();
+    const url = (document.getElementById('lsubs-tp-url')?.value || '').trim();
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    if (!/\/comments\/[a-z0-9]+/i.test(url)) { toast('Enter a valid Reddit post URL (must contain /comments/<id>/)', 'error'); return; }
+    let res;
+    try {
+        res = await api('/api/live-posts/import-thirdparty', {
+            method: 'POST', body: { brand_id: bid, reddit_url: url }
+        });
+    } catch (e) { toast(e.message || 'Import failed', 'error'); return; }
+    const _refresh = () => {
+        try { lsubsLoadTable(); } catch(_) {}
+        try { if (document.getElementById('lsubs-posts-table')) lsubsLoadPosts(); } catch(_) {}
+    };
+    // Dedupe response (already imported) comes back synchronously, no task_id.
+    if (res && res.duplicate) {
+        closeModal();
+        toast(`Already imported as post #${res.post_number || res.post_id}: "${(res.title || '').substring(0, 60)}"`, 'info');
+        _refresh();
+        return;
+    }
+    const tid = res.task_id;
+    closeModal();
+    toast('Importing the Reddit thread…', 'info');
+    _addBgTask(tid, '3rd-party import');
+    const poll = setInterval(async () => {
+        try {
+            const t = await api(`/api/tasks/${tid}`);
+            if (t.status === 'complete') {
+                clearInterval(poll); _removeBgTask(tid);
+                const r = t.result || {};
+                toast(`Imported 3rd-party post #${r.post_number || r.post_id}: "${(r.title || '').substring(0, 60)}" — now run + HQ / + Cmts.`, 'success');
+                _refresh();
+            } else if (t.status === 'error') {
+                clearInterval(poll); _removeBgTask(tid);
+                toast(`Import error: ${t.error || ''}`, 'error');
+            }
+        } catch(e) {}
+    }, 2000);
+}
+
 async function lsubsGenerateFiller() {
     const { bid, sub } = lsubsContext();
     if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
@@ -8537,7 +8610,7 @@ async function lsubsLoadPosts(silent = false) {
                             : `<button class="btn btn-sm" style="background:#3a2a0e;color:#ffd166" onclick="lsubsEditSubreddit(${p.id}, '', ${(p.brands && p.brands[0] && p.brands[0].id) || 'null'})" title="Assign a subreddit to this post">＋ Assign sub</button>`}</td>
                         <td class="max-w-xs truncate cursor-pointer text-orange-400" onclick="showPostDetail(${p.id})">${p.title}</td>
                         <td class="text-xs text-gray-400">${p.brand_names || (p.is_filler ? '-' : '')}</td>
-                        <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}</td>
+                        <td><span class="badge ${p.is_filler ? 'badge-filler' : 'badge-brand'}">${p.is_filler ? 'Filler' : (p.is_custom ? 'Custom' : 'Brand')}</span>${_aiModeBadge(p)}${_thirdPartyBadge(p)}</td>
                         <td>${p.intent ? `<span class="badge" style="background:${p.intent==='commercial'?'#1f5132':p.intent==='comparison'?'#1e3a5f':'#3a3a3a'};color:#fff">${p.intent}</span>` : '<span class="text-gray-600">-</span>'}</td>
                         <td class="text-gray-400">${p.storyline || ''}</td>
                         <td>${p.ai_query_score || '-'}</td>
@@ -9377,6 +9450,7 @@ function _lsubsRenderComments() {
                 post_url: c.post_reddit_url || '',
                 brand_name: c.brand_name || '',
                 post_prompt_version: c.post_prompt_version || '',
+                post_is_third_party: c.post_is_third_party || 0,
                 post_number: c.post_number,
                 items: [],
             };
@@ -9550,7 +9624,7 @@ function _lsubsRenderComments() {
                     <a href="${g.post_url || `javascript:showPostDetail(${pid})`}" ${g.post_url ? 'target="_blank"' : ''} class="font-bold hover:underline truncate" style="color:#0079D3;max-width:60%" onclick="event.stopPropagation()">${g.post_title.substring(0, 90)}</a>
                     <span class="text-xs text-gray-500">r/${g.subreddit_name}</span>
                     ${g.brand_name ? `<span class="badge badge-brand">${g.brand_name}</span>` : ''}
-                    ${_aiModeBadge({ prompt_version: g.post_prompt_version })}
+                    ${_aiModeBadge({ prompt_version: g.post_prompt_version })}${_thirdPartyBadge({ is_third_party: g.post_is_third_party })}
                     ${statusChipsHtml ? `<span class="ml-1 flex gap-1 flex-wrap" style="opacity:0.85">${statusChipsHtml}</span>` : ''}
                 </div>
                 <div class="flex items-center gap-1" onclick="event.stopPropagation()">

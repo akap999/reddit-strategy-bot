@@ -743,6 +743,77 @@ class CommentGenerator:
             print(f"    RSS comment fetch failed: {str(e)[:60]}")
         return comments, post_body, False
 
+    def fetch_post(self, post_url):
+        """Fetch an EXISTING Reddit post's real TITLE + BODY (selftext) from
+        its URL — used to import a 3rd-party thread into Live Subreddits.
+
+        Reuses the same proxy + Atom path as `_fetch_comments_rss`: the post
+        is the `t3_` entry, which carries the real `atom:title` + `atom:content`
+        (whereas `fetch_comments` only returns the body). Fallback chain:
+        RSS (via proxy) -> Reddit JSON -> URL-slug title + `fetch_comments`
+        body. Never raises; `title` is always non-empty (slug fallback), `body`
+        may be "" (link/image posts).
+
+        Returns {"title": str, "body": str, "subreddit": str}.
+        """
+        import xml.etree.ElementTree as _ET
+        import html as _html
+        clean = (post_url or "").split("?")[0].rstrip("/")
+        sub = self.extract_subreddit(post_url) or ""
+        path_m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", clean, re.IGNORECASE)
+        base = (self.reddit_base or "https://www.reddit.com").rstrip("/")
+        ua = self.headers.get("User-Agent", "Mozilla/5.0")
+        title, body = "", ""
+        # 1) RSS via proxy (reliable on cloud IPs; the t3_ entry has the title).
+        if path_m:
+            try:
+                r = requests.get(
+                    f"{base}{path_m.group(1)}/.rss", params={"limit": 1},
+                    headers={"User-Agent": ua,
+                             "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
+                    timeout=20)
+                if r.status_code == 200 and r.text.lstrip().startswith("<?xml"):
+                    ns = {"atom": "http://www.w3.org/2005/Atom"}
+                    for e in _ET.fromstring(r.text).findall("atom:entry", ns):
+                        idel = e.find("atom:id", ns)
+                        if idel is not None and re.search(r"t1_\w+", idel.text or ""):
+                            continue  # a comment, not the post
+                        t = e.find("atom:title", ns)
+                        if t is not None and t.text:
+                            title = _html.unescape(t.text).strip()
+                        cont = e.find("atom:content", ns)
+                        if cont is not None and cont.text:
+                            pb = re.sub(r"<[^>]+>", " ", cont.text)
+                            body = re.sub(r"\s+", " ", _html.unescape(pb)).strip()[:2000]
+                        break
+            except Exception as e:
+                print(f"    fetch_post RSS failed: {str(e)[:60]}")
+        # 2) Reddit JSON fallback (richer; may 403 on cloud IPs).
+        if path_m and (not title or not body):
+            try:
+                r = requests.get(
+                    f"{base}{path_m.group(1)}/.json", params={"limit": 1},
+                    headers={"User-Agent": ua}, timeout=20)
+                if r.status_code == 200:
+                    pd = r.json()[0]["data"]["children"][0]["data"]
+                    title = title or (pd.get("title") or "").strip()
+                    if not body:
+                        body = (pd.get("selftext") or "").strip()[:2000]
+            except Exception as e:
+                print(f"    fetch_post JSON failed: {str(e)[:60]}")
+        # 3) Final fallbacks: de-slug the title from the URL; body via fetch_comments.
+        if not title:
+            sm = re.search(r"/comments/[a-z0-9]+/([^/?#]+)", post_url or "", re.IGNORECASE)
+            if sm:
+                title = sm.group(1).replace("_", " ").replace("-", " ").strip()
+        if not body:
+            try:
+                _c, pb, _a = self.fetch_comments(post_url, limit=1)
+                body = (pb or "").strip()
+            except Exception:
+                body = ""
+        return {"title": title or "(untitled Reddit thread)", "body": body, "subreddit": sub}
+
     def _fetch_comments_arctic(self, post_id, limit=20):
         """Fallback comment source: Arctic-Shift archive by link_id.
         Carries score (unlike RSS) but is a post-time snapshot, so it

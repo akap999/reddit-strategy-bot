@@ -6108,6 +6108,73 @@ def api_live_posts_custom():
     tid = start_task("live-posts-custom", task)
     return jsonify({"task_id": tid})
 
+@app.route("/api/live-posts/import-thirdparty", methods=["POST"])
+def api_live_posts_import_thirdparty():
+    """Import an EXISTING (3rd-party) Reddit thread into Live Subreddits.
+
+    Body: {brand_id, reddit_url}. Fetches the post's real title+body, saves a
+    `posts` row tagged is_third_party=1 under the brand + the thread's
+    subreddit, and links the thread URL (post_urls) so +HQ/+Cmts anchor to it.
+    The post is NEVER deployed (it's already live on Reddit) — only its comments
+    are. After import it behaves like any Live Subs post.
+    """
+    data = request.json or {}
+    bid = data.get("brand_id")
+    url = (data.get("reddit_url") or "").strip()
+    if not bid:
+        return jsonify({"error": "brand_id is required"}), 400
+    if not re.search(r"/comments/[a-z0-9]+", url, re.IGNORECASE):
+        return jsonify({"error": "Enter a valid Reddit post URL (must contain /comments/<id>/)."}), 400
+
+    db_check = get_db()
+    try:
+        brand = db_check.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "Brand not found"}), 404
+        # Dedupe: if this exact thread is already a post, return it (no dup).
+        existing = db_check.find_post_by_url(url)
+        if existing and existing[0] == "post":
+            p = db_check.get_post(existing[1]["id"]) or existing[1]
+            return jsonify({
+                "duplicate": True, "post_id": existing[1]["id"],
+                "post_number": p.get("post_number"), "title": p.get("title"),
+            })
+    finally:
+        db_check.close()
+
+    def task():
+        db, claude, _sg, _pg, comment_gen = make_generators()
+        try:
+            sub = db.ensure_live_subreddit(comment_gen.extract_subreddit(url))
+            if not sub:
+                raise ValueError(f"Could not resolve a subreddit from {url}")
+            brand_full = db.get_brand(bid)
+            if not brand_full:
+                raise ValueError("Brand not found")
+            fetched = comment_gen.fetch_post(url)
+            post_id = db.save_post(
+                subreddit_id=sub["id"], brand_id=brand_full["id"],
+                title=fetched["title"], body=fetched["body"],
+                storyline="third-party", is_custom=0, is_filler=0,
+                status="complete", suggested_post_day=0,
+                prompt_version="third-party", brand_ids=[brand_full["id"]],
+                is_third_party=1,
+            )
+            # Anchor the existing thread URL so HQ/comments deploy under it and
+            # the post card links to the live thread.
+            db.link_url_to_post(post_id, url, sub["id"])
+            saved = db.get_post(post_id) or {}
+            return {
+                "post_id": post_id, "post_number": saved.get("post_number"),
+                "title": fetched["title"], "subreddit_id": sub["id"],
+                "subreddit_name": sub["name"],
+            }
+        finally:
+            db.close()
+
+    tid = start_task("live-posts-import-thirdparty", task)
+    return jsonify({"task_id": tid})
+
 @app.route("/api/generate/comments", methods=["POST"])
 def api_gen_comments():
     data = request.json

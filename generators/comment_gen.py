@@ -747,12 +747,16 @@ class CommentGenerator:
         """Fetch an EXISTING Reddit post's real TITLE + BODY (selftext) from
         its URL — used to import a 3rd-party thread into Live Subreddits.
 
-        Reuses the same proxy + Atom path as `_fetch_comments_rss`: the post
-        is the `t3_` entry, which carries the real `atom:title` + `atom:content`
-        (whereas `fetch_comments` only returns the body). Fallback chain:
-        RSS (via proxy) -> Reddit JSON -> URL-slug title + `fetch_comments`
-        body. Never raises; `title` is always non-empty (slug fallback), `body`
-        may be "" (link/image posts).
+        Fallback chain (each step fills whatever's still missing):
+          1. RSS via the proxy (live; the `t3_` entry has the real title+body),
+          2. Arctic-Shift posts archive (`/api/posts/ids`) — INDEPENDENT of the
+             Reddit proxy, so it still returns the real title + selftext when the
+             proxy/cloud-IP is rate-limited (the "only the title came through"
+             case on Railway),
+          3. Reddit JSON (usually 403 on cloud IPs),
+          4. URL-slug title + `fetch_comments` body.
+        Never raises; `title` is always non-empty (slug fallback); `body` may be
+        "" only for genuine link/image posts with no selftext.
 
         Returns {"title": str, "body": str, "subreddit": str}.
         """
@@ -760,11 +764,20 @@ class CommentGenerator:
         import html as _html
         clean = (post_url or "").split("?")[0].rstrip("/")
         sub = self.extract_subreddit(post_url) or ""
+        post_id = self.extract_post_id(post_url) or ""
         path_m = re.search(r"(/r/[^/]+/comments/[a-z0-9]+)", clean, re.IGNORECASE)
         base = (self.reddit_base or "https://www.reddit.com").rstrip("/")
         ua = self.headers.get("User-Agent", "Mozilla/5.0")
+
+        def _strip_footer(s):
+            # Reddit RSS appends "submitted by /u/<author> [link] [comments]" to
+            # the post content — strip it (a link/image post then correctly
+            # reduces to "").
+            return re.sub(r"\s*submitted by\s+/u/\S+\s*(?:\[link\])?\s*(?:\[comments\])?\s*$",
+                          "", s or "", flags=re.I).strip()
+
         title, body = "", ""
-        # 1) RSS via proxy (reliable on cloud IPs; the t3_ entry has the title).
+        # 1) RSS via the proxy — live + current when the proxy/IP isn't throttled.
         if path_m:
             try:
                 r = requests.get(
@@ -784,11 +797,29 @@ class CommentGenerator:
                         cont = e.find("atom:content", ns)
                         if cont is not None and cont.text:
                             pb = re.sub(r"<[^>]+>", " ", cont.text)
-                            body = re.sub(r"\s+", " ", _html.unescape(pb)).strip()[:2000]
+                            body = _strip_footer(re.sub(r"\s+", " ", _html.unescape(pb)).strip())[:2000]
                         break
             except Exception as e:
                 print(f"    fetch_post RSS failed: {str(e)[:60]}")
-        # 2) Reddit JSON fallback (richer; may 403 on cloud IPs).
+        # 2) Arctic-Shift post archive — INDEPENDENT of the Reddit proxy, so it
+        #    delivers the real title + selftext on Railway's cloud IP when the
+        #    proxy RSS is rate-limited (the "only the title came through" case).
+        if post_id and (not title or not body):
+            try:
+                r = requests.get(
+                    "https://arctic-shift.photon-reddit.com/api/posts/ids",
+                    params={"ids": f"t3_{post_id}"},
+                    headers={"User-Agent": ua}, timeout=25)
+                if r.status_code == 200:
+                    data = (r.json() or {}).get("data") or []
+                    if data:
+                        pd = data[0]
+                        title = title or (pd.get("title") or "").strip()
+                        if not body:
+                            body = (pd.get("selftext") or "").strip()[:2000]
+            except Exception as e:
+                print(f"    fetch_post Arctic failed: {str(e)[:60]}")
+        # 3) Reddit JSON (rich, but usually 403 on cloud IPs).
         if path_m and (not title or not body):
             try:
                 r = requests.get(
@@ -801,7 +832,7 @@ class CommentGenerator:
                         body = (pd.get("selftext") or "").strip()[:2000]
             except Exception as e:
                 print(f"    fetch_post JSON failed: {str(e)[:60]}")
-        # 3) Final fallbacks: de-slug the title from the URL; body via fetch_comments.
+        # 4) Final fallbacks: de-slug the title from the URL; body via fetch_comments.
         if not title:
             sm = re.search(r"/comments/[a-z0-9]+/([^/?#]+)", post_url or "", re.IGNORECASE)
             if sm:
@@ -809,7 +840,7 @@ class CommentGenerator:
         if not body:
             try:
                 _c, pb, _a = self.fetch_comments(post_url, limit=1)
-                body = (pb or "").strip()
+                body = _strip_footer((pb or "").strip())
             except Exception:
                 body = ""
         return {"title": title or "(untitled Reddit thread)", "body": body, "subreddit": sub}

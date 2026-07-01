@@ -2043,6 +2043,33 @@ class Database:
             self.conn.commit()
             self.meta_set("report_status_repair_v1", "1")
 
+        # FU43 one-shot repair: a comment in status='deployed' that ALSO carries report_month +
+        # report_added_at is the signature of the liveness-corruption victim (a reported comment that was
+        # mis-marked removed, then "restored" to 'deployed' — dropping it from the monthly report). Pull it
+        # back into the report as live. Idempotent via the meta gate; mirrors report_status_repair_v1.
+        if not self.meta_get("report_deployed_repair_v1"):
+            cur = self.conn.execute(
+                """UPDATE comments
+                      SET status = 'report'
+                    WHERE status = 'deployed'
+                      AND report_month IS NOT NULL
+                      AND report_added_at IS NOT NULL"""
+            )
+            n1 = cur.rowcount if cur.rowcount is not None else 0
+            cur = self.conn.execute(
+                """UPDATE search_comments
+                      SET status = 'report'
+                    WHERE status = 'deployed'
+                      AND report_month IS NOT NULL
+                      AND report_added_at IS NOT NULL"""
+            )
+            n2 = cur.rowcount if cur.rowcount is not None else 0
+            self.conn.commit()
+            self.meta_set("report_deployed_repair_v1", "1")
+            if n1 or n2:
+                print(f"[db] report_deployed_repair_v1: restored {n1} comment(s) + {n2} search_comment(s) "
+                      f"from deployed -> report", flush=True)
+
         # One-shot cleanup: the report model is now "1 post = 1 HQ
         # root comment reported". Earlier flows could flip every
         # deployed/paid comment under a reported post (including HQ
@@ -5593,6 +5620,38 @@ class Database:
             "UPDATE search_comments SET status = 'deployed', last_live_check = datetime('now') WHERE id = ?",
             (comment_id,))
         self.conn.commit()
+
+    def restore_comment_live(self, comment_id):
+        """FU43 — restore a found-live comment to a LIVE status that PRESERVES report membership: 'report'
+        if the comment is a reported deliverable (report_month + report_added_at set), else 'deployed'.
+        Fixes the corruption where a reported comment mis-marked removed→restored to 'deployed' fell out of
+        the monthly report (report counts report/removed/replace/replaced, NOT deployed). Returns the new
+        status string."""
+        self.conn.execute(
+            """UPDATE comments
+                  SET status = CASE
+                        WHEN report_month IS NOT NULL AND report_added_at IS NOT NULL THEN 'report'
+                        ELSE 'deployed' END,
+                      last_live_check = datetime('now')
+                WHERE id = ?""",
+            (comment_id,))
+        self.conn.commit()
+        row = self.conn.execute("SELECT status FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        return row["status"] if row else "deployed"
+
+    def restore_search_comment_live(self, comment_id):
+        """FU43 — report-aware restore for a search_comment (see restore_comment_live). Returns new status."""
+        self.conn.execute(
+            """UPDATE search_comments
+                  SET status = CASE
+                        WHEN report_month IS NOT NULL AND report_added_at IS NOT NULL THEN 'report'
+                        ELSE 'deployed' END,
+                      last_live_check = datetime('now')
+                WHERE id = ?""",
+            (comment_id,))
+        self.conn.commit()
+        row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
+        return row["status"] if row else "deployed"
 
     def get_published_posts_with_urls(self, subreddit_id):
         """Get posts that have Reddit URLs linked (published posts)."""

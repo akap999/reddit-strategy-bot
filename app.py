@@ -430,7 +430,11 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
 
     Returns:
       'live'    — the comment id appears in its own permalink RSS
-      'removed' — feed fetched OK but the comment id is absent
+      'removed' — STRONG: the comment's own entry is a [removed]/[deleted] shell
+      'absent'  — WEAK (FU43): feed fetched OK but the comment id isn't in it; a
+                  capped/nested/flaky-proxy feed can omit a LIVE comment, so this is
+                  NOT a confirmed removal (callers require stronger confirmation for
+                  a reported deliverable)
       None      — couldn't fetch / parse (caller should fall back or
                   treat as inconclusive, NOT as removed)
 
@@ -489,8 +493,11 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
                             # ([removed]/[deleted] body, '[deleted]' author).
                             # Don't score that as live.
                             return "removed" if _rss_entry_is_removed(entry, ns) else "live"
-                    # Feed parsed but our comment id isn't in it → removed.
-                    return "removed"
+                    # Feed parsed but our comment id isn't in it. This is the WEAK signal (FU43): a
+                    # capped/nested/flaky-proxy feed can omit a LIVE comment, so it is NOT a confirmed
+                    # removal. Return "absent" (distinct from the STRONG "removed" shell above) so callers
+                    # can require stronger confirmation before flipping a reported deliverable dead.
+                    return "absent"
                 # 200 but not XML (challenge page) — retry.
             # Non-200 (429/5xx/proxy hiccup) — back off and retry.
             if attempt < 2:
@@ -3420,17 +3427,20 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         # shows the comment alive (e.g. mod approved, OP undeleted),
         # treat it identically to a restored 'removed' row.
         if cur_status in ("removed", "replace", "deleted"):
+            # FU43: restore to a LIVE status that PRESERVES report membership — 'report' for a reported
+            # deliverable (so it does not fall out of the monthly report), else 'deployed'. The DB decides
+            # from report_month/report_added_at and returns the chosen status.
             if src == "comment":
-                db.restore_comment_to_deployed(item["id"])
+                new_status = db.restore_comment_live(item["id"])
             else:
-                db.restore_search_comment_to_deployed(item["id"])
+                new_status = db.restore_search_comment_live(item["id"])
             restored += 1
             db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
-                              "restored", cur_status, "deployed",
+                              "restored", cur_status, new_status,
                               item.get("account_id"), item.get("subreddit"), item.get("brand_name"))
             changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
-                            "action": "restored", "prev_status": cur_status, "new_status": "deployed"})
-            print(f"[{log_prefix}] #{item['id']} ({src}) RESTORED to deployed (was {cur_status})", flush=True)
+                            "action": "restored", "prev_status": cur_status, "new_status": new_status})
+            print(f"[{log_prefix}] #{item['id']} ({src}) RESTORED to {new_status} (was {cur_status})", flush=True)
         else:
             if src == "comment":
                 db.set_comment_live_check(item["id"])
@@ -3652,6 +3662,11 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         # on it and skip the (doomed) JSON fetch entirely. If it's
         # inconclusive (None), fall through to the legacy JSON path.
         rss_verdict = _comment_liveness_via_rss(clean_url)
+        # FU43: a REPORTED deliverable (status report/replaced) only flips dead on a STRONG confirmation.
+        # The weak "absent" verdict (id merely missing from a possibly-flaky/capped feed) is NOT a
+        # confirmed removal, so it must not corrupt the report — for those, fall through to the stronger
+        # PullPush/JSON checks below (and if none confirm, the end-of-loop path leaves the status unchanged).
+        _report_live = (item.get("status") or "") in ("report", "replaced")
         if rss_verdict == "live":
             # Live on its own permalink — but confirm the parent post isn't removed
             # (a comment under a removed post is dead even though its shell lingers).
@@ -3661,6 +3676,17 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             _time.sleep(1)
             continue
         elif rss_verdict == "removed":
+            # STRONG: the comment's own entry is a [removed]/[deleted] shell.
+            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — [removed]/[deleted] shell)", flush=True)
+            _mark_dead(item)
+            dead += 1
+            handled_ids.add(item["id"])
+            _emit_progress()
+            _time.sleep(1)
+            continue
+        elif rss_verdict == "absent" and not _report_live:
+            # Non-reported deployed/paid comment: absence from its permalink feed is the removal signal
+            # (dashboard removal-detection — unchanged behavior).
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from feed)", flush=True)
             _mark_dead(item)
             dead += 1
@@ -3668,7 +3694,12 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             _emit_progress()
             _time.sleep(1)
             continue
-        # RSS inconclusive (couldn't fetch) → PullPush archive fallback BEFORE the (usually
+        elif rss_verdict == "absent":
+            # Reported deliverable + weak 'absent' → don't trust it; require confirmation from the
+            # stronger PullPush/JSON checks below (else it's left UNCHANGED at the end of the loop).
+            print(f"[{log_prefix}] #{item['id']} ({src}) reported + weak 'absent' RSS signal — requiring "
+                  f"stronger confirmation before any status change", flush=True)
+        # RSS inconclusive (couldn't fetch) or reported-absent → PullPush archive fallback BEFORE the (usually
         # 403 on cloud) JSON path, so a live comment isn't left unverified by a flaky proxy.
         pp_verdict = _comment_liveness_via_pullpush(clean_url)
         if pp_verdict == "live":
@@ -10071,7 +10102,7 @@ def api_comment_to_report(cid):
         # A non-live one is left at its current status (never moved to removed). For
         # 'replaced' this verifies the replacement at the comment's link is live.
         gate = _report_live_gate(db, [{"id": cid, "source": source}],
-                                 allow_missing=True, fast=True)
+                                 allow_missing=False, fast=False)  # FU43: report ONLY on confirmed live
         if not gate["live"]:
             nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
             return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
@@ -10124,7 +10155,7 @@ def api_comment_reclassify_report(cid):
     try:
         # Live gate: only relabel a comment that's still live on Reddit.
         gate = _report_live_gate(db, [{"id": cid, "source": source}],
-                                 allow_missing=True, fast=True)
+                                 allow_missing=False, fast=False)  # FU43: report ONLY on confirmed live
         if not gate["live"]:
             nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
             return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),

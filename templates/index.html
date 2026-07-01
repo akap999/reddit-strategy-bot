@@ -7636,8 +7636,11 @@ function _lsubsRenderClusters() {
             <div data-cluster-body style="${_bodyStyle}">
                 ${_grnd}
                 <div>${rows}</div>
-                <div class="mt-2">
+                <div class="mt-2 flex items-center gap-2 flex-wrap">
                     <button class="btn btn-sm" style="background:#0e2a3d;color:#60a5fa" onclick="lsubsClusterGenSelected(${i})" title="Generate posts for ONLY the checked rewrites above">▶ Generate for selected</button>
+                    <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" title="General mode: natural-human titles + bodies (much harder to auto-remove) — still targets the rewrite + asks for a recommendation, still keyword-dense.">
+                        <input type="checkbox" id="clu-general-${i}"> 🧑 General
+                    </label>
                 </div>
                 <div class="flex items-center gap-2 flex-wrap mt-2 pt-2" style="border-top:1px solid #20283a">
                     <input id="clu-add-${i}" placeholder="add post #s e.g. 3,5" class="text-xs" style="width:130px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:3px 6px" title="Attach existing posts to this cluster by their post number (#)">
@@ -7657,8 +7660,9 @@ async function lsubsClusterGenSelected(i) {
     if (!checks.length) { toast('Tick one or more rewrites first', 'error'); return; }
     const n = checks.length, per = Math.floor(n / 3), rem = n % 3;
     const intent_counts = { commercial: per + (rem > 0 ? 1 : 0), comparison: per + (rem > 1 ? 1 : 0), informational: per };
+    const general = !!document.getElementById('clu-general-' + i)?.checked;
     try {
-        const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, target_rewrites: checks, intent_counts } });
+        const res = await api('/api/live-posts/generate', { method: 'POST', body: { brand_id: cl.brand_id, seed: cl.seed, ai_search: true, target_rewrites: checks, intent_counts, general } });
         const tid = res.task_id;
         toast(`Generating ${n} post${n === 1 ? '' : 's'} for the selected rewrite${n === 1 ? '' : 's'}…`, 'info');
         // Delegate to the shared poller: it removes the bg-task pill on completion,

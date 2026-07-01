@@ -37,6 +37,7 @@ _THIRD_PARTY_DOMAINS = [
 _MAX_WEB_SOURCES = 8              # cap independent third-party sources folded into evidence
 _VERIFY_MAX_SEARCHES = 8         # FU48 deep-verify agent: cap on independent re-check web searches
 _VERIFY_MAX_BRANDS = 6           # FU49 verify+complete: cap on competitor tools sourced per article
+_MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
 
 
 def _as_list(raw):
@@ -702,9 +703,11 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     post + its comments), you MUST cite it AT LEAST ONCE as real-world SOCIAL PROOF with a NATURAL
     community framing — e.g. "in a r/<sub> thread, contractors weighing nationwide options pointed to …",
     "pros on Reddit discussing this flagged …" — and cite it [S#]. It was deliberately attached, so the
-    article has to reference it. Use it to corroborate sentiment / that {name} is recommended by real
-    users; at most ONE short quoted line, attributed; NEVER invent comments beyond what's in the thread.
-    Frame it as community discussion, not a raw link.
+    article has to reference it. Include a short VERBATIM quote ONLY if the thread contains a SUBSTANTIVE,
+    on-topic remark; if it does not, reference the discussion generally (paraphrase the sentiment) WITHOUT
+    quoting — NEVER quote a vacuous or off-topic throwaway line (e.g. "so music is good sometimes") just to
+    have a quote. At most ONE short quoted line, attributed; NEVER invent comments beyond what's in the
+    thread. Frame it as community discussion, not a raw link.
   - PREFER INDEPENDENT SOURCES: the EVIDENCE may include "third-party ·" sources (independent reviews,
     news/funding, analyst/pricing — NOT the brands' own sites). When present, LEAD your key claims with
     them and aim to cite at least 2 DISTINCT independent sources (ideally a review + a news/funding item +
@@ -887,6 +890,9 @@ Return JSON only:
         # (a) extract comparison tools + dimensions + high-risk claims
         claim_prompt = f"""From this article about {name}, extract for verification:
   - TOOLS: every product/tool named in the comparison table(s) or compared in prose, EXCLUDING "{name}".
+    Include ONLY tools that perform the article's CORE function ({cat or "the subject's product type"}) —
+    EXCLUDE tools of a different product type (e.g. a video-only generator when the article is about music
+    generators); those don't belong in the comparison.
   - DIMENSIONS: the comparison columns / attributes being compared (e.g. pricing, commercial license,
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
@@ -924,38 +930,46 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 dom = self.claude.find_official_domain(tool, ctx)
             except Exception:
                 dom = ""
-            facts, src_url = "", (f"https://{_dom(dom)}" if dom else "")
+            tool_blocks = []   # {label,url,text} — one per SPECIFIC page so citations deep-link (FU52)
 
-            def _lines_from(srcs):
-                out_, u_ = [], ""
+            def _blocks_from(srcs, cap=_MAX_TOOL_PAGES, tool=tool):
+                """Build per-page blocks using each result's ACTUAL url (deep link), deduped by url."""
+                out_, seen_ = [], set()
                 for s in (srcs or []):
+                    u = (s.get("url") or "").strip()
                     fc = (s.get("fact") or s.get("title") or "").strip()
-                    if fc:
-                        out_.append(f"- {fc}")
-                        u_ = u_ or (s.get("url") or "").strip()
-                return out_, u_
+                    key = u.lower().split("?")[0].rstrip("/")
+                    if u and fc and key not in seen_:
+                        seen_.add(key)
+                        out_.append({"label": tool, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
+                    if len(out_) >= cap:
+                        break
+                return out_
 
-            # Tier 1 — the tool's OWN site (JSON fact extraction, pinned to its domain).
+            # Tier 1 — web search PINNED to the tool's own domain. Returns SPECIFIC pages (pricing/terms)
+            # WITH their urls → cite the exact page, not the homepage.
             if dom:
-                try:
-                    facts = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
-                except Exception:
-                    facts = ""
-            # Tier 2 — web search PINNED to the tool's own domain (different plumbing, same site).
-            if not facts.strip() and dom:
                 try:
                     pin = self.claude.search_sources(
                         f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
-                        f"key capabilities", max_searches=2, allowed_domains=[_dom(dom)])
+                        f"key capabilities", max_searches=3, allowed_domains=[_dom(dom)])
                 except Exception:
                     pin = []
-                lines, _u = _lines_from(pin)
-                if lines:
-                    facts, src_url = "\n".join(lines[:6]), f"https://{_dom(dom)}"
+                tool_blocks = _blocks_from(pin)
+            # Tier 2 — JSON fact extraction from the tool's own site (fetch_site_facts has no per-page url,
+            # so this can only cite the root domain — used only when the pinned search returned nothing).
+            if not tool_blocks and dom:
+                try:
+                    fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
+                except Exception:
+                    fj = ""
+                if fj.strip():
+                    tool_blocks = [{"label": tool, "url": f"https://{_dom(dom)}",
+                                    "text": fj[:_EVIDENCE_TEXT_CAP]}]
             # Tier 3 — broad search, but keep ONLY tool-SPECIFIC results (the tool's own domain, else a
-            # page that actually names the tool). A general policy/industry article is NOT accepted as a
-            # per-tool source — that's what produced the identical boilerplate rows before.
-            if not facts.strip():
+            # page that actually names the tool), citing each result's ACTUAL url. A general policy/industry
+            # article is NOT accepted as a per-tool source (that produced boilerplate rows before).
+            if not tool_blocks:
                 try:
                     br = self.claude.search_sources(
                         f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
@@ -966,15 +980,12 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 own = [s for s in (br or []) if dom and _dom(s.get("url")) == _dom(dom)]
                 named = [s for s in (br or [])
                          if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()]
-                pool = own or named
-                lines, u = _lines_from(pool)
-                if lines:
-                    facts = "\n".join(lines[:6])
-                    src_url = (f"https://{_dom(dom)}" if dom else u) or u
+                tool_blocks = _blocks_from(own or named)
 
-            if facts.strip() and src_url:
-                fresh.append({"label": tool, "url": src_url, "text": facts[:_EVIDENCE_TEXT_CAP]})
-                print(f"[blog_gen] verify+complete: sourced {tool} <- {src_url}", flush=True)
+            if tool_blocks:
+                fresh.extend(tool_blocks)
+                print(f"[blog_gen] verify+complete: sourced {tool} <- "
+                      f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
             else:
                 print(f"[blog_gen] verify+complete: {tool} — could NOT source individually (row will be "
                       f"dropped, not generalized)", flush=True)
@@ -1024,8 +1035,14 @@ Below are the article, the claims to verify, and FRESH SOURCED FACTS — each to
 (pricing / license / capability) plus independent corroboration. Rewrite the article so its comparison is
 COMPLETE and every stated fact is sourced:
 
+  - ONLY tools that perform the article's CORE function ({cat or "the subject's product type"}) belong in
+    the comparison. REMOVE any row for a tool that does NOT (e.g. a video-only generator in a music-generator
+    comparison) — it may be name-dropped in prose as an adjacent tool, but NEVER a comparison row with a
+    nonsensical cell.
   - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
-    it with that source's [S#]. Do this for EVERY tool and EVERY dimension.
+    it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
+    claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
+    NOT a generic homepage when a specific page is in the FRESH FACTS.
   - A tool's cells may ONLY be filled from a FRESH FACT that is ABOUT that SPECIFIC tool (a block labeled
     with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
     TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical

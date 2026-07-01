@@ -12292,6 +12292,11 @@ async function renderBlogs(c) {
                 🔎 Find independent third-party sources (web search)
                 <span class="text-gray-600">— G2 / reviews / news; uses paid web search (~a few ¢/article)</span>
             </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-deepverify">
+                🔍 Deep verify — independently re-check facts after writing
+                <span class="text-gray-600">— re-sources high-risk / comparison claims via a DIFFERENT search, corrects or replaces what it can't confirm (extra web searches, +~$0.15–0.30 &amp; ~20–50s)</span>
+            </label>
             <details class="mt-2">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default for this article)</summary>
                 <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
@@ -12398,6 +12403,7 @@ function blogGenerate() {
         .split('\n').map(s => s.trim()).filter(Boolean);
     const research_notes = (document.getElementById('blog-gen-notes')?.value || '').trim();
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
+    const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
@@ -12405,7 +12411,7 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, reddit_url, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, reddit_url, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         if (res && res.blog_id) openBlog(res.blog_id);
@@ -12439,9 +12445,10 @@ async function openBlog(id) {
         const cls = rstat === 'ok' ? 'text-emerald-400' : (rmap[rstat] ? 'text-amber-400' : 'text-gray-500');
         redNote = ` · <span class="${cls}" title="${_blogEsc(b.reddit_url)}">Reddit ${label}</span>`;
     }
+    const dvNote = b.deep_verify ? ` · <span class="text-cyan-400" title="Facts were independently re-checked via a separate web search">🔍 deep-verified</span>` : '';
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}</p>
+        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}</p>
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>

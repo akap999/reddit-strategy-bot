@@ -1750,6 +1750,7 @@ def api_blog_generate():
     source_urls = [u.strip() for u in (raw_urls or []) if str(u).strip()]
     research_notes = (data.get("research_notes") or "").strip()
     use_web_search = bool(data.get("use_web_search"))
+    deep_verify = bool(data.get("deep_verify"))   # FU48: run the independent verify agent (opt-in)
     reddit_url = (data.get("reddit_url") or "").strip()
     # Optional per-blog byline override (falls back to the brand byline when blank).
     byline = {k: (data.get(k) or "").strip() for k in
@@ -1778,7 +1779,8 @@ def api_blog_generate():
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
-                use_web_search=use_web_search, reddit_thread=reddit_thread)
+                use_web_search=use_web_search, reddit_thread=reddit_thread,
+                deep_verify=deep_verify)
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             blog_id = bg.save_blog(
@@ -1793,7 +1795,7 @@ def api_blog_generate():
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_url=reddit_url,
-                reddit_status=reddit_status, **byline,
+                reddit_status=reddit_status, deep_verify=deep_verify, **byline,
             )
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status)}
@@ -1833,6 +1835,7 @@ def api_blog_regenerate(blog_id):
             stored_urls = blog.get("source_urls") or []
             stored_notes = blog.get("research_notes") or ""
             stored_web = bool(blog.get("use_web_search"))
+            stored_deep = bool(blog.get("deep_verify"))   # FU48: reuse the verify-agent choice
             stored_reddit = (blog.get("reddit_url") or "").strip()
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, stored_reddit)
             evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
@@ -1845,7 +1848,8 @@ def api_blog_regenerate(blog_id):
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
-                                          use_web_search=stored_web, reddit_thread=reddit_thread)
+                                          use_web_search=stored_web, reddit_thread=reddit_thread,
+                                          deep_verify=stored_deep)
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -1860,20 +1864,34 @@ def api_blog_regenerate(blog_id):
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 v = gen.verify_claims(brand, a, evidence=evidence)
+                a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
+                flagged = (v or {}).get("flagged") or []
+                if stored_deep:   # FU48: independent verify agent, reused from generate
+                    dv = gen.deep_verify(brand, seed, a)
+                    if dv:
+                        a["body_markdown"] = dv["body_markdown"]
+                        flagged = flagged + dv["flagged"]
                 # Deterministic ## Sources rebuild (gen._evidence_blocks set by _gather_evidence above)
-                body = gen._rebuild_sources((v or {}).get("body_markdown") or a.get("body_markdown", ""))
+                body = gen._rebuild_sources(a.get("body_markdown", ""))
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
                     keywords=a.get("keywords") or [],
                     body_markdown=body,
-                    claims_flagged=(v or {}).get("flagged") or [])
+                    claims_flagged=flagged)
             elif part == "verify":
                 v = gen.verify_claims(brand, article, evidence=evidence)
                 if not v:
                     raise ValueError(claude.last_error or "Verify pass failed")
-                bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(v["body_markdown"]),
-                               claims_flagged=v["flagged"])
+                body_md = v["body_markdown"]
+                flagged = v["flagged"]
+                if stored_deep:   # FU48: run the independent verify agent as part of re-verify
+                    dv = gen.deep_verify(brand, seed, {**article, "body_markdown": body_md})
+                    if dv:
+                        body_md = dv["body_markdown"]
+                        flagged = flagged + dv["flagged"]
+                bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(body_md),
+                               claims_flagged=flagged)
             elif part == "linkedin":
                 li = gen.generate_linkedin(brand, seed, article)
                 bg.update_blog(blog_id, linkedin_text=li or "")

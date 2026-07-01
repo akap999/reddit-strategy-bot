@@ -35,6 +35,7 @@ _THIRD_PARTY_DOMAINS = [
     "reuters.com", "crunchbase.com", "wikipedia.org",
 ]
 _MAX_WEB_SOURCES = 8              # cap independent third-party sources folded into evidence
+_VERIFY_MAX_SEARCHES = 8         # FU48 deep-verify agent: cap on independent re-check web searches
 
 
 def _as_list(raw):
@@ -168,7 +169,7 @@ class BlogGenerator:
         angles = [
             "independent user REVIEWS and ratings (e.g. G2, Capterra, Trustpilot, TrustRadius)",
             "NEWS, funding, launch or analyst coverage (e.g. TechCrunch, Reuters, PR Newswire, Forbes, Crunchbase)",
-            "third-party PRICING, comparison or analyst references",
+            "third-party PRICING, COMMERCIAL LICENSE / terms-of-use (is commercial + monetization use permitted, and per-plan restrictions), comparison or analyst references",
         ]
 
         def _take(srcs):
@@ -320,7 +321,7 @@ class BlogGenerator:
         # Competitor paths: include product/platform pages so FEATURE facts are captured,
         # not just pricing (the gap that left competitor feature rows "not confirmed").
         _comp_paths = ("", "/pricing", "/features", "/product", "/platform",
-                       "/how-it-works", "/testimonials")
+                       "/how-it-works", "/testimonials", "/terms", "/license")
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
             target_dom[label] = dom
@@ -474,6 +475,38 @@ class BlogGenerator:
             parts.append(f"[S{i}] {src}\n{bl['text']}")
         return "\n\n".join(parts)
 
+    _PUNT_CELL_RE = re.compile(
+        r"^\s*(?:verify\b|check\b|consult\b|varies?\s+by\s+plan|not\s+publicly\s+documented)",
+        re.IGNORECASE)
+    _PUNT_SENT_RE = re.compile(
+        r"[^.\n]*\b(?:always\s+verify|be\s+sure\s+to\s+verify|varies?\s+by\s+plan|"
+        r"not\s+publicly\s+documented)\b[^.\n]*\.",
+        re.IGNORECASE)
+
+    def _scrub_punts(self, body):
+        """FU47 guarantee: never SHIP a reader-directed 'go verify it yourself' cop-out (the fallback
+        the model reaches for when it can't source a value). In a Markdown TABLE row, a cell that STARTS
+        with a punt ("Verify on X's site", "Varies by plan", "Not publicly documented") → "—"; a
+        standalone punt sentence in prose is dropped. This never invents a value (the anti-fabrication
+        gate is intact) — it just stops surfacing the gap, as a backstop to the prompt + verify_claims
+        rules. Belt-and-braces; runs at the top of _rebuild_sources so every path is covered."""
+        if not body:
+            return body
+        lines = []
+        for line in body.split("\n"):
+            s = line.strip()
+            if s.startswith("|") and s.count("|") >= 2:   # markdown table row
+                cells = line.split("|")
+                for i, c in enumerate(cells):
+                    if self._PUNT_CELL_RE.match(c.strip() or ""):
+                        cells[i] = " — "
+                line = "|".join(cells)
+            lines.append(line)
+        body = "\n".join(lines)
+        body = self._PUNT_SENT_RE.sub(" ", body)          # drop pure go-verify-yourself sentences
+        body = re.sub(r"[ \t]{2,}", " ", body)
+        return body
+
     def _rebuild_sources(self, body):
         """Deterministically rebuild the article's ## Sources from the evidence map captured by
         the last `_gather_evidence` call. Renumbers the [S#] markers the model actually used to a
@@ -483,8 +516,8 @@ class BlogGenerator:
         what guarantees every cited source — brand site, competitor site, Reddit, third-party —
         appears with the right URL and no numbering gaps. No-op when there's no evidence or
         nothing was cited."""
+        body = self._scrub_punts(body or "")   # FU47: kill reader-directed punts on every path
         blocks = getattr(self, "_evidence_blocks", None) or []
-        body = body or ""
         if not body or not blocks:
             return body
         # Drop the model's own ## / ### Sources section (we rebuild it).
@@ -646,6 +679,17 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
   - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
     hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
     positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
+  - NEVER PUNT TO THE READER. Do NOT write "verify on X's site", "check their site", "consult the
+    terms", "varies by plan — always verify", "always verify … before publishing", "not publicly
+    documented", or ANY go-check-it-yourself instruction — that is a cop-out, not content, and it
+    names the exact thing you couldn't source. Instead, when you lack a sourced value:
+      • COMPARISON TABLE cell → put "—" (em dash), or a DIFFERENT attribute you DO have sourced for
+        that tool. Never fill a cell with a "verify/check their site" sentence.
+      • A whole COLUMN you can't source for most tools → DROP the column and compare on dimensions you
+        CAN source. Prefer to build the table from tools + dimensions you actually have evidence for;
+        do not add a column you'll only be able to punt on.
+      • In PROSE → just leave the unsourced point out and say something substantive you CAN support
+        instead. Never surface the gap or tell the reader to go find it.
   - END the body with a "## Sources" section listing every [S#] you cited (label + URL). Omit the
     section only if you cited nothing.
   - If no EVIDENCE is provided, keep claims to {name}'s own brand context and name competitors
@@ -782,6 +826,11 @@ EVIDENCE GATE (the top weakness reviewers flag — apply to EVERY named brand, n
   - If a claim has no supporting evidence: DROP it, soften to a name-only mention, or (for {name}
     only) reframe as {name}'s own positioning. NEVER keep an unsourced competitor claim and NEVER
     use "not publicly documented" hedging.
+  - REMOVE READER-DIRECTED PUNTS: strip every "verify on X's site / check their site / consult the
+    terms / varies by plan — always verify / always verify … before publishing / not publicly
+    documented" phrasing. Replace a punt TABLE cell with "—" (or a sourced attribute); DELETE a punt
+    sentence in prose (don't leave the reader a go-find-it-yourself instruction, and never name the
+    exact fact you couldn't source). These MUST appear in `flagged`.
   - Ensure the "## Sources" section lists every [S#] cited.
 
 SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
@@ -806,6 +855,138 @@ Return JSON only:
             "body_markdown": (res.get("revised_body_markdown") or body),
             "flagged": [f for f in (res.get("flagged") or []) if isinstance(f, dict)],
         }
+
+    def deep_verify(self, brand, seed, article):
+        """FU48 — the independent VERIFY AGENT. After the draft is written, re-check its HIGH-RISK claims
+        (comparison-table cells, competitor claims, numbers/prices/license terms, superlatives) through a
+        retrieval channel DELIBERATELY DIFFERENT from write time — a web search that BLOCKS the brands' own
+        domains AND every URL already used at write time — so it cannot just re-fetch the same source and
+        rubber-stamp it. It then CORRECTS wrong values and REPLACES anything it can't confirm with an
+        equally-relevant VERIFIED fact (drop/soften/"—" only as a last resort). Cited fresh findings are
+        appended to self._evidence_blocks (in [S#] order) so _rebuild_sources lists them. Returns
+        {body_markdown, flagged} or None (draft left unchanged). Never raises; no-ops when there is nothing
+        high-risk to check or the independent search returns nothing."""
+        name, _url, _block = self._brand_block(brand)
+        body = (article or {}).get("body_markdown") or ""
+        if not body.strip():
+            return None
+
+        def _dom(u):
+            u = re.sub(r"^https?://", "", (u or "").strip()).rstrip("/")
+            return u.split("/")[0].lower()
+
+        # (b) INDEPENDENT channel: block every write-time source domain + the brand-owned domains, so the
+        # verify search physically cannot return a page already used when the article was written.
+        blocked = set()
+        for blk in (getattr(self, "_evidence_blocks", None) or []):
+            d = _dom(blk.get("url"))
+            if d:
+                blocked.add(d)
+        if brand.get("domain_url"):
+            blocked.add(_dom(brand["domain_url"]))
+        try:
+            for d in (json.loads(brand.get("competitor_domains") or "{}") or {}).values():
+                dd = _dom(d)
+                if dd:
+                    blocked.add(dd)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        blocked = sorted(x for x in blocked if x)
+
+        # (a) extract the high-risk claims to check
+        cat = (brand.get("category") or "").strip()
+        claim_prompt = f"""From this article about {name}, list ONLY the HIGH-RISK factual claims a reader
+would want independently verified — comparison-table cells, claims about NAMED competitors, any
+number / price / plan / commercial-license term, and any superlative ("best / #1 / largest / only").
+For each give the brand it's about, the dimension, and the exact asserted value. Ignore generic advice.
+
+ARTICLE:
+{body[:6000]}
+
+Return JSON only: {{"claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
+        cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
+        claims = ([c for c in (cres.get("claims") or []) if isinstance(c, dict)]
+                  if isinstance(cres, dict) else [])
+        if not claims:
+            return None  # nothing high-risk to check
+
+        # independent search — claim-REFUTATION framing (not source-discovery), capped
+        brands_in = []
+        for c in claims:
+            bn = (c.get("brand") or "").strip()
+            if bn and bn.lower() != name.lower() and bn not in brands_in:
+                brands_in.append(bn)
+        claim_lines = "; ".join(
+            f'{(c.get("brand") or "?")}: {(c.get("dimension") or "")} = '
+            f'{(c.get("value") or c.get("claim") or "")}'.strip()
+            for c in claims[:20])
+        subj_cat = f" ({cat})" if cat else ""
+        brief = (f"Independently CONFIRM or REFUTE these specific claims about AI tools{subj_cat}, using "
+                 f"reputable INDEPENDENT sources (reviews, documentation, news — NOT the tools' own "
+                 f"marketing pages). For each, return the TRUE current value with a source URL, and also "
+                 f"surface any equally relevant, verifiable fact about the same tool's commercial-license "
+                 f"/ pricing / capability. Tools: {', '.join([name] + brands_in) or name}. "
+                 f"Claims: {claim_lines}")
+        findings = self.claude.search_sources(brief, max_searches=_VERIFY_MAX_SEARCHES,
+                                              blocked_domains=(blocked or None))
+        if not findings:
+            print("[blog_gen] deep_verify: independent search returned nothing — draft unchanged",
+                  flush=True)
+            return None
+
+        # (c) reconcile: correct / replace-with-relevant-verifiable / (last resort) drop
+        blocks = getattr(self, "_evidence_blocks", None) or []
+        start_idx = len(blocks) + 1
+        fresh_lines = "\n".join(
+            f"[S{start_idx + i}] {(f.get('title') or f.get('url') or 'source')} — {f.get('url','')}\n"
+            f"{(f.get('fact') or '')[:600]}"
+            for i, f in enumerate(findings))
+        recon_prompt = f"""You are the VERIFY AGENT for a first-party article about {name}. Below are the
+article, the claims flagged for independent checking, and FRESH INDEPENDENT findings (retrieved from
+sources that were NOT used when the article was written). Reconcile the article against the findings:
+
+  - CONFIRMED by a finding → keep the claim and cite that finding's [S#].
+  - CONTRADICTED by a finding → CORRECT the value to what the finding says and cite its [S#].
+  - NOT confirmable from the findings → REPLACE it with a DIFFERENT, equally-relevant fact about the SAME
+    tool / dimension that IS supported by a finding (and cite it) — keep the article just as informative,
+    no drop in quality. ONLY if no relevant verifiable substitute exists: drop the claim, soften to a
+    name-only mention, or put "—" in a table cell.
+  - NEVER write "verify on their site" or any go-check-it-yourself punt. NEVER invent a value or a source.
+  - Preserve the structure (Quick answer, question H2s, comparison table, FAQ) and any byline / disclosure
+    lines at the very top. Keep {name}'s own existing [S#] citations intact.
+
+The FRESH findings are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
+
+CLAIMS TO CHECK:
+{json.dumps(claims[:20], ensure_ascii=False)}
+
+FRESH INDEPENDENT FINDINGS:
+{fresh_lines}
+
+ARTICLE (Markdown):
+{body}
+
+Return JSON only:
+{{"revised_body_markdown": "the corrected full Markdown body",
+  "flagged": [{{"claim": "", "action": "confirmed|corrected|replaced|removed", "reason": ""}}]}}"""
+        rres = self.claude.call(recon_prompt, max_tokens=6000, temperature=0.3)
+        if (not rres or not isinstance(rres, dict)
+                or not (rres.get("revised_body_markdown") or "").strip()):
+            return None
+
+        # (d) append ALL fresh findings in order so the model's [S{start_idx+i}] line up with
+        # self._evidence_blocks; _rebuild_sources then lists only the ones actually cited.
+        for f in findings:
+            self._evidence_blocks.append({
+                "label": f"third-party · {(f.get('title') or f.get('url') or 'source')}",
+                "url": (f.get("url") or "").strip(),
+                "text": (f.get("fact") or "")[:_EVIDENCE_TEXT_CAP],
+            })
+        flagged = [f for f in (rres.get("flagged") or []) if isinstance(f, dict)]
+        changed = sum(1 for f in flagged if f.get("action") in ("corrected", "replaced", "removed"))
+        print(f"[blog_gen] deep_verify: {len(claims)} high-risk claim(s) checked, {changed} changed, "
+              f"{len(findings)} independent finding(s) available", flush=True)
+        return {"body_markdown": rres["revised_body_markdown"], "flagged": flagged}
 
     def generate_linkedin(self, brand, seed, article):
         """LinkedIn-native adaptation of the article. Returns the post text or ""."""
@@ -835,13 +1016,15 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         return (res.get("linkedin_text") or "").strip()
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
-                      research_notes="", use_web_search=False, reddit_thread=None):
-        """Full pipeline: gather evidence → article → verify_claims → LinkedIn. Returns
+                      research_notes="", use_web_search=False, reddit_thread=None,
+                      deep_verify=False):
+        """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
 
         `reddit_thread` (optional) is a pre-fetched live thread {subreddit,title,url,text}
-        the article may cite as COMMUNITY social proof (the brand's own live post + comments)."""
+        the article may cite as COMMUNITY social proof (the brand's own live post + comments).
+        `deep_verify` (opt-in): run the independent verify AGENT (FU48) after verify_claims."""
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
                                          research_notes=research_notes,
                                          use_web_search=use_web_search,
@@ -856,6 +1039,13 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             article["claims_flagged"] = v["flagged"]
         else:
             article["claims_flagged"] = []
+        # FU48: opt-in independent verify AGENT — re-check high-risk claims via a DIFFERENT channel,
+        # correct/replace, and add fresh independent sources. Off → pipeline unchanged.
+        if deep_verify:
+            dv = self.deep_verify(brand, seed, article)
+            if dv:
+                article["body_markdown"] = dv["body_markdown"]
+                article["claims_flagged"] = (article.get("claims_flagged") or []) + dv["flagged"]
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article)

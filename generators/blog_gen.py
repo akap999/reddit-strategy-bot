@@ -924,37 +924,60 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 dom = self.claude.find_official_domain(tool, ctx)
             except Exception:
                 dom = ""
-            facts = ""
-            src_url = f"https://{_dom(dom)}" if dom else ""
+            facts, src_url = "", (f"https://{_dom(dom)}" if dom else "")
+
+            def _lines_from(srcs):
+                out_, u_ = [], ""
+                for s in (srcs or []):
+                    fc = (s.get("fact") or s.get("title") or "").strip()
+                    if fc:
+                        out_.append(f"- {fc}")
+                        u_ = u_ or (s.get("url") or "").strip()
+                return out_, u_
+
+            # Tier 1 — the tool's OWN site (JSON fact extraction, pinned to its domain).
             if dom:
                 try:
-                    facts = self.claude.fetch_site_facts(dom, tool, fetch_brief) or ""
+                    facts = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
                 except Exception:
                     facts = ""
-            # Two-tier: a blocked/empty vendor page must NOT leave the tool unsourced. Fall back to a
-            # broad web search for its public pricing / license / capability facts (reviews/pricing pages).
+            # Tier 2 — web search PINNED to the tool's own domain (different plumbing, same site).
+            if not facts.strip() and dom:
+                try:
+                    pin = self.claude.search_sources(
+                        f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
+                        f"key capabilities", max_searches=2, allowed_domains=[_dom(dom)])
+                except Exception:
+                    pin = []
+                lines, _u = _lines_from(pin)
+                if lines:
+                    facts, src_url = "\n".join(lines[:6]), f"https://{_dom(dom)}"
+            # Tier 3 — broad search, but keep ONLY tool-SPECIFIC results (the tool's own domain, else a
+            # page that actually names the tool). A general policy/industry article is NOT accepted as a
+            # per-tool source — that's what produced the identical boilerplate rows before.
             if not facts.strip():
                 try:
-                    fb = self.claude.search_sources(
-                        f"{tool} ({cat}): pricing and plans, commercial-use & licensing terms, "
-                        f"royalty-free status, key capabilities — return the specific facts with source "
-                        f"URLs.", max_searches=2)
+                    br = self.claude.search_sources(
+                        f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
+                        f"royalty-free terms, key capabilities — its own site or a review that names it",
+                        max_searches=3)
                 except Exception:
-                    fb = []
-                lines = []
-                for s in (fb or []):
-                    fct = (s.get("fact") or s.get("title") or "").strip()
-                    if fct:
-                        lines.append(f"- {fct}")
-                        if not src_url:
-                            src_url = (s.get("url") or "").strip()
+                    br = []
+                own = [s for s in (br or []) if dom and _dom(s.get("url")) == _dom(dom)]
+                named = [s for s in (br or [])
+                         if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()]
+                pool = own or named
+                lines, u = _lines_from(pool)
                 if lines:
                     facts = "\n".join(lines[:6])
+                    src_url = (f"https://{_dom(dom)}" if dom else u) or u
+
             if facts.strip() and src_url:
                 fresh.append({"label": tool, "url": src_url, "text": facts[:_EVIDENCE_TEXT_CAP]})
                 print(f"[blog_gen] verify+complete: sourced {tool} <- {src_url}", flush=True)
             else:
-                print(f"[blog_gen] verify+complete: {tool} — could NOT source (name-only)", flush=True)
+                print(f"[blog_gen] verify+complete: {tool} — could NOT source individually (row will be "
+                      f"dropped, not generalized)", flush=True)
 
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
@@ -1003,6 +1026,12 @@ COMPLETE and every stated fact is sourced:
 
   - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
     it with that source's [S#]. Do this for EVERY tool and EVERY dimension.
+  - A tool's cells may ONLY be filled from a FRESH FACT that is ABOUT that SPECIFIC tool (a block labeled
+    with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
+    TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
+    cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
+    specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
+    from the table — do NOT generalize a policy article or another tool's values to fill it.
   - Do NOT reduce the number of comparison dimensions/columns — KEEP them all, and add a dimension if the
     facts support a useful one.
   - CORRECT any value the fresh facts contradict; CONFIRM supported ones (add the [S#]).

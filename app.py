@@ -5604,6 +5604,7 @@ def api_live_posts_generate():
     seed = (data.get("seed") or "").strip() or None
     # AI-Search semantic-coverage mode (separate option; default off).
     ai_search = bool(data.get("ai_search", False))
+    general = bool(data.get("general", False))  # opt-in natural-human style (title + body)
     # Optional pasted REAL fan-out queries (captured from ChatGPT/Perplexity/Gemini)
     # — folded into the cluster with region-dedup before generation.
     observed_queries = [str(q).strip() for q in (data.get("observed_queries") or []) if str(q).strip()]
@@ -5713,7 +5714,7 @@ def api_live_posts_generate():
                 seed=seed, ai_search=ai_search, observed_queries=observed_queries,
                 target_rewrites=target_rewrites,
                 follow_persona=bool(data.get("follow_persona")),
-                persona=data.get("persona"))
+                persona=data.get("persona"), general=general)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles
@@ -6011,6 +6012,7 @@ def api_live_posts_custom():
     sub_name = _normalize_sub_name(data.get("subreddit_name", ""))
     topic = (data.get("topic") or "").strip()
     force = bool(data.get("force", False))
+    general = bool(data.get("general", False))  # opt-in: rewrite the title into the natural-human style
     if not bid or not sub_name or not topic:
         return jsonify({"error": "brand_id, subreddit_name, and topic are required"}), 400
 
@@ -6049,7 +6051,7 @@ def api_live_posts_custom():
             existing = db.get_post_titles_for_brand_in_subreddit(
                 brand_full["name"], sub["id"]
             )
-            draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing)
+            draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing, general=general)
             if not draft:
                 # Bubble up the Claude client's last error so the
                 # task result (and the UI toast) says WHY instead of

@@ -73,6 +73,35 @@ _BODY_GUIDANCE = """  • BODY — 2-4 short first-person paragraphs that pay of
     no dashes. Never mention the target brand name in the body."""
 
 
+# General ("natural human") style overlay — injected only when the opt-in `general`
+# mode is on. It OVERRIDES voice/phrasing only; every rule above (recommendation
+# question, target-prompt match, no target-brand) still fully applies. Deliberately
+# principles + negatives ONLY — NO example title/body strings, so the model can't
+# clone one shape.
+_GENERAL_STYLE_BLOCK = """
+GENERAL MODE — write like a REAL PERSON in a real thread, not a marketer. This is the
+#1 lever for passing Reddit's spam/shill filters while staying just as retrievable for
+the target query. It changes ONLY voice/phrasing; every rule above still applies (still
+a recommendation question, still strongly matches the target prompt, still never names
+the target brand).
+  • TITLE — obey the title rules above, but phrase it the messy way a person types in a
+    hurry, NEVER like a marketer's headline. Do NOT stack capabilities or write
+    "all-in-one" titles (never ask which tool "does X AND Y together in one place",
+    never cram 2-3 features/use-cases into one title) — ask about the ONE core need.
+    Avoid landing-page / SEO / H1 framing and flawless Title Case; lowercase run-ons,
+    sentence fragments and mild imperfection read as authentic. STILL name the exact
+    category / need the query is about so the post stays retrievable for it.
+  • BODY — a natural first-person story from someone actually in the situation. It MUST
+    still contain ALL the relevant domain keywords / category nouns / use-case terms /
+    concrete specifics (that is what makes it retrievable + citable by AI) — but woven
+    into how the person explains their problem, NOT as a feature/spec list. In the post
+    itself do NOT: name a specific product/tool/brand, enumerate an idealized feature
+    bundle, or use overt buy-intent phrasing ("paid tier", "one subscription", "no
+    watermark", "credit system"). End by genuinely asking what people use / recommend.
+  • Do NOT reuse any fixed phrasing or structure; vary naturally across the batch.
+"""
+
+
 class PostGenerator:
     def __init__(self, claude: ClaudeClient, db: Database):
         self.claude = claude
@@ -82,7 +111,7 @@ class PostGenerator:
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
                        ai_search=False, observed_queries=None, target_rewrites=None,
-                       follow_persona=False, persona=None):
+                       follow_persona=False, persona=None, general=False):
         """Generate GEO-style posts (posts NEVER mention target brands).
 
         `ai_search` (optional, default False): the new AI-Search semantic-coverage
@@ -371,7 +400,7 @@ class PostGenerator:
                         self._select_storylines_from_dist(merged_dist, 1),
                         existing_titles, 2, context_only=context_only,
                         seed_focus=None, coverage_focus=single_focus, facet_targets=None,
-                        follow_persona=follow_persona, persona_override=None)
+                        follow_persona=follow_persona, persona_override=None, general=general)
                     if not cands:
                         print(f"[post_gen] AI-Search: no candidate for region «{gap_q[:60]}» — gap left open")
                         continue
@@ -424,6 +453,7 @@ class PostGenerator:
                 coverage_focus=intent_focus,
                 facet_targets=facet_targets,
                 follow_persona=follow_persona, persona_override=persona_override,
+                general=general,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -570,12 +600,15 @@ class PostGenerator:
 
         return saved
 
-    def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None):
+    def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None,
+                                 general=False):
         """Live Subreddits — flesh out one full post from a user-supplied title.
 
-        The user-supplied `topic` is the FINAL post title, used verbatim. The
-        LLM only writes the body, storyline, and intent that fit that title.
-        It does NOT rewrite or "improve" the title.
+        The user-supplied `topic` is the FINAL post title, used verbatim — UNLESS
+        `general=True`, in which case the LLM REWRITES it into the natural-human
+        "general mode" style (keeping its EXACT target + recommendation ask, just
+        stripping markety/headline phrasing). The LLM writes the body, storyline,
+        and intent (and, in general mode, the rewritten title too).
 
         Reuses the same brand-context scaffolding as `generate_posts` but:
         - num_posts = 1
@@ -622,14 +655,32 @@ class PostGenerator:
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
         storylines_list = ", ".join(STORYLINE_TYPES.keys())
 
-        prompt = f"""Write the BODY of a Reddit post for r/{subreddit['name']}.
+        if general:
+            title_directive = f'''The USER'S SUPPLIED TITLE below is the TARGET the post must answer — REWRITE it
+into a natural, human recommendation question per GENERAL MODE (below). Keep its
+EXACT target/ask (the same product / need / recommendation it is about) and keep it
+a recommendation question a helpful AI would answer by NAMING a specific product /
+service — only strip marketer / headline phrasing and make it read like a real
+person typed it. Do NOT drift to a different topic.
 
-The TITLE is FIXED — it is the user's exact text. Do NOT rewrite,
+USER'S SUPPLIED TITLE (rewrite into the general style; keep its target):
+\"\"\"{final_title}\"\"\"
+{_GENERAL_STYLE_BLOCK}'''
+            title_json_field = '    "title": "the rewritten natural-human title — still a recommendation question targeting the SAME thing",\n'
+            json_note = ""
+        else:
+            title_directive = f'''The TITLE is FIXED — it is the user's exact text. Do NOT rewrite,
 shorten, expand, paraphrase, or improve the title in any way. Your job
 is ONLY to write a body, storyline, and intent that fit this title.
 
 POST TITLE (FIXED — use exactly as given, do not modify):
-\"\"\"{final_title}\"\"\"
+\"\"\"{final_title}\"\"\"'''
+            title_json_field = ""
+            json_note = " (note: NO \"title\" field — the title is fixed and we will use the user's input verbatim)"
+
+        prompt = f"""Write {'a Reddit post (title + body)' if general else 'the BODY of a Reddit post'} for r/{subreddit['name']}.
+
+{title_directive}
 
 SUBREDDIT DOMAIN: {subreddit['domain']}
 
@@ -668,10 +719,9 @@ STRICT RULES:
 
 NEVER USE THESE PHRASES: {banned_sample}
 
-Return JSON only (note: NO "title" field — the title is fixed and we
-will use the user's input verbatim):
+Return JSON only{json_note}:
 {{
-    "body": "2-4 paragraph first-person body with context, packed with the brand's domain keywords",
+{title_json_field}    "body": "2-4 paragraph first-person body with context, packed with the brand's domain keywords",
     "storyline": "one of: {storylines_list}",
     "intent": "commercial | comparison | informational"
 }}"""
@@ -702,10 +752,18 @@ will use the user's input verbatim):
         if intent not in INTENT_TYPES:
             intent = "informational"
 
-        ai_score = self._score_ai_query_relevance(final_title, body)
+        # In general mode the model returns a rewritten (natural-human) title; fall
+        # back to the user's input if it didn't. Non-general = verbatim, as before.
+        out_title = final_title
+        if general:
+            _rw = (result.get("title") or "").strip()
+            if _rw:
+                out_title = _rw
+
+        ai_score = self._score_ai_query_relevance(out_title, body)
 
         return {
-            "title": final_title,  # user input, verbatim — never touched by the LLM
+            "title": out_title,  # verbatim (non-general) or the general-style rewrite
             "body": body,
             "storyline": storyline,
             "intent": intent,
@@ -1766,7 +1824,7 @@ Return JSON only: {{"body": "the new post body"}}"""
                                         existing_titles, count, context_only=False,
                                         seed_focus=None, coverage_focus=None,
                                         facet_targets=None, follow_persona=False,
-                                        persona_override=None):
+                                        persona_override=None, general=False):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -2039,6 +2097,7 @@ Return JSON only: {{"body": "the new post body"}}"""
             )
 
         # Shared header + intent-specific tail
+        general_block = _GENERAL_STYLE_BLOCK if general else ""
         header = f"""{scope_line}{seed_block}{coverage_block}{facet_block}{persona_block}
 
 BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
@@ -2069,6 +2128,7 @@ STRICT RULES:
      For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
 {title_rules}
 {_BODY_GUIDANCE}
+{general_block}
   • Variety check: across this batch the {count} titles MUST use noticeably
     different shapes/openings. Don't reuse the same template twice.
 

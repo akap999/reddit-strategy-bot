@@ -7824,6 +7824,10 @@ function renderLsubsGenerate(c) {
                     <input type="checkbox" id="lsubs-ai-search" checked>
                     🎯 AI Search mode <span class="text-gray-600">(semantic coverage — fan out + cover the query cluster; uses the seed as the anchor if set)</span>
                 </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Natural-human style: titles + bodies read like a real person typed them (no marketer/all-in-one headlines), which is far harder for Reddit to auto-remove — while still strongly targeting the prompt, still asking for a recommendation, and still keyword-dense for AI retrieval.">
+                    <input type="checkbox" id="lsubs-general">
+                    🧑 General mode <span class="text-gray-600">(natural human phrasing — still targets the prompt; much harder to auto-remove)</span>
+                </label>
                 <label class="text-xs text-gray-400 block" style="flex-basis:100%">
                     Observed fan-out queries <span class="text-gray-600">(optional — paste the REAL fanned-out queries you captured from ChatGPT/Perplexity/Gemini, one per line; each is region-classified and added only if its region is new)</span>
                     <textarea id="lsubs-observed" rows="2" class="w-full text-xs mt-1"
@@ -8124,11 +8128,13 @@ async function lsubsGeneratePosts(force = false) {
 
     const seed = (document.getElementById('lsubs-seed')?.value || '').trim();
     const aiSearch = !!document.getElementById('lsubs-ai-search')?.checked;
+    const general = !!document.getElementById('lsubs-general')?.checked;
     const observed = (document.getElementById('lsubs-observed')?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
     if (seed) reqBody.seed = seed;
     if (aiSearch) reqBody.ai_search = true;
+    if (general) reqBody.general = true;
     if (aiSearch && observed.length) reqBody.observed_queries = observed;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
@@ -8277,12 +8283,16 @@ function lsubsShowCustomModal() {
     const { bid, sub } = lsubsContext();
     if (!bid || !sub) { toast('Pick a brand and subreddit first', 'error'); return; }
     showModal(`
-        <h3 class="text-xl font-bold mb-3">Custom Post — title only</h3>
-        <p class="text-xs text-gray-400 mb-3">Type the exact title you want for the r/${sub} post. The title will be used <strong>verbatim</strong> — Claude only writes the body to fit it.</p>
+        <h3 class="text-xl font-bold mb-3">Custom Post</h3>
+        <p class="text-xs text-gray-400 mb-3">Type the title you want for the r/${sub} post. By default it's used <strong>verbatim</strong> (Claude only writes the body). Turn on <strong>General mode</strong> to have the title <strong>rewritten into a natural human style</strong> — still targeting the same thing + still a recommendation question — so it's harder to auto-remove.</p>
         <div>
-            <label class="text-xs text-gray-400">Post title (used as-is)</label>
+            <label class="text-xs text-gray-400">Post title</label>
             <textarea id="lsubs-custom-topic" rows="3" class="w-full" placeholder="e.g. anyone using AI to generate music synced to their videos?" style="font-family:inherit;min-height:90px"></textarea>
         </div>
+        <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer mt-2">
+            <input type="checkbox" id="lsubs-custom-general">
+            🧑 General mode <span class="text-gray-600">(rewrite my title into a natural human style)</span>
+        </label>
         <div class="flex gap-2 mt-4 justify-end">
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="lsubsSubmitCustom(false)">Generate body</button>
@@ -8294,19 +8304,20 @@ async function lsubsSubmitCustom(force) {
     const { bid, sub } = lsubsContext();
     const topic = (document.getElementById('lsubs-custom-topic')?.value || '').trim();
     if (!topic) { toast('Enter a topic', 'error'); return; }
+    const general = !!document.getElementById('lsubs-custom-general')?.checked;
 
     let res;
     try {
         res = await api('/api/live-posts/custom', {
             method: 'POST',
-            body: { brand_id: bid, subreddit_name: sub, topic, force }
+            body: { brand_id: bid, subreddit_name: sub, topic, force, general }
         });
     } catch (e) {
         try {
             const r = await fetch('/api/live-posts/custom', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force })
+                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force, general })
             });
             if (r.status === 409) {
                 const d = await r.json();

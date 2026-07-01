@@ -1866,11 +1866,11 @@ def api_blog_regenerate(blog_id):
                 v = gen.verify_claims(brand, a, evidence=evidence)
                 a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
                 flagged = (v or {}).get("flagged") or []
-                if stored_deep:   # FU48: independent verify agent, reused from generate
-                    dv = gen.deep_verify(brand, seed, a)
-                    if dv:
-                        a["body_markdown"] = dv["body_markdown"]
-                        flagged = flagged + dv["flagged"]
+                # FU49: always source competitors + fill the comparison (deep = extra corroboration)
+                vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep)
+                if vc:
+                    a["body_markdown"] = vc["body_markdown"]
+                    flagged = flagged + vc["flagged"]
                 # Deterministic ## Sources rebuild (gen._evidence_blocks set by _gather_evidence above)
                 body = gen._rebuild_sources(a.get("body_markdown", ""))
                 bg.update_blog(
@@ -1885,11 +1885,12 @@ def api_blog_regenerate(blog_id):
                     raise ValueError(claude.last_error or "Verify pass failed")
                 body_md = v["body_markdown"]
                 flagged = v["flagged"]
-                if stored_deep:   # FU48: run the independent verify agent as part of re-verify
-                    dv = gen.deep_verify(brand, seed, {**article, "body_markdown": body_md})
-                    if dv:
-                        body_md = dv["body_markdown"]
-                        flagged = flagged + dv["flagged"]
+                # FU49: always source competitors + fill the comparison (deep = extra corroboration)
+                vc = gen.verify_and_complete(brand, seed, {**article, "body_markdown": body_md},
+                                             deep=stored_deep)
+                if vc:
+                    body_md = vc["body_markdown"]
+                    flagged = flagged + vc["flagged"]
                 bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(body_md),
                                claims_flagged=flagged)
             elif part == "linkedin":

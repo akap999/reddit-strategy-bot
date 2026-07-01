@@ -555,6 +555,15 @@ class PostGenerator:
                     "image_prompt": None,
                 })
 
+        # GENERAL mode: de-template the batch's titles. The indirect-framing rules tend to
+        # make the model converge on ONE shape (e.g. every title trailing "…what do people
+        # use?"). A second LLM pass rewrites the batch so it reads like different real people
+        # wrote it — surface phrasing only; each title keeps its underlying target so the body
+        # still fits. NO templates are supplied; graceful on failure. General-only, so the
+        # standard path is byte-for-byte unchanged.
+        if general:
+            selected = self._diversify_general_titles(selected, subreddit)
+
         # Scheduling
         total = len(selected)
         spread = max(total, int(total * POST_SPREAD_FACTOR))
@@ -618,6 +627,80 @@ class PostGenerator:
             saved.append(post)
 
         return saved
+
+    def _diversify_general_titles(self, posts, subreddit):
+        """GENERAL mode only — a second LLM pass that rewrites a batch of generated titles
+        so they read like DIFFERENT real people wrote them.
+
+        The indirect-framing rules (FU45) fix "too direct" but tend to make the model
+        converge on a SINGLE shape across the batch (e.g. a first-person setup that all
+        trail off with the same "…what do people use?" ask) — which reads as one template
+        with the details swapped. This pass sees the whole batch at once and rewrites each
+        title's SURFACE PHRASING only, keeping its underlying question/target identical so
+        the already-written body still answers it.
+
+        No fixed shapes/templates are supplied (per the user's "no defined templates" rule):
+        the model is told to write as distinct individuals and is only FORBIDDEN from
+        converging on one shape. Graceful — on any failure or a count mismatch the original
+        titles are kept unchanged. Custom (user-supplied) titles are never touched.
+        """
+        items = [p for p in posts
+                 if not p.get("is_custom") and (p.get("title") or "").strip()]
+        if len(items) < 2:
+            return posts  # nothing to diverge from in a batch of one
+
+        def _line(i, p):
+            tq = (p.get("target_query") or "").strip()
+            keep = f"   (keep it about: {tq})" if tq else ""
+            return f'  {i+1}. "{p["title"].strip()}"{keep}'
+        numbered = "\n".join(_line(i, p) for i, p in enumerate(items))
+        sub_name = (subreddit or {}).get("name") or "a relevant subreddit"
+
+        prompt = f"""These {len(items)} Reddit post titles were just generated for r/{sub_name}.
+They came out TOO SAME-Y — like one template with the details swapped (e.g. a first-person
+setup that all trail off with the same kind of "…what do people use?" ask). Rewrite EACH so
+the batch reads like {len(items)} DIFFERENT real people posted them, at different moments.
+
+TITLES:
+{numbered}
+
+Rules:
+- Keep each title's UNDERLYING QUESTION / TARGET identical — same topic, same thing being
+  asked about — so the post's existing body still answers it. Change only HOW it's phrased,
+  never WHAT it's about, and never which title targets which topic (keep the order).
+- Each rewrite MUST STILL SEEK A RECOMMENDATION — it has to be answerable by naming a
+  specific product / service (that is how the brand gets surfaced when an AI answers it, and
+  what keeps the thread retrievable). The ask may be indirect or trail at the very end, but
+  it must be there: never drift a title into a pure vent, observation, or bare statement that
+  invites no recommendation.
+- Make them genuinely DIFFERENT FROM EACH OTHER: no shared opening word, no shared trailing
+  phrase, do NOT let more than one end in "what do people use / what's everyone using", vary
+  the length and rhythm a lot. Not every one has to be a literal question (a statement that
+  still clearly invites "so what should I use" is fine) — but every one must still seek a
+  recommendation per the rule above.
+- Keep the natural, human, INDIRECT voice — a real person in a real thread, leading with a
+  situation or a specific detail, NOT a bald "is there a tool that does X?" product ask.
+- Do NOT sound markety: no "AI platform / tool / software / generator" nouns, no "all-in-one",
+  don't stack features with "and / together / in one place", never name a specific brand.
+- Do NOT follow any fixed formula or template — write each exactly as that one person would
+  type it, quirks and all.
+
+Return JSON only: {{"titles": ["rewritten 1", "rewritten 2", ...]}} — exactly {len(items)}
+strings, in the SAME order as above."""
+
+        try:
+            res = self.claude.call(prompt, max_tokens=1500, temperature=1.0)
+            new = res.get("titles") if isinstance(res, dict) else None
+            if isinstance(new, list) and len(new) == len(items):
+                for p, t in zip(items, new):
+                    t = (t or "").strip()
+                    if t:
+                        p["title"] = t
+            else:
+                print("[post_gen] title-diversify pass: bad/short response, keeping originals")
+        except Exception as e:
+            print(f"[post_gen] title-diversify pass failed (keeping originals): {e}")
+        return posts
 
     def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None,
                                  general=False):

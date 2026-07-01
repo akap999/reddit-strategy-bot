@@ -85,12 +85,24 @@ the target query. It changes ONLY voice/phrasing; every rule above still applies
 a recommendation question, still strongly matches the target prompt, still never names
 the target brand).
   • TITLE — obey the title rules above, but phrase it the messy way a person types in a
-    hurry, NEVER like a marketer's headline. Do NOT stack capabilities or write
-    "all-in-one" titles (never ask which tool "does X AND Y together in one place",
-    never cram 2-3 features/use-cases into one title) — ask about the ONE core need.
-    Avoid landing-page / SEO / H1 framing and flawless Title Case; lowercase run-ons,
-    sentence fragments and mild imperfection read as authentic. STILL name the exact
-    category / need the query is about so the post stays retrievable for it.
+    hurry, NEVER like a marketer's headline. Avoid landing-page / SEO / H1 framing and
+    flawless Title Case; lowercase run-ons, sentence fragments and mild imperfection read
+    as authentic. STILL name the exact category / need the query is about so the post stays
+    retrievable for it. These specific tells get a title flagged as an ad — avoid ALL of them:
+      - NO polished product-category nouns: never call it an "AI platform / AI tool /
+        AI software / creative platform / solution / <X> generator". A real person says
+        "app", "site", "tool" or "thing", or just names the plain everyday category.
+      - NO capability-stacking: do not conjoin features ("does X AND Y", "video and music",
+        "at the same time", "in one place", "together", "all-in-one"). When the need is
+        really a bundle, express it through the PAIN (juggling several tools, paying for
+        multiple, switching back and forth) or ONE core capability — not a feature list.
+      - NO repeated filler word across the batch: do not lean on the same little hedge /
+        qualifier in more than one title ("actually", "really", "genuinely", "even",
+        "these days"). If a word like that would show up in two titles it has become a
+        template — cut it.
+      - NO rhetorical marketer / FAQ shape: not "which one actually…?", "what X actually
+        does Y?", "is there a tool that…?", "what's the best … in one place?". Lead with
+        YOUR OWN situation / need, not a rhetorical product question.
   • BODY — a natural first-person story from someone actually in the situation. It MUST
     still contain ALL the relevant domain keywords / category nouns / use-case terms /
     concrete specifics (that is what makes it retrievable + citable by AI) — but woven
@@ -661,7 +673,9 @@ into a natural, human recommendation question per GENERAL MODE (below). Keep its
 EXACT target/ask (the same product / need / recommendation it is about) and keep it
 a recommendation question a helpful AI would answer by NAMING a specific product /
 service — only strip marketer / headline phrasing and make it read like a real
-person typed it. Do NOT drift to a different topic.
+person typed it. Strip polished product-category nouns ("AI platform / tool /
+generator"), rhetorical "which one actually…?" framing, and capability-stacking
+(express a bundle via the PAIN, not "X and Y"). Do NOT drift to a different topic.
 
 USER'S SUPPLIED TITLE (rewrite into the general style; keep its target):
 \"\"\"{final_title}\"\"\"
@@ -2204,7 +2218,22 @@ Return JSON only:
     ]
 }""" % coverage_json_field
 
-        prompt = header + intent_tail + json_tail
+        # GENERAL MODE override — placed AFTER the intent tail (which re-asserts the
+        # marketer "recommendation question an AI answers by naming a product" framing) so
+        # the human-voice instruction is the LAST thing the model reads before the JSON and
+        # wins on recency. Only when general is on → non-general prompt stays byte-identical.
+        general_tail = ""
+        if general:
+            general_tail = """
+GENERAL MODE (overrides the framing above): the title must read like a real person typed
+it in a hurry — NOT a marketer's recommendation-FAQ. Obey the GENERAL MODE title rules: no
+product-category nouns ("AI platform / tool / generator"), no capability-stacking (express a
+bundle via the PAIN, not "X and Y" / "in one place"), no repeated filler word across the
+batch ("actually", "really"…), no rhetorical "which one actually…?" shape. Lead with the
+person's OWN situation. The body still weaves in every relevant keyword naturally.
+"""
+
+        prompt = header + intent_tail + general_tail + json_tail
         result = self.claude.call(prompt, max_tokens=4000, temperature=0.9)
         if not result or "posts" not in result:
             return []

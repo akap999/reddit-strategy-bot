@@ -1006,17 +1006,20 @@ class Database:
     def save_blog(self, brand_id, seed, title="", meta_description="", keywords=None,
                   body_markdown="", linkedin_text="", claims_flagged=None,
                   status="draft", prompt_version="", source_urls=None, research_notes="",
-                  use_web_search=0, reddit_url="", author_name="", author_title="",
-                  reviewer_name="", reviewer_title="", disclosure="", image_url=""):
+                  use_web_search=0, reddit_url="", reddit_status="", author_name="",
+                  author_title="", reviewer_name="", reviewer_title="", disclosure="",
+                  image_url=""):
         """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. The byline
-        fields are optional per-blog overrides of the brand byline. Returns id."""
+        fields are optional per-blog overrides of the brand byline. `reddit_status` records the
+        attached-thread fetch outcome (ok/empty/failed/bad_url/skipped) for UI visibility. Returns id."""
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
-                                  research_notes, use_web_search, reddit_url, status, prompt_version,
+                                  research_notes, use_web_search, reddit_url, reddit_status,
+                                  status, prompt_version,
                                   author_name, author_title, reviewer_name, reviewer_title,
                                   disclosure, image_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
@@ -1025,6 +1028,7 @@ class Database:
              research_notes or "",
              1 if use_web_search else 0,
              (reddit_url or "").strip(),
+             (reddit_status or "").strip(),
              status, prompt_version,
              author_name or "", author_title or "", reviewer_name or "",
              reviewer_title or "", disclosure or "", image_url or ""),
@@ -1094,8 +1098,8 @@ class Database:
         allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
-                   "author_name", "author_title", "reviewer_name", "reviewer_title",
-                   "disclosure", "image_url"}
+                   "reddit_status", "author_name", "author_title", "reviewer_name",
+                   "reviewer_title", "disclosure", "image_url"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2212,7 +2216,8 @@ class Database:
         # individual article can carry its own author/reviewer/disclosure; image_url feeds Article image.
         blog_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(blogs)").fetchall()]
         for col in ("source_urls", "research_notes", "author_name", "author_title",
-                    "reviewer_name", "reviewer_title", "disclosure", "image_url"):
+                    "reviewer_name", "reviewer_title", "disclosure", "image_url",
+                    "reddit_status"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

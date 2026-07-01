@@ -1633,12 +1633,17 @@ def api_blog_suggest_keywords():
 
 def _blog_reddit_evidence(claude, db, reddit_url):
     """Fetch a live Reddit thread (post body + top comments, incl. the brand comment) so a
-    blog can cite it as COMMUNITY social proof. Returns {subreddit,title,url,text} or None on
-    any failure (the blog then generates without it). Reuses CommentGenerator.fetch_comments
+    blog can cite it as COMMUNITY social proof. Returns (thread, status) where `thread` is
+    {subreddit,title,url,text} or None, and `status` is one of
+    "ok" | "empty" | "failed" | "bad_url" | "skipped" — surfaced to the UI so an attach that
+    couldn't be fetched isn't a silent no-op. Reuses CommentGenerator.fetch_comments
     (RSS-via-proxy, cloud-IP safe)."""
     url = (reddit_url or "").strip()
-    if not url or "reddit.com" not in url.lower() or "/comments/" not in url.lower():
-        return None
+    if not url:
+        return None, "skipped"
+    if "reddit.com" not in url.lower() or "/comments/" not in url.lower():
+        print(f"[blog_gen] reddit thread skipped — not a reddit post URL: {url}", flush=True)
+        return None, "bad_url"
     try:
         from generators.comment_gen import CommentGenerator
         proxy = REDDIT_PROXY_URL.rstrip("/") if REDDIT_PROXY_URL else None
@@ -1647,7 +1652,7 @@ def _blog_reddit_evidence(claude, db, reddit_url):
         sub = cg.extract_subreddit(url) or ""
     except Exception as e:
         print(f"[blog_gen] reddit thread fetch failed for {url}: {e}", flush=True)
-        return None
+        return None, "failed"
     # Title from the URL slug (no extra fetch): /comments/<id>/<slug>/
     title = ""
     m = re.search(r"/comments/[a-z0-9]+/([^/?#]+)", url, re.IGNORECASE)
@@ -1660,7 +1665,7 @@ def _blog_reddit_evidence(claude, db, reddit_url):
             bodies.append("- " + bdy)
     if not (post_body or "").strip() and not bodies:
         print(f"[blog_gen] reddit thread {url} returned no usable post/comments", flush=True)
-        return None
+        return None, "empty"
     parts = []
     if title:
         parts.append(f'Thread title: "{title}"')
@@ -1670,7 +1675,20 @@ def _blog_reddit_evidence(claude, db, reddit_url):
         parts.append("Comments from the discussion:\n" + "\n".join(bodies))
     print(f"[blog_gen] reddit thread r/{sub}: post + {len(bodies)} comment(s) loaded as "
           f"community evidence", flush=True)
-    return {"subreddit": sub, "title": title, "url": url, "text": "\n".join(parts)}
+    return {"subreddit": sub, "title": title, "url": url, "text": "\n".join(parts)}, "ok"
+
+
+def _reddit_status_note(status):
+    """Human-readable note for a _blog_reddit_evidence status, surfaced in the generate/
+    regenerate task result so an attached-but-unfetchable Reddit URL isn't a silent no-op.
+    Empty string = nothing to say (no URL was attached)."""
+    return {
+        "ok": "Reddit thread fetched and cited.",
+        "empty": "Reddit thread returned no usable post/comments — blog generated without it.",
+        "failed": "Reddit thread couldn't be fetched (rate-limited/unreachable) — blog generated without it.",
+        "bad_url": "That Reddit URL isn't a post link (need a /comments/ URL) — skipped.",
+        "skipped": "",
+    }.get(status, "")
 
 
 def _ensure_brand_byline_logo(claude, db, brand):
@@ -1756,7 +1774,7 @@ def api_blog_generate():
             brand = _ensure_brand_byline_logo(claude, bg, brand)
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
-            reddit_thread = _blog_reddit_evidence(claude, bg, reddit_url) if reddit_url else None
+            reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
@@ -1774,9 +1792,11 @@ def api_blog_generate():
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
-                use_web_search=use_web_search, reddit_url=reddit_url, **byline,
+                use_web_search=use_web_search, reddit_url=reddit_url,
+                reddit_status=reddit_status, **byline,
             )
-            return {"blog_id": blog_id}
+            return {"blog_id": blog_id, "reddit_status": reddit_status,
+                    "reddit_note": _reddit_status_note(reddit_status)}
         finally:
             bg.close()
 
@@ -1814,7 +1834,7 @@ def api_blog_regenerate(blog_id):
             stored_notes = blog.get("research_notes") or ""
             stored_web = bool(blog.get("use_web_search"))
             stored_reddit = (blog.get("reddit_url") or "").strip()
-            reddit_thread = _blog_reddit_evidence(claude, bg, stored_reddit) if stored_reddit else None
+            reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, stored_reddit)
             evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
                                             research_notes=stored_notes,
                                             use_web_search=stored_web,
@@ -1857,7 +1877,10 @@ def api_blog_regenerate(blog_id):
             elif part == "linkedin":
                 li = gen.generate_linkedin(brand, seed, article)
                 bg.update_blog(blog_id, linkedin_text=li or "")
-            return {"blog_id": blog_id, "part": part}
+            if stored_reddit:
+                bg.update_blog(blog_id, reddit_status=reddit_status)
+            return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
+                    "reddit_note": _reddit_status_note(reddit_status)}
         finally:
             bg.close()
 

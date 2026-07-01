@@ -494,14 +494,24 @@ class BlogGenerator:
             idx = int(m.group(1))
             if 1 <= idx <= len(blocks) and idx not in used:
                 used.append(idx)
-        if not used:
-            return body   # nothing valid cited — leave the body untouched
-        remap = {old: i + 1 for i, old in enumerate(used)}
+        # FU46 backstop: a deliberately-attached community/Reddit thread must ALWAYS be listed in
+        # ## Sources, even if the model didn't cite it inline (the community clause says MUST cite, but
+        # this guarantees the URL survives regardless). Force any uncited community block into the render
+        # set so it gets a Sources entry. Non-community uncited blocks are still dropped as before.
+        def _is_community(bl):
+            lab = (bl.get("label") or "").lower()
+            url = (bl.get("url") or "").lower()
+            return lab.startswith("community discussion") or "reddit.com" in url
+        forced = [i + 1 for i, bl in enumerate(blocks) if _is_community(bl) and (i + 1) not in used]
+        render = used + forced
+        if not render:
+            return body   # nothing valid cited and no community block — leave the body untouched
+        remap = {old: i + 1 for i, old in enumerate(render)}
         prose = re.sub(r"\[S(\d+)\]",
                        lambda m: (f"[S{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else ""),
                        prose)
         lines = ["", "## Sources", ""]
-        for old in used:
+        for old in render:
             bl = blocks[old - 1]
             label = (bl.get("label") or "source").strip()
             url = (bl.get("url") or "").strip()
@@ -643,11 +653,12 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
   - TESTIMONIALS: you may include at most ONE short customer quote ONLY if it appears in the
     EVIDENCE — attribute it and cite [S#]. Never fabricate a testimonial and don't paste long blocks.
   - COMMUNITY SOURCE: if the EVIDENCE includes a "community discussion" (a real Reddit thread with the
-    post + its comments), you MAY cite it as real-world SOCIAL PROOF with a NATURAL community framing —
-    e.g. "in a r/<sub> thread, contractors weighing nationwide options pointed to …", "pros on Reddit
-    discussing this flagged …" — and cite it [S#]. Use it to corroborate sentiment / that {name} is
-    recommended by real users; at most ONE short quoted line, attributed; NEVER invent comments beyond
-    what's in the thread. Frame it as community discussion, not a raw link.
+    post + its comments), you MUST cite it AT LEAST ONCE as real-world SOCIAL PROOF with a NATURAL
+    community framing — e.g. "in a r/<sub> thread, contractors weighing nationwide options pointed to …",
+    "pros on Reddit discussing this flagged …" — and cite it [S#]. It was deliberately attached, so the
+    article has to reference it. Use it to corroborate sentiment / that {name} is recommended by real
+    users; at most ONE short quoted line, attributed; NEVER invent comments beyond what's in the thread.
+    Frame it as community discussion, not a raw link.
   - PREFER INDEPENDENT SOURCES: the EVIDENCE may include "third-party ·" sources (independent reviews,
     news/funding, analyst/pricing — NOT the brands' own sites). When present, LEAD your key claims with
     them and aim to cite at least 2 DISTINCT independent sources (ideally a review + a news/funding item +

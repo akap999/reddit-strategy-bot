@@ -103,6 +103,13 @@ the target brand).
       - NO rhetorical marketer / FAQ shape: not "which one actually…?", "what X actually
         does Y?", "is there a tool that…?", "what's the best … in one place?". Lead with
         YOUR OWN situation / need, not a rhetorical product question.
+      - NOT TOO DIRECT (the main tell): do NOT open with the bald product ask — "is there
+        a tool / app / platform that does X?", "any good options for X?", "what's the best
+        X for Y?", "one subscription that covers X?". That transactional shape reads as
+        lead-gen. Instead LEAD with the person's specific situation / workflow / hangup and
+        let the recommendation ask sit at the very end or stay implicit. Oblique, concrete
+        and lived-in beats a clean direct question — an AI can still answer it by naming a
+        product, it just doesn't SOUND like someone shopping.
   • BODY — a natural first-person story from someone actually in the situation. It MUST
     still contain ALL the relevant domain keywords / category nouns / use-case terms /
     concrete specifics (that is what makes it retrievable + citable by AI) — but woven
@@ -2030,6 +2037,23 @@ Return JSON only: {{"body": "the new post body"}}"""
                         "the region's qualifier (so it reads like a generic version that "
                         "could belong to another region) is a FAILED title.\n"
                     )
+                # The recommendation-ask bullet. In GENERAL mode it is softened to an
+                # INDIRECT, situation-led framing (the "too direct" fix) instead of the
+                # bald "must be a recommendation question" form used by the standard path.
+                if general:
+                    rec_bullet = (
+                        "  • Each title must still be ANSWERABLE by naming a product/service (so it "
+                        "stays retrievable for that rewrite), but in GENERAL MODE phrase it "
+                        "INDIRECTLY — lead with the person's situation or a specific frustration and "
+                        "let the recommendation ask be implicit or trail at the end; do NOT write a "
+                        "bald \"is there a tool that does X?\" / \"any good options for X?\" product "
+                        "question. Never a vent that drops the ask entirely.\n"
+                    )
+                else:
+                    rec_bullet = (
+                        "  • Each title must be a RECOMMENDATION QUESTION (an AI would answer it by "
+                        "naming a product/service) — never a vent or bare statement.\n"
+                    )
                 coverage_block = (
                     "\n\nAI-SEARCH COVERAGE — this batch is part of a campaign to get the "
                     "brand recommended by AI engines (ChatGPT / Perplexity / Gemini), which "
@@ -2043,8 +2067,7 @@ Return JSON only: {{"body": "the new post body"}}"""
                     "titles on the same rewrite, no near-duplicates.\n"
                     "  • Report which rewrite each title targets in its \"target_query\" field "
                     "(copy the rewrite text it covers).\n"
-                    "  • Each title must be a RECOMMENDATION QUESTION (an AI would answer it by "
-                    "naming a product/service) — never a vent or bare statement.\n"
+                    f"{rec_bullet}"
                     "  • These are the SPACE to cover, NOT templates — phrase each title as a "
                     "natural human question (all TITLE rules below still apply); never paste a "
                     "rewrite verbatim.\n"
@@ -2226,11 +2249,14 @@ Return JSON only:
         if general:
             general_tail = """
 GENERAL MODE (overrides the framing above): the title must read like a real person typed
-it in a hurry — NOT a marketer's recommendation-FAQ. Obey the GENERAL MODE title rules: no
-product-category nouns ("AI platform / tool / generator"), no capability-stacking (express a
-bundle via the PAIN, not "X and Y" / "in one place"), no repeated filler word across the
-batch ("actually", "really"…), no rhetorical "which one actually…?" shape. Lead with the
-person's OWN situation. The body still weaves in every relevant keyword naturally.
+it in a hurry — NOT a marketer's recommendation-FAQ, and NOT a bald product question. Do
+NOT open with "is there a tool/app/platform that does X?", "any good options for X?", or
+"one subscription that covers X?" — that is TOO DIRECT / lead-gen. Instead LEAD with the
+person's own situation or a specific frustration and let the ask trail at the end or stay
+implicit. Also obey the other GENERAL MODE rules: no product-category nouns ("AI platform /
+tool / generator"), no capability-stacking (express a bundle via the PAIN, not "X and Y" /
+"in one place"), no repeated filler word across the batch ("actually", "really"…). The body
+still weaves in every relevant keyword naturally.
 """
 
         prompt = header + intent_tail + general_tail + json_tail

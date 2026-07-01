@@ -477,11 +477,12 @@ class BlogGenerator:
         return "\n\n".join(parts)
 
     _PUNT_CELL_RE = re.compile(
-        r"^\s*(?:verify\b|check\b|consult\b|varies?\s+by\s+plan|not\s+publicly\s+documented)",
+        r"^\s*(?:verify\b|check\b|consult\b|confirm\b|varies?\s+by\s+plan|not\s+publicly\s+documented)",
         re.IGNORECASE)
     _PUNT_SENT_RE = re.compile(
-        r"[^.\n]*\b(?:always\s+verify|be\s+sure\s+to\s+verify|varies?\s+by\s+plan|"
-        r"not\s+publicly\s+documented)\b[^.\n]*\.",
+        r"[^.\n]*\b(?:(?:always\s+|be\s+sure\s+to\s+|please\s+)?(?:verify|confirm|check)\b[^.\n]*"
+        r"\bbefore\s+(?:publishing|monetiz|you\s+publish)|always\s+verify|varies?\s+by\s+plan|"
+        r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented)\b[^.\n]*\.",
         re.IGNORECASE)
 
     def _scrub_punts(self, body):
@@ -923,19 +924,37 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 dom = self.claude.find_official_domain(tool, ctx)
             except Exception:
                 dom = ""
-            if not dom:
-                print(f"[blog_gen] verify+complete: no official domain for {tool!r} — name-only", flush=True)
-                continue
-            try:
-                facts = self.claude.fetch_site_facts(dom, tool, fetch_brief)
-            except Exception:
-                facts = ""
-            if (facts or "").strip():
-                fresh.append({"label": tool, "url": f"https://{_dom(dom)}",
-                              "text": facts[:_EVIDENCE_TEXT_CAP]})
-                print(f"[blog_gen] verify+complete: sourced {tool} <- {_dom(dom)}", flush=True)
+            facts = ""
+            src_url = f"https://{_dom(dom)}" if dom else ""
+            if dom:
+                try:
+                    facts = self.claude.fetch_site_facts(dom, tool, fetch_brief) or ""
+                except Exception:
+                    facts = ""
+            # Two-tier: a blocked/empty vendor page must NOT leave the tool unsourced. Fall back to a
+            # broad web search for its public pricing / license / capability facts (reviews/pricing pages).
+            if not facts.strip():
+                try:
+                    fb = self.claude.search_sources(
+                        f"{tool} ({cat}): pricing and plans, commercial-use & licensing terms, "
+                        f"royalty-free status, key capabilities — return the specific facts with source "
+                        f"URLs.", max_searches=2)
+                except Exception:
+                    fb = []
+                lines = []
+                for s in (fb or []):
+                    fct = (s.get("fact") or s.get("title") or "").strip()
+                    if fct:
+                        lines.append(f"- {fct}")
+                        if not src_url:
+                            src_url = (s.get("url") or "").strip()
+                if lines:
+                    facts = "\n".join(lines[:6])
+            if facts.strip() and src_url:
+                fresh.append({"label": tool, "url": src_url, "text": facts[:_EVIDENCE_TEXT_CAP]})
+                print(f"[blog_gen] verify+complete: sourced {tool} <- {src_url}", flush=True)
             else:
-                print(f"[blog_gen] verify+complete: {tool} <- {_dom(dom)} returned no facts", flush=True)
+                print(f"[blog_gen] verify+complete: {tool} — could NOT source (name-only)", flush=True)
 
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
@@ -987,9 +1006,12 @@ COMPLETE and every stated fact is sourced:
   - Do NOT reduce the number of comparison dimensions/columns — KEEP them all, and add a dimension if the
     facts support a useful one.
   - CORRECT any value the fresh facts contradict; CONFIRM supported ones (add the [S#]).
-  - NEVER leave "—", "N/A", blank, or a "verify on their site" punt in ANY cell. If a specific dimension
-    genuinely cannot be sourced for MOST tools, remove that WHOLE column. If ONE tool cannot be sourced at
-    all, remove that tool's row from the table — never show a blank cell.
+  - NEVER leave "—", "N/A", blank, or ANY punt in a cell OR in prose — no "verify / confirm / check … before
+    publishing", no "depends on the plan / varies by plan" hedge, no "verify on their site" pointer. State
+    the ACTUAL value(s), including plan-by-plan where they differ (from the FRESH FACTS). If a specific
+    dimension genuinely cannot be sourced for MOST tools, remove that WHOLE column. If ONE tool cannot be
+    sourced at all, remove that tool's row from the table — never show a blank cell or a "confirm it
+    yourself" note.
   - NEVER invent a value or a source — fill only from the FRESH FACTS (or the article's existing cited
     facts). Preserve the structure (Quick answer, question H2s, FAQ) and the byline/disclosure lines at top;
     keep {name}'s existing [S#] citations intact.

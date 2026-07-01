@@ -531,12 +531,14 @@ class ClaudeClient:
                 "max_uses": int(max_searches), "allowed_domains": [domain]}
         prompt = (
             f'From {domain} — the OFFICIAL website of "{brand or domain}" — extract its concrete, '
-            f'specific facts relevant to: {brief}. Look across its pages (homepage, pricing, '
-            "products, shipping/returns, about, financing) and capture real specifics: pricing, "
-            "shipping/coverage, return/warranty policy, financing, products/brands carried, "
-            "locations, and contact details. Use web search restricted to that site, then respond "
-            'with JSON ONLY (no prose, no code fences): {"facts": ["one specific fact", "..."]}. '
-            "Include only facts actually stated on the site; omit anything you cannot find there."
+            f'specific facts relevant to: {brief}. Look across its pages (homepage, pricing/plans, '
+            "features/product, terms/license, about) and capture real specifics: prices and plan "
+            "names, what each plan includes, licensing / commercial-use / rights terms, key features "
+            "and capabilities, and any other specifics that answer the brief (for a physical-goods "
+            "site that also means shipping/returns/financing/locations). Use web search restricted to "
+            'that site, then respond with JSON ONLY (no prose, no code fences): '
+            '{"facts": ["one specific fact", "..."]}. Include only facts actually stated on the site; '
+            "omit anything you cannot find there."
         )
         try:
             message = self.client.messages.create(

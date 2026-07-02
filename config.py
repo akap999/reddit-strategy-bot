@@ -81,6 +81,11 @@ FILLER_LEAD_DAYS = 3      # filler posts lead brand posts by this many days
 # --- Reddit ---
 REDDIT_USER_AGENT = "SubredditStrategyBot/2.0 (by /u/strategy_bot_admin)"
 REDDIT_PROXY_URL = os.environ.get("REDDIT_PROXY_URL", "")  # Cloudflare Worker URL for Reddit proxy
+# Optional: a distinct-IP residential proxy (IPRoyal) used as a FALLBACK egress when the normal Reddit
+# path (Cloudflare worker / cloud IP) is blocked or throttled. Gateway URL, e.g.
+# http://USER:PASS@geo.iproyal.com:12321 . Residential bandwidth is METERED, so the app only routes
+# Reddit through it after a block (see search/reddit_bot.py) to conserve the plan's GB.
+REDDIT_HTTP_PROXY = os.environ.get("REDDIT_HTTP_PROXY", "")
 # Optional: Brave Search API key. When set, Live Search adds a `site:reddit.com`
 # discovery fallback leg (independent of Reddit's rate limits). No-op when unset.
 # Free key: https://brave.com/search/api

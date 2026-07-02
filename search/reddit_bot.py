@@ -142,6 +142,15 @@ class RedditSearchBot:
         # Remember whether a proxy is in use — drives the
         # old.reddit.com fallback in _make_request.
         self.using_proxy = bool(reddit_base)
+        # FU57: optional distinct-IP RESIDENTIAL proxy (IPRoyal gateway URL). Used ONLY as a
+        # last-resort fallback when the normal Reddit path is blocked/throttled — Reddit rarely
+        # blocks residential IPs, so this recovers the fetch. Bandwidth is metered, so it is NEVER
+        # the default egress: the free cached/worker path runs first, this fires only on failure.
+        _rp = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+        self._reddit_proxies = {"http": _rp, "https": _rp} if _rp else None
+        if self._reddit_proxies:
+            print("    ✓ RedditSearchBot: residential proxy (REDDIT_HTTP_PROXY) available as a "
+                  "block-fallback egress for Reddit.", flush=True)
         ua = script_user_agent or os.environ.get("REDDIT_USER_AGENT") \
             or "python:reddit-strategy:v1 (search bot)"
         self.headers = {
@@ -328,6 +337,21 @@ class RedditSearchBot:
                     except Exception as fb_err:
                         print(f"(error: {fb_err})", end=" ", flush=True)
                         continue
+
+        # FU57: last resort — retry DIRECT to old.reddit.com through the residential proxy (distinct
+        # IP). Runs only after the normal path + UA/host rotation all failed, so metered GB is spent
+        # only on a real block.
+        if path and is_reddit_url and self._reddit_proxies:
+            try:
+                pr = requests.get("https://old.reddit.com" + path, params=params,
+                                  headers=self.headers, timeout=timeout, proxies=self._reddit_proxies)
+                if pr.status_code == 200 and pr.text.lstrip()[:1] != "<":
+                    print("\n    ✓ Reddit JSON via residential proxy", flush=True)
+                    return pr
+                if last_response is None or last_response.status_code != 200:
+                    last_response = pr
+            except Exception as _pe:
+                print(f"\n    ⚠ residential-proxy JSON retry failed: {_pe}", flush=True)
 
         # Mark the Reddit leg as dead so the rest of this bot's
         # lifetime skips it. Only flip when the failure looks
@@ -662,6 +686,20 @@ class RedditSearchBot:
                     time.sleep(wait)
                     continue
                 break
+            # FU57: normal path blocked/throttled → retry ONCE through the residential proxy, DIRECT
+            # to old.reddit.com (distinct IP). Fallback-only, so metered GB is spent only on a block.
+            if (resp is None or resp.status_code != 200) and self._reddit_proxies:
+                direct_url = "https://old.reddit.com" + url[len(rss_base):]
+                try:
+                    presp = requests.get(direct_url, params=params, headers=headers,
+                                         timeout=20, proxies=self._reddit_proxies)
+                    if presp.status_code == 200:
+                        print(f"\n    ✓ RSS via residential proxy for {direct_url}", flush=True)
+                        resp = presp
+                    else:
+                        print(f"\n    ⚠ RSS residential-proxy retry got {presp.status_code}", flush=True)
+                except Exception as _pe:
+                    print(f"\n    ⚠ RSS residential-proxy retry failed: {_pe}", flush=True)
             if resp.status_code != 200:
                 print(f"\n    ⚠ Reddit RSS returned {resp.status_code} for {url}", flush=True)
                 # Only a persistent 403 means the wall expanded to RSS.

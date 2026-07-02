@@ -647,7 +647,15 @@ class RedditSearchBot:
         # back to the canonical host so we don't build a broken URL.
         if "reddit.com" not in rss_base and "://" not in rss_base:
             rss_base = "https://www.reddit.com"
-        if subreddit_path and keyword:
+        # TIGHT WINDOW (≤7d → time_filter day/week): reddit's SEARCH index LAGS fresh posts, so
+        # search.rss?q=…&t=day returns almost nothing for niche subs (measured: r/Machinists day=2 vs
+        # all-time=100). Instead fetch /new.rss (chronological recent posts) and let the cascade's
+        # WORD-BOUNDARY keyword-presence filter + the date filter select relevance client-side
+        # (measured ~19 matches vs 2). Opt out with REDDIT_TIGHT_WINDOW_NEW=0.
+        _tight = (time_filter in ("day", "week")
+                  and os.environ.get("REDDIT_TIGHT_WINDOW_NEW", "1").strip().lower()
+                      not in ("0", "false", "no", "off"))
+        if subreddit_path and keyword and not _tight:
             url = f"{rss_base}/r/{subreddit_path}/search.rss"
             params = {
                 "q": keyword,
@@ -657,6 +665,8 @@ class RedditSearchBot:
                 "limit": min(limit, 100),
             }
         elif subreddit_path:
+            # keyword-less OR tight-window keyword search: chronological recent posts; keyword relevance
+            # is applied client-side by the cascade's keyword-presence filter (which honors the window).
             url = f"{rss_base}/r/{subreddit_path}/new.rss"
             params = {"limit": min(limit, 100)}
         else:
@@ -1592,13 +1602,13 @@ class RedditSearchBot:
                         if any(pat.search((p.get("title", "") + " " + (p.get("text", "") or "")))
                                for pat in pats)]
                 lbl = "|".join(labels[:6]) + ("…" if len(labels) > 6 else "")
-                # The RSS/Arctic/Pullpush legs ALREADY keyword-searched Reddit's full-text index, but RSS
-                # only exposes a TRUNCATED body — so a pivot token can be absent from title+text even
-                # though the post genuinely matched (match was in the full body / relevance). Only TRUST
-                # this filter when it trims a MINORITY; if it would drop half-or-more of an already-matched
-                # set, keep them — otherwise a thin niche search collapses to ~1. Opt out with
-                # REDDIT_KW_FILTER=0.
-                if kept and len(kept) >= max(1, (before_kw + 1) // 2):
+                # TIGHT window uses /new.rss (NOT keyword-matched upstream) → apply this filter FULLY (drop
+                # every non-match; that's the whole point of the fast path). BROAD windows use search.rss
+                # (already keyword-matched, but RSS truncates the body so a pivot can be absent for a
+                # genuine match) → only trim a MINORITY; if it would drop half-or-more, keep them (else a
+                # thin niche search collapses to ~1). Opt out entirely with REDDIT_KW_FILTER=0.
+                _tight_kw = bool(max_days_old and max_days_old <= 7)
+                if _tight_kw or (kept and len(kept) >= max(1, (before_kw + 1) // 2)):
                     if before_kw - len(kept):
                         print(f"    Keyword-presence filter ('{lbl}'): dropped "
                               f"{before_kw - len(kept)} off-keyword posts, {len(kept)} remain")

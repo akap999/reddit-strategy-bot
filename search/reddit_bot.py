@@ -236,7 +236,7 @@ class RedditSearchBot:
         "Mozilla/5.0 (compatible; redditbot/1.0)",
     ]
 
-    def _make_request(self, url, params, timeout=30):
+    def _make_request(self, url, params, timeout=10):
         """Hardened Reddit GET. Handles three failure modes:
 
         1. Transient HTTP errors (429/403/500/502/503/504) — retry
@@ -1042,6 +1042,7 @@ class RedditSearchBot:
         force_refresh=False,
         keywords=None,
         reddit_wide=False,
+        _deadline=None,
     ):
         # `keywords` (optional): the ORIGINAL term list when `keyword` is a
         # combined boolean-OR query. OR-capable legs (RSS/JSON) use the combined
@@ -1167,9 +1168,18 @@ class RedditSearchBot:
                               or min_subscribers is not None
                               or nsfw is not None or excluded_set)
 
+        # Hard wall-clock budget so a search can't grind for minutes when residential RSS underfills and
+        # the slow Arctic (sub×term fan-out) / Pullpush legs + reddit-wide recursion stack up. Shared
+        # across the reddit_wide recursion via _deadline. Returns whatever was gathered by the deadline.
+        search_deadline = _deadline or (time.time() + self._SEARCH_TIME_BUDGET)
+
         for api_name in apis_to_try:
             # Stop early if we already have enough results
             if len(filtered) >= limit:
+                break
+            if time.time() > search_deadline:
+                print(f"    ⏱ search time budget ({self._SEARCH_TIME_BUDGET:.0f}s) reached — "
+                      f"returning {len(filtered)} result(s) gathered so far", flush=True)
                 break
 
             # The 'reddit' leg now means RSS (the JSON path is dead for
@@ -1236,6 +1246,10 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-sub fetch error (reddit rss): {e}")
+                                if time.time() > search_deadline:
+                                    for _fut in futures:
+                                        _fut.cancel()
+                                    break
                     else:
                         batch = self._search_reddit_rss(
                             keyword, subreddit_path, reddit_sort, time_filter, needed_raw
@@ -1265,6 +1279,10 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-sub fetch error (pullpush): {e}")
+                                if time.time() > search_deadline:
+                                    for _fut in futures:
+                                        _fut.cancel()
+                                    break
                     else:
                         batch = self._search_pullpush(
                             keyword, subreddit_path, sort_by, max_days_old,
@@ -1341,6 +1359,10 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-pair fetch error (arctic): {e}")
+                                if time.time() > search_deadline:
+                                    for _fut in futures:
+                                        _fut.cancel()
+                                    break
                         if len(arctic_terms) > 1 or not subreddit_path:
                             print(f"(arctic {len(pairs)} sub×term queries) ", end="")
                 elif api_name == "brave":
@@ -1555,7 +1577,8 @@ class RedditSearchBot:
         # keep their priority/order; globals only fill the remaining tail. Opt-in via
         # `reddit_wide` (the Live Search endpoint turns it on). No recursion loop: the
         # inner call passes subreddits=None, so its own guard is False.
-        if reddit_wide and subreddit_path and api == "auto" and len(result) < limit:
+        if (reddit_wide and subreddit_path and api == "auto" and len(result) < limit
+                and time.time() < search_deadline):
             seen_ids = {p.get("id") for p in result if p.get("id")}
             needed = limit - len(result)
             try:
@@ -1568,7 +1591,7 @@ class RedditSearchBot:
                     min_upvote_ratio=min_upvote_ratio, max_subscribers=max_subscribers,
                     min_subscribers=min_subscribers, max_scrutiny=max_scrutiny,
                     db=db, db_path=db_path, force_refresh=force_refresh,
-                    keywords=keywords, reddit_wide=False,
+                    keywords=keywords, reddit_wide=False, _deadline=search_deadline,
                 )
                 added = 0
                 for p in global_hits:
@@ -1628,6 +1651,10 @@ class RedditSearchBot:
     # so a high needed_raw or a deep subreddit can never paginate the slow legs
     # indefinitely. ~3 pages × 100 = up to ~300 raw, plenty for the over-fetch.
     _MAX_PAGES = 3
+    # Hard wall-clock budget for a single search() (env-overridable). Caps the worst case when the
+    # residential RSS leg underfills and the slow Arctic (sub×term fan-out) / Pullpush legs + the
+    # reddit-wide recursion pile up — the search returns whatever it gathered by the deadline.
+    _SEARCH_TIME_BUDGET = float(os.environ.get("REDDIT_SEARCH_BUDGET", "40"))
 
     # GLOBAL per-host concurrency caps (shared across ALL keyword/sub threads of
     # ALL in-flight searches). The nested keyword-pool × sub-pool executors can

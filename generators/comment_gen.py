@@ -559,6 +559,13 @@ class CommentGenerator:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
+        # FU58: optional residential proxy (REDDIT_HTTP_PROXY) — used ONLY as a fallback when the
+        # normal worker/direct comment fetch is blocked (403/429/empty), retrying DIRECT at
+        # old.reddit.com through a distinct residential IP. Fallback-only → metered GB spent only on a
+        # block. None when the env var is unset → behavior unchanged.
+        import os as _os
+        _rp = _os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+        self._reddit_proxies = {"http": _rp, "https": _rp} if _rp else None
         self._pattern_history = []
         # Records the outcome of the most recent fetch_comments() call so
         # callers (and the API/UI) can report when existing comments
@@ -690,6 +697,18 @@ class CommentGenerator:
         try:
             r = requests.get(rss_url, params={"limit": min(limit, 100)},
                              headers=headers, timeout=20)
+            # FU58: blocked on the worker/direct path → retry DIRECT at old.reddit.com through the
+            # residential proxy (fallback-only, so metered GB is spent only on a real block).
+            if (r.status_code != 200 or not r.text.lstrip().startswith("<?xml")) and self._reddit_proxies:
+                try:
+                    pr = requests.get(f"https://old.reddit.com{m.group(1)}/.rss",
+                                      params={"limit": min(limit, 100)}, headers=headers,
+                                      timeout=20, proxies=self._reddit_proxies)
+                    if pr.status_code == 200 and pr.text.lstrip().startswith("<?xml"):
+                        print("    ✓ comments via residential proxy (RSS)")
+                        r = pr
+                except Exception:
+                    pass
             if r.status_code != 200 or not r.text.lstrip().startswith("<?xml"):
                 return [], "", False
             ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -780,11 +799,21 @@ class CommentGenerator:
         # 1) RSS via the proxy — live + current when the proxy/IP isn't throttled.
         if path_m:
             try:
-                r = requests.get(
-                    f"{base}{path_m.group(1)}/.rss", params={"limit": 1},
-                    headers={"User-Agent": ua,
-                             "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
-                    timeout=20)
+                _rss_h = {"User-Agent": ua,
+                          "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"}
+                r = requests.get(f"{base}{path_m.group(1)}/.rss", params={"limit": 1},
+                                 headers=_rss_h, timeout=20)
+                # FU58: blocked → retry old.reddit.com through the residential proxy (fallback-only).
+                if (r.status_code != 200 or not r.text.lstrip().startswith("<?xml")) and self._reddit_proxies:
+                    try:
+                        pr = requests.get(f"https://old.reddit.com{path_m.group(1)}/.rss",
+                                          params={"limit": 1}, headers=_rss_h, timeout=20,
+                                          proxies=self._reddit_proxies)
+                        if pr.status_code == 200 and pr.text.lstrip().startswith("<?xml"):
+                            print("    ✓ post via residential proxy (RSS)")
+                            r = pr
+                    except Exception:
+                        pass
                 if r.status_code == 200 and r.text.lstrip().startswith("<?xml"):
                     ns = {"atom": "http://www.w3.org/2005/Atom"}
                     for e in _ET.fromstring(r.text).findall("atom:entry", ns):
@@ -939,6 +968,17 @@ class CommentGenerator:
                 else:
                     json_url = f"{clean_url}.json"
                 response = requests.get(json_url, headers=self.headers, timeout=30)
+                # FU58: blocked → retry old.reddit.com/.json through the residential proxy (fallback-only).
+                if response.status_code in (403, 429) and self._reddit_proxies:
+                    try:
+                        from urllib.parse import urlparse as _up
+                        pr = requests.get(f"https://old.reddit.com{_up(clean_url).path}.json",
+                                          headers=self.headers, timeout=30, proxies=self._reddit_proxies)
+                        if pr.status_code == 200:
+                            print("    ✓ comments via residential proxy (JSON)")
+                            response = pr
+                    except Exception:
+                        pass
 
                 if response.status_code == 429:
                     wait = min(2 ** attempt * 3, 30)

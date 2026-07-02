@@ -373,6 +373,12 @@ def _normalize_reddit_comment_url(url):
         return None
     return path + ".json"
 
+# FU58: browser UA — Reddit serves RSS/JSON more readily to a browser UA than to a bot UA like
+# REDDIT_USER_AGENT, especially from a residential IP. Used by _reddit_get + _reddit_rss_fetch.
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
 def _reddit_http_proxies():
     """Return a requests-style proxies dict for the residential HTTP
     proxy (IPRoyal etc.) when REDDIT_HTTP_PROXY is set, else None.
@@ -390,6 +396,64 @@ def _reddit_http_proxies():
         # call. (None would let requests fall back to env proxies.)
         return {"http": None, "https": None}
     return {"http": p, "https": p}
+
+
+def _reddit_rss_fetch(rel_path, params=None, timeout=15):
+    """FU58: fetch a Reddit RSS/Atom path and return the requests Response (caller inspects
+    .status_code / .text), or None if every attempt raised.
+
+    PRIMARY = worker/direct (REDDIT_PROXY_URL or www.reddit.com), forward-proxy OFF, BROWSER UA, up
+    to 3 tries honoring a capped Retry-After. A CONCLUSIVE result — 200 XML, or 404 (gone) — is
+    returned as-is. On a BLOCK (403 / 429 / 5xx / non-XML challenge / network error) the request is
+    retried DIRECT at old.reddit.com through the residential proxy (REDDIT_HTTP_PROXY) when it's set —
+    FALLBACK-ONLY, so metered residential GB is spent only on a real block. `rel_path` starts with '/'
+    (e.g. /r/<sub>/comments/<id>/.rss). This is the shared fetch behind every Check-Live liveness read
+    (comment/post RSS) AND the dashboard Check Live, which flow through it."""
+    import requests as _rq
+    import time as _t
+    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
+    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    headers = {"User-Agent": _BROWSER_UA,
+               "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"}
+
+    def _conclusive(r):
+        return r is not None and (r.status_code == 404 or
+                                  (r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml")))
+
+    last = None
+    for attempt in range(3):
+        try:
+            r = _rq.get(f"{base}{rel_path}", params=params, headers=headers, timeout=timeout,
+                        proxies={"http": None, "https": None})
+            last = r
+            if _conclusive(r):
+                return r
+        except Exception:
+            pass
+        if attempt < 2:
+            wait = 2.0 * (attempt + 1)
+            if last is not None:
+                try:
+                    ra = float(last.headers.get("Retry-After") or 0)
+                    if ra > 0:
+                        wait = min(ra, 5.0)
+                except (TypeError, ValueError):
+                    pass
+            _t.sleep(wait)
+
+    # Blocked on the normal path → retry DIRECT at old.reddit.com through the residential proxy.
+    hp = _reddit_http_proxies()
+    if hp and hp.get("http"):
+        try:
+            pr = _rq.get(f"https://old.reddit.com{rel_path}", params=params, headers=headers,
+                         timeout=timeout, proxies=hp)
+            if _conclusive(pr):
+                print("    ✓ liveness RSS via residential proxy", flush=True)
+                return pr
+            last = last if last is not None else pr
+        except Exception:
+            pass
+    return last
 
 
 def _rss_entry_is_removed(entry, ns):
@@ -463,59 +527,28 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
     # was a post link, not a comment link — can't check a comment.
     if cid == post_id.lower():
         return None
-    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    rss_url = f"{base}/r/{sub}/comments/{post_id}/comment/{cid}/.rss"
-    headers = {
-        "User-Agent": REDDIT_USER_AGENT,
-        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
-    }
-    # Retry transient failures (non-200 / non-XML / network) before giving up.
-    # A single attempt that hiccups returns None → the caller falls to the
-    # cloud-IP-403 JSON path and counts an ERROR, even though the comment is
-    # perfectly readable on a retry. Honoring Retry-After (capped) handles 429.
-    import time as _t_rss
-    last_err = None
-    for attempt in range(3):
-        try:
-            r = _requests.get(rss_url, headers=headers, timeout=timeout,
-                              proxies={"http": None, "https": None})
-            if r.status_code == 200:
-                body = r.text or ""
-                if body.lstrip().startswith("<?xml"):
-                    root = _ET.fromstring(body)
-                    ns = {"atom": "http://www.w3.org/2005/Atom"}
-                    for entry in root.findall("atom:entry", ns):
-                        eid = (entry.find("atom:id", ns).text or "")
-                        if cid in eid.lower():
-                            # Entry present — but Reddit keeps a removed/deleted
-                            # comment in the feed as a blanked-out shell
-                            # ([removed]/[deleted] body, '[deleted]' author).
-                            # Don't score that as live.
-                            return "removed" if _rss_entry_is_removed(entry, ns) else "live"
-                    # Feed parsed but our comment id isn't in it. This is the WEAK signal (FU43): a
-                    # capped/nested/flaky-proxy feed can omit a LIVE comment, so it is NOT a confirmed
-                    # removal. Return "absent" (distinct from the STRONG "removed" shell above) so callers
-                    # can require stronger confirmation before flipping a reported deliverable dead.
-                    return "absent"
-                # 200 but not XML (challenge page) — retry.
-            # Non-200 (429/5xx/proxy hiccup) — back off and retry.
-            if attempt < 2:
-                wait = 2.0 * (attempt + 1)
-                try:
-                    ra = float(r.headers.get("Retry-After") or 0)
-                    if ra > 0:
-                        wait = min(ra, 5.0)
-                except (TypeError, ValueError):
-                    pass
-                _t_rss.sleep(wait)
-        except Exception as e:
-            last_err = e
-            if attempt < 2:
-                _t_rss.sleep(2.0 * (attempt + 1))
-    if last_err:
-        print(f"[COMMENT-RSS] liveness check failed for {comment_url}: {last_err}", flush=True)
-    return None
+    # FU58: fetch via the shared helper (worker/direct primary + residential old.reddit.com fallback
+    # on a block). Verdict logic below is unchanged.
+    r = _reddit_rss_fetch(f"/r/{sub}/comments/{post_id}/comment/{cid}/.rss", timeout=timeout)
+    if r is None or r.status_code != 200:
+        return None
+    body = r.text or ""
+    if not body.lstrip().startswith("<?xml"):
+        return None
+    try:
+        root = _ET.fromstring(body)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            eid = (entry.find("atom:id", ns).text or "")
+            if cid in eid.lower():
+                # Reddit keeps a removed/deleted comment as a blanked-out shell — don't score it live.
+                return "removed" if _rss_entry_is_removed(entry, ns) else "live"
+        # Feed parsed but our comment id isn't in it → WEAK signal (FU43): a capped/nested feed can omit
+        # a LIVE comment, so this is NOT a confirmed removal (callers require stronger confirmation).
+        return "absent"
+    except Exception as e:
+        print(f"[COMMENT-RSS] liveness parse failed for {comment_url}: {e}", flush=True)
+        return None
 
 
 def _post_liveness_via_rss(post_url, timeout=15):
@@ -539,46 +572,28 @@ def _post_liveness_via_rss(post_url, timeout=15):
     if not m:
         return None
     post_path, pid = m.group(1), m.group(2).lower()
-    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    rss_url = f"{base}{post_path}/.rss"
-    headers = {
-        "User-Agent": REDDIT_USER_AGENT,
-        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
-    }
-    for attempt in range(3):
+    # FU58: shared fetch (worker/direct primary + residential old.reddit.com fallback on a block).
+    r = _reddit_rss_fetch(f"{post_path}/.rss", params={"limit": 25}, timeout=timeout)
+    if r is None:
+        return None
+    if r.status_code == 404:
+        return "removed"                                   # post gone entirely
+    if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
         try:
-            r = _requests.get(rss_url, params={"limit": 25}, headers=headers,
-                              timeout=timeout, proxies={"http": None, "https": None})
-            if r.status_code == 404:
-                return "removed"
-            if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
-                root = _ET.fromstring(r.text)
-                ns = {"atom": "http://www.w3.org/2005/Atom"}
-                entries = root.findall("atom:entry", ns)
-                if not entries:
-                    return "removed"
-                # The post's own entry carries the removal signal.
-                for e in entries:
-                    eid = (e.find("atom:id", ns).text or "").lower()
-                    if eid == f"t3_{pid}":
-                        return "removed" if _rss_entry_is_removed(e, ns) else "live"
-                # Post entry absent from its own feed → inconclusive; don't
-                # guess 'live' off the comment entries (that was the old bug).
-                return None
-            # Non-200 / non-XML — back off and retry.
-            if attempt < 2:
-                wait = 2.0 * (attempt + 1)
-                try:
-                    ra = float(r.headers.get("Retry-After") or 0)
-                    if ra > 0:
-                        wait = min(ra, 5.0)
-                except (TypeError, ValueError):
-                    pass
-                _t_post.sleep(wait)
+            root = _ET.fromstring(r.text)
         except Exception:
-            if attempt < 2:
-                _t_post.sleep(2.0 * (attempt + 1))
+            return None
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("atom:entry", ns)
+        if not entries:
+            return "removed"
+        # The post's own t3_ entry carries the removal signal.
+        for e in entries:
+            eid = (e.find("atom:id", ns).text or "").lower()
+            if eid == f"t3_{pid}":
+                return "removed" if _rss_entry_is_removed(e, ns) else "live"
+        # Post entry absent from its own feed → inconclusive; don't guess 'live' off the comments.
+        return None
     return None
 
 
@@ -681,20 +696,15 @@ def _post_feed_scan(post_url, timeout=15):
     if not m:
         return (None, False)
     pid = m.group(2).lower()
-    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    rss_url = f"{base}{m.group(1)}/.rss"
+    # FU58: shared fetch (worker/direct primary + residential old.reddit.com fallback on a block).
+    resp = _reddit_rss_fetch(f"{m.group(1)}/.rss", params={"limit": 100}, timeout=timeout)
+    if resp is None:
+        return (None, False)
+    if resp.status_code == 404:
+        return (None, True)   # post gone entirely
+    if resp.status_code != 200 or not (resp.text or "").lstrip().startswith("<?xml"):
+        return (None, False)
     try:
-        resp = _requests.get(
-            rss_url, params={"limit": 100},
-            headers={"User-Agent": REDDIT_USER_AGENT,
-                     "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"},
-            timeout=timeout, proxies={"http": None, "https": None},
-        )
-        if resp.status_code == 404:
-            return (None, True)   # post gone entirely
-        if resp.status_code != 200 or not (resp.text or "").lstrip().startswith("<?xml"):
-            return (None, False)
         root = _ET.fromstring(resp.text)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         present = set()
@@ -702,21 +712,19 @@ def _post_feed_scan(post_url, timeout=15):
         for e in root.findall("atom:entry", ns):
             eid = (e.find("atom:id", ns).text or "")
             if eid.lower() == f"t3_{pid}":
-                # The post's own entry — a [removed]/[deleted] shell means the post
-                # is gone, so every comment under it is effectively dead.
+                # The post's own entry — a [removed]/[deleted] shell means the post is gone.
                 post_removed = _rss_entry_is_removed(e, ns)
                 continue
             mm = _re.search(r"t1_(\w+)", eid)
             if not mm:
                 continue
-            # A removed/deleted comment still appears as a blanked-out shell —
-            # don't count it as 'present/live'.
+            # A removed/deleted comment appears as a blanked-out shell — don't count it present/live.
             if _rss_entry_is_removed(e, ns):
                 continue
             present.add(mm.group(1).lower())
         return (present, post_removed)
     except Exception as e:
-        print(f"[POST-FEED-RSS] fetch failed for {post_url}: {e}", flush=True)
+        print(f"[POST-FEED-RSS] parse failed for {post_url}: {e}", flush=True)
         return (None, False)
 
 
@@ -771,20 +779,11 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
     if cid == post_id.lower():
         return out  # post link, not a comment link
 
-    proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
-    # Use the POST-LEVEL comment feed, NOT the comment-permalink feed.
-    # Reddit redirects the permalink form (/comments/<post>/comment/<cid>/.rss)
-    # old.reddit -> new reddit, which 403s the proxy's cloud IP — so the old
-    # URL returned nothing and bulk-deploy scored every row 'missing'. The
-    # post feed (/comments/<post>/.rss?limit=100) is the same form Check Live's
-    # _post_feed_scan uses successfully; it carries every live comment's entry
-    # (t1_<cid>) with body + author, so we just locate <cid> within it.
-    rss_url = f"{base}/r/{sub}/comments/{post_id}/.rss"
-    headers = {
-        "User-Agent": REDDIT_USER_AGENT,
-        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
-    }
+    # Use the POST-LEVEL comment feed (/comments/<post>/.rss?limit=100), NOT the comment-permalink
+    # feed (which redirects to new-reddit and 403s the cloud IP). It carries every live comment's
+    # entry (t1_<cid>) with body + author, so we locate <cid> within it. (FU58: fetched via
+    # _reddit_rss_fetch — worker/direct primary + residential old.reddit.com fallback on a block.)
+    rel_rss = f"/r/{sub}/comments/{post_id}/.rss"
 
     def _strip_tags(html):
         txt = re.sub(r"<[^>]+>", " ", html or "")
@@ -801,24 +800,12 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
         except Exception:
             return None
 
-    import time as _time
-    text = None
-    # Retry transient proxy failures (403/429 from the shared-IP block, non-XML
-    # challenge pages, network errors) before giving up. Reddit's block on the
-    # proxy's Cloudflare IP is INTERMITTENT, so a short backoff often gets a
-    # clean feed instead of falling straight through to 'missing' — which was
-    # making bulk deploy report reddit_fetch_failed for whole runs.
-    for _attempt in range(3):
-        try:
-            r = _requests.get(rss_url, params={"limit": 100}, headers=headers,
-                              timeout=timeout, proxies={"http": None, "https": None})
-            if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
-                text = r.text
-                break
-        except Exception:
-            pass
-        if _attempt < 2:
-            _time.sleep(1.0 * (_attempt + 1))   # 1s, then 2s
+    # FU58: shared fetch — worker/direct primary (retries + capped Retry-After) then residential
+    # old.reddit.com fallback on a block. Reddit's IP block is intermittent, so this recovers the feed
+    # instead of falling straight through to 'missing' (which made bulk deploy report whole-run failures).
+    r = _reddit_rss_fetch(rel_rss, params={"limit": 100}, timeout=timeout)
+    text = (r.text if (r is not None and r.status_code == 200
+                       and (r.text or "").lstrip().startswith("<?xml")) else None)
     if text is None:
         return out
     try:

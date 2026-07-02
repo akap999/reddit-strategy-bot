@@ -1342,7 +1342,10 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         title = (article or {}).get("title") or ""
         body = (article or {}).get("body_markdown") or ""
         pv = (persona_voice or "").strip()
-        disc = (disclosure or "").strip() or f"Disclosure: I work with {name}."
+        # Default = collaboration/partnership language (NOT "I work with", which implies employment).
+        # A blog/brand-supplied disclosure overrides this verbatim.
+        disc = (disclosure or "").strip() or \
+            f"Disclosure: This article was written in collaboration with {name}."
 
         if pv:
             persona_block = (
@@ -1369,17 +1372,24 @@ SOURCE ARTICLE (facts to carry over — do NOT copy its wording):
 
 Rules:
   - Return a compelling ARTICLE HEADLINE as `title` (a real headline, not the source title verbatim).
-  - Strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
-    "Unpopular opinion:", "I've been thinking a lot about…".
-  - Skimmable structure: short sections with `##`/`###` subheads, bold, and lists where useful
-    (LinkedIn articles support rich text).
+  - START the body with the affiliation DISCLOSURE as the VERY FIRST line, BEFORE any mention of {name}
+    (FTC "clear and conspicuous"), written exactly as: {disc}
+  - Then a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
+    "Unpopular opinion:", "I've been thinking a lot about…". Commit to a specific, distinctive point of
+    view — no generic thought-leadership filler.
+  - Skimmable structure: short sections with `##`/`###` subheads, bold, and bulleted lists.
+  - Do NOT use Markdown TABLES (pipe `|` tables) or horizontal rules (`---`, `***`, `___`) — LinkedIn's
+    editor renders them as literal characters. Present any comparison as a bolded list or short labeled
+    lines instead.
   - Carry over the SUBSTANTIVE facts/insights from the source, but do NOT fabricate any claim beyond it,
     and do NOT reuse sentences or phrasing from the source — same facts, DIFFERENT words.
-  - Name {name} exactly once as the natural recommendation, with a soft CTA and a link placeholder
-    written exactly as {{link}}.
-  - Include a one-line affiliation DISCLOSURE, written exactly as: {disc}
+  - Do NOT cite the brand's OWN press releases / PR-wire distribution (e.g. PR Newswire) or sponsored
+    coverage as if it were INDEPENDENT third-party validation. Describe how the product works DIRECTLY
+    (the concrete mechanism) rather than leaning on marketing or press quotes.
+  - Name {name} as the natural recommendation (don't over-repeat it), with a soft CTA and a link
+    placeholder written exactly as {{link}}.
   - End with 3-5 relevant hashtags.
-  - About 800-1500 words. Markdown is allowed (subheads, bold, lists).
+  - About 800-1500 words. Markdown is allowed (subheads, bold, lists) — but NO tables and NO horizontal rules.
 
 Return JSON only: {{"title": "the article headline", "body_markdown": "the full article in Markdown"}}"""
         res = self.claude.call(prompt, max_tokens=4000, temperature=0.75)

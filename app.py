@@ -2127,7 +2127,12 @@ def api_blog_export(blog_id):
                    f'<style>{li_css}</style>')
         li_page = (f'<!doctype html>\n<html lang="en"><head>\n{li_head}\n</head>\n<body>\n'
                    f'{inner}\n</body></html>\n')
-        return Response(li_page, mimetype="text/html")   # inline → select-all + rich-text copy
+        li_resp = Response(li_page, mimetype="text/html")   # inline → select-all + rich-text copy
+        if (request.args.get("dl") or "").strip():          # ?dl=1 → download as an .html file
+            _base = art_title or blog.get("title") or "linkedin-article"
+            _slug = (re.sub(r"[^a-z0-9]+", "-", _base.lower()).strip("-") or "linkedin-article")[:60]
+            li_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-linkedin.html"'
+        return li_resp
 
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"

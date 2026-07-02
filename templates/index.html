@@ -12487,6 +12487,7 @@ async function openBlog(id) {
                 <div class="flex gap-2 mt-1">
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article')" title="Copy as clean plain text — LinkedIn's editor ignores raw Markdown">Copy (plain text)</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;dl=1" title="Download the formatted article as an .html file">⬇ Download HTML</a>
                 </div>
             </div>
             <details>
@@ -12586,6 +12587,9 @@ function _stripMd(md) {
         .replace(/\*\*([^*]+)\*\*/g, '$1')              // bold
         .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')        // italics
         .replace(/`([^`]+)`/g, '$1')                    // inline code
+        .replace(/^\s{0,3}(?:[-*_]\s*){3,}$/gm, '')     // horizontal rules --- *** ___
+        .replace(/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$/gm, '') // table separator row |---|---|
+        .replace(/^[ \t]*\|(.+)\|[ \t]*$/gm, (m, row) => row.split('|').map(s => s.trim()).filter(Boolean).join(' — ')) // table rows -> " — "
         .replace(/^\s{0,3}[-*+]\s+/gm, '')              // bullet markers
         .replace(/^\s{0,3}>\s?/gm, '')                  // blockquotes
         .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)') // links -> text (url)

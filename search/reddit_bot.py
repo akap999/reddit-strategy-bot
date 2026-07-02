@@ -312,11 +312,14 @@ class RedditSearchBot:
         except Exception:
             host_lc, path = "", None
 
-        # Is this a Reddit URL? Match any reddit.com subdomain AND
-        # the configured proxy (if any) — the proxy is acting as
-        # Reddit so its responses share Reddit's failure modes.
+        # Is this a Reddit URL? Match reddit.com as a DOMAIN (host == reddit.com or a *.reddit.com
+        # subdomain) AND the configured proxy (if any) — the proxy is acting as Reddit so its responses
+        # share Reddit's failure modes. NOTE: a naive `"reddit.com" in host_lc` SUBSTRING check misfires
+        # on `arctic-shift.photon-reddit.com` (Arctic-Shift's host contains "reddit.com"!) — that mangled
+        # every Arctic request onto old.reddit.com/api/posts/search (404/503/429), killed the Arctic leg,
+        # and burned the whole time budget + residential GB on doomed retries.
         is_reddit_url = (
-            "reddit.com" in host_lc
+            host_lc == "reddit.com" or host_lc.endswith(".reddit.com")
             or (self.using_proxy and self.apis["reddit"] in (url or ""))
         )
 
@@ -1333,7 +1336,7 @@ class RedditSearchBot:
                         # _arctic_sem(4) regardless, so a bigger budget only costs
                         # latency in the throttled case (RSS underfilled) -- a healthy
                         # RSS fills the limit first and the early-stop skips Arctic.
-                        _ARCTIC_BUDGET = min(len(arctic_subs) * len(arctic_terms), 96)
+                        _ARCTIC_BUDGET = min(len(arctic_subs) * len(arctic_terms), 40)
                         pairs, _seen_pairs = [], set()
                         for _pass in range(len(arctic_terms)):
                             for _i, sub in enumerate(arctic_subs):

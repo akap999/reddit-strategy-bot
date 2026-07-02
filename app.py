@@ -855,8 +855,9 @@ def _reddit_get(path, timeout=15, max_retries=3):
     """GET a Reddit API path. Three transport modes, in priority order:
 
     1. Residential HTTP proxy (REDDIT_HTTP_PROXY) — tunnels to
-       www.reddit.com directly through a residential IP. Reddit serves
-       JSON to residential IPs, so this is the preferred path when set.
+       old.reddit.com directly through a residential IP + a browser UA.
+       Reddit 403s anonymous www.reddit.com/.json even from residential,
+       but old.reddit.com serves it, so this is the preferred path when set.
     2. Cloudflare worker (REDDIT_PROXY_URL) — path-rewrite proxy; serves
        RSS but Reddit 403s its JSON.
     3. Direct old.reddit.com — last resort.
@@ -869,12 +870,17 @@ def _reddit_get(path, timeout=15, max_retries=3):
     http_proxies = _reddit_http_proxies()
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     if http_proxies:
-        # Residential proxy: hit www.reddit.com directly, tunneled.
-        base = "https://www.reddit.com"
+        # Residential proxy: hit OLD.reddit.com (NOT www) — Reddit 403s anonymous www.reddit.com/.json
+        # even from a residential IP, but old.reddit.com has much lighter bot-blocking and serves the
+        # same JSON. Combined with the browser UA below, this is what actually gets .json through.
+        base = "https://old.reddit.com"
     else:
         base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
     url = f"{base}{path}"
-    ua = REDDIT_USER_AGENT
+    # Browser UA: Reddit serves .json to a residential IP + browser UA where it 403s a bot UA like
+    # REDDIT_USER_AGENT. Harmless on the worker/direct paths, and often helps there too.
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     headers = {"User-Agent": ua, "Accept": "application/json"}
     last_exc = None
     last_resp = None

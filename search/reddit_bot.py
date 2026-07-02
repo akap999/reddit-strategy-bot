@@ -151,10 +151,12 @@ class RedditSearchBot:
         # The residential proxy is a LOW-VOLUME block fallback (check-live / comment fetch, in app.py +
         # comment_gen). In the HIGH-FAN-OUT Live SEARCH legs it is OFF by default: on a blocked cloud IP
         # the "block fallback" fires on EVERY subreddit, and metered residential latency turns a fast
-        # Arctic/Pullpush search into a multi-minute crawl (and burns the metered GB). Opt in with
-        # REDDIT_SEARCH_USE_RESIDENTIAL=1 only if you specifically want RSS-via-residential in search.
-        self._search_use_residential = os.environ.get(
-            "REDDIT_SEARCH_USE_RESIDENTIAL", "").strip().lower() in ("1", "true", "yes", "on")
+        # Arctic/Pullpush search into a slow crawl. HOWEVER, on Railway's blocked cloud IP the residential
+        # egress is the ONLY leg that returns search results (the free RSS/Arctic/Pullpush legs are walled),
+        # so when a proxy IS configured we default this ON — and keep it fast via a capped residential
+        # timeout + a wider RSS fan-out (below). Force OFF with REDDIT_SEARCH_USE_RESIDENTIAL=0/false.
+        _sflag = os.environ.get("REDDIT_SEARCH_USE_RESIDENTIAL", "").strip().lower()
+        self._search_use_residential = _sflag not in ("0", "false", "no", "off")
         if self._reddit_proxies:
             _sr = "ON" if self._search_use_residential else "OFF (search uses Arctic/Pullpush; "\
                   "residential still covers check-live + comments)"
@@ -353,7 +355,7 @@ class RedditSearchBot:
         if path and is_reddit_url and self._reddit_proxies and self._search_use_residential:
             try:
                 pr = requests.get("https://old.reddit.com" + path, params=params,
-                                  headers=self.headers, timeout=timeout, proxies=self._reddit_proxies)
+                                  headers=self.headers, timeout=min(timeout, 15), proxies=self._reddit_proxies)
                 if pr.status_code == 200 and pr.text.lstrip()[:1] != "<":
                     print("\n    ✓ Reddit JSON via residential proxy", flush=True)
                     return pr
@@ -702,7 +704,7 @@ class RedditSearchBot:
                 direct_url = "https://old.reddit.com" + url[len(rss_base):]
                 try:
                     presp = requests.get(direct_url, params=params, headers=headers,
-                                         timeout=20, proxies=self._reddit_proxies)
+                                         timeout=12, proxies=self._reddit_proxies)
                     if presp.status_code == 200:
                         print(f"\n    ✓ RSS via residential proxy for {direct_url}", flush=True)
                         resp = presp
@@ -1219,10 +1221,12 @@ class RedditSearchBot:
                         # stagger so requests are spaced under the limit. RSS
                         # is fast (~2s/100 posts), so this costs little.
                         def _staggered_rss(idx, sub):
-                            time.sleep(idx * 0.4 + random.uniform(0, 0.2))
+                            # Cap the per-sub stagger so a 20+ sub fan-out doesn't add ~8s of sleep to the
+                            # last subs; the residential IP tolerates a wider pool than the shared IP did.
+                            time.sleep(min(idx * 0.4, 2.0) + random.uniform(0, 0.2))
                             return self._search_reddit_rss(
                                 keyword, sub, reddit_sort, time_filter, per_sub)
-                        with ThreadPoolExecutor(max_workers=min(len(subs), 2)) as ex:
+                        with ThreadPoolExecutor(max_workers=min(len(subs), 5)) as ex:
                             futures = [
                                 ex.submit(_staggered_rss, i, sub)
                                 for i, sub in enumerate(subs)

@@ -11,6 +11,7 @@ cluster fan-out we target on Reddit (see `suggest_keywords`). Unlike the Reddit
 generators, blogs are FIRST-PARTY: they name and recommend the brand (owned media).
 """
 import json
+import os
 import re
 
 from generators.post_gen import PostGenerator
@@ -34,10 +35,18 @@ _THIRD_PARTY_DOMAINS = [
     "techcrunch.com", "theverge.com", "forbes.com", "businessinsider.com",
     "reuters.com", "crunchbase.com", "wikipedia.org",
 ]
-_MAX_WEB_SOURCES = 8              # cap independent third-party sources folded into evidence
-_VERIFY_MAX_SEARCHES = 8         # FU48 deep-verify agent: cap on independent re-check web searches
-_VERIFY_MAX_BRANDS = 6           # FU49 verify+complete: cap on competitor tools sourced per article
+_MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources folded in (was 8 — cost)
+_VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
+_VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
+
+# FU56: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
+# skipped (search result tokens are ~90% of a blog's cost), keeping a full gen under ~$2. Env-overridable.
+_BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "1.5"))
+# FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
+# FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
+# i.e. plan + prioritize instead of a first-come cutoff. The remainder is reserved for verify_and_complete.
+_CEIL_EVIDENCE = round(_BLOG_COST_CEILING * 0.4, 2)
 
 # FU54: stale SaaS-listing / aggregator domains whose pricing lags the vendor. Downranked BELOW the
 # vendor's OWN site and reputable reviews for a price/license cell (a competitor sourced only from one of
@@ -184,10 +193,10 @@ class BlogGenerator:
         out, seen = [], set()
         cat = (category or "").strip()
         brands = [n for n in ([subject] + list(competitors or [])[:1]) if (n or "").strip()]
-        angles = [
+        angles = [   # FU56: 2 angles (was 3) — fewer searches per brand
             "independent user REVIEWS and ratings (e.g. G2, Capterra, Trustpilot, TrustRadius)",
-            "NEWS, funding, launch or analyst coverage (e.g. TechCrunch, Reuters, PR Newswire, Forbes, Crunchbase)",
-            "third-party PRICING, COMMERCIAL LICENSE / terms-of-use (is commercial + monetization use permitted, and per-plan restrictions), comparison or analyst references",
+            "NEWS / funding / analyst coverage OR third-party PRICING & commercial-license / terms references "
+            "(e.g. TechCrunch, Reuters, Forbes, Crunchbase, G2)",
         ]
 
         def _take(srcs):
@@ -211,11 +220,11 @@ class BlogGenerator:
                          + f'. Topic: {seed}. Prefer recent (2024-2025) coverage. It MUST be an '
                            "INDEPENDENT third-party page, NOT the brand's own website.")
                 try:
-                    got = self.claude.search_sources(brief, max_searches=3,
+                    got = self.claude.search_sources(brief, max_searches=2,   # FU56: was 3
                                                      allowed_domains=_THIRD_PARTY_DOMAINS)
                     if not got:
                         # niche brand with no reputable page -> broad web, block the brands' own sites
-                        got = self.claude.search_sources(brief, max_searches=3,
+                        got = self.claude.search_sources(brief, max_searches=2,   # FU56: was 3
                                                          blocked_domains=own_domains)
                     _take(got)
                 except Exception as e:
@@ -506,6 +515,14 @@ class BlogGenerator:
     _SECTION_RE = re.compile(r"(?im)^(#{2,3})[ \t]+(.+?)[ \t]*$")
     _STAT_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
 
+    # FU55: the model narrating its OWN sourcing/editing decisions into the article — a broken comparison
+    # row or an "addressed elsewhere" note. Never real content; scrubbed from the final body.
+    _META_RE = re.compile(
+        r"deduplicated\s+(?:above|below)|no\s+tool-specific\s+fresh\s+fact|per\s+sourcing\s+rules|"
+        r"row(?:'?s)?\s+(?:is|are)\s+removed|removed\s+per\s+sourcing|not\s+a\s+direct\s+comparison\s+row|"
+        r"addressed\s+in\s+the\s+.{0,40}?section\b.{0,30}?rather\s+than",
+        re.IGNORECASE)
+
     def _scrub_punts(self, body):
         """FU47 guarantee: never SHIP a reader-directed 'go verify it yourself' cop-out (the fallback
         the model reaches for when it can't source a value). In a Markdown TABLE row, a cell that STARTS
@@ -527,6 +544,28 @@ class BlogGenerator:
             lines.append(line)
         body = "\n".join(lines)
         body = self._PUNT_SENT_RE.sub(" ", body)          # drop pure go-verify-yourself sentences
+        body = re.sub(r"[ \t]{2,}", " ", body)
+        return body
+
+    def _scrub_meta(self, body):
+        """FU55: drop the model's edit-narration that leaked into the article — a comparison-table ROW
+        or a blockquote/prose SENTENCE that explains a sourcing/editing decision ("… deduplicated above",
+        "… row is removed per sourcing rules", "… addressed in the risk section … rather than a direct
+        comparison row"). Never real content. Matches ONLY edit-narration phrasing, so real rows/sentences
+        are untouched. Runs alongside _scrub_punts at the top of _rebuild_sources."""
+        if not body:
+            return body
+        kept = []
+        for line in body.split("\n"):
+            s = line.strip()
+            # a table row or blockquote line that is pure edit-narration → drop the whole line
+            if (s.startswith("|") or s.startswith(">")) and self._META_RE.search(s):
+                continue
+            kept.append(line)
+        body = "\n".join(kept)
+        # a standalone prose sentence that narrates an edit → drop just that sentence
+        body = re.sub(r"[^.\n]*(?:" + self._META_RE.pattern + r")[^.\n]*\.", " ", body,
+                      flags=re.IGNORECASE)
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
@@ -589,6 +628,7 @@ class BlogGenerator:
         appears with the right URL and no numbering gaps. No-op when there's no evidence or
         nothing was cited."""
         body = self._scrub_punts(body or "")   # FU47: kill reader-directed punts on every path
+        body = self._scrub_meta(body)          # FU55: drop leaked edit-narration (broken table rows/notes)
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not body or not blocks:
             return body
@@ -997,6 +1037,28 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
 
         fresh = []   # each: {"label","url","text"} — appended to _evidence_blocks in [S#] order
 
+        # PRIORITY ORDER (FU56): under a cost ceiling, secure the highest-VALUE sources FIRST so a budget
+        # cutoff only ever drops the least-important searches. Rank: (c2) authoritative core-topic source →
+        # (b) each competitor's OWN vendor page → (c) independent corroboration (least critical, cut first).
+
+        # (c2) PRIMARY / OFFICIAL source for the article's CENTRAL factual claim — the single
+        # highest-authority citation, so fetch it BEFORE spending budget on competitors. Labeled "official ·".
+        core_q = core_topic or (seed or name)
+        try:
+            prim = self.claude.search_sources(
+                f"the OFFICIAL primary source documenting {core_q} — the platform's / regulator's / "
+                f"standard-body's OWN policy, documentation or help page (NOT a third-party blog or "
+                f"review). Return the official page URL + the exact rule / requirement it states.",
+                max_searches=2)
+        except Exception:
+            prim = []
+        for c in (prim or [])[:2]:
+            u = (c.get("url") or "").strip()
+            fct = (c.get("fact") or c.get("title") or "").strip()
+            if u and fct:
+                fresh.append({"label": f"official · {c.get('title') or u}", "url": u,
+                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+
         # (b) SOURCE each named competitor tool from its OWN public pages (vendor domains ALLOWED)
         ctx = f"{cat} {seed}".strip()
         fetch_brief = ("pricing and plans; commercial-use & license terms (is monetization/commercial use "
@@ -1061,7 +1123,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 try:
                     pin = self.claude.search_sources(
                         f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
-                        f"key capabilities", max_searches=3, allowed_domains=[_dom(dom)])
+                        f"key capabilities", max_searches=2, allowed_domains=[_dom(dom)],
+                        first_party=True)   # FU55: vendor's OWN pages — don't tell it to avoid the vendor
                 except Exception:
                     pin = []
                 tool_blocks = _blocks_from(pin)
@@ -1071,7 +1134,7 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
             # vendor reliably even on a cloud IP.
             if dom and not _has_vendor(tool_blocks):
                 try:
-                    fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
+                    fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=2) or ""
                 except Exception:
                     fj = ""
                 if fj.strip():
@@ -1086,7 +1149,7 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                     br = self.claude.search_sources(
                         f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
                         f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
-                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=3)
+                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=2)
                 except Exception:
                     br = []
                 own = [s for s in (br or []) if _same_site(s.get("url"))]
@@ -1128,7 +1191,7 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                       f"the true value + a source URL for each. Claims: {claim_lines or seed}")
         try:
             corr = self.claude.search_sources(
-                corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 4),
+                corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 3),   # FU56: was 4
                 blocked_domains=(blocked or None))
         except Exception:
             corr = []
@@ -1137,26 +1200,6 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
             fct = (c.get("fact") or c.get("title") or "").strip()
             if u and fct:
                 fresh.append({"label": f"third-party · {c.get('title') or u}", "url": u,
-                              "text": fct[:_EVIDENCE_TEXT_CAP]})
-
-        # (c2) PRIMARY / OFFICIAL source for the article's CENTRAL factual claim (FU53): third-party blogs
-        # disagree on core policy claims, so anchor the central claim on the authoritative source (the
-        # platform/regulator's OWN policy page) when one exists. Labeled "official ·" so the reconcile can
-        # prefer it.
-        core_q = core_topic or (seed or name)
-        try:
-            prim = self.claude.search_sources(
-                f"the OFFICIAL primary source documenting {core_q} — the platform's / regulator's / "
-                f"standard-body's OWN policy, documentation or help page (NOT a third-party blog or "
-                f"review). Return the official page URL + the exact rule / requirement it states.",
-                max_searches=3)
-        except Exception:
-            prim = []
-        for c in (prim or [])[:2]:
-            u = (c.get("url") or "").strip()
-            fct = (c.get("fact") or c.get("title") or "").strip()
-            if u and fct:
-                fresh.append({"label": f"official · {c.get('title') or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
 
         if not fresh:
@@ -1215,6 +1258,14 @@ COMPLETE and every stated fact is sourced:
     factual/policy claim lacks a source, CITE the "official ·" primary source above (or attribute it) —
     NEVER delete a whole section to avoid sourcing it. Deletion is allowed ONLY for (i) an off-category tool
     ROW and (ii) a genuinely unsourceable SPECIFIC value in a table CELL — never a section, a stat, or a list.
+  - APPLY EDITS SILENTLY: NEVER write meta-commentary about your sourcing/editing decisions INTO the article.
+    Do NOT add a table row, cell, sentence, or note stating that a tool was "deduplicated above", "removed
+    per sourcing rules", "has no tool-specific fresh fact", or is "addressed elsewhere / not a direct
+    comparison row". When you drop a tool's row, just delete it — never leave a placeholder row or note that
+    explains the removal. The reader must never see your rationale.
+  - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
+    facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
+    that tool's whole row — never ship a kept row with a blank or "—" cell.
   - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
     loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
     ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
@@ -1291,10 +1342,16 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         `deep_verify` (opt-in): deepen the independent CORROBORATION of the brand's own claims (FU48).
         The competitor-sourcing + comparison-table FILL (FU49) runs on EVERY blog regardless."""
         self.claude.reset_usage()   # FU54: cost this generation from real API usage
+        # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
+        # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
+        # official/vendor sourcing in verify_and_complete. Keeps a full gen under ~$2 WITHOUT a blunt cutoff
+        # that would starve the most valuable searches.
+        self.claude.set_cost_ceiling(_CEIL_EVIDENCE)
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
                                          research_notes=research_notes,
                                          use_web_search=use_web_search,
                                          reddit_thread=reddit_thread)
+        self.claude.set_cost_ceiling(_BLOG_COST_CEILING)   # raise to the full budget for the priority stage
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence)
         if not article:

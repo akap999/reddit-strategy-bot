@@ -10,12 +10,29 @@ They pin the guarantees that stop the per-round blog quality DECLINE:
 """
 import os
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from generators.base import ClaudeClient
 from generators.blog_gen import BlogGenerator, _norm_domain, _parse_faq_pairs, build_blog_jsonld
 from tests.stubs import StubClaude
+
+
+def _fake_client():
+    """A ClaudeClient whose HTTP layer is replaced with a recorder that returns an empty message
+    (no network). `captured` holds the last create() kwargs."""
+    c = ClaudeClient("x")
+    captured = {}
+
+    class _Msgs:
+        def create(self, **kw):
+            captured.update(kw)
+            return SimpleNamespace(content=[], usage=SimpleNamespace(
+                input_tokens=0, output_tokens=0, server_tool_use=None))
+
+    c.client = SimpleNamespace(messages=_Msgs())
+    return c, captured
 
 
 def _gen():
@@ -189,3 +206,69 @@ def test_v8_body_from_db_has_no_brand_promo_in_schema():
     bn = brand["name"].lower()
     qs = [q["name"].lower() for q in faqpage[0]["mainEntity"]]
     assert not any(bn in q for q in qs), f"brand-promo FAQ leaked into schema: {qs}"
+
+
+# --- FU55 Change 3: _scrub_meta (edit-narration scrub) --------------------------
+def test_scrub_meta_drops_leaked_table_row_keeps_real_rows():
+    gen = _gen()
+    md = (
+        "| Tool | Price |\n| --- | --- |\n"
+        "| Suno | $10/mo |\n"
+        "| Beatoven rows are deduplicated above; Udio has no tool-specific fresh fact and its row "
+        "is removed per sourcing rules. | |\n"
+        "| Mubert | $14/mo |\n"
+    )
+    out = gen._scrub_meta(md)
+    assert "deduplicated above" not in out and "per sourcing rules" not in out
+    assert "| Suno | $10/mo |" in out and "| Mubert | $14/mo |" in out   # real rows survive
+
+
+def test_scrub_meta_drops_note_and_prose_keeps_content():
+    gen = _gen()
+    body = (
+        "> Note: AI Cover Generator tools are addressed in the risk section above rather than as a "
+        "direct comparison row.\n\n"
+        "Udio's row is removed per sourcing rules.\n\n"
+        "Soundraw generates original royalty-free tracks with a commercial license.\n"
+    )
+    out = gen._scrub_meta(body)
+    assert "addressed in the risk section" not in out
+    assert "removed per sourcing rules" not in out
+    assert "Soundraw generates original royalty-free tracks" in out   # real sentence untouched
+
+
+# --- FU55 Change 1: search_sources first-party framing (the t1=0 fix) -----------
+def test_search_sources_first_party_prompt_drops_anti_own_site():
+    c, captured = _fake_client()
+    c.search_sources("Suno pricing", allowed_domains=["suno.com"])                 # default = third-party
+    assert "NOT the brands' own websites" in captured["messages"][0]["content"]
+    c.search_sources("Suno pricing", allowed_domains=["suno.com"], first_party=True)  # FU55 vendor mode
+    p = captured["messages"][0]["content"]
+    assert "NOT the brands' own websites" not in p       # the contradiction is gone
+    assert "OWN pages" in p                               # first-party guidance
+    assert captured["tools"][0].get("allowed_domains") == ["suno.com"]
+
+
+# --- FU55 Change 2: fetch_site_facts no longer NameErrors (missing import re) ----
+def test_fetch_site_facts_no_nameerror():
+    c, _ = _fake_client()
+    # Pre-fix this raised NameError on the re.sub domain-normalization → caller swallowed it → t2=0.
+    out = c.fetch_site_facts("https://www.suno.com/", "Suno", "pricing/plans; license terms")
+    assert out == ""   # returns gracefully (no facts parsed from the empty fake message), never raises
+
+
+# --- FU56 Change: cost ceiling stops searches once the running cost hits the cap -----
+def test_cost_ceiling_skips_searches_over_budget():
+    c, captured = _fake_client()
+    c.set_cost_ceiling(1.0)
+    c._usage = {"input_tokens": 400_000, "output_tokens": 0, "web_search_requests": 0}  # 0.4M*$3 = $1.20 > $1.00
+    assert c.usage_cost() >= 1.0
+    # all three web-search-backed calls short-circuit WITHOUT hitting the API
+    assert c.search_sources("x", allowed_domains=["suno.com"]) == []
+    assert c.fetch_site_facts("suno.com", "S", "x") == ""
+    assert c.find_official_domain("Suno") == ""
+    assert captured == {}, "no API call should be made once over the cost ceiling"
+    # back under budget → the call is attempted again
+    c.reset_usage()
+    c.search_sources("x")
+    assert captured, "under budget, search_sources should hit the (fake) API"

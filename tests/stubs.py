@@ -46,8 +46,10 @@ class StubClaude:
         return ""
 
     # --- web-search-backed helpers ---
-    def search_sources(self, brief, max_searches=4, allowed_domains=None, blocked_domains=None):
-        self.searches.append({"brief": brief, "allowed": allowed_domains, "blocked": blocked_domains})
+    def search_sources(self, brief, max_searches=4, allowed_domains=None, blocked_domains=None,
+                       first_party=False):
+        self.searches.append({"brief": brief, "allowed": allowed_domains,
+                              "blocked": blocked_domains, "first_party": first_party})
         if callable(self._search_handler):
             return self._search_handler(brief, allowed_domains, blocked_domains) or []
         return []

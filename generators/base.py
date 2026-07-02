@@ -5,6 +5,7 @@ Extracted from comment_generator.py + 5 new personas.
 
 import anthropic
 import json
+import re
 import time
 import random
 
@@ -351,10 +352,22 @@ class ClaudeClient:
         # `usage_cost()` turns it into dollars. A fresh client per blog task scopes it to
         # one generation. Callers that don't read it are unaffected.
         self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+        # FU55: optional live COST CEILING ($). Once accumulated cost reaches it, further
+        # web_search-backed calls (search_sources / fetch_site_facts / find_official_domain) are
+        # SKIPPED, so a generation can't blow past a dollar budget. None = no cap (default).
+        self._cost_ceiling = None
 
     def reset_usage(self):
         """Zero the usage accumulator (call at the start of a generation to cost it)."""
         self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+
+    def set_cost_ceiling(self, dollars):
+        """Cap web-search spend for this generation: once usage_cost() >= dollars, further
+        search calls are skipped (return []/""). Pass None to disable."""
+        self._cost_ceiling = dollars
+
+    def _over_budget(self):
+        return self._cost_ceiling is not None and self.usage_cost() >= self._cost_ceiling
 
     def _track(self, message):
         """Add one API response's token + web-search usage to the accumulator. Never raises
@@ -496,31 +509,51 @@ class ClaudeClient:
             return None
 
     def search_sources(self, brief, max_searches=4, allowed_domains=None,
-                       blocked_domains=None):
-        """Use Anthropic's server-side `web_search` tool to find INDEPENDENT third-party
-        sources for `brief`. Returns a list of {title, url, fact} (deduped by url), or []
-        on ANY error — must never raise, so blog generation never breaks when off/failing.
+                       blocked_domains=None, first_party=False):
+        """Use Anthropic's server-side `web_search` tool to find sources for `brief`. Returns a
+        list of {title, url, fact} (deduped by url), or [] on ANY error — must never raise, so
+        blog generation never breaks when off/failing.
 
-        web_search is a SERVER tool: Anthropic runs the searches inside this single
-        request and returns the completed message (search results + final text), so there
-        is no client-side tool loop to manage. `allowed_domains` / `blocked_domains` are
-        mutually exclusive — pass at most one (we use blocked_domains to exclude the brands'
-        OWN sites and let the whole web answer, which surfaces real independent coverage).
+        web_search is a SERVER tool: Anthropic runs the searches inside this single request and
+        returns the completed message (search results + final text), so there is no client-side
+        tool loop to manage. `allowed_domains` / `blocked_domains` are mutually exclusive — pass at
+        most one.
+
+        `first_party` (FU55): when True, this is VENDOR sourcing (pin `allowed_domains=[the vendor]`
+        and pull ITS OWN pages). The default guidance says "find third-party sources — NOT the
+        brands' own websites", which DIRECTLY CONTRADICTS an allowed_domains pinned to the vendor's
+        own site → 0 results (the v9 `t1=0`-for-all bug). `first_party=True` swaps that guidance for
+        a first-party one so the pinned search actually returns the vendor's own pricing/terms pages.
+        Default False keeps every third-party / corroboration caller byte-identical.
         """
+        if self._over_budget():   # FU55: cost ceiling reached → stop searching
+            print("    search_sources: skipped (cost ceiling reached)", flush=True)
+            return []
         tool = {"type": "web_search_20250305", "name": "web_search",
                 "max_uses": int(max_searches)}
         if blocked_domains:
             tool["blocked_domains"] = list(blocked_domains)
         elif allowed_domains:
             tool["allowed_domains"] = list(allowed_domains)
-        prompt = (
-            f"{brief}\n\nFind INDEPENDENT third-party sources (review sites, news, analyst "
-            "pages — NOT the brands' own websites) that support specific factual claims for "
-            "the above. Use web search, then respond with JSON ONLY (no prose, no code "
-            'fences): {"sources": [{"title": "...", "url": "...", "fact": "one specific, '
-            'sourced fact this page supports"}]}. Include only sources you actually found; '
-            "omit anything you could not verify."
-        )
+        if first_party:
+            guidance = (
+                "Use web search to pull the OWN pages of the allowed site that answer the above — "
+                "its pricing / plans, license / commercial-use / royalty-free terms, and key "
+                "features/capabilities. Return the SPECIFIC page URLs on that site (e.g. its "
+                "pricing or terms page), NOT third-party reviews. Respond with JSON ONLY (no prose, "
+                'no code fences): {"sources": [{"title": "...", "url": "...", "fact": "one specific '
+                'fact stated on that page"}]}. Include only pages you actually found on that site.'
+            )
+        else:
+            guidance = (
+                "Find INDEPENDENT third-party sources (review sites, news, analyst pages — NOT the "
+                "brands' own websites) that support specific factual claims for the above. Use web "
+                'search, then respond with JSON ONLY (no prose, no code fences): {"sources": '
+                '[{"title": "...", "url": "...", "fact": "one specific, sourced fact this page '
+                'supports"}]}. Include only sources you actually found; omit anything you could not '
+                "verify."
+            )
+        prompt = f"{brief}\n\n{guidance}"
         try:
             message = self.client.messages.create(
                 model=self.model,
@@ -571,6 +604,9 @@ class ClaudeClient:
         when a direct HTTP fetch of the site is blocked on a cloud IP. Reuses the same proven
         web_search plumbing as `search_sources`. Returns a combined facts string (each line a
         sourced fact), or "" on ANY error/empty — must never raise (generation continues)."""
+        if self._over_budget():   # FU55: cost ceiling reached → stop searching
+            print("    fetch_site_facts: skipped (cost ceiling reached)", flush=True)
+            return ""
         domain = re.sub(r"^https?://", "", str(domain or "").strip().lower()).strip("/").split("/")[0]
         brand = (brand or "").strip()
         if not domain:
@@ -628,6 +664,8 @@ class ClaudeClient:
         Used to resolve a niche or same-named competitor to the RIGHT peer site (e.g.
         Profound the AI-search tool -> tryprofound.com, NOT the famous same-named
         profound.com) when the model's training-knowledge guess is unreliable."""
+        if self._over_budget():   # FU55: cost ceiling reached → stop searching
+            return ""
         brand = (brand or "").strip()
         if not brand:
             return ""

@@ -1838,6 +1838,11 @@ def api_blog_regenerate(blog_id):
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
             claude.reset_usage()   # FU54: cost this regeneration from real API usage
+            try:
+                from generators.blog_gen import _BLOG_COST_CEILING
+                claude.set_cost_ceiling(_BLOG_COST_CEILING)   # FU56: keep a regen under ~$2
+            except Exception:
+                pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
             gen = BlogGenerator(claude, bg)
             seed = blog.get("seed") or ""

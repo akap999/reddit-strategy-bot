@@ -1802,10 +1802,12 @@ def api_blog_generate():
                 prompt_version=blog.get("prompt_version", ""),
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_url=reddit_url,
-                reddit_status=reddit_status, deep_verify=deep_verify, **byline,
+                reddit_status=reddit_status, deep_verify=deep_verify,
+                gen_cost=blog.get("gen_cost", 0), **byline,
             )
             return {"blog_id": blog_id, "reddit_status": reddit_status,
-                    "reddit_note": _reddit_status_note(reddit_status)}
+                    "reddit_note": _reddit_status_note(reddit_status),
+                    "gen_cost": blog.get("gen_cost", 0)}
         finally:
             bg.close()
 
@@ -1835,6 +1837,7 @@ def api_blog_regenerate(blog_id):
             if not brand:
                 raise ValueError("brand not found")
             claude = ClaudeClient(api_key)
+            claude.reset_usage()   # FU54: cost this regeneration from real API usage
             brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
             gen = BlogGenerator(claude, bg)
             seed = blog.get("seed") or ""
@@ -1905,8 +1908,10 @@ def api_blog_regenerate(blog_id):
                 bg.update_blog(blog_id, linkedin_text=li or "")
             if stored_reddit:
                 bg.update_blog(blog_id, reddit_status=reddit_status)
+            regen_cost = round(claude.usage_cost(), 4)   # FU54: cost of this regeneration
+            bg.update_blog(blog_id, gen_cost=regen_cost)
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
-                    "reddit_note": _reddit_status_note(reddit_status)}
+                    "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost}
         finally:
             bg.close()
 

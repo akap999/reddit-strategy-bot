@@ -39,6 +39,14 @@ _VERIFY_MAX_SEARCHES = 8         # FU48 deep-verify agent: cap on independent re
 _VERIFY_MAX_BRANDS = 6           # FU49 verify+complete: cap on competitor tools sourced per article
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
 
+# FU54: stale SaaS-listing / aggregator domains whose pricing lags the vendor. Downranked BELOW the
+# vendor's OWN site and reputable reviews for a price/license cell (a competitor sourced only from one of
+# these read as stale in v8, e.g. SaaSworthy's Beatoven price).
+_STALE_AGGREGATORS = {
+    "saasworthy.com", "softwarefinder.com", "eesel.ai", "softwaresuggest.com",
+    "goodfirms.co", "sourceforge.net", "slashdot.org", "toolify.ai", "futurepedia.io",
+}
+
 
 def _as_list(raw):
     """Best-effort list of non-empty strings from a JSON string / delimited string /
@@ -57,6 +65,14 @@ def _as_list(raw):
         if v:
             out.append(v)
     return out
+
+
+def _norm_domain(u):
+    """Registrable-ish domain from a url/bare domain: strip scheme + path + a leading 'www.' so a
+    www / non-www variant compares equal (FU54). Module-level so it's unit-testable."""
+    u = re.sub(r"^https?://", "", (u or "").strip()).rstrip("/")
+    d = u.split("/")[0].lower()
+    return d[4:] if d.startswith("www.") else d
 
 
 class BlogGenerator:
@@ -486,6 +502,10 @@ class BlogGenerator:
         r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented)\b[^.\n]*\.",
         re.IGNORECASE)
 
+    # FU54 substance guard: section splitter (## / ### headings) + concrete-stat detector.
+    _SECTION_RE = re.compile(r"(?im)^(#{2,3})[ \t]+(.+?)[ \t]*$")
+    _STAT_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+
     def _scrub_punts(self, body):
         """FU47 guarantee: never SHIP a reader-directed 'go verify it yourself' cop-out (the fallback
         the model reaches for when it can't source a value). In a Markdown TABLE row, a cell that STARTS
@@ -510,6 +530,55 @@ class BlogGenerator:
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
+    def _split_sections(self, body):
+        """[(heading_text_lower, full_block)] for each ## / ### section (heading line + content up to
+        the next ## / ### heading). Content before the first heading (e.g. the byline) is not a section."""
+        body = body or ""
+        out = []
+        matches = list(self._SECTION_RE.finditer(body))
+        for i, m in enumerate(matches):
+            title = m.group(2).strip().strip("#").strip().lower()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+            out.append((title, body[m.start():end].rstrip()))
+        return out
+
+    def _restore_dropped_sections(self, draft, revised):
+        """FU54 substance guard: if the verify/reconcile rewrite DROPPED a whole ## / ### section that was
+        in the draft, re-append that section's ORIGINAL content (before ## Sources) so substantive prose —
+        a policy section, a checklist — can't silently vanish. Restores SECTIONS only; it never re-adds an
+        individual dropped table-cell value (those stay dropped — anti-fabrication intact). Heading match is
+        exact/lowercased, so it targets outright DELETION (a renamed heading is treated as dropped and the
+        original restored — content-preservation over cosmetic dedup). Skips Sources/FAQ (handled elsewhere).
+        No-op when nothing was dropped."""
+        draft = draft or ""
+        revised = revised or ""
+        if not draft.strip() or not revised.strip():
+            return revised or draft
+        rev_titles = {t for t, _ in self._split_sections(revised)}
+        restored = [block for title, block in self._split_sections(draft)
+                    if title and title not in ("sources", "faq") and title not in rev_titles]
+        if not restored:
+            return revised
+        for block in restored:
+            head = block.splitlines()[0].strip() if block.splitlines() else "?"
+            print(f"[blog_gen] substance-guard: restored dropped section {head!r}", flush=True)
+        add = "\n\n" + "\n\n".join(restored).strip() + "\n"
+        m = re.search(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", revised)
+        if m:
+            return revised[:m.start()].rstrip() + add + "\n" + revised[m.start():]
+        return revised.rstrip() + add
+
+    def _dropped_stats(self, draft, revised):
+        """Concrete stats (multi-digit numbers / percentages / counts) present in the draft but MISSING
+        from the revised body — a log/test SIGNAL (not auto-restored; mid-paragraph insertion is fragile)."""
+        def stats(t):
+            out = set()
+            for s in self._STAT_RE.findall(t or ""):
+                if len(re.sub(r"\D", "", s)) >= 3:   # keep the big citation-magnet numbers (8,600 / 51,000)
+                    out.add(s)
+            return out
+        return sorted(stats(draft) - stats(revised))
+
     def _rebuild_sources(self, body):
         """Deterministically rebuild the article's ## Sources from the evidence map captured by
         the last `_gather_evidence` call. Renumbers the [S#] markers the model actually used to a
@@ -530,15 +599,16 @@ class BlogGenerator:
             idx = int(m.group(1))
             if 1 <= idx <= len(blocks) and idx not in used:
                 used.append(idx)
-        # FU46 backstop: a deliberately-attached community/Reddit thread must ALWAYS be listed in
-        # ## Sources, even if the model didn't cite it inline (the community clause says MUST cite, but
-        # this guarantees the URL survives regardless). Force any uncited community block into the render
-        # set so it gets a Sources entry. Non-community uncited blocks are still dropped as before.
-        def _is_community(bl):
+        # FU46/FU54 backstop: a deliberately-attached community/Reddit thread OR an authoritative
+        # "official ·" primary source must ALWAYS be listed in ## Sources, even if the model didn't cite it
+        # inline — the highest-authority source can never be silently dropped. Force such blocks into the
+        # render set so they get a Sources entry. Other uncited blocks are still dropped as before.
+        def _is_forced(bl):
             lab = (bl.get("label") or "").lower()
             url = (bl.get("url") or "").lower()
-            return lab.startswith("community discussion") or "reddit.com" in url
-        forced = [i + 1 for i, bl in enumerate(blocks) if _is_community(bl) and (i + 1) not in used]
+            return (lab.startswith("community discussion") or lab.startswith("official ·")
+                    or "reddit.com" in url)
+        forced = [i + 1 for i, bl in enumerate(blocks) if _is_forced(bl) and (i + 1) not in used]
         render = used + forced
         if not render:
             return body   # nothing valid cited and no community block — leave the body untouched
@@ -736,10 +806,14 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     as a fit. (AI engines lift this as the extractable answer.)
   - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-  - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end. Format the
-    FAQ STRICTLY as: each question is an H3 heading ending in "?" (e.g. "### Does {name} ship
-    nationwide?"), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (This
-    exact format is parsed into FAQPage structured data — keep it consistent.)
+  - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
+    entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
+    engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
+    "What is the cheapest {name} plan?" or "Can I use {name} for X?"; those belong in the body, not the
+    FAQ). The FAQ is parsed into FAQPage structured data, which must ANSWER THE TOPIC, not advertise the
+    brand. Format STRICTLY: each question is an H3 heading ending in "?" (a real question about the topic,
+    not about {name}), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (Keep
+    this exact format — it is parsed into FAQPage structured data.)
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
@@ -883,9 +957,7 @@ Return JSON only:
             return None
         cat = (brand.get("category") or "").strip()
 
-        def _dom(u):
-            u = re.sub(r"^https?://", "", (u or "").strip()).rstrip("/")
-            return u.split("/")[0].lower()
+        _dom = _norm_domain   # FU54: registrable domain (scheme/path/www. stripped) — see module helper
 
         # (a) extract comparison tools + dimensions + high-risk claims
         claim_prompt = f"""From this article about {name}, extract for verification:
@@ -897,14 +969,19 @@ Return JSON only:
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
     plan / license term, superlatives) — each with the brand it's about, the dimension, and the value.
+  - CORE_TOPIC: the article's CENTRAL subject AND the authority that officially documents it — a short
+    phrase naming the platform / regulator / standard whose OWN page is the highest-authority source
+    (e.g. "TikTok — synthetic-media / AI-content labeling / monetization policy", "FDA guidance on <X>",
+    "GDPR data-retention rules"). Empty if the article has no such external authority.
 
 ARTICLE:
 {body[:6000]}
 
-Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
+Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
   "claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
         cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
         cres = cres if isinstance(cres, dict) else {}
+        core_topic = str(cres.get("core_topic") or "").strip()
         tools = [str(t).strip() for t in (cres.get("tools") or [])
                  if str(t).strip() and str(t).strip().lower() != name.lower()]
         dims = [str(d).strip() for d in (cres.get("dimensions") or []) if str(d).strip()]
@@ -930,6 +1007,22 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 dom = self.claude.find_official_domain(tool, ctx)
             except Exception:
                 dom = ""
+            # FU54: when the resolver fails, recover the tool's OWN domain from a web search so the
+            # vendor tiers can still run. Competitors depend on this — the SUBJECT sources from its known
+            # domain_url, but a competitor with no resolved domain skips Tier 1+2 and falls to a review.
+            if not dom:
+                try:
+                    cand = self.claude.search_sources(
+                        f"the OFFICIAL website (its own product homepage) of {tool} "
+                        f"({cat or 'the tool'}) — NOT a review site, app store, or directory",
+                        max_searches=2)
+                except Exception:
+                    cand = []
+                for s in (cand or []):
+                    d = _norm_domain(s.get("url"))
+                    if d and d not in _THIRD_PARTY_DOMAINS and d not in _STALE_AGGREGATORS:
+                        dom = d
+                        break
 
             def _same_site(u, dom=dom):
                 """True when url u is the tool's OWN site (its registrable domain or a subdomain)."""
@@ -960,8 +1053,10 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 return any(_same_site(b["url"]) for b in (blocks or []))
 
             tool_blocks = []
-            # Tier 1 — web search PINNED to the tool's OWN domain → SPECIFIC pages (pricing/terms) WITH
-            # their urls → cite the exact vendor page, not a review.
+            n1 = n3 = 0            # FU54: per-tier hit counts for the diagnostic log line
+            t2_added = False
+            # Tier 1 — web search PINNED to the tool's OWN registrable domain → SPECIFIC pages
+            # (pricing/terms) WITH their urls → cite the exact vendor page, not a review.
             if dom:
                 try:
                     pin = self.claude.search_sources(
@@ -970,8 +1065,10 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 except Exception:
                     pin = []
                 tool_blocks = _blocks_from(pin)
-            # Tier 2 — fetch_site_facts (reliable vendor facts, root url) whenever Tier 1 gave NO vendor
-            # page. Different plumbing than the pinned search, so together they source the vendor reliably.
+                n1 = len(tool_blocks)
+            # Tier 2 — fetch_site_facts (the IP-INDEPENDENT web-search-pinned vendor path — the same one
+            # the SUBJECT uses reliably) whenever Tier 1 gave NO vendor page. Together they source the
+            # vendor reliably even on a cloud IP.
             if dom and not _has_vendor(tool_blocks):
                 try:
                     fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
@@ -980,9 +1077,10 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 if fj.strip():
                     tool_blocks.append({"label": tool, "url": f"https://{_dom(dom)}",
                                         "text": fj[:_EVIDENCE_TEXT_CAP]})
+                    t2_added = True
             # Tier 3 — ONLY when no VENDOR block exists. Prefer the tool's own domain, then a REPUTABLE
-            # review (G2/Capterra/Trustpilot/… — _THIRD_PARTY_DOMAINS); a random blog is the last resort and
-            # is honestly labeled 'third-party ·' (never presented as the vendor).
+            # review (G2/Capterra/… — _THIRD_PARTY_DOMAINS); a stale SaaS aggregator or random blog is the
+            # last resort and is honestly labeled 'third-party ·' (never presented as the vendor).
             if not _has_vendor(tool_blocks):
                 try:
                     br = self.claude.search_sources(
@@ -994,17 +1092,21 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 own = [s for s in (br or []) if _same_site(s.get("url"))]
                 reputable = [s for s in (br or []) if _dom(s.get("url")) in _THIRD_PARTY_DOMAINS]
                 named = [s for s in (br or [])
-                         if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()]
-                tool_blocks = tool_blocks + _blocks_from(own or reputable or named)
+                         if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()
+                         and _dom(s.get("url")) not in _STALE_AGGREGATORS]   # FU54: downrank stale aggregators
+                added = _blocks_from(own or reputable or named)
+                n3 = len(added)
+                tool_blocks = tool_blocks + added
 
             if tool_blocks:
                 fresh.extend(tool_blocks)
-                print(f"[blog_gen] verify+complete: sourced {tool} <- "
-                      f"{', '.join(b['url'] for b in tool_blocks)} "
-                      f"({'vendor' if _has_vendor(tool_blocks) else 'third-party only'})", flush=True)
+                print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} "
+                      f"t1={n1} t2={int(t2_added)} t3={n3} -> "
+                      f"{'vendor' if _has_vendor(tool_blocks) else 'third-party'} <- "
+                      f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
             else:
-                print(f"[blog_gen] verify+complete: {tool} — could NOT source individually (row will be "
-                      f"dropped, not generalized)", flush=True)
+                print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} t1=0 t2=0 t3=0 -> none "
+                      f"(could NOT source individually — row will be dropped, not generalized)", flush=True)
 
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
@@ -1041,12 +1143,13 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
         # disagree on core policy claims, so anchor the central claim on the authoritative source (the
         # platform/regulator's OWN policy page) when one exists. Labeled "official ·" so the reconcile can
         # prefer it.
+        core_q = core_topic or (seed or name)
         try:
             prim = self.claude.search_sources(
-                f"the PRIMARY / OFFICIAL source for the central claim of an article about "
-                f"'{seed or name}' — the platform's or regulator's OWN policy / documentation / help page "
-                f"(not a third-party blog). Return the official page URL + the exact rule it states.",
-                max_searches=2)
+                f"the OFFICIAL primary source documenting {core_q} — the platform's / regulator's / "
+                f"standard-body's OWN policy, documentation or help page (NOT a third-party blog or "
+                f"review). Return the official page URL + the exact rule / requirement it states.",
+                max_searches=3)
         except Exception:
             prim = []
         for c in (prim or [])[:2]:
@@ -1082,10 +1185,13 @@ COMPLETE and every stated fact is sourced:
   - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
     block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
     then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
-    vs annual) — NEVER present an annual price as a monthly one.
-  - CORE CLAIM: for the article's central factual/policy claim, PREFER an "official ·" primary source (the
-    platform/regulator's own policy page) and cite it; do NOT state two contradictory versions of that claim
-    — resolve it to the authoritative source.
+    vs annual) — NEVER present an annual price as a monthly one. NEVER cite a stale SaaS aggregator (e.g.
+    SaaSworthy, SoftwareFinder) for a price when a vendor page or reputable review is available; if only an
+    aggregator has it, attribute it and keep the billing basis, or drop the exact figure.
+  - CORE CLAIM: for the article's central factual/policy claim, cite the "official ·" primary source (the
+    platform/regulator's own policy page) when one is provided above, and resolve any two contradictory
+    versions to that authoritative source. The central claim (and the section that carries it) MUST REMAIN
+    in the article — never drop it to avoid a contradiction; reconcile it instead.
   - A tool's cells may ONLY be filled from a FRESH FACT that is ABOUT that SPECIFIC tool (a block labeled
     with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
     TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
@@ -1104,6 +1210,11 @@ COMPLETE and every stated fact is sourced:
   - NEVER invent a value or a source — fill only from the FRESH FACTS (or the article's existing cited
     facts). Preserve the structure (Quick answer, question H2s, FAQ) and the byline/disclosure lines at top;
     keep {name}'s existing [S#] citations intact.
+  - PRESERVE SUBSTANCE: you may FILL, SOURCE, FIX and REORDER, but you may NOT DELETE any ## / ### SECTION,
+    any concrete STATISTIC / number, or any LIST (e.g. a checklist) that is in the draft. If a section's
+    factual/policy claim lacks a source, CITE the "official ·" primary source above (or attribute it) —
+    NEVER delete a whole section to avoid sourcing it. Deletion is allowed ONLY for (i) an off-category tool
+    ROW and (ii) a genuinely unsourceable SPECIFIC value in a table CELL — never a section, a stat, or a list.
   - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
     loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
     ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
@@ -1179,6 +1290,7 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         the article may cite as COMMUNITY social proof (the brand's own live post + comments).
         `deep_verify` (opt-in): deepen the independent CORROBORATION of the brand's own claims (FU48).
         The competitor-sourcing + comparison-table FILL (FU49) runs on EVERY blog regardless."""
+        self.claude.reset_usage()   # FU54: cost this generation from real API usage
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
                                          research_notes=research_notes,
                                          use_web_search=use_web_search,
@@ -1187,6 +1299,7 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
                                         evidence=evidence)
         if not article:
             return None
+        draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
         v = self.verify_claims(brand, article, evidence=evidence)
         if v:
             article["body_markdown"] = v["body_markdown"]
@@ -1200,10 +1313,19 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         if vc:
             article["body_markdown"] = vc["body_markdown"]
             article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
+        # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
+        # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
+        article["body_markdown"] = self._restore_dropped_sections(draft_body, article["body_markdown"])
+        missing_stats = self._dropped_stats(draft_body, article["body_markdown"])
+        if missing_stats:
+            print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article)
         article["prompt_version"] = PROMPT_VERSION
+        # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.
+        article["gen_cost"] = round(self.claude.usage_cost(), 4)
+        article["gen_usage"] = dict(self.claude._usage)
         return article
 
 
@@ -1334,6 +1456,13 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
         article["mainEntityOfPage"] = {"@type": "WebPage", "@id": page_url}
     graph = [article]
     faqs = _parse_faq_pairs(blog.get("body_markdown") or "")
+    # FU54: keep the FAQPage schema TOPIC-focused — drop any FAQ whose QUESTION names the subject brand
+    # (brand-promo Q&A baked into FAQPage reads as advertising, not a topic answer). The visible body FAQ
+    # is untouched; only the structured data is de-promoted. If every question names the brand, emit no
+    # FAQPage rather than a page of ads.
+    if faqs and brand_name:
+        bn = brand_name.lower()
+        faqs = [f for f in faqs if bn not in (f.get("q") or "").lower()]
     if faqs:
         graph.append({
             "@type": "FAQPage",

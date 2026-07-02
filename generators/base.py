@@ -332,9 +332,54 @@ def select_few_shot_examples(n=3):
 class ClaudeClient:
     """Shared Claude API caller extracted from CommentGeneratorBot._call_claude."""
 
+    # Per-1M-token (input, output) list prices, for turning accumulated usage into a
+    # dollar cost (FU54). Fallback to Sonnet rates for an unknown model id.
+    _MODEL_RATES = {
+        "claude-sonnet-4-6": (3.0, 15.0),
+        "claude-opus-4-8": (5.0, 25.0),
+        "claude-opus-4-7": (5.0, 25.0),
+        "claude-opus-4-6": (5.0, 25.0),
+        "claude-haiku-4-5": (1.0, 5.0),
+        "claude-fable-5": (10.0, 50.0),
+    }
+    _WEB_SEARCH_COST = 0.01           # $ per web_search server-tool request
+
     def __init__(self, api_key):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = DEFAULT_MODEL
+        # FU54: passive per-instance usage accumulator. Every API call feeds `_track`;
+        # `usage_cost()` turns it into dollars. A fresh client per blog task scopes it to
+        # one generation. Callers that don't read it are unaffected.
+        self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+
+    def reset_usage(self):
+        """Zero the usage accumulator (call at the start of a generation to cost it)."""
+        self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+
+    def _track(self, message):
+        """Add one API response's token + web-search usage to the accumulator. Never raises
+        (usage is best-effort; a missing field just doesn't count)."""
+        try:
+            u = getattr(message, "usage", None)
+            if not u:
+                return
+            self._usage["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+            self._usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+            stu = getattr(u, "server_tool_use", None)
+            if stu:
+                self._usage["web_search_requests"] += getattr(stu, "web_search_requests", 0) or 0
+        except Exception:
+            pass
+
+    def usage_cost(self):
+        """Dollar cost of the accumulated usage at list prices for `self.model`
+        (input+output tokens + web_search requests). Approximate (cache tokens billed at
+        the standard input rate)."""
+        rin, rout = self._MODEL_RATES.get(self.model, (3.0, 15.0))
+        u = self._usage
+        return (u["input_tokens"] / 1e6 * rin
+                + u["output_tokens"] / 1e6 * rout
+                + u["web_search_requests"] * self._WEB_SEARCH_COST)
 
     def call(self, prompt, max_tokens=1024, max_retries=3, temperature=None, system_prompt=None):
         """Make API call to Claude with retries. Returns parsed JSON or None.
@@ -361,6 +406,7 @@ class ClaudeClient:
                     create_kwargs["temperature"] = temperature
 
                 message = self.client.messages.create(**create_kwargs)
+                self._track(message)
                 content = message.content[0].text.strip()
                 last_raw_content = content
 
@@ -443,6 +489,7 @@ class ClaudeClient:
                 create_kwargs["temperature"] = temperature
 
             message = self.client.messages.create(**create_kwargs)
+            self._track(message)
             return message.content[0].text.strip()
         except Exception as e:
             print(f"    API error: {e}")
@@ -481,6 +528,7 @@ class ClaudeClient:
                 tools=[tool],
                 messages=[{"role": "user", "content": prompt}],
             )
+            self._track(message)
         except Exception as e:
             print(f"    web_search error: {e}", flush=True)
             return []
@@ -545,6 +593,7 @@ class ClaudeClient:
                 model=self.model, max_tokens=1500, tools=[tool],
                 messages=[{"role": "user", "content": prompt}],
             )
+            self._track(message)
         except Exception as e:
             print(f"    fetch_site_facts error ({domain}): {e}", flush=True)
             return ""
@@ -597,6 +646,7 @@ class ClaudeClient:
                 model=self.model, max_tokens=600, tools=[tool],
                 messages=[{"role": "user", "content": prompt}],
             )
+            self._track(message)
         except Exception as e:
             print(f"    find_official_domain error: {e}", flush=True)
             return ""

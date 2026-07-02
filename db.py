@@ -1008,20 +1008,20 @@ class Database:
                   status="draft", prompt_version="", source_urls=None, research_notes="",
                   use_web_search=0, reddit_url="", reddit_status="", deep_verify=0,
                   author_name="", author_title="", reviewer_name="", reviewer_title="",
-                  disclosure="", image_url=""):
+                  disclosure="", image_url="", gen_cost=0):
         """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. The byline
         fields are optional per-blog overrides of the brand byline. `reddit_status` records the
         attached-thread fetch outcome (ok/empty/failed/bad_url/skipped) for UI visibility.
         `deep_verify` records whether the independent verify agent was requested (reused on regenerate).
-        Returns id."""
+        `gen_cost` is the real $ cost of the generation (FU54). Returns id."""
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
                                   research_notes, use_web_search, reddit_url, reddit_status, deep_verify,
                                   status, prompt_version,
                                   author_name, author_title, reviewer_name, reviewer_title,
-                                  disclosure, image_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  disclosure, image_url, gen_cost)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
@@ -1034,7 +1034,8 @@ class Database:
              1 if deep_verify else 0,
              status, prompt_version,
              author_name or "", author_title or "", reviewer_name or "",
-             reviewer_title or "", disclosure or "", image_url or ""),
+             reviewer_title or "", disclosure or "", image_url or "",
+             float(gen_cost or 0)),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1102,7 +1103,7 @@ class Database:
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
                    "reddit_status", "deep_verify", "author_name", "author_title", "reviewer_name",
-                   "reviewer_title", "disclosure", "image_url"}
+                   "reviewer_title", "disclosure", "image_url", "gen_cost"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2259,6 +2260,9 @@ class Database:
             self.conn.commit()
         if "reddit_url" not in blog_cols:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN reddit_url TEXT")
+            self.conn.commit()
+        if "gen_cost" not in blog_cols:   # FU54: real $ cost of the generation, shown in the UI
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN gen_cost REAL DEFAULT 0")
             self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----

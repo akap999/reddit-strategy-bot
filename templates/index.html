@@ -12388,6 +12388,11 @@ function _blogRedditToast(res) {
     else toast('⚠️ ' + (res.reddit_note || 'Reddit thread not fetched.'), 'info');
 }
 
+function _blogCostToast(res) {
+    // FU54: show the real API cost (tokens + web searches) of the generation.
+    if (res && res.gen_cost) toast('≈ $' + Number(res.gen_cost).toFixed(2) + ' to generate', 'info');
+}
+
 function blogGenerate() {
     const brand_id = +document.getElementById('blog-gen-brand').value;
     const seed = document.getElementById('blog-gen-seed').value.trim();
@@ -12415,6 +12420,7 @@ function blogGenerate() {
     runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, reddit_url, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
+        _blogCostToast(res);
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
 }
@@ -12447,9 +12453,11 @@ async function openBlog(id) {
         redNote = ` · <span class="${cls}" title="${_blogEsc(b.reddit_url)}">Reddit ${label}</span>`;
     }
     const dvNote = b.deep_verify ? ` · <span class="text-cyan-400" title="Facts were independently re-checked via a separate web search">🔍 deep-verified</span>` : '';
+    const _gc = Number(b.gen_cost || 0);
+    const costNote = _gc > 0 ? ` · <span class="text-gray-400" title="Approx. API cost (tokens + web searches) to generate this blog">≈ $${_gc.toFixed(2)} to generate</span>` : '';
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}</p>
+        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>
@@ -12534,6 +12542,7 @@ function blogRegen(id, part) {
         openBlog(id);
         blogReload();
         _blogRedditToast(res);
+        _blogCostToast(res);
     }, `Regenerating ${part}`);
 }
 

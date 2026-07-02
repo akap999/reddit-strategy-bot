@@ -148,9 +148,18 @@ class RedditSearchBot:
         # the default egress: the free cached/worker path runs first, this fires only on failure.
         _rp = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
         self._reddit_proxies = {"http": _rp, "https": _rp} if _rp else None
+        # The residential proxy is a LOW-VOLUME block fallback (check-live / comment fetch, in app.py +
+        # comment_gen). In the HIGH-FAN-OUT Live SEARCH legs it is OFF by default: on a blocked cloud IP
+        # the "block fallback" fires on EVERY subreddit, and metered residential latency turns a fast
+        # Arctic/Pullpush search into a multi-minute crawl (and burns the metered GB). Opt in with
+        # REDDIT_SEARCH_USE_RESIDENTIAL=1 only if you specifically want RSS-via-residential in search.
+        self._search_use_residential = os.environ.get(
+            "REDDIT_SEARCH_USE_RESIDENTIAL", "").strip().lower() in ("1", "true", "yes", "on")
         if self._reddit_proxies:
-            print("    ✓ RedditSearchBot: residential proxy (REDDIT_HTTP_PROXY) available as a "
-                  "block-fallback egress for Reddit.", flush=True)
+            _sr = "ON" if self._search_use_residential else "OFF (search uses Arctic/Pullpush; "\
+                  "residential still covers check-live + comments)"
+            print(f"    ✓ RedditSearchBot: residential proxy available; search-leg residential = {_sr}.",
+                  flush=True)
         ua = script_user_agent or os.environ.get("REDDIT_USER_AGENT") \
             or "python:reddit-strategy:v1 (search bot)"
         self.headers = {
@@ -341,7 +350,7 @@ class RedditSearchBot:
         # FU57: last resort — retry DIRECT to old.reddit.com through the residential proxy (distinct
         # IP). Runs only after the normal path + UA/host rotation all failed, so metered GB is spent
         # only on a real block.
-        if path and is_reddit_url and self._reddit_proxies:
+        if path and is_reddit_url and self._reddit_proxies and self._search_use_residential:
             try:
                 pr = requests.get("https://old.reddit.com" + path, params=params,
                                   headers=self.headers, timeout=timeout, proxies=self._reddit_proxies)
@@ -688,7 +697,8 @@ class RedditSearchBot:
                 break
             # FU57: normal path blocked/throttled → retry ONCE through the residential proxy, DIRECT
             # to old.reddit.com (distinct IP). Fallback-only, so metered GB is spent only on a block.
-            if (resp is None or resp.status_code != 200) and self._reddit_proxies:
+            if (resp is None or resp.status_code != 200) and self._reddit_proxies \
+                    and self._search_use_residential:
                 direct_url = "https://old.reddit.com" + url[len(rss_base):]
                 try:
                     presp = requests.get(direct_url, params=params, headers=headers,

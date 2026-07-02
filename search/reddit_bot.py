@@ -671,6 +671,17 @@ class RedditSearchBot:
             "User-Agent": self.headers.get("User-Agent", "python:reddit-strategy:v1 (rss)"),
             "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
         }
+        # Residential retry target: www.reddit.com + a BROWSER UA is the combination that actually returns
+        # full search results — old.reddit.com's search.rss (and a bot UA) returns ~0-2, while www + browser
+        # returns the full 100. The residential proxy's clean IP isn't rate-limited, so this is the path
+        # that yields posts once the shared-IP worker gets throttled.
+        _resi_base = "https://www.reddit.com"
+        _resi_headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": headers["Accept"],
+        }
+        _has_resi = bool(self._reddit_proxies and self._search_use_residential)
         results = []
         try:
             # Retry transient 429 (rate limit) up to 2× with backoff
@@ -685,7 +696,10 @@ class RedditSearchBot:
             # cooldown route subsequent searches straight to Pullpush/Arctic.
             for rss_attempt in range(2):
                 resp = requests.get(url, params=params, headers=headers, timeout=20)
-                if resp.status_code == 429 and rss_attempt < 1:
+                if resp.status_code == 429 and rss_attempt < 1 and not _has_resi:
+                    # The shared-IP worker 429s nearly every sub; when a residential proxy is available,
+                    # DON'T waste ~2s retrying the doomed worker — break out and fall straight to the
+                    # clean residential path below (saves ~2s/sub, so more subs fit in the time budget).
                     # Honor Retry-After when Reddit sends it (capped at 5s so a big
                     # server value can't stall the whole search); else short backoff.
                     # Jitter so concurrent per-sub retries don't re-collide.
@@ -703,11 +717,10 @@ class RedditSearchBot:
             # FU57: normal path blocked/throttled → retry ONCE through the residential proxy, DIRECT
             # to old.reddit.com (distinct IP). Fallback-only, so metered GB is spent only on a block.
             used_residential = False
-            if (resp is None or resp.status_code != 200) and self._reddit_proxies \
-                    and self._search_use_residential:
-                direct_url = "https://old.reddit.com" + url[len(rss_base):]
+            if (resp is None or resp.status_code != 200) and _has_resi:
+                direct_url = _resi_base + url[len(rss_base):]
                 try:
-                    presp = requests.get(direct_url, params=params, headers=headers,
+                    presp = requests.get(direct_url, params=params, headers=_resi_headers,
                                          timeout=12, proxies=self._reddit_proxies)
                     if presp.status_code == 200:
                         print(f"\n    ✓ RSS via residential proxy for {direct_url}", flush=True)
@@ -759,11 +772,11 @@ class RedditSearchBot:
             # 100 via a clean IP but ~0 via the worker). When the worker path yields ZERO entries and a
             # residential proxy is available, retry through the clean residential IP and re-parse. Only
             # fires on 0 results (the paid GB is spent exactly where the worker came back empty).
-            if (not results and not used_residential and self._reddit_proxies
-                    and self._search_use_residential and rss_base != "https://old.reddit.com"):
-                direct_url = "https://old.reddit.com" + url[len(rss_base):]
+            if (not results and not used_residential and _has_resi
+                    and rss_base != _resi_base):
+                direct_url = _resi_base + url[len(rss_base):]
                 try:
-                    presp = requests.get(direct_url, params=params, headers=headers,
+                    presp = requests.get(direct_url, params=params, headers=_resi_headers,
                                          timeout=12, proxies=self._reddit_proxies)
                     if presp.status_code == 200 and presp.text.lstrip()[:5] == "<?xml":
                         _parse_rss_into(presp.text, results)

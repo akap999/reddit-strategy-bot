@@ -1330,6 +1330,66 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             return ""
         return (res.get("linkedin_text") or "").strip()
 
+    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure=""):
+        """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE (distinct from the short
+        `generate_linkedin` post) in a chosen persona's VOICE. Returns {"title","body_markdown"} or {}.
+
+        Author's-voice = adopt the persona's PERSPECTIVE/stance/vocabulary on the topic (first person),
+        NEVER fabricate the author's personal history/credentials/numbers/anecdotes. `disclosure` is a
+        one-line affiliation disclosure (the caller passes the blog/brand disclosure, else "" → a default).
+        """
+        name, _url, _block = self._brand_block(brand)
+        title = (article or {}).get("title") or ""
+        body = (article or {}).get("body_markdown") or ""
+        pv = (persona_voice or "").strip()
+        disc = (disclosure or "").strip() or f"Disclosure: I work with {name}."
+
+        if pv:
+            persona_block = (
+                "WRITE AS THIS PERSON (first-person author voice):\n"
+                f"{pv}\n"
+                "Adopt THIS persona's perspective, stance, and vocabulary on the topic. Write in first "
+                "person as a real practitioner sharing a point of view. BUT do NOT invent the author's "
+                "personal history, job history, credentials, specific numbers, or anecdotes "
+                '("in my 10 years at…", "when I built…") — nothing about the author that is not in the '
+                "source material. Voice and perspective only; never a fabricated biography.\n\n"
+            )
+        else:
+            persona_block = (
+                "Write in a natural first-person thought-leadership voice for a practitioner at "
+                f"{name}. Do NOT invent personal history, credentials, or anecdotes.\n\n"
+            )
+
+        prompt = f"""{persona_block}Rewrite the source article below into a LONG-FORM LinkedIn ARTICLE (not a short post).
+
+BRAND (the product you can recommend): {name}
+ARTICLE TITLE: {title}
+SOURCE ARTICLE (facts to carry over — do NOT copy its wording):
+{body[:8000]}
+
+Rules:
+  - Return a compelling ARTICLE HEADLINE as `title` (a real headline, not the source title verbatim).
+  - Strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
+    "Unpopular opinion:", "I've been thinking a lot about…".
+  - Skimmable structure: short sections with `##`/`###` subheads, bold, and lists where useful
+    (LinkedIn articles support rich text).
+  - Carry over the SUBSTANTIVE facts/insights from the source, but do NOT fabricate any claim beyond it,
+    and do NOT reuse sentences or phrasing from the source — same facts, DIFFERENT words.
+  - Name {name} exactly once as the natural recommendation, with a soft CTA and a link placeholder
+    written exactly as {{link}}.
+  - Include a one-line affiliation DISCLOSURE, written exactly as: {disc}
+  - End with 3-5 relevant hashtags.
+  - About 800-1500 words. Markdown is allowed (subheads, bold, lists).
+
+Return JSON only: {{"title": "the article headline", "body_markdown": "the full article in Markdown"}}"""
+        res = self.claude.call(prompt, max_tokens=4000, temperature=0.75)
+        if not res or not isinstance(res, dict):
+            return {}
+        return {
+            "title": (res.get("title") or "").strip(),
+            "body_markdown": (res.get("body_markdown") or "").strip(),
+        }
+
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False):

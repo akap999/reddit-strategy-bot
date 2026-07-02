@@ -12455,6 +12455,14 @@ async function openBlog(id) {
     const dvNote = b.deep_verify ? ` · <span class="text-cyan-400" title="Facts were independently re-checked via a separate web search">🔍 deep-verified</span>` : '';
     const _gc = Number(b.gen_cost || 0);
     const costNote = _gc > 0 ? ` · <span class="text-gray-400" title="Approx. API cost (tokens + web searches) to generate this blog">≈ $${_gc.toFixed(2)} to generate</span>` : '';
+    // FU59: LinkedIn Article — persona voice-seed dropdown from the brand's fit(yes/maybe) personas.
+    const _liBrand = _blogBrands.find(x => x.id == b.brand_id);
+    let _liPersonas = [];
+    try { _liPersonas = JSON.parse((_liBrand && _liBrand.personas) || '[]'); } catch (e) {}
+    const _liFit = (_liPersonas || []).filter(p => p && p.label && ['yes', 'maybe'].includes(String(p.fit || '').toLowerCase()));
+    window._blogArticlePersonas = _liFit;   // stashed for the prefill handler
+    const _liPersonaOpts = '<option value="">(type your own voice below)</option>' +
+        _liFit.map((p, i) => `<option value="${i}">${_blogEsc(p.label)}${String(p.fit).toLowerCase() === 'maybe' ? ' (maybe)' : ''}</option>`).join('');
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
@@ -12464,6 +12472,23 @@ async function openBlog(id) {
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="blog-e-kw" value="${_blogEsc((b.keywords || []).join(', '))}"></div>
             <div><label class="text-xs text-gray-400">Website body (Markdown)</label><textarea id="blog-e-body" rows="12">${_blogEsc(b.body_markdown || '')}</textarea></div>
             <div><label class="text-xs text-gray-400">LinkedIn post</label><textarea id="blog-e-li" rows="6">${_blogEsc(b.linkedin_text || '')}</textarea></div>
+            <div class="card p-2" style="background:#141026;border:1px solid #3b0764">
+                <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold" style="color:#c084fc">LinkedIn article (long-form, in a persona's voice)</label>
+                    <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogGenLinkedInArticle(${id})">✨ Generate LinkedIn article</button>
+                </div>
+                <label class="text-xs text-gray-400">Persona / author voice — written AS this voice (perspective &amp; style only; no invented biography). Pick a saved persona to prefill, or type your own.</label>
+                <select id="blog-e-li-article-persona-sel" onchange="_blogArticlePersonaPick()" class="mb-1">${_liPersonaOpts}</select>
+                <textarea id="blog-e-li-article-persona" rows="2" placeholder="e.g. a pragmatic founder who shares real numbers and skips the hype">${_blogEsc(b.linkedin_article_persona || '')}</textarea>
+                <label class="text-xs text-gray-400 mt-1">Article headline</label>
+                <input id="blog-e-li-article-title" value="${_blogEsc(b.linkedin_article_title || '')}" placeholder="generated headline">
+                <label class="text-xs text-gray-400 mt-1">Article body (Markdown)</label>
+                <textarea id="blog-e-li-article" rows="14">${_blogEsc(b.linkedin_article || '')}</textarea>
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article')" title="Copy as clean plain text — LinkedIn's editor ignores raw Markdown">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
+                </div>
+            </div>
             <details>
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default)</summary>
                 <div class="grid gap-2 mt-2" style="grid-template-columns:1fr 1fr">
@@ -12505,6 +12530,9 @@ async function blogSave(id) {
             author_name: _v('blog-e-author'), author_title: _v('blog-e-author-title'),
             reviewer_name: _v('blog-e-reviewer'), reviewer_title: _v('blog-e-reviewer-title'),
             disclosure: _v('blog-e-disclosure'), image_url: _v('blog-e-image'),
+            linkedin_article: _v('blog-e-li-article'),
+            linkedin_article_title: _v('blog-e-li-article-title'),
+            linkedin_article_persona: _v('blog-e-li-article-persona'),
         }});
         toast('Saved', 'success');
         blogReload();
@@ -12515,6 +12543,60 @@ function blogCopy(elId) {
     const el = document.getElementById(elId);
     if (!el) return;
     navigator.clipboard.writeText(el.value).then(() => toast('Copied', 'success'), () => toast('Copy failed', 'error'));
+}
+
+// FU59 — LinkedIn ARTICLE helpers (voice-seed prefill, generate, plain-text copy).
+function _renderPersonaVoice(pd) {
+    // Mirror of blog_gen / post_gen _render_persona_voice: a compact one-line voice seed.
+    if (!pd || !pd.label) return '';
+    const parts = [pd.label];
+    if (pd.profile) parts.push(pd.profile);
+    const pp = pd.pain_points || [];
+    if (pp.length) parts.push('pains: ' + pp.slice(0, 4).join('; '));
+    const uc = pd.use_cases || [];
+    if (uc.length) parts.push('trying to: ' + uc.slice(0, 4).join('; '));
+    if (pd.goal) parts.push('wants: ' + pd.goal);
+    if (pd.trigger) parts.push('triggered by: ' + pd.trigger);
+    if (pd.constraints) parts.push('constraints: ' + pd.constraints);
+    if (pd.vocab) parts.push('says it like: ' + pd.vocab);
+    return parts.join(' — ');
+}
+
+function _blogArticlePersonaPick() {
+    const sel = document.getElementById('blog-e-li-article-persona-sel');
+    const ta = document.getElementById('blog-e-li-article-persona');
+    if (!sel || !ta || sel.value === '') return;
+    const pd = (window._blogArticlePersonas || [])[parseInt(sel.value)];
+    const v = _renderPersonaVoice(pd);
+    if (v) ta.value = v;   // prefill — editable
+}
+
+function blogGenLinkedInArticle(id) {
+    const persona = (document.getElementById('blog-e-li-article-persona')?.value || '').trim();
+    runTask(`/api/blogs/${id}/linkedin-article`, { persona }, (res) => {
+        openBlog(id);
+        _blogCostToast(res);
+    }, 'Generating LinkedIn article');
+}
+
+function _stripMd(md) {
+    // LinkedIn's article editor ignores raw Markdown — copy clean prose, keep line breaks.
+    return (md || '')
+        .replace(/^\s{0,3}#{1,6}\s+/gm, '')             // ATX headings
+        .replace(/\*\*([^*]+)\*\*/g, '$1')              // bold
+        .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')        // italics
+        .replace(/`([^`]+)`/g, '$1')                    // inline code
+        .replace(/^\s{0,3}[-*+]\s+/gm, '')              // bullet markers
+        .replace(/^\s{0,3}>\s?/gm, '')                  // blockquotes
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)') // links -> text (url)
+        .trim();
+}
+
+function blogCopyPlain(elId) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    navigator.clipboard.writeText(_stripMd(el.value || '')).then(
+        () => toast('Copied (plain text)', 'success'), () => toast('Copy failed', 'error'));
 }
 
 async function blogPublish(id, platform) {

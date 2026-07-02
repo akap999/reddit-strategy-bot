@@ -1915,6 +1915,47 @@ def api_blog_regenerate(blog_id):
 
     return jsonify({"task_id": start_task("blog_regenerate", task, pass_task_id=True)})
 
+@app.route("/api/blogs/<int:blog_id>/linkedin-article", methods=["POST"])
+def api_blog_linkedin_article(blog_id):
+    """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE in a chosen persona's VOICE
+    (distinct from the short linkedin_text post). Background task; poll for {blog_id, gen_cost}."""
+    data = request.get_json() or {}
+    persona = (data.get("persona") or "").strip()
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            brand = bg.get_brand(blog.get("brand_id")) or {}
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()   # cost this article from real API usage (FU54 accumulator)
+            gen = BlogGenerator(claude, bg)
+            # Affiliation disclosure: per-blog override, else the brand's, else the generator's default.
+            disclosure = (blog.get("disclosure") or brand.get("disclosure") or "").strip()
+            art = gen.generate_linkedin_article(
+                brand,
+                {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
+                persona_voice=persona, disclosure=disclosure)
+            if not art or not art.get("body_markdown"):
+                raise ValueError(claude.last_error or "LinkedIn article generation failed")
+            cost = round(claude.usage_cost(), 4)
+            bg.update_blog(blog_id,
+                           linkedin_article_title=art.get("title", ""),
+                           linkedin_article=art.get("body_markdown", ""),
+                           linkedin_article_persona=persona,
+                           gen_cost=cost)
+            return {"blog_id": blog_id, "gen_cost": cost}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_linkedin_article", task, pass_task_id=True)})
+
 @app.route("/api/blogs/<int:blog_id>", methods=["PATCH"])
 def api_blog_patch(blog_id):
     """Manual edits to a blog's content fields."""
@@ -1922,7 +1963,8 @@ def api_blog_patch(blog_id):
     fields = {k: data[k] for k in
               ("title", "meta_description", "keywords", "body_markdown", "linkedin_text",
                "author_name", "author_title", "reviewer_name", "reviewer_title",
-               "disclosure", "image_url")
+               "disclosure", "image_url",
+               "linkedin_article", "linkedin_article_title", "linkedin_article_persona")
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -2060,6 +2102,33 @@ def api_blog_export(blog_id):
         db.close()
     if not blog:
         return jsonify({"error": "blog not found"}), 404
+
+    # FU59: the long-form LinkedIn ARTICLE, rendered as an INLINE HTML page (not an attachment) so the
+    # user can open it and rich-text-copy it into LinkedIn's editor (which ignores raw Markdown).
+    if fmt == "linkedin":
+        art_title = (blog.get("linkedin_article_title") or "").strip()
+        art_body = (blog.get("linkedin_article") or "").strip()
+        if not art_body:
+            return jsonify({"error": "no LinkedIn article generated yet"}), 404
+        md_src = (f"# {art_title}\n\n{art_body}") if art_title else art_body
+        try:
+            import markdown as _md
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(md_src)),
+                                 extensions=["tables", "fenced_code"])
+        except Exception:
+            inner = "<pre>" + _html.escape(md_src) + "</pre>"
+        inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
+        li_css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+                  "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+                  "h1,h2,h3{line-height:1.25}")
+        li_head = (f'<meta charset="utf-8">\n'
+                   f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+                   f'<title>{_html.escape(art_title or "LinkedIn article")}</title>\n'
+                   f'<style>{li_css}</style>')
+        li_page = (f'<!doctype html>\n<html lang="en"><head>\n{li_head}\n</head>\n<body>\n'
+                   f'{inner}\n</body></html>\n')
+        return Response(li_page, mimetype="text/html")   # inline → select-all + rich-text copy
+
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
     desc = blog.get("meta_description") or ""

@@ -1103,7 +1103,8 @@ class Database:
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
                    "reddit_status", "deep_verify", "author_name", "author_title", "reviewer_name",
-                   "reviewer_title", "disclosure", "image_url", "gen_cost"}
+                   "reviewer_title", "disclosure", "image_url", "gen_cost",
+                   "linkedin_article", "linkedin_article_title", "linkedin_article_persona"}
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2248,7 +2249,9 @@ class Database:
         blog_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(blogs)").fetchall()]
         for col in ("source_urls", "research_notes", "author_name", "author_title",
                     "reviewer_name", "reviewer_title", "disclosure", "image_url",
-                    "reddit_status"):
+                    "reddit_status",
+                    # FU59: long-form LinkedIn ARTICLE (distinct from the short linkedin_text post).
+                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

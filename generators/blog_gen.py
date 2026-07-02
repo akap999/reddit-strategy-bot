@@ -930,24 +930,38 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 dom = self.claude.find_official_domain(tool, ctx)
             except Exception:
                 dom = ""
-            tool_blocks = []   # {label,url,text} — one per SPECIFIC page so citations deep-link (FU52)
+
+            def _same_site(u, dom=dom):
+                """True when url u is the tool's OWN site (its registrable domain or a subdomain)."""
+                dd = _dom(dom)
+                du = _dom(u)
+                return bool(dd) and du and (du == dd or du.endswith("." + dd))
 
             def _blocks_from(srcs, cap=_MAX_TOOL_PAGES, tool=tool):
-                """Build per-page blocks using each result's ACTUAL url (deep link), deduped by url."""
+                """Per-page blocks with HONEST labels (FU53): the tool's OWN domain → first-party (tool
+                name); any other domain → 'third-party · <title>' — a review is NEVER labeled as the vendor.
+                Uses each result's ACTUAL url so citations deep-link. Deduped by url."""
                 out_, seen_ = [], set()
                 for s in (srcs or []):
                     u = (s.get("url") or "").strip()
                     fc = (s.get("fact") or s.get("title") or "").strip()
                     key = u.lower().split("?")[0].rstrip("/")
-                    if u and fc and key not in seen_:
-                        seen_.add(key)
-                        out_.append({"label": tool, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
+                    if not (u and fc) or key in seen_:
+                        continue
+                    seen_.add(key)
+                    label = tool if _same_site(u) else \
+                        f"third-party · {(s.get('title') or _dom(u) or 'review')}"
+                    out_.append({"label": label, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
                     if len(out_) >= cap:
                         break
                 return out_
 
-            # Tier 1 — web search PINNED to the tool's own domain. Returns SPECIFIC pages (pricing/terms)
-            # WITH their urls → cite the exact page, not the homepage.
+            def _has_vendor(blocks):
+                return any(_same_site(b["url"]) for b in (blocks or []))
+
+            tool_blocks = []
+            # Tier 1 — web search PINNED to the tool's OWN domain → SPECIFIC pages (pricing/terms) WITH
+            # their urls → cite the exact vendor page, not a review.
             if dom:
                 try:
                     pin = self.claude.search_sources(
@@ -956,36 +970,38 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 except Exception:
                     pin = []
                 tool_blocks = _blocks_from(pin)
-            # Tier 2 — JSON fact extraction from the tool's own site (fetch_site_facts has no per-page url,
-            # so this can only cite the root domain — used only when the pinned search returned nothing).
-            if not tool_blocks and dom:
+            # Tier 2 — fetch_site_facts (reliable vendor facts, root url) whenever Tier 1 gave NO vendor
+            # page. Different plumbing than the pinned search, so together they source the vendor reliably.
+            if dom and not _has_vendor(tool_blocks):
                 try:
                     fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=3) or ""
                 except Exception:
                     fj = ""
                 if fj.strip():
-                    tool_blocks = [{"label": tool, "url": f"https://{_dom(dom)}",
-                                    "text": fj[:_EVIDENCE_TEXT_CAP]}]
-            # Tier 3 — broad search, but keep ONLY tool-SPECIFIC results (the tool's own domain, else a
-            # page that actually names the tool), citing each result's ACTUAL url. A general policy/industry
-            # article is NOT accepted as a per-tool source (that produced boilerplate rows before).
-            if not tool_blocks:
+                    tool_blocks.append({"label": tool, "url": f"https://{_dom(dom)}",
+                                        "text": fj[:_EVIDENCE_TEXT_CAP]})
+            # Tier 3 — ONLY when no VENDOR block exists. Prefer the tool's own domain, then a REPUTABLE
+            # review (G2/Capterra/Trustpilot/… — _THIRD_PARTY_DOMAINS); a random blog is the last resort and
+            # is honestly labeled 'third-party ·' (never presented as the vendor).
+            if not _has_vendor(tool_blocks):
                 try:
                     br = self.claude.search_sources(
                         f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
-                        f"royalty-free terms, key capabilities — its own site or a review that names it",
-                        max_searches=3)
+                        f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
+                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=3)
                 except Exception:
                     br = []
-                own = [s for s in (br or []) if dom and _dom(s.get("url")) == _dom(dom)]
+                own = [s for s in (br or []) if _same_site(s.get("url"))]
+                reputable = [s for s in (br or []) if _dom(s.get("url")) in _THIRD_PARTY_DOMAINS]
                 named = [s for s in (br or [])
                          if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()]
-                tool_blocks = _blocks_from(own or named)
+                tool_blocks = tool_blocks + _blocks_from(own or reputable or named)
 
             if tool_blocks:
                 fresh.extend(tool_blocks)
                 print(f"[blog_gen] verify+complete: sourced {tool} <- "
-                      f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
+                      f"{', '.join(b['url'] for b in tool_blocks)} "
+                      f"({'vendor' if _has_vendor(tool_blocks) else 'third-party only'})", flush=True)
             else:
                 print(f"[blog_gen] verify+complete: {tool} — could NOT source individually (row will be "
                       f"dropped, not generalized)", flush=True)
@@ -1021,6 +1037,25 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."],
                 fresh.append({"label": f"third-party · {c.get('title') or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
 
+        # (c2) PRIMARY / OFFICIAL source for the article's CENTRAL factual claim (FU53): third-party blogs
+        # disagree on core policy claims, so anchor the central claim on the authoritative source (the
+        # platform/regulator's OWN policy page) when one exists. Labeled "official ·" so the reconcile can
+        # prefer it.
+        try:
+            prim = self.claude.search_sources(
+                f"the PRIMARY / OFFICIAL source for the central claim of an article about "
+                f"'{seed or name}' — the platform's or regulator's OWN policy / documentation / help page "
+                f"(not a third-party blog). Return the official page URL + the exact rule it states.",
+                max_searches=2)
+        except Exception:
+            prim = []
+        for c in (prim or [])[:2]:
+            u = (c.get("url") or "").strip()
+            fct = (c.get("fact") or c.get("title") or "").strip()
+            if u and fct:
+                fresh.append({"label": f"official · {c.get('title') or u}", "url": u,
+                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+
         if not fresh:
             print("[blog_gen] verify+complete: no fresh evidence gathered — draft unchanged", flush=True)
             return None
@@ -1037,12 +1072,20 @@ COMPLETE and every stated fact is sourced:
 
   - ONLY tools that perform the article's CORE function ({cat or "the subject's product type"}) belong in
     the comparison. REMOVE any row for a tool that does NOT (e.g. a video-only generator in a music-generator
-    comparison) — it may be name-dropped in prose as an adjacent tool, but NEVER a comparison row with a
-    nonsensical cell.
+    comparison). You MAY note it in AT MOST ONE neutral clause (e.g. "Runway is video-only, not a music
+    generator") — NEVER a dedicated "Note on <tool>" blockquote or an FAQ entry about it. Do NOT use an
+    off-category tool as a foil to disparage-and-pivot to {name}.
   - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
     it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
     claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
     NOT a generic homepage when a specific page is in the FRESH FACTS.
+  - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
+    block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
+    then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
+    vs annual) — NEVER present an annual price as a monthly one.
+  - CORE CLAIM: for the article's central factual/policy claim, PREFER an "official ·" primary source (the
+    platform/regulator's own policy page) and cite it; do NOT state two contradictory versions of that claim
+    — resolve it to the authoritative source.
   - A tool's cells may ONLY be filled from a FRESH FACT that is ABOUT that SPECIFIC tool (a block labeled
     with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
     TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
@@ -1061,6 +1104,12 @@ COMPLETE and every stated fact is sourced:
   - NEVER invent a value or a source — fill only from the FRESH FACTS (or the article's existing cited
     facts). Preserve the structure (Quick answer, question H2s, FAQ) and the byline/disclosure lines at top;
     keep {name}'s existing [S#] citations intact.
+  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
+    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
+    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
+    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
+  - NO COMPETITOR-JAB: do NOT add or keep any FAQ entry or "Note on <competitor>" blockquote whose function
+    is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown.
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 

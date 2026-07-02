@@ -702,6 +702,7 @@ class RedditSearchBot:
                 break
             # FU57: normal path blocked/throttled → retry ONCE through the residential proxy, DIRECT
             # to old.reddit.com (distinct IP). Fallback-only, so metered GB is spent only on a block.
+            used_residential = False
             if (resp is None or resp.status_code != 200) and self._reddit_proxies \
                     and self._search_use_residential:
                 direct_url = "https://old.reddit.com" + url[len(rss_base):]
@@ -711,6 +712,7 @@ class RedditSearchBot:
                     if presp.status_code == 200:
                         print(f"\n    ✓ RSS via residential proxy for {direct_url}", flush=True)
                         resp = presp
+                        used_residential = True
                     else:
                         print(f"\n    ⚠ RSS residential-proxy retry got {presp.status_code}", flush=True)
                 except Exception as _pe:
@@ -732,25 +734,45 @@ class RedditSearchBot:
                     print(f"    ⏸ RSS throttled (429) — cooling down the RSS leg for "
                           f"{RedditSearchBot._RSS_COOLDOWN_SECS}s", flush=True)
                 return []
-            # Parse Atom XML.
-            try:
-                root = _ET.fromstring(resp.text)
-            except _ET.ParseError as e:
-                print(f"\n    ⚠ Reddit RSS XML parse failed: {e}", flush=True)
-                return []
-            entries = root.findall("atom:entry", self._RSS_NS)
-            seen_ids = set()
-            for entry in entries:
+            # Parse Atom XML into `results` (dedup by id).
+            def _parse_rss_into(text, out):
                 try:
-                    post = self._parse_rss_entry(entry)
-                except Exception:
-                    continue
-                if not post.get("id"):
-                    continue
-                if post["id"] in seen_ids:
-                    continue
-                seen_ids.add(post["id"])
-                results.append(post)
+                    root = _ET.fromstring(text)
+                except _ET.ParseError as e:
+                    print(f"\n    ⚠ Reddit RSS XML parse failed: {e}", flush=True)
+                    return
+                seen = {p.get("id") for p in out}
+                for entry in root.findall("atom:entry", self._RSS_NS):
+                    try:
+                        post = self._parse_rss_entry(entry)
+                    except Exception:
+                        continue
+                    pid = post.get("id")
+                    if pid and pid not in seen:
+                        seen.add(pid)
+                        out.append(post)
+            _parse_rss_into(resp.text, results)
+
+            # The Cloudflare worker's SHARED IP is rate-limited by Reddit; when throttled it often returns
+            # an EMPTY 200 (stale/empty cache) instead of a 429 — so the non-200 fallback above never fires
+            # and RSS silently returns 0 for subs that actually HAVE posts (verified: r/Machinists returns
+            # 100 via a clean IP but ~0 via the worker). When the worker path yields ZERO entries and a
+            # residential proxy is available, retry through the clean residential IP and re-parse. Only
+            # fires on 0 results (the paid GB is spent exactly where the worker came back empty).
+            if (not results and not used_residential and self._reddit_proxies
+                    and self._search_use_residential and rss_base != "https://old.reddit.com"):
+                direct_url = "https://old.reddit.com" + url[len(rss_base):]
+                try:
+                    presp = requests.get(direct_url, params=params, headers=headers,
+                                         timeout=12, proxies=self._reddit_proxies)
+                    if presp.status_code == 200 and presp.text.lstrip()[:5] == "<?xml":
+                        _parse_rss_into(presp.text, results)
+                        if results:
+                            print(f"\n    ✓ RSS via residential proxy (worker returned empty) — "
+                                  f"{len(results)} posts for {direct_url}", flush=True)
+                except Exception as _pe:
+                    print(f"\n    ⚠ RSS empty-200 residential retry failed: {_pe}", flush=True)
+
             print(f"(rss: {len(results)} posts)", end=" ", flush=True)
         except requests.exceptions.RequestException as e:
             print(f"\n    ⚠ Reddit RSS request failed: {e}", flush=True)
@@ -877,6 +899,10 @@ class RedditSearchBot:
         """
         if not subreddit:
             return []  # Arctic-Shift requires a subreddit for text queries
+        # Circuit-breaker: if a sibling query already saw "maintenance" / "slow down",
+        # skip — don't burn the budget hammering a down/rate-limited Arctic-Shift.
+        if time.time() < RedditSearchBot._arctic_cooldown_until:
+            return []
 
         results = []
         seen_ids = set()
@@ -893,12 +919,20 @@ class RedditSearchBot:
             if before_ts:
                 params["before"] = str(int(before_ts))
 
+            def _cool_if_down(err):
+                # Trip the Arctic circuit-breaker on a maintenance / rate-limit signal so the rest of
+                # the fan-out (and the next search) skips Arctic instead of burning the budget.
+                if any(s in (err or "").lower()
+                       for s in ("maintenance", "too many", "slow down", "rate")):
+                    RedditSearchBot._arctic_cooldown_until = (
+                        time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
             try:
                 response = self._make_request(self.apis["arctic"], params)
                 data = response.json()
                 # Arctic-Shift returns errors in the response body
                 if data.get("error"):
                     print(f"(Arctic-Shift error: {data['error'][:50]})")
+                    _cool_if_down(data["error"])
                     break
             except Exception as e:
                 # One extra page-level retry before giving up (see pullpush
@@ -911,9 +945,14 @@ class RedditSearchBot:
                     data = response.json()
                     if data.get("error"):
                         print(f"(Arctic-Shift error: {data['error'][:50]})")
+                        _cool_if_down(data["error"])
                         break
                 except Exception as e2:
                     print(f"    arctic page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
+                    # A page that fails even after _make_request's own retries = Arctic-Shift is
+                    # down/rate-limiting → cool it down so the rest of the fan-out skips it.
+                    RedditSearchBot._arctic_cooldown_until = (
+                        time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
                     break
 
             posts = data.get("data", [])
@@ -1195,6 +1234,10 @@ class RedditSearchBot:
             if api_name == "reddit" and time.time() < RedditSearchBot._reddit_rss_cooldown_until:
                 left = int(RedditSearchBot._reddit_rss_cooldown_until - time.time())
                 print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
+                continue
+            if api_name == "arctic" and time.time() < RedditSearchBot._arctic_cooldown_until:
+                left = int(RedditSearchBot._arctic_cooldown_until - time.time())
+                print(f"    Skipping Arctic API (under maintenance / rate-limited — cooling down {left}s)", flush=True)
                 continue
 
             # Adaptive over-fetch, scaled to the requested limit (NOT a flat 500).
@@ -1536,16 +1579,21 @@ class RedditSearchBot:
                         if any(pat.search((p.get("title", "") + " " + (p.get("text", "") or "")))
                                for pat in pats)]
                 lbl = "|".join(labels[:6]) + ("…" if len(labels) > 6 else "")
-                if kept:
+                # The RSS/Arctic/Pullpush legs ALREADY keyword-searched Reddit's full-text index, but RSS
+                # only exposes a TRUNCATED body — so a pivot token can be absent from title+text even
+                # though the post genuinely matched (match was in the full body / relevance). Only TRUST
+                # this filter when it trims a MINORITY; if it would drop half-or-more of an already-matched
+                # set, keep them — otherwise a thin niche search collapses to ~1. Opt out with
+                # REDDIT_KW_FILTER=0.
+                if kept and len(kept) >= max(1, (before_kw + 1) // 2):
                     if before_kw - len(kept):
                         print(f"    Keyword-presence filter ('{lbl}'): dropped "
                               f"{before_kw - len(kept)} off-keyword posts, {len(kept)} remain")
                     filtered = kept
                 else:
-                    # Filter would wipe everything — keep the set rather than
-                    # returning nothing (terms likely only in comments/truncated bodies).
-                    print(f"    Keyword-presence filter ('{lbl}'): would drop all "
-                          f"{before_kw} — keeping unfiltered")
+                    print(f"    Keyword-presence filter ('{lbl}'): would drop "
+                          f"{before_kw - len(kept)} of {before_kw} (majority/all) — keeping unfiltered "
+                          f"(legs already keyword-matched; RSS body is truncated)")
 
         # Always compute scrutiny scores (annotate every result);
         # only drop posts when max_scrutiny is provided.
@@ -1641,6 +1689,14 @@ class RedditSearchBot:
     # auto-expiring sibling of the 403 `_reddit_rss_dead` latch.
     _reddit_rss_cooldown_until = 0.0
     _RSS_COOLDOWN_SECS = 90
+
+    # Arctic-Shift circuit-breaker: when it's under maintenance or rate-limiting
+    # ("Too many complex queries. Please slow down."), STOP hammering it — otherwise
+    # its per-query 503/429 backoff-retries burn the whole search time budget for 0
+    # results. Set on the first such error; the leg + queued fan-out queries skip
+    # until it expires (auto-recovers).
+    _arctic_cooldown_until = 0.0
+    _ARCTIC_COOLDOWN_SECS = 300
 
     # Same idea for Pullpush: it frequently 429s / returns nothing for niche subs
     # and grinds through retries (measured ~2-11s per dead call). When a call

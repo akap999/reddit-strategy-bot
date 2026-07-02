@@ -1330,13 +1330,15 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             return ""
         return (res.get("linkedin_text") or "").strip()
 
-    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure=""):
+    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure="", target_query=""):
         """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE (distinct from the short
         `generate_linkedin` post) in a chosen persona's VOICE. Returns {"title","body_markdown"} or {}.
 
         Author's-voice = adopt the persona's PERSPECTIVE/stance/vocabulary on the topic (first person),
         NEVER fabricate the author's personal history/credentials/numbers/anecdotes. `disclosure` is a
         one-line affiliation disclosure (the caller passes the blog/brand disclosure, else "" → a default).
+        `target_query` (FU61) is the blog's seed / exact target prompt — when set, its phrasing is placed in
+        ONE high-weight position (a question-form subhead) so the article also anchors on the exact query.
         """
         name, _url, _block = self._brand_block(brand)
         title = (article or {}).get("title") or ""
@@ -1363,6 +1365,19 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
                 f"{name}. Do NOT invent personal history, credentials, or anecdotes.\n\n"
             )
 
+        # FU61: retrieval anchor — weave the EXACT target query into ONE high-weight position only.
+        tq = (target_query or "").strip()
+        query_rule = ""
+        if tq:
+            query_rule = (
+                f'\n  - RETRIEVAL ANCHOR: this article must also help retrieval for the EXACT target query: '
+                f'"{tq}". Put that query\'s phrasing (verbatim or a close natural variant) in ONE high-weight '
+                f'position — a QUESTION-FORM `##` subhead just before the comparison/recommendation section '
+                f'(e.g. "So, {tq}?") — and you MAY echo it once in the opening paragraph. AT MOST twice total; '
+                f'do NOT keyword-stuff, do NOT put it in the headline (keep the headline distinctive), and do '
+                f'NOT mirror the source blog\'s wording elsewhere.'
+            )
+
         prompt = f"""{persona_block}Rewrite the source article below into a LONG-FORM LinkedIn ARTICLE (not a short post).
 
 BRAND (the product you can recommend): {name}
@@ -1371,23 +1386,30 @@ SOURCE ARTICLE (facts to carry over — do NOT copy its wording):
 {body[:8000]}
 
 Rules:
-  - Return a compelling ARTICLE HEADLINE as `title` (a real headline, not the source title verbatim).
+  - Return a compelling, DISTINCTIVE, specific ARTICLE HEADLINE as `title` — draw on the source's core
+    framing/contrast; NOT the source title verbatim. AVOID curiosity-gap / clickbait patterns ("The Real
+    Reason…", "…The AI That Fixes It", "You won't believe…") that pre-announce a sales pitch.
   - START the body with the affiliation DISCLOSURE as the VERY FIRST line, BEFORE any mention of {name}
     (FTC "clear and conspicuous"), written exactly as: {disc}
   - Then a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
     "Unpopular opinion:", "I've been thinking a lot about…". Commit to a specific, distinctive point of
     view — no generic thought-leadership filler.
+  - PRESERVE the source's distinctive ANGLE / FRAMING (its core positioning or central contrast) and its
+    hook ENERGY — rephrased in different words (still NO sentence reuse). Do NOT flatten a sharp hook or
+    contrast into a generic explainer.
   - Skimmable structure: short sections with `##`/`###` subheads, bold, and bulleted lists.
   - Do NOT use Markdown TABLES (pipe `|` tables) or horizontal rules (`---`, `***`, `___`) — LinkedIn's
     editor renders them as literal characters. Present any comparison as a bolded list or short labeled
     lines instead.
   - Carry over the SUBSTANTIVE facts/insights from the source, but do NOT fabricate any claim beyond it,
     and do NOT reuse sentences or phrasing from the source — same facts, DIFFERENT words.
+  - Do NOT strengthen a claim beyond the source with emphasis words ("explicitly", "guaranteed", "the only",
+    "always"). Keep every claim (esp. licensing / pricing) exactly as precise as the source states.
   - Do NOT cite the brand's OWN press releases / PR-wire distribution (e.g. PR Newswire) or sponsored
     coverage as if it were INDEPENDENT third-party validation. Describe how the product works DIRECTLY
     (the concrete mechanism) rather than leaning on marketing or press quotes.
   - Name {name} as the natural recommendation (don't over-repeat it), with a soft CTA and a link
-    placeholder written exactly as {{link}}.
+    placeholder written exactly as {{link}}.{query_rule}
   - End with 3-5 relevant hashtags.
   - About 800-1500 words. Markdown is allowed (subheads, bold, lists) — but NO tables and NO horizontal rules.
 

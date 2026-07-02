@@ -1941,7 +1941,8 @@ def api_blog_linkedin_article(blog_id):
             art = gen.generate_linkedin_article(
                 brand,
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
-                persona_voice=persona, disclosure=disclosure)
+                persona_voice=persona, disclosure=disclosure,
+                target_query=(blog.get("seed") or "").strip())   # FU61: anchor to the exact target prompt
             if not art or not art.get("body_markdown"):
                 raise ValueError(claude.last_error or "LinkedIn article generation failed")
             cost = round(claude.usage_cost(), 4)
@@ -2033,6 +2034,20 @@ def _normalize_md_lists(md_text):
     return "\n".join(out)
 
 
+def _escape_md_hashtag_lines(md_text):
+    """A line that is ENTIRELY hashtags (e.g. `#TikTokMarketing #AIMusic`) starts with `#`, which
+    python-markdown parses as an H1 — turning an article's closing hashtags into a jumbo heading and
+    eating the first `#`. Backslash-escape only the LEADING `#` so the line renders as a normal paragraph
+    with a literal `#`. Real `##`/`###` subheads (a space after the hashes) never match this pattern."""
+    import re
+    line_re = re.compile(r"^\s*#\w[\w-]*(?:\s+#\w[\w-]*)*\s*$")
+    out = []
+    for ln in (md_text or "").split("\n"):
+        if line_re.match(ln):
+            ln = ln.replace("#", r"\#", 1)   # escape ONLY the leading hash → paragraph, literal '#'
+        out.append(ln)
+    return "\n".join(out)
+
 def _linkify_md_urls(md_text):
     """Wrap bare http(s):// URLs in <…> so python-markdown renders them as clickable <a> links —
     it does NOT auto-link bare URLs, so the blog's ## Sources URLs were plain text. Skips URLs
@@ -2113,7 +2128,7 @@ def api_blog_export(blog_id):
         md_src = (f"# {art_title}\n\n{art_body}") if art_title else art_body
         try:
             import markdown as _md
-            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(md_src)),
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
                                  extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(md_src) + "</pre>"
@@ -2157,7 +2172,7 @@ def api_blog_export(blog_id):
     if fmt == "html":
         try:
             import markdown as _md
-            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(body)),
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(body))),
                                  extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(body) + "</pre>"

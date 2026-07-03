@@ -4720,6 +4720,47 @@ def api_backfill_keywords(sid):
     tid = start_task("backfill-keywords", task)
     return jsonify({"task_id": tid})
 
+@app.route("/api/debug/comment-dates")
+def api_debug_comment_dates():
+    """Read-only diagnostic: dump the raw date/status columns for a comment (regular OR search) so we can
+    see which stored field drives the client 'Published' date and whether it drifted. Pass ?url=<permalink>
+    or ?comment_id=<base36 id> (e.g. otdg75m)."""
+    import re as _re
+    url = (request.args.get("url") or "").strip()
+    rid = (request.args.get("comment_id") or "").strip().lower()
+    if url and not rid:
+        m = (_re.search(r"/comment/([a-z0-9]+)", url)
+             or _re.search(r"/comments/[a-z0-9]+/[^/]+/([a-z0-9]+)", url))
+        if m:
+            rid = m.group(1).lower()
+    if not rid and not url:
+        return jsonify({"error": "pass ?url=<permalink> or ?comment_id=<base36 id>"}), 400
+    pattern = f"%{rid}%" if rid else f"%{url.split('?')[0].rstrip('/')}%"
+    # Only surface date/status/id columns (whatever exists on the row).
+    keep = {"id", "status", "prev_status", "posted_at", "deployed_at", "paid_at",
+            "report_month", "report_added_at", "last_live_check", "created_at",
+            "assigned_at", "deleted_at", "reddit_comment_url", "brand_id", "subreddit_id",
+            "outcome", "replaced_at"}
+    db = get_db()
+    try:
+        out = {}
+        for tbl, kind in (("comments", "comment"), ("search_comments", "search_comment")):
+            try:
+                rows = db.conn.execute(
+                    f"SELECT * FROM {tbl} WHERE reddit_comment_url LIKE ?", (pattern,)
+                ).fetchall()
+            except Exception as e:
+                out[kind] = {"error": str(e)}
+                continue
+            out[kind] = [{k: r[k] for k in r.keys() if k in keep} for r in rows]
+        # Which field the client dashboard would DISPLAY as "Published" (posted_at -> deployed_at).
+        for kind in out:
+            for row in (out[kind] if isinstance(out[kind], list) else []):
+                row["_displayed_published_date"] = (row.get("posted_at") or row.get("deployed_at") or "")
+        return jsonify({"match": rid or url, "results": out})
+    finally:
+        db.close()
+
 @app.route("/api/brands/all")
 def api_all_brands():
     db = get_db()

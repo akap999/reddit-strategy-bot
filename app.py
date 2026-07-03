@@ -590,8 +590,13 @@ def _comment_posted_at_via_rss(comment_url, timeout=15):
         for entry in root.findall("atom:entry", ns):
             eid = ((entry.find("atom:id", ns) is not None and entry.find("atom:id", ns).text) or "")
             if cid in eid.lower():
+                # FU70: a Reddit COMMENT Atom entry has NO <published> (only the POST entry does) — its
+                # real timestamp is in <updated>. Prefer <published> when present, else <updated>.
                 pub = entry.find("atom:published", ns)
                 raw = ((pub is not None and pub.text) or "").strip()
+                if not raw:
+                    upd = entry.find("atom:updated", ns)
+                    raw = ((upd is not None and upd.text) or "").strip()
                 if not raw:
                     return None
                 try:

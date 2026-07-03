@@ -4885,10 +4885,38 @@ def api_backfill_posted_at_scoped():
                 return jsonify({"error": f"{source_one} {cid_one} not found"}), 404
             had = bool(row["posted_at"])
             url = ((row["reddit_comment_url"] or "")).strip()
-            posted_at = _ensure_posted_at(db, cid_one, source_one, url, log_prefix="backfill-one")
-            return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
-                            "posted_at": posted_at, "already_had": had,
-                            "filled": (not had) and bool(posted_at)})
+            if had:
+                return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
+                                "posted_at": row["posted_at"], "already_had": True,
+                                "filled": False, "reason": "already_had"})
+            # FU69: RSS-first fetch; `reason` makes the outcome visible (this field's presence also
+            # confirms the FU69 build is live).
+            posted_at, reason = _fetch_comment_posted_at(url)
+            if posted_at:
+                db.update_posted_at(cid_one, source_one, posted_at)
+            resp = {"comment_id": cid_one, "source": source_one, "url": url,
+                    "posted_at": posted_at, "already_had": False,
+                    "filled": bool(posted_at), "reason": reason}
+            if not posted_at:
+                # Probe what Railway's RSS path actually returned for this comment, so a failure is
+                # diagnosable (worker empty-200 vs 429 vs 200-XML-but-no-entry).
+                try:
+                    from bulk_deploy import classify_reddit_url as _cr
+                    info = _cr(url) or {}
+                    if info.get("comment_id"):
+                        rel = (f"/r/{info['sub']}/comments/{info['post_id']}"
+                               f"/comment/{info['comment_id']}/.rss")
+                        rr = _reddit_rss_fetch(rel)
+                        body = ((rr.text if rr is not None else "") or "")
+                        resp["rss_debug"] = {
+                            "path": rel,
+                            "status": (rr.status_code if rr is not None else None),
+                            "is_xml": body.lstrip().startswith("<?xml"),
+                            "len": len(body),
+                            "snippet": body[:200]}
+                except Exception as e:
+                    resp["rss_debug"] = {"error": str(e)}
+            return jsonify(resp)
         finally:
             db.close()
 

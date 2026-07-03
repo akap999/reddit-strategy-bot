@@ -5660,6 +5660,37 @@ class Database:
         row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
         return row["status"] if row else "deployed"
 
+    def get_rows_missing_posted_at(self, month=None):
+        """FU67: rows needing a posted_at backfill — a reddit_comment_url present and posted_at NULL,
+        that are CURRENTLY reported (status 'report'/'replaced') OR currently 'deployed'. We scope by
+        LIVE STATUS, not report_month, because report_month can be mis-bucketed (a comment reported this
+        cycle can carry an earlier month) — filtering on it silently drops comments that are sitting in
+        the report right now. `month` (YYYY-MM), when given, additionally narrows the REPORTED rows to
+        that report_month (deployed rows always included); default None = every currently-reported comment
+        regardless of bucket. Returns [{id, source, reddit_comment_url}] across comments + search_comments."""
+        out = []
+        for tbl, src in (("comments", "comment"), ("search_comments", "search_comment")):
+            try:
+                if month:
+                    rows = self.conn.execute(
+                        f"""SELECT id, reddit_comment_url FROM {tbl}
+                            WHERE posted_at IS NULL
+                              AND reddit_comment_url IS NOT NULL AND TRIM(reddit_comment_url) != ''
+                              AND (status = 'deployed'
+                                   OR (status IN ('report','replaced') AND report_month = ?))""",
+                        (month,)).fetchall()
+                else:
+                    rows = self.conn.execute(
+                        f"""SELECT id, reddit_comment_url FROM {tbl}
+                            WHERE posted_at IS NULL
+                              AND reddit_comment_url IS NOT NULL AND TRIM(reddit_comment_url) != ''
+                              AND status IN ('report','replaced','deployed')""").fetchall()
+            except Exception:
+                continue
+            out.extend({"id": r["id"], "source": src,
+                        "reddit_comment_url": r["reddit_comment_url"]} for r in rows)
+        return out
+
     def get_published_posts_with_urls(self, subreddit_id):
         """Get posts that have Reddit URLs linked (published posts)."""
         rows = self.conn.execute(

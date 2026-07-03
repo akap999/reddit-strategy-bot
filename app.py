@@ -4761,6 +4761,46 @@ def api_debug_comment_dates():
     finally:
         db.close()
 
+@app.route("/api/admin/backfill-posted-at", methods=["POST"])
+def api_backfill_posted_at_scoped():
+    """FU67: backfill posted_at (real Reddit created_utc) for every currently-reported comment
+    (status 'report'/'replaced') OR currently 'deployed' comment whose posted_at is NULL. Scoped by
+    LIVE STATUS, not report_month (which can be mis-bucketed). Background task; poll for
+    {scanned, filled, still_missing}. Body: {"month": "YYYY-MM"} OPTIONAL — narrows the reported set
+    to that report_month (deployed always included); omit to cover all currently-reported comments."""
+    data = request.get_json(silent=True) or {}
+    month = (data.get("month") or "").strip() or None
+
+    def task(_task_id=None):
+        import time as _time
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            rows = bg.get_rows_missing_posted_at(month)
+            scanned = len(rows)
+            filled = 0
+            scope = (f"report_month={month} OR deployed" if month
+                     else "all reported (report/replaced) OR deployed")
+            print(f"[backfill posted_at] scope=({scope}) missing={scanned}", flush=True)
+            for i, r in enumerate(rows):
+                if _ensure_posted_at(bg, r["id"], r["source"], r["reddit_comment_url"],
+                                     log_prefix="backfill"):
+                    filled += 1
+                if _task_id:
+                    try:
+                        bg.update_task_progress(_task_id, {"checked": i + 1, "total": scanned,
+                                                           "filled": filled})
+                    except Exception:
+                        pass
+                _time.sleep(0.3)  # pace Reddit / conserve residential GB
+            return {"month": month, "scanned": scanned, "filled": filled,
+                    "still_missing": scanned - filled}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("backfill_posted_at", task, pass_task_id=True)})
+
 @app.route("/api/brands/all")
 def api_all_brands():
     db = get_db()
@@ -10070,6 +10110,35 @@ def _classify_url_liveness(url):
     return (liveness, detail)
 
 
+def _ensure_posted_at(db, cid, source, url, log_prefix="posted_at"):
+    """FU67: fetch + persist the REAL Reddit publish timestamp (created_utc) for a comment when its
+    `posted_at` is missing, so the client 'Published' date reflects the true publish date (immutable)
+    instead of falling back to the mutable `deployed_at`. NULL-safe + write-once (never overwrites an
+    existing posted_at). `source` is 'comment' | 'search_comment'. Returns the stored posted_at (or None).
+    Uses the residential-proxy Reddit fetch (`_reddit_get_json`), so it works on Railway's blocked IP."""
+    url = (url or "").strip()
+    if not url or source not in ("comment", "search_comment"):
+        return None
+    table = "comments" if source == "comment" else "search_comments"
+    try:
+        row = db.conn.execute(f"SELECT posted_at FROM {table} WHERE id = ?", (cid,)).fetchone()
+    except Exception:
+        return None
+    if row and row["posted_at"]:
+        return row["posted_at"]   # already captured — never overwrite the real publish date
+    try:
+        from bulk_deploy import fetch_reddit_comment_meta
+        meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+        posted_at = meta.get("posted_at") if meta else None
+        if posted_at:
+            db.update_posted_at(cid, source, posted_at)   # write-once (NULL-safe)
+            print(f"[{log_prefix}] captured posted_at for #{cid} ({source}) = {posted_at}", flush=True)
+            return posted_at
+    except Exception as e:
+        print(f"[{log_prefix}] posted_at fetch failed #{cid} ({source}): {e}", flush=True)
+    return None
+
+
 def _report_live_gate(db, items, task_id=None, allow_missing=False, fast=False):
     """NON-MUTATING liveness gate for the report flow. For each {id, source}, classify the
     comment's Reddit liveness — but NEVER change any row's status (unlike the regular
@@ -10115,6 +10184,19 @@ def _report_live_gate(db, items, task_id=None, allow_missing=False, fast=False):
     done = 0
     handled = set()  # (id, source) confirmed live by the bulk pre-pass
 
+    url_by_key = {(r["id"], r["source"]): r["url"] for r in records}
+
+    def _capture_live_posted_at():
+        # FU67: before these LIVE comments are reported, capture each one's real Reddit publish date
+        # (created_utc) if it's missing, so the client 'Published' date shows the true, immutable date
+        # instead of the mutable deployed_at. Only fetches for live rows that lack posted_at (converges).
+        for it in live:
+            try:
+                _ensure_posted_at(db, it["id"], it["source"],
+                                  url_by_key.get((it["id"], it["source"]), ""), log_prefix="report-gate")
+            except Exception:
+                pass
+
     def _emit():
         if task_id:
             try:
@@ -10159,6 +10241,7 @@ def _report_live_gate(db, items, task_id=None, allow_missing=False, fast=False):
             _decide(liveness, rec)
             done += 1
             _emit()
+        _capture_live_posted_at()
         return {"live": live, "not_live": not_live}
 
     # --- Phase 1: bulk post-feed pre-pass (Live Subs comments only). One fetch per post
@@ -10201,6 +10284,7 @@ def _report_live_gate(db, items, task_id=None, allow_missing=False, fast=False):
         # Pace between comments (not after the last) to avoid rate-limit bursts.
         if i < n - 1:
             _t.sleep(1)
+    _capture_live_posted_at()
     return {"live": live, "not_live": not_live}
 
 

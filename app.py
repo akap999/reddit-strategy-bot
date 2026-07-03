@@ -551,6 +551,87 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
         return None
 
 
+def _comment_posted_at_via_rss(comment_url, timeout=15):
+    """FU69: the comment's REAL publish time as a UTC 'YYYY-MM-DD HH:MM:SS' string, read from its
+    permalink RSS <entry><published>, or None.
+
+    Reddit now 403s the anonymous .json comment API broadly (verified: 403 to a browser UA on BOTH
+    www + old.reddit.com, from a clean residential IP — so `fetch_reddit_comment_meta`'s created_utc
+    path fails everywhere, proxy or not). But the SAME `/r/<sub>/comments/<post>/comment/<cid>/.rss`
+    feed the liveness check uses still returns 200 and carries the comment's <published> date, and
+    routes through the worker/residential RSS path (`_reddit_rss_fetch`). This is the reliable source.
+    Mirrors `_comment_liveness_via_rss`'s parse (same entry-id match)."""
+    import xml.etree.ElementTree as _ET
+    from datetime import datetime as _dt, timezone as _tz
+    if not comment_url:
+        return None
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)(?:/[^/]*)*?/([a-z0-9]{4,12})/?(?:\?|$)",
+                  comment_url, re.IGNORECASE)
+    if not m:
+        mp = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)", comment_url, re.IGNORECASE)
+        seg = [s for s in comment_url.split("?")[0].rstrip("/").split("/") if s]
+        if not mp or not seg:
+            return None
+        sub, post_id, cid = mp.group(1), mp.group(2), seg[-1]
+    else:
+        sub, post_id, cid = m.group(1), m.group(2), m.group(3)
+    cid = cid.lower()
+    if cid == post_id.lower():
+        return None
+    r = _reddit_rss_fetch(f"/r/{sub}/comments/{post_id}/comment/{cid}/.rss", timeout=timeout)
+    if r is None or r.status_code != 200:
+        return None
+    body = r.text or ""
+    if not body.lstrip().startswith("<?xml"):
+        return None
+    try:
+        root = _ET.fromstring(body)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            eid = ((entry.find("atom:id", ns) is not None and entry.find("atom:id", ns).text) or "")
+            if cid in eid.lower():
+                pub = entry.find("atom:published", ns)
+                raw = ((pub is not None and pub.text) or "").strip()
+                if not raw:
+                    return None
+                try:
+                    dt = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=_tz.utc)
+                return dt.astimezone(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        return None
+    except Exception as e:
+        print(f"[COMMENT-RSS] posted_at parse failed for {comment_url}: {e}", flush=True)
+        return None
+
+
+def _fetch_comment_posted_at(comment_url):
+    """FU69: fetch a comment's real publish time, returning (posted_at | None, reason). reason ∈
+    {'filled','bad_url','not_found','no_created_utc'}. RSS FIRST (the .json comment API is broadly
+    403'd now); the legacy .json created_utc path is a fallback for when a proxy/worker serves JSON."""
+    from bulk_deploy import fetch_reddit_comment_meta, classify_reddit_url
+    url = (comment_url or "").strip()
+    info = classify_reddit_url(url) if url else None
+    if not info or not info.get("comment_id"):
+        return None, "bad_url"
+    pa = _comment_posted_at_via_rss(url)
+    if pa:
+        return pa, "filled"
+    # Fallback: the old JSON path (created_utc). Works only where JSON isn't 403'd.
+    try:
+        meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+    except Exception:
+        meta = None
+    pa = (meta or {}).get("posted_at")
+    if pa:
+        return pa, "filled"
+    if meta and meta.get("found"):
+        return None, "no_created_utc"
+    return None, "not_found"
+
+
 def _post_liveness_via_rss(post_url, timeout=15):
     """Liveness check for a POST url via its comment RSS feed.
 
@@ -4837,7 +4918,6 @@ def api_backfill_posted_at_scoped():
 
     def task(_task_id=None):
         import time as _time
-        from bulk_deploy import fetch_reddit_comment_meta, classify_reddit_url
         bg = Database(DB_PATH)
         bg.connect()
         bg.initialize()
@@ -4858,23 +4938,13 @@ def api_backfill_posted_at_scoped():
             for i, r in enumerate(rows):
                 rid, src = r["id"], r["source"]
                 url = (r["reddit_comment_url"] or "").strip()
-                info = classify_reddit_url(url) if url else None
-                if not info or not info.get("comment_id"):
-                    _tally("bad_url", rid)   # no comment id in the permalink → can't be resolved
-                else:
-                    try:
-                        meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
-                    except Exception:
-                        meta = None
-                    posted_at = (meta or {}).get("posted_at")
-                    if posted_at:
-                        bg.update_posted_at(rid, src, posted_at)
-                        filled += 1
-                        _tally("filled", rid)
-                    elif meta and meta.get("found"):
-                        _tally("no_created_utc", rid)   # comment located but no usable timestamp
-                    else:
-                        _tally("not_found", rid)        # deleted / not in the fetched tree / unfetchable
+                # FU69: RSS-first (Reddit .json comment API is 403'd); reason ∈ filled/bad_url/
+                # not_found/no_created_utc.
+                posted_at, reason = _fetch_comment_posted_at(url)
+                if posted_at:
+                    bg.update_posted_at(rid, src, posted_at)
+                    filled += 1
+                _tally(reason, rid)
                 if _task_id:
                     try:
                         bg.update_task_progress(_task_id, {"checked": i + 1, "total": scanned,
@@ -10208,7 +10278,8 @@ def _ensure_posted_at(db, cid, source, url, log_prefix="posted_at"):
     `posted_at` is missing, so the client 'Published' date reflects the true publish date (immutable)
     instead of falling back to the mutable `deployed_at`. NULL-safe + write-once (never overwrites an
     existing posted_at). `source` is 'comment' | 'search_comment'. Returns the stored posted_at (or None).
-    Uses the residential-proxy Reddit fetch (`_reddit_get_json`), so it works on Railway's blocked IP."""
+    FU69: sources the timestamp from the comment's .rss <published> (Reddit's .json comment API is now
+    broadly 403'd) via `_fetch_comment_posted_at`, which routes through the worker/residential RSS path."""
     url = (url or "").strip()
     if not url or source not in ("comment", "search_comment"):
         return None
@@ -10220,9 +10291,7 @@ def _ensure_posted_at(db, cid, source, url, log_prefix="posted_at"):
     if row and row["posted_at"]:
         return row["posted_at"]   # already captured — never overwrite the real publish date
     try:
-        from bulk_deploy import fetch_reddit_comment_meta
-        meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
-        posted_at = meta.get("posted_at") if meta else None
+        posted_at, _reason = _fetch_comment_posted_at(url)
         if posted_at:
             db.update_posted_at(cid, source, posted_at)   # write-once (NULL-safe)
             print(f"[{log_prefix}] captured posted_at for #{cid} ({source}) = {posted_at}", flush=True)

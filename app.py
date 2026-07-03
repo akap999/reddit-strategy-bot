@@ -4766,27 +4766,115 @@ def api_backfill_posted_at_scoped():
     """FU67: backfill posted_at (real Reddit created_utc) for every currently-reported comment
     (status 'report'/'replaced') OR currently 'deployed' comment whose posted_at is NULL. Scoped by
     LIVE STATUS, not report_month (which can be mis-bucketed). Background task; poll for
-    {scanned, filled, still_missing}. Body: {"month": "YYYY-MM"} OPTIONAL — narrows the reported set
-    to that report_month (deployed always included); omit to cover all currently-reported comments."""
+    {scanned, filled, still_missing}.
+
+    Body options:
+      {"comment_id": <int>, "source": "comment"|"search_comment"} — SURGICAL: backfill exactly one
+          comment, INLINE (one fetch), returns the result directly (no task polling). Guaranteed to
+          hit that row regardless of its report_month.
+      {"month": "YYYY-MM"} — OPTIONAL narrowing of the sweep to that report_month (deployed always
+          included).
+      {"client_id": <int>} — OPTIONAL: restrict the sweep + breakdown to one client's brand rows
+          (numbers then match that client's dashboard).
+      {"preview": true} — READ-ONLY: return only the `breakdown` (report_month histogram + per-status
+          counts), no Reddit fetch, no writes — a zero-GB dry run to see where the comments actually sit.
+      {} — sweep every currently-reported + deployed comment missing posted_at.
+
+    Non-preview responses include a `breakdown` (FU68) so a single per-month run is self-diagnosing, and
+    the task result carries a per-row `reasons` tally (filled / not_found / no_created_utc / bad_url)."""
     data = request.get_json(silent=True) or {}
+
+    # --- Surgical single-comment path: inline, one fetch, immediate result. ---
+    cid_one = data.get("comment_id")
+    if cid_one not in (None, "", 0):
+        try:
+            cid_one = int(cid_one)
+        except (TypeError, ValueError):
+            return jsonify({"error": "comment_id must be an int"}), 400
+        source_one = (data.get("source") or "comment").strip()
+        if source_one not in ("comment", "search_comment"):
+            return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+        db = get_db()
+        try:
+            table = "comments" if source_one == "comment" else "search_comments"
+            row = db.conn.execute(
+                f"SELECT reddit_comment_url, posted_at FROM {table} WHERE id = ?",
+                (cid_one,)).fetchone()
+            if not row:
+                return jsonify({"error": f"{source_one} {cid_one} not found"}), 404
+            had = bool(row["posted_at"])
+            url = ((row["reddit_comment_url"] or "")).strip()
+            posted_at = _ensure_posted_at(db, cid_one, source_one, url, log_prefix="backfill-one")
+            return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
+                            "posted_at": posted_at, "already_had": had,
+                            "filled": (not had) and bool(posted_at)})
+        finally:
+            db.close()
+
     month = (data.get("month") or "").strip() or None
+    client_id = data.get("client_id")
+    try:
+        client_id = int(client_id) if client_id not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        client_id = None
+    preview = bool(data.get("preview"))
+
+    # Read-only breakdown (NO Reddit fetch) — cheap; explains where the reported comments actually sit.
+    _db = get_db()
+    try:
+        breakdown = _db.report_posted_at_coverage(month, client_id)
+    finally:
+        _db.close()
+
+    if preview:
+        return jsonify({"preview": True, "month": month, "client_id": client_id,
+                        "breakdown": breakdown})
+
+    scope = (f"report_month={month} OR deployed" if month
+             else "all reported (report/replaced) OR deployed")
+    if client_id:
+        scope += f" · client={client_id}"
 
     def task(_task_id=None):
         import time as _time
+        from bulk_deploy import fetch_reddit_comment_meta, classify_reddit_url
         bg = Database(DB_PATH)
         bg.connect()
         bg.initialize()
         try:
-            rows = bg.get_rows_missing_posted_at(month)
+            rows = bg.get_rows_missing_posted_at(month, client_id)
             scanned = len(rows)
             filled = 0
-            scope = (f"report_month={month} OR deployed" if month
-                     else "all reported (report/replaced) OR deployed")
+            reasons = {}        # reason -> count
+            reason_examples = {}  # reason -> [ids] (first few)
+
+            def _tally(reason, rid):
+                reasons[reason] = reasons.get(reason, 0) + 1
+                ex = reason_examples.setdefault(reason, [])
+                if len(ex) < 5:
+                    ex.append(rid)
+
             print(f"[backfill posted_at] scope=({scope}) missing={scanned}", flush=True)
             for i, r in enumerate(rows):
-                if _ensure_posted_at(bg, r["id"], r["source"], r["reddit_comment_url"],
-                                     log_prefix="backfill"):
-                    filled += 1
+                rid, src = r["id"], r["source"]
+                url = (r["reddit_comment_url"] or "").strip()
+                info = classify_reddit_url(url) if url else None
+                if not info or not info.get("comment_id"):
+                    _tally("bad_url", rid)   # no comment id in the permalink → can't be resolved
+                else:
+                    try:
+                        meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
+                    except Exception:
+                        meta = None
+                    posted_at = (meta or {}).get("posted_at")
+                    if posted_at:
+                        bg.update_posted_at(rid, src, posted_at)
+                        filled += 1
+                        _tally("filled", rid)
+                    elif meta and meta.get("found"):
+                        _tally("no_created_utc", rid)   # comment located but no usable timestamp
+                    else:
+                        _tally("not_found", rid)        # deleted / not in the fetched tree / unfetchable
                 if _task_id:
                     try:
                         bg.update_task_progress(_task_id, {"checked": i + 1, "total": scanned,
@@ -4794,12 +4882,17 @@ def api_backfill_posted_at_scoped():
                     except Exception:
                         pass
                 _time.sleep(0.3)  # pace Reddit / conserve residential GB
-            return {"month": month, "scanned": scanned, "filled": filled,
-                    "still_missing": scanned - filled}
+            print(f"[backfill posted_at] done scanned={scanned} filled={filled} reasons={reasons}",
+                  flush=True)
+            return {"month": month, "client_id": client_id, "scope": scope,
+                    "scanned": scanned, "filled": filled, "still_missing": scanned - filled,
+                    "reasons": reasons, "reason_examples": reason_examples,
+                    "breakdown": breakdown}
         finally:
             bg.close()
 
-    return jsonify({"task_id": start_task("backfill_posted_at", task, pass_task_id=True)})
+    return jsonify({"task_id": start_task("backfill_posted_at", task, pass_task_id=True),
+                    "breakdown": breakdown})
 
 @app.route("/api/brands/all")
 def api_all_brands():

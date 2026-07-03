@@ -5660,36 +5660,158 @@ class Database:
         row = self.conn.execute("SELECT status FROM search_comments WHERE id = ?", (comment_id,)).fetchone()
         return row["status"] if row else "deployed"
 
-    def get_rows_missing_posted_at(self, month=None):
+    def get_rows_missing_posted_at(self, month=None, client_id=None):
         """FU67: rows needing a posted_at backfill — a reddit_comment_url present and posted_at NULL,
         that are CURRENTLY reported (status 'report'/'replaced') OR currently 'deployed'. We scope by
         LIVE STATUS, not report_month, because report_month can be mis-bucketed (a comment reported this
         cycle can carry an earlier month) — filtering on it silently drops comments that are sitting in
         the report right now. `month` (YYYY-MM), when given, additionally narrows the REPORTED rows to
         that report_month (deployed rows always included); default None = every currently-reported comment
-        regardless of bucket. Returns [{id, source, reddit_comment_url}] across comments + search_comments."""
+        regardless of bucket. `client_id` (FU68, optional) restricts to that client's brand rows using the
+        same brand-match chain as get_comments_for_client_month. Returns [{id, source, reddit_comment_url}]
+        across comments + search_comments."""
+        brand_ids = self.client_brand_ids(client_id) if client_id else None
+        if client_id and not brand_ids:
+            return []
         out = []
         for tbl, src in (("comments", "comment"), ("search_comments", "search_comment")):
+            a = "c" if src == "comment" else "sc"
+            if brand_ids:
+                ph = ",".join("?" * len(brand_ids))
+                if src == "comment":
+                    join = " JOIN posts p ON c.post_id = p.id"
+                    match = (f" AND (c.brand_id IN ({ph})"
+                             f" OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+                             f" OR (c.brand_id IS NULL AND p.id IN"
+                             f" (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))))")
+                    bparams = brand_ids * 3
+                else:
+                    join = " JOIN search_posts sp ON sc.search_post_id = sp.id"
+                    match = (f" AND (sc.brand_id IN ({ph})"
+                             f" OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})))")
+                    bparams = brand_ids * 2
+            else:
+                join = match = ""
+                bparams = []
             try:
                 if month:
-                    rows = self.conn.execute(
-                        f"""SELECT id, reddit_comment_url FROM {tbl}
-                            WHERE posted_at IS NULL
-                              AND reddit_comment_url IS NOT NULL AND TRIM(reddit_comment_url) != ''
-                              AND (status = 'deployed'
-                                   OR (status IN ('report','replaced') AND report_month = ?))""",
-                        (month,)).fetchall()
+                    q = (f"SELECT {a}.id AS id, {a}.reddit_comment_url AS url "
+                         f"FROM {tbl} {a}{join} "
+                         f"WHERE {a}.posted_at IS NULL "
+                         f"AND {a}.reddit_comment_url IS NOT NULL AND TRIM({a}.reddit_comment_url) != '' "
+                         f"AND ({a}.status = 'deployed' "
+                         f"OR ({a}.status IN ('report','replaced') AND {a}.report_month = ?)){match}")
+                    params = [month] + bparams
                 else:
-                    rows = self.conn.execute(
-                        f"""SELECT id, reddit_comment_url FROM {tbl}
-                            WHERE posted_at IS NULL
-                              AND reddit_comment_url IS NOT NULL AND TRIM(reddit_comment_url) != ''
-                              AND status IN ('report','replaced','deployed')""").fetchall()
+                    q = (f"SELECT {a}.id AS id, {a}.reddit_comment_url AS url "
+                         f"FROM {tbl} {a}{join} "
+                         f"WHERE {a}.posted_at IS NULL "
+                         f"AND {a}.reddit_comment_url IS NOT NULL AND TRIM({a}.reddit_comment_url) != '' "
+                         f"AND {a}.status IN ('report','replaced','deployed'){match}")
+                    params = bparams
+                rows = self.conn.execute(q, params).fetchall()
             except Exception:
                 continue
             out.extend({"id": r["id"], "source": src,
-                        "reddit_comment_url": r["reddit_comment_url"]} for r in rows)
+                        "reddit_comment_url": r["url"]} for r in rows)
         return out
+
+    def report_posted_at_coverage(self, month=None, client_id=None):
+        """FU68: read-only diagnostic (NO Reddit fetch) that explains a posted_at backfill's scope —
+        it answers "why did month=X scan only N when the dashboard shows 50+".
+
+        Returns:
+          {"by_report_month": [{report_month, status, total, missing_posted_at}, ...],  # both tables merged
+           "month": month,
+           "for_month": {status: {total, has_posted_at, missing_posted_at, missing_url}, ...} | {},
+           "client_id": client_id}
+
+        Counts the dashboard's reported set (status report/removed/replace/replaced) + deployed. When
+        `client_id` is given, restrict to that client's brand rows using the SAME brand-match chain as
+        `get_comments_for_client_month` (so the numbers match one client's dashboard). No fetch, no write."""
+        STATUSES = ("report", "removed", "replace", "replaced", "deployed")
+        st_ph = ",".join("?" * len(STATUSES))
+        st_list = list(STATUSES)
+
+        brand_ids = self.client_brand_ids(client_id) if client_id else None
+        if client_id and not brand_ids:
+            return {"by_report_month": [], "month": month, "for_month": {},
+                    "client_id": client_id, "note": "client has no brands"}
+
+        if brand_ids:
+            ph = ",".join("?" * len(brand_ids))
+            cjoin = " JOIN posts p ON c.post_id = p.id"
+            cmatch = (f" AND (c.brand_id IN ({ph})"
+                      f" OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+                      f" OR (c.brand_id IS NULL AND p.id IN"
+                      f" (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))))")
+            cparams = brand_ids * 3
+            scjoin = " JOIN search_posts sp ON sc.search_post_id = sp.id"
+            scmatch = (f" AND (sc.brand_id IN ({ph})"
+                       f" OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})))")
+            scparams = brand_ids * 2
+        else:
+            cjoin = cmatch = scjoin = scmatch = ""
+            cparams = scparams = []
+
+        # --- histogram: (report_month, status) -> total, missing_posted_at ---
+        hist = {}
+        q_c = (f"SELECT c.report_month AS rm, c.status AS st, COUNT(*) AS total, "
+               f"SUM(CASE WHEN c.posted_at IS NULL THEN 1 ELSE 0 END) AS missing "
+               f"FROM comments c{cjoin} WHERE c.status IN ({st_ph}){cmatch} "
+               f"GROUP BY c.report_month, c.status")
+        q_sc = (f"SELECT sc.report_month AS rm, sc.status AS st, COUNT(*) AS total, "
+                f"SUM(CASE WHEN sc.posted_at IS NULL THEN 1 ELSE 0 END) AS missing "
+                f"FROM search_comments sc{scjoin} WHERE sc.status IN ({st_ph}){scmatch} "
+                f"GROUP BY sc.report_month, sc.status")
+        for q, params in ((q_c, st_list + cparams), (q_sc, st_list + scparams)):
+            try:
+                rows = self.conn.execute(q, params).fetchall()
+            except Exception:
+                continue
+            for r in rows:
+                key = (r["rm"], r["st"])
+                e = hist.setdefault(key, {"report_month": r["rm"], "status": r["st"],
+                                          "total": 0, "missing_posted_at": 0})
+                e["total"] += r["total"]
+                e["missing_posted_at"] += (r["missing"] or 0)
+        by_report_month = sorted(
+            hist.values(),
+            key=lambda e: ((e["report_month"] or ""), e["status"]), reverse=True)
+
+        # --- per-status detail for the requested month ---
+        for_month = {}
+        if month:
+            d_c = (f"SELECT c.status AS st, COUNT(*) AS total, "
+                   f"SUM(CASE WHEN c.posted_at IS NOT NULL THEN 1 ELSE 0 END) AS has_pa, "
+                   f"SUM(CASE WHEN c.posted_at IS NULL THEN 1 ELSE 0 END) AS miss_pa, "
+                   f"SUM(CASE WHEN c.reddit_comment_url IS NULL OR TRIM(c.reddit_comment_url)='' "
+                   f"    THEN 1 ELSE 0 END) AS miss_url "
+                   f"FROM comments c{cjoin} WHERE c.report_month = ? AND c.status IN ({st_ph}){cmatch} "
+                   f"GROUP BY c.status")
+            d_sc = (f"SELECT sc.status AS st, COUNT(*) AS total, "
+                    f"SUM(CASE WHEN sc.posted_at IS NOT NULL THEN 1 ELSE 0 END) AS has_pa, "
+                    f"SUM(CASE WHEN sc.posted_at IS NULL THEN 1 ELSE 0 END) AS miss_pa, "
+                    f"SUM(CASE WHEN sc.reddit_comment_url IS NULL OR TRIM(sc.reddit_comment_url)='' "
+                    f"    THEN 1 ELSE 0 END) AS miss_url "
+                    f"FROM search_comments sc{scjoin} WHERE sc.report_month = ? AND sc.status IN ({st_ph}){scmatch} "
+                    f"GROUP BY sc.status")
+            for q, params in ((d_c, [month] + st_list + cparams),
+                              (d_sc, [month] + st_list + scparams)):
+                try:
+                    rows = self.conn.execute(q, params).fetchall()
+                except Exception:
+                    continue
+                for r in rows:
+                    e = for_month.setdefault(r["st"], {"total": 0, "has_posted_at": 0,
+                                                       "missing_posted_at": 0, "missing_url": 0})
+                    e["total"] += r["total"]
+                    e["has_posted_at"] += (r["has_pa"] or 0)
+                    e["missing_posted_at"] += (r["miss_pa"] or 0)
+                    e["missing_url"] += (r["miss_url"] or 0)
+
+        return {"by_report_month": by_report_month, "month": month,
+                "for_month": for_month, "client_id": client_id}
 
     def get_published_posts_with_urls(self, subreddit_id):
         """Get posts that have Reddit URLs linked (published posts)."""

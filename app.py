@@ -10616,6 +10616,7 @@ def api_post_to_report(pid):
                 pass
     post_reddit_url = (data.get('post_reddit_url') or '').strip()
     hq_reddit_url = (data.get('hq_reddit_url') or '').strip()
+    hq_body = (data.get('hq_body') or '').strip()
     db = get_db()
     try:
         post = db.conn.execute("SELECT id, subreddit_id FROM posts WHERE id = ?", (pid,)).fetchone()
@@ -10627,7 +10628,11 @@ def api_post_to_report(pid):
         if post_reddit_url:
             db.link_url_to_post(pid, post_reddit_url, post["subreddit_id"])
         if hq_reddit_url:
-            db.set_hq_anchor_url(pid, hq_reddit_url)
+            # Create the HQ anchor if the post has none (e.g. a 3rd-party imported thread with no
+            # generated HQ comment) so pasting the deployed comment's link reports it as usual.
+            eb = db.get_effective_post_brand(pid)
+            anchor_brand = brand_id or (eb.get("id") if eb else None)
+            db.ensure_hq_anchor_with_url(pid, hq_reddit_url, brand_id=anchor_brand, body=hq_body)
         result = db.move_post_to_report(
             pid, report_month=month,
             actor_email=_admin_email(),

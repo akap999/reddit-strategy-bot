@@ -412,6 +412,25 @@ class Database:
             self.update_comment_url(cid, url)      # url only; preserve deployed/paid/report/…
         return cid
 
+    def ensure_hq_anchor_with_url(self, post_id, url, brand_id=None, body=""):
+        """Like `set_hq_anchor_url`, but CREATES a deployed HQ anchor comment when the post has none —
+        so a post can be reported by just pasting the deployed comment's link, even with no generated
+        HQ comment (e.g. a 3rd-party imported thread where the operator posted the comment manually on
+        Reddit). Returns the anchor comment id, or None on blank input. Idempotent: if an anchor already
+        exists it's updated/deployed in place (never a duplicate)."""
+        url = (url or "").strip()
+        if not url or not post_id:
+            return None
+        existing = self.set_hq_anchor_url(post_id, url)
+        if existing:
+            return existing
+        # No HQ anchor under this post → create one, deployed, carrying this link. parent_comment_id
+        # stays NULL (HQ root) so move_post_to_report / set_hq_anchor_url find it.
+        cid = self.save_comment(post_id, brand_id, (body or "").strip(),
+                                mentions_brand=1, status="draft", comment_type="hq")
+        self.deploy_comment(cid, url)   # sets reddit_comment_url + deployed_at + status='deployed'
+        return cid
+
     # --- Post-Brand Junction ---
 
     def add_post_brands(self, post_id, brand_ids):

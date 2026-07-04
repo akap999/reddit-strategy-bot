@@ -13006,7 +13006,9 @@ async function showReportThisPostModal(postId) {
     ` : `
         <div class="mb-2 p-3 rounded" style="background:#3a2a0e;color:#ffd7a3;border:1px solid #5a3f1c">
             <div class="text-xs font-medium mb-1">No deployed HQ comment yet</div>
-            <div class="text-xs" style="opacity:0.85">The post will be flipped to <code>report</code> but will show as Removed on the client dashboard until an HQ root is deployed. Re-run Report after deploying to attach it.</div>
+            <div class="text-xs" style="opacity:0.85">Paste the <strong>HQ anchor comment link</strong> above (and optionally the comment text below) — it'll be created and reported as the mention. Otherwise the post flips to <code>report</code> but shows as Removed on the dashboard until an HQ root is deployed.</div>
+            <label class="text-xs block mt-2" style="color:#ffd7a3;opacity:0.8">Comment text <span style="opacity:0.6">(optional — used only when creating the anchor)</span></label>
+            <textarea id="rep-post-hq-body" class="w-full" rows="3" placeholder="The comment you posted on the thread (optional)"></textarea>
         </div>
     `;
     showModal(`
@@ -13045,10 +13047,12 @@ async function submitReportThisPost(postId) {
     const brandId = brandSel ? (parseInt(brandSel.value) || null) : null;
     const postUrl = (document.getElementById('rep-post-url')?.value || '').trim();
     const hqUrl = (document.getElementById('rep-post-hq-url')?.value || '').trim();
+    const hqBody = (document.getElementById('rep-post-hq-body')?.value || '').trim();
     const body = { report_month: month };
     if (brandId) body.brand_id = brandId;
     if (postUrl) body.post_reddit_url = postUrl;
     if (hqUrl) body.hq_reddit_url = hqUrl;
+    if (hqBody) body.hq_body = hqBody;
     try {
         const res = await fetch(`/api/posts/${postId}/to-report`, {
             method: 'POST',

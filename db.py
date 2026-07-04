@@ -8190,16 +8190,31 @@ class Database:
         return restore_to
 
     def undo_search_comment_status(self, comment_id):
-        """Revert a search comment to its previous status. Returns the restored status or None."""
+        """Revert a search comment to its previous status. Returns the restored status or None.
+
+        Report-membership-clean (FU72): always clears `replaced_at` (we're leaving the 'replaced'
+        state). When `prev` is NOT a report-member status (deployed/paid/draft/…), also clears
+        `report_month`/`report_added_at` so the comment fully leaves the report — otherwise a comment
+        undone from a mistaken 'replaced' would sit in 'deployed' still carrying a stale report_month.
+        When `prev` IS a report-member status (report/removed/replace/replaced), those are KEPT so it
+        stays in the report under its old label.
+        """
         row = self.conn.execute(
             "SELECT prev_status FROM search_comments WHERE id = ?", (comment_id,)
         ).fetchone()
         if not row or not row["prev_status"]:
             return None
         prev = row["prev_status"]
-        self.conn.execute(
-            "UPDATE search_comments SET status = ?, prev_status = NULL WHERE id = ?",
-            (prev, comment_id))
+        if prev in ("report", "removed", "replace", "replaced"):
+            self.conn.execute(
+                "UPDATE search_comments SET status = ?, prev_status = NULL, replaced_at = NULL "
+                "WHERE id = ?",
+                (prev, comment_id))
+        else:
+            self.conn.execute(
+                "UPDATE search_comments SET status = ?, prev_status = NULL, replaced_at = NULL, "
+                "report_month = NULL, report_added_at = NULL WHERE id = ?",
+                (prev, comment_id))
         self.conn.commit()
         return prev
 

@@ -10762,6 +10762,56 @@ def api_comment_undo_report(cid):
         db.close()
 
 
+@app.route('/api/admin/undo-replaced-batch', methods=['POST'])
+def api_undo_replaced_batch():
+    """FU72: undo a mistaken bulk-'replaced' call on Live Search comments.
+
+      {brand_id | brand_name, preview: true}  -> READ-ONLY preview: the brand's current 'replaced'
+          search comments, bucketed by report_added_at (the mistaken bulk call clusters at one
+          timestamp) + the full list. No mutation. (Also returned when no `ids` are supplied.)
+      {brand_id | brand_name, ids: [...]}      -> revert exactly those ids to their prev_status
+          (deployed->deployed, paid->paid). Guarded: only 'replaced' comments that resolve to this
+          brand are touched; a stray id is skipped."""
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    try:
+        bid = data.get("brand_id")
+        try:
+            bid = int(bid) if bid not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            bid = None
+        if bid is None:
+            name = (data.get("brand_name") or "").strip()
+            if name:
+                r = db.conn.execute(
+                    "SELECT id FROM brands WHERE lower(name) = lower(?) ORDER BY id LIMIT 1",
+                    (name,)).fetchone()
+                bid = r["id"] if r else None
+        if bid is None:
+            return jsonify({"error": "brand_id or a matching brand_name is required"}), 400
+
+        rows = db.list_replaced_search_comments_for_brand(bid)
+
+        # Default to preview when no ids are given (safety) or preview is requested.
+        if data.get("preview") or not data.get("ids"):
+            from collections import OrderedDict
+            buckets = OrderedDict()
+            for row in rows:
+                key = (row.get("report_added_at") or "")[:16] or "(none)"  # YYYY-MM-DD HH:MM
+                b = buckets.setdefault(key, {"report_added_at_minute": key, "count": 0, "ids": []})
+                b["count"] += 1
+                b["ids"].append(row["id"])
+            return jsonify({"preview": True, "brand_id": bid, "total_replaced": len(rows),
+                            "batches": list(buckets.values()), "comments": rows})
+
+        result = db.bulk_undo_replaced(ids=data.get("ids") or [], brand_id=bid,
+                                       actor_email=_admin_email())
+        result["brand_id"] = bid
+        return jsonify(result)
+    finally:
+        db.close()
+
+
 @app.route('/api/comments/bulk-to-report', methods=['POST'])
 def api_bulk_to_report():
     """Body: {ids: [{id, source}], report_month, brand_id?}

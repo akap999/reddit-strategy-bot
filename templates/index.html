@@ -10967,10 +10967,12 @@ function lsFilterComments() {
     //  - For earlier-stage statuses (draft/assigned/informed/deployed)
     //    we keep the post-max-status behaviour so the UI shows posts
     //    currently AT that stage of the pipeline rather than past it.
-    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8 };
-    // `replace` is a terminal-ish state (auto-detected recent removal),
-    // so we filter directly on c.status — same treatment as removed.
-    const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace']);
+    const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8, replaced: 9 };
+    // `replace`/`replaced` are terminal-ish states (auto-detected recent removal /
+    // delivered replacement), so we filter directly on c.status — same treatment as
+    // removed. Without `replaced` here, the "Replaced" filter fell into the post-max-rank
+    // branch and hid every replaced comment that shared a post with a higher-ranked sibling.
+    const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace', 'replaced']);
     if (status && status !== 'archived') {
         if (DIRECT_STATUSES.has(status)) {
             filtered = filtered.filter(c => c.status === status);

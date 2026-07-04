@@ -4363,17 +4363,15 @@ class Database:
         )
         return old_status
 
-    def undo_report(self, comment_id, source, actor_email=None):
-        """Reverse a 'report' status, restoring the comment to the live
-        'deployed' pipeline state. Returns the new status or None on
-        failure.
+    def undo_report(self, comment_id, source, actor_email=None, restore_to_prev=False):
+        """Reverse a 'report'/'replaced' status, restoring the comment to the live
+        pipeline. Returns the new status or None on failure.
 
-        Always restores to 'deployed' (never 'paid'): undoing a report
-        means the comment is no longer in a monthly report, but it IS
-        still a live deployed comment. The operator re-marks it 'paid'
-        explicitly if it was paid for — we don't silently resurrect the
-        prior 'paid' state, which previously left reverted rows stuck in
-        a paid bucket the user didn't expect.
+        Default restores to 'deployed' (never 'paid'): undoing a single report means the
+        comment is no longer in a monthly report, but it IS still a live deployed comment;
+        the operator re-marks 'paid' explicitly. `restore_to_prev=True` (FU72 bulk-undo of a
+        mistaken 'replaced' batch) restores to the captured `prev_status` instead
+        (deployed→deployed, paid→paid) — the faithful undo of a wrong bulk call.
         """
         table = "comments" if source == "comment" else "search_comments"
         row = self.conn.execute(
@@ -4383,8 +4381,8 @@ class Database:
         if not row or row["status"] not in ("report", "replaced"):
             return None
         # Both 'report' and 'replaced' came from a live deployed/paid comment, so undo
-        # returns them to the live 'deployed' pipeline.
-        restore_to = "deployed"
+        # returns them to the live pipeline.
+        restore_to = (row["prev_status"] or "deployed") if restore_to_prev else "deployed"
         self.conn.execute(
             f"""UPDATE {table}
                 SET status = ?, prev_status = NULL,
@@ -4399,6 +4397,69 @@ class Database:
             actor_email=actor_email,
         )
         return restore_to
+
+    def list_replaced_search_comments_for_brand(self, brand_id):
+        """FU72 (read-only): preview for the bulk-'replaced' undo — every search_comment currently
+        status='replaced' whose brand RESOLVES to brand_id (COALESCE(sc.brand_id, sp.brand_id)).
+        Ordered by report_added_at so a mistaken bulk call (all rows stamped ~the same time) shows as
+        one cluster. No mutation."""
+        rows = self.conn.execute(
+            """SELECT sc.id, sc.prev_status, sc.report_month, sc.report_added_at,
+                      sc.reddit_comment_url, substr(sc.body, 1, 80) AS body_snippet,
+                      sp.subreddit AS post_subreddit
+                 FROM search_comments sc
+                 JOIN search_posts sp ON sc.search_post_id = sp.id
+                WHERE sc.status = 'replaced'
+                  AND COALESCE(sc.brand_id, sp.brand_id) = ?
+                ORDER BY sc.report_added_at DESC, sc.id""",
+            (brand_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def bulk_undo_replaced(self, *, ids, brand_id, actor_email=None):
+        """FU72: revert a mistaken bulk-'replaced' batch. `ids` = list of {id, source} (or bare ints,
+        treated as search_comment). GUARD per row: only revert when it currently resolves to `brand_id`
+        AND status=='replaced' — so a stray id can never touch a legit / other-brand comment. Each is
+        restored to its prev_status (undo_report restore_to_prev=True). Returns
+        {reverted, skipped, details:[{id, to} | {id, skipped:<reason>}]}."""
+        reverted = 0
+        skipped = 0
+        details = []
+        for entry in (ids or []):
+            if isinstance(entry, dict):
+                try:
+                    cid = int(entry.get("id"))
+                except (TypeError, ValueError, AttributeError):
+                    skipped += 1
+                    continue
+                src = entry.get("source") or "search_comment"
+            else:
+                try:
+                    cid = int(entry)
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                src = "search_comment"
+            if src == "comment":
+                table, alias, join, postbrand = "comments", "c", " JOIN posts p ON c.post_id = p.id", "p.brand_id"
+            else:
+                table, alias, join, postbrand = "search_comments", "sc", " JOIN search_posts sp ON sc.search_post_id = sp.id", "sp.brand_id"
+            row = self.conn.execute(
+                f"SELECT {alias}.status AS status FROM {table} {alias}{join} "
+                f"WHERE {alias}.id = ? AND {alias}.status = 'replaced' "
+                f"AND COALESCE({alias}.brand_id, {postbrand}) = ?",
+                (cid, brand_id)).fetchone()
+            if not row:
+                skipped += 1
+                details.append({"id": cid, "skipped": "not a 'replaced' comment for this brand"})
+                continue
+            new_status = self.undo_report(cid, src, actor_email=actor_email, restore_to_prev=True)
+            if new_status:
+                reverted += 1
+                details.append({"id": cid, "to": new_status})
+            else:
+                skipped += 1
+                details.append({"id": cid, "skipped": "undo failed"})
+        return {"reverted": reverted, "skipped": skipped, "details": details}
 
     def reclassify_report_tag(self, comment_id, source, to_status, actor_email=None):
         """Relabel an already-terminal report comment between the two parallel tags
@@ -7889,11 +7950,18 @@ class Database:
         return cur.lastrowid
 
     def list_search_comments(self, search_post_id=None, status=None):
+        # Resolve the brand via the comment's own brand_id, falling back to the search_post's
+        # brand_id (COALESCE) — mirrors the client dashboard's resolution. Without the fallback a
+        # reported/replaced comment whose brand sits on sp.brand_id (NULL sc.brand_id) shows a blank
+        # brand and vanishes from the bot's brand filter.
         q = """SELECT sc.*, sp.title as post_title, sp.subreddit as post_subreddit,
-                      sp.reddit_url as post_url, sp.post_date as post_date, b.name as brand_name
+                      sp.reddit_url as post_url, sp.post_date as post_date,
+                      COALESCE(b.name, spb.name) as brand_name,
+                      COALESCE(sc.brand_id, sp.brand_id) as resolved_brand_id
                FROM search_comments sc
                JOIN search_posts sp ON sc.search_post_id = sp.id
                LEFT JOIN brands b ON sc.brand_id = b.id
+               LEFT JOIN brands spb ON sp.brand_id = spb.id
                WHERE 1=1"""
         params = []
         if search_post_id:

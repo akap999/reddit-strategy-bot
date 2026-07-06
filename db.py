@@ -3286,6 +3286,39 @@ class Database:
             return "replace"
         return "removed"
 
+    def _within_replaced_window(self, comment_id, table, days=None):
+        """FU74: is a REPLACED comment still inside the 14-day window from
+        when its replacement was DELIVERED?
+
+        Anchor preference: `replaced_at` (trigger-stamped exactly when the
+        row became 'replaced' — always present, can never carry the
+        ORIGINAL comment's date) → `deployed_at` (the replacement's deploy)
+        → `posted_at`. Returns True when the chosen anchor is within `days`
+        days of now (or the delta is negative), and True when NO anchor
+        parses — so a fast-death default lands on 'removed' (the safer side
+        of the rule). `table` ∈ {'comments','search_comments'}.
+        """
+        if days is None:
+            days = self.REPLACE_WINDOW_DAYS
+        row = self.conn.execute(
+            f"SELECT replaced_at, deployed_at, posted_at FROM {table} WHERE id = ?",
+            (comment_id,)
+        ).fetchone()
+        if not row:
+            return True
+        anchor = row["replaced_at"] or row["deployed_at"] or row["posted_at"]
+        if not anchor:
+            return True
+        try:
+            s = str(anchor).replace("T", " ").split(".")[0].strip()
+            ts = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return True
+        delta = datetime.utcnow() - ts
+        if delta.total_seconds() < 0:
+            return True
+        return delta.days < days
+
     def mark_comment_removed_or_replace(self, comment_id, posted_at_hint=None,
                                         days=None):
         """Auto-detection variant of `mark_comment_removed`.
@@ -3311,6 +3344,19 @@ class Database:
         old_status = row["status"]
         if old_status in ("removed", "replace"):
             return old_status
+        # FU74: a REPLACED (delivered-replacement) comment found dead — a
+        # replacement that dies WITHIN 14 days of delivery failed → 'removed';
+        # one that survived 14+ days did its job → leave it 'replaced' (no write).
+        if old_status == "replaced":
+            if self._within_replaced_window(comment_id, "comments", days=days):
+                self.conn.execute(
+                    "UPDATE comments SET status = 'removed', prev_status = 'replaced', "
+                    "deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
+                    (comment_id,)
+                )
+                self.conn.commit()
+                return "removed"
+            return "replaced"
         if posted_at_hint and not row["posted_at"]:
             self.conn.execute(
                 "UPDATE comments SET posted_at = ? WHERE id = ?",
@@ -5567,9 +5613,13 @@ class Database:
         promoted = {"comments": 0, "search_comments": 0}
 
         # comments
+        # FU74: never re-promote a FAILED replacement (a dead 'replaced'
+        # comment we deliberately set to 'removed' within its window carries
+        # prev_status='replaced') back to 'replace' — it should stay removed.
         rows = self.conn.execute(
             """SELECT id FROM comments
                 WHERE status = 'removed'
+                  AND (prev_status IS NULL OR prev_status != 'replaced')
                   AND COALESCE(posted_at, deployed_at) IS NOT NULL
                   AND COALESCE(posted_at, deployed_at) >= ?""",
             (cutoff,)
@@ -5592,6 +5642,7 @@ class Database:
         rows = self.conn.execute(
             """SELECT id FROM search_comments
                 WHERE status = 'removed'
+                  AND (prev_status IS NULL OR prev_status != 'replaced')
                   AND COALESCE(posted_at, deployed_at) IS NOT NULL
                   AND COALESCE(posted_at, deployed_at) >= ?""",
             (cutoff,)
@@ -8172,6 +8223,19 @@ class Database:
         old_status = row["status"]
         if old_status in ("removed", "replace"):
             return old_status
+        # FU74: a REPLACED (delivered-replacement) comment found dead — a
+        # replacement that dies WITHIN 14 days of delivery failed → 'removed';
+        # one that survived 14+ days did its job → leave it 'replaced' (no write).
+        if old_status == "replaced":
+            if self._within_replaced_window(comment_id, "search_comments", days=days):
+                self.conn.execute(
+                    "UPDATE search_comments SET status = 'removed', prev_status = 'replaced', "
+                    "deleted_at = datetime('now'), paid_at = NULL WHERE id = ?",
+                    (comment_id,)
+                )
+                self.conn.commit()
+                return "removed"
+            return "replaced"
         if posted_at_hint and not row["posted_at"]:
             self.conn.execute(
                 "UPDATE search_comments SET posted_at = ? WHERE id = ?",

@@ -3590,11 +3590,20 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             else:
                 db.mark_search_comment_removed(item["id"])
                 new_status = "removed"
+        # FU74: a REPLACED comment found dead but PAST its 14-day window is left
+        # UNCHANGED by mark_*_removed_or_replace (returns 'replaced'). That is a
+        # genuine no-op — don't log a phantom "marked_dead" event, don't record a
+        # change, and signal the caller (return False) so it isn't counted as newly
+        # dead. Any real transition (→ removed / replace / deleted) logs as before.
+        if new_status == prev:
+            print(f"[{log_prefix}] #{item['id']} ({src}) {prev} past 14d — left unchanged", flush=True)
+            return False
         db.log_live_check(item["id"], src, item.get("reddit_comment_url", ""),
                           "marked_dead", prev, new_status,
                           item.get("account_id"), item.get("subreddit"), item.get("brand_name"))
         changes.append({"id": item["id"], "source": src, "url": item.get("reddit_comment_url", ""),
                         "action": "marked_dead", "prev_status": prev, "new_status": new_status})
+        return True
 
     def _mark_live(item):
         nonlocal restored
@@ -3635,7 +3644,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         parent = _parse_comment_url(clean_url)[0]
         if parent and _post_liveness_via_rss(parent) == "removed":
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (parent post gone; comment was {via}-live)", flush=True)
-            _mark_dead(item); dead += 1
+            if _mark_dead(item): dead += 1
         else:
             print(f"[{log_prefix}] #{item['id']} ({src}) LIVE ({via})", flush=True)
             _mark_live(item); live += 1
@@ -3710,8 +3719,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             print(f"[{log_prefix}] post removed → marking {len(group)} comment(s) dead: {post_url}", flush=True)
             for item, _cid in group:
                 checked += 1
-                _mark_dead(item)
-                dead += 1
+                if _mark_dead(item):
+                    dead += 1
                 handled_ids.add(item["id"])
                 _emit_progress()
             _time.sleep(0.5)
@@ -3755,8 +3764,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             # this the row would silently stay in 'report' (= live)
             # forever even though there's no actual mention on Reddit.
             print(f"[{log_prefix}] #{item['id']} ({src}): no URL — marking removed", flush=True)
-            _mark_dead(item)
-            dead += 1
+            if _mark_dead(item):
+                dead += 1
             _emit_progress()
             continue
 
@@ -3822,7 +3831,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                 _mark_live(item); live += 1
             elif post_verdict == "removed":
                 print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (post RSS — t3_ shell/absent)", flush=True)
-                _mark_dead(item); dead += 1
+                if _mark_dead(item): dead += 1
             else:
                 print(f"[{log_prefix}] #{item['id']} ({src}) post liveness inconclusive", flush=True)
                 errors += 1
@@ -3856,8 +3865,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         elif rss_verdict == "removed":
             # STRONG: the comment's own entry is a [removed]/[deleted] shell.
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — [removed]/[deleted] shell)", flush=True)
-            _mark_dead(item)
-            dead += 1
+            if _mark_dead(item):
+                dead += 1
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
@@ -3866,8 +3875,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             # Non-reported deployed/paid comment: absence from its permalink feed is the removal signal
             # (dashboard removal-detection — unchanged behavior).
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from feed)", flush=True)
-            _mark_dead(item)
-            dead += 1
+            if _mark_dead(item):
+                dead += 1
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
@@ -3888,8 +3897,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             continue
         elif pp_verdict == "removed":
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (PullPush archive body [removed]/[deleted])", flush=True)
-            _mark_dead(item)
-            dead += 1
+            if _mark_dead(item):
+                dead += 1
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
@@ -3913,8 +3922,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
 
             if resp.status_code == 404:
                 print(f"[{log_prefix}] #{item['id']} ({src}) 404 — removed", flush=True)
-                _mark_dead(item)
-                dead += 1
+                if _mark_dead(item):
+                    dead += 1
                 _time.sleep(3)
                 continue
             if resp.status_code == 403:
@@ -3958,8 +3967,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             children = data[1].get("data", {}).get("children", [])
             if not children:
                 print(f"[{log_prefix}] #{item['id']} ({src}) empty children — removed", flush=True)
-                _mark_dead(item)
-                dead += 1
+                if _mark_dead(item):
+                    dead += 1
                 _time.sleep(3)
                 continue
 
@@ -3985,12 +3994,12 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             )
             if is_removed:
                 print(f"[{log_prefix}] #{item['id']} ({src}) DEAD body={body[:60]!r} author={author} removed={removed_flag}", flush=True)
-                _mark_dead(item, posted_at_hint=posted_hint_per_item)
-                dead += 1
+                if _mark_dead(item, posted_at_hint=posted_hint_per_item):
+                    dead += 1
             elif not body.strip() and not author:
                 print(f"[{log_prefix}] #{item['id']} ({src}) DEAD empty body+author", flush=True)
-                _mark_dead(item, posted_at_hint=posted_hint_per_item)
-                dead += 1
+                if _mark_dead(item, posted_at_hint=posted_hint_per_item):
+                    dead += 1
             else:
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE author={author} body={body[:40]!r}", flush=True)
                 _mark_live(item)

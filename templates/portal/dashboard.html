@@ -396,7 +396,15 @@ async function runGlobalCheckLive() {
   progress.textContent = '';
   let taskId;
   try {
-    const qs = ASCID ? ('?as=' + ASCID) : '';
+    // FU75: honor the dashboard's on-screen status/sub filter so a filtered "Update status for all
+    // brands" rechecks only those rows.
+    const params = new URLSearchParams();
+    if (ASCID) params.set('as', ASCID);
+    const st = (document.getElementById('flt-status')?.value || '').trim();
+    const sb = (document.getElementById('flt-sub')?.value || '').trim();
+    if (st) params.set('status', st);
+    if (sb) params.set('sub', sb);
+    const qs = params.toString() ? ('?' + params.toString()) : '';
     const r = await fetch('/portal/check-live-all' + qs, { method: 'POST' });
     const j = await r.json();
     taskId = j.task_id;

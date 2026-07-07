@@ -495,10 +495,15 @@ async function runLiveCheck() {
       scopeBrand = new URLSearchParams(window.location.search).get('brand') || '';
     } catch (_) {}
   }
+  // FU75: carry the on-screen status/sub filter (like exportFilteredCsv does) so a filtered
+  // "Update status" rechecks only the rows the admin is looking at, not the whole month.
+  const params = new URLSearchParams();
+  if (scopeBrand)     params.set('brand', scopeBrand);
+  if (_fState.status) params.set('status', _fState.status);
+  if (_fState.sub)    params.set('sub', _fState.sub);
   let url = '/portal/month/{{ month }}/check-live' + ASQS;
-  if (scopeBrand) {
-    url += (ASQS ? '&' : '?') + 'brand=' + encodeURIComponent(scopeBrand);
-  }
+  const qs = params.toString();
+  if (qs) { url += (ASQS ? '&' : '?') + qs; }
   let taskId;
   try {
     const r = await fetch(url, { method: 'POST' });

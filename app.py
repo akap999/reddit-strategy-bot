@@ -413,8 +413,13 @@ def _reddit_rss_fetch(rel_path, params=None, timeout=15):
     import time as _t
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
     base = proxy.rstrip("/") if proxy else "https://www.reddit.com"
+    # FU75: liveness reads MUST be fresh — a stale cached feed makes a removed comment read "live" — AND
+    # must not consume a Worker KV put (these permalink URLs are unique + never reused, so caching them
+    # only burns the 1000/day cap). The Cloudflare worker bypasses BOTH cache tiers when it sees this
+    # header; a direct/residential fetch (Reddit) simply ignores it.
     headers = {"User-Agent": _BROWSER_UA,
-               "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5"}
+               "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+               "X-Reddit-Nocache": "1"}
 
     def _conclusive(r):
         return r is not None and (r.status_code == 404 or
@@ -474,6 +479,12 @@ def _rss_entry_is_removed(entry, ns):
     # '[removed] submitted by /u/<author> [link] [comments]' — so match a
     # leading marker, not only an exact string.
     if text.startswith("[removed]") or text.startswith("[deleted]"):
+        return True
+    # FU75: broaden — mod / anti-spam removals, and a blanked-out (empty) comment body. A live comment
+    # always carries body text, so an empty <content> on the matched entry is a removed shell.
+    if text.startswith("removed by moderator") or text.startswith("removed by reddit"):
+        return True
+    if content_el is not None and text == "":
         return True
     author_el = entry.find("atom:author/atom:name", ns)
     author = (author_el.text or "").strip().lower() if author_el is not None else ""
@@ -538,14 +549,19 @@ def _comment_liveness_via_rss(comment_url, timeout=15):
     try:
         root = _ET.fromstring(body)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("atom:entry", ns):
+        entries = root.findall("atom:entry", ns)
+        for entry in entries:
             eid = (entry.find("atom:id", ns).text or "")
             if cid in eid.lower():
                 # Reddit keeps a removed/deleted comment as a blanked-out shell — don't score it live.
                 return "removed" if _rss_entry_is_removed(entry, ns) else "live"
-        # Feed parsed but our comment id isn't in it → WEAK signal (FU43): a capped/nested feed can omit
-        # a LIVE comment, so this is NOT a confirmed removal (callers require stronger confirmation).
-        return "absent"
+        # FU75: our comment id isn't in the feed. Trust this as a removal ONLY when the feed is genuinely
+        # WORKING (>=1 OTHER entry — the documented gone-behavior: Reddit serves the post/parent entries
+        # and omits a removed comment). A parsed-but-EMPTY feed (zero entries) is a broken/blocked response
+        # → inconclusive (None), never a removal. Callers (Option A) treat a working 'absent' as confirmed.
+        if entries:
+            return "absent"
+        return None
     except Exception as e:
         print(f"[COMMENT-RSS] liveness parse failed for {comment_url}: {e}", flush=True)
         return None
@@ -663,7 +679,15 @@ def _post_liveness_via_rss(post_url, timeout=15):
     if r is None:
         return None
     if r.status_code == 404:
-        return "removed"                                   # post gone entirely
+        # FU75: a single 404 can be a transient/misrouted proxy blip; via _resolve_live_or_orphaned /
+        # the post-URL path a false 404 would mark a live comment (or a whole group) dead. Confirm with
+        # ONE re-read before trusting it — only a repeated 404 counts as gone.
+        r2 = _reddit_rss_fetch(f"{post_path}/.rss", params={"limit": 25}, timeout=timeout)
+        if r2 is not None and r2.status_code == 404:
+            return "removed"                               # post gone entirely (confirmed)
+        if r2 is None:
+            return None                                    # re-read couldn't fetch → inconclusive
+        r = r2                                             # fall through with the fresh result
     if r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml"):
         try:
             root = _ET.fromstring(r.text)
@@ -672,7 +696,10 @@ def _post_liveness_via_rss(post_url, timeout=15):
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         entries = root.findall("atom:entry", ns)
         if not entries:
-            return "removed"
+            # FU75: a removed POST keeps its comment tree, so a live OR removed post ALWAYS has entries
+            # (at minimum its own t3_ shell). An empty feed is a broken/blocked response → inconclusive,
+            # NOT a removal (matches the comment-liveness empty-feed guard).
+            return None
         # The post's own t3_ entry carries the removal signal.
         for e in entries:
             eid = (e.find("atom:id", ns).text or "").lower()
@@ -3529,9 +3556,11 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         except Exception:
             pass
         try:
-            from bulk_deploy import fetch_reddit_comment_meta
-            meta = fetch_reddit_comment_meta(url, reddit_get=_reddit_get_json)
-            posted_at = meta.get("posted_at") if meta else None
+            # FU75: RSS-first. The comment .json API is broadly 403'd on cloud IPs (FU69/70), so the old
+            # JSON-only fetch left posted_at NULL → the 14-day chooser defaulted to 'removed'.
+            # _fetch_comment_posted_at reads the permalink RSS <published>/<updated> (JSON only as a
+            # last-ditch), so posted_at is actually filled → correct Replace-vs-Removed.
+            posted_at, _reason = _fetch_comment_posted_at(url)
             if posted_at:
                 db.update_posted_at(item["id"], src, posted_at)
         except Exception as e:
@@ -3849,11 +3878,6 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
         # on it and skip the (doomed) JSON fetch entirely. If it's
         # inconclusive (None), fall through to the legacy JSON path.
         rss_verdict = _comment_liveness_via_rss(clean_url)
-        # FU43: a REPORTED deliverable (status report/replaced) only flips dead on a STRONG confirmation.
-        # The weak "absent" verdict (id merely missing from a possibly-flaky/capped feed) is NOT a
-        # confirmed removal, so it must not corrupt the report — for those, fall through to the stronger
-        # PullPush/JSON checks below (and if none confirm, the end-of-loop path leaves the status unchanged).
-        _report_live = (item.get("status") or "") in ("report", "replaced")
         if rss_verdict == "live":
             # Live on its own permalink — but confirm the parent post isn't removed
             # (a comment under a removed post is dead even though its shell lingers).
@@ -3871,23 +3895,21 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             _emit_progress()
             _time.sleep(1)
             continue
-        elif rss_verdict == "absent" and not _report_live:
-            # Non-reported deployed/paid comment: absence from its permalink feed is the removal signal
-            # (dashboard removal-detection — unchanged behavior).
-            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from feed)", flush=True)
+        elif rss_verdict == "absent":
+            # FU75 (Option A): 'absent' = the comment's OWN permalink feed WORKED (>=1 entry) but omits the
+            # comment → a confirmed removal, for reported/replaced deliverables too. A throttled proxy → None
+            # (block) and an empty/broken feed → None (FU75), so this only fires on a genuine FRESH omission
+            # (fresh because the worker no longer caches liveness reads — FU75 Change 5). Supersedes the FU43
+            # weak-absent guard, which left genuinely-dead deliverables stuck when the JSON fallback 403'd.
+            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from working feed)", flush=True)
             if _mark_dead(item):
                 dead += 1
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
             continue
-        elif rss_verdict == "absent":
-            # Reported deliverable + weak 'absent' → don't trust it; require confirmation from the
-            # stronger PullPush/JSON checks below (else it's left UNCHANGED at the end of the loop).
-            print(f"[{log_prefix}] #{item['id']} ({src}) reported + weak 'absent' RSS signal — requiring "
-                  f"stronger confirmation before any status change", flush=True)
-        # RSS inconclusive (couldn't fetch) or reported-absent → PullPush archive fallback BEFORE the (usually
-        # 403 on cloud) JSON path, so a live comment isn't left unverified by a flaky proxy.
+        # RSS inconclusive (couldn't fetch / empty-or-broken feed) → PullPush archive fallback BEFORE the
+        # best-effort JSON path, so a live comment isn't left unverified by a flaky proxy.
         pp_verdict = _comment_liveness_via_pullpush(clean_url)
         if pp_verdict == "live":
             _resolve_live_or_orphaned(item, clean_url, "PullPush archive — RSS unreachable")
@@ -3926,42 +3948,36 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                     dead += 1
                 _time.sleep(3)
                 continue
+            # FU75: the comment .json API is broadly 403'd on cloud IPs (and RSS/PullPush already had
+            # their say). Treat 403/429/other-non-200/non-JSON as the EXPECTED "JSON unavailable" case:
+            # leave the item UNCHANGED and do NOT count it as an error, so the run's error total reflects
+            # real problems, not the dead JSON API. (Genuine timeouts/exceptions below stay counted.)
             if resp.status_code == 403:
-                print(f"[{log_prefix}] #{item['id']} ({src}) 403 Forbidden", flush=True)
-                errors += 1
-                error_details["forbidden"] += 1
-                _time.sleep(3)
+                print(f"[{log_prefix}] #{item['id']} ({src}) 403 on JSON (expected on cloud IP) — leaving unchanged", flush=True)
+                _time.sleep(1)
                 continue
             if resp.status_code == 429:
-                print(f"[{log_prefix}] #{item['id']} ({src}) rate limited", flush=True)
-                errors += 1
-                error_details["rate_limited"] += 1
+                print(f"[{log_prefix}] #{item['id']} ({src}) 429 on JSON — leaving unchanged", flush=True)
                 _time.sleep(5)
                 continue
             if resp.status_code != 200:
-                print(f"[{log_prefix}] #{item['id']} ({src}) HTTP {resp.status_code}", flush=True)
-                errors += 1
-                error_details["http_other"] += 1
-                _time.sleep(3)
+                print(f"[{log_prefix}] #{item['id']} ({src}) HTTP {resp.status_code} on JSON — leaving unchanged", flush=True)
+                _time.sleep(2)
                 continue
 
-            # Parse JSON — if it fails (HTML returned), skip as error
+            # Parse JSON — a 200 that isn't JSON (challenge/HTML) is the same JSON-unavailable case.
             try:
                 data = resp.json()
             except (ValueError, Exception):
                 ct = resp.headers.get("Content-Type", "")
-                print(f"[{log_prefix}] #{item['id']} ({src}) JSON parse failed ({ct}), skipping", flush=True)
-                errors += 1
-                error_details["non_json"] += 1
-                _time.sleep(3)
+                print(f"[{log_prefix}] #{item['id']} ({src}) non-JSON on JSON path ({ct}) — leaving unchanged", flush=True)
+                _time.sleep(2)
                 continue
 
             # Reddit returns [post_data, comment_data]
             if not isinstance(data, list) or len(data) < 2:
-                print(f"[{log_prefix}] #{item['id']} ({src}) unexpected JSON structure, skipping", flush=True)
-                errors += 1
-                error_details["non_json"] += 1
-                _time.sleep(3)
+                print(f"[{log_prefix}] #{item['id']} ({src}) unexpected JSON structure — leaving unchanged", flush=True)
+                _time.sleep(2)
                 continue
 
             children = data[1].get("data", {}).get("children", [])
@@ -11575,15 +11591,30 @@ def portal_month_export(month):
     return resp
 
 
-def _build_check_live_items(rows, brand_filter=None):
+def _build_check_live_items(rows, brand_filter=None, status_filter=None, sub_filter=None):
     """Map reported-comment rows into the shape `_check_live_batch`
     expects. Optional `brand_filter` (case-insensitive name) narrows
     to a single brand — used when the live-check is scoped from a
-    brand context."""
+    brand context.
+
+    FU75: `status_filter` (a single report status — report/removed/
+    replace/replaced) and `sub_filter` (a subreddit name, with or
+    without an 'r/' prefix) narrow the recheck to match the on-screen
+    filter bar, so "Update status" while filtered to Replaced rechecks
+    only replaced rows (not the whole month). None = no narrowing."""
+    def _norm_sub(s):
+        s = (s or "").strip().lower()
+        return s[2:] if s.startswith("r/") else s
     items = []
     bf = (brand_filter or "").strip().lower() or None
+    sf = (status_filter or "").strip().lower() or None
+    subf = _norm_sub(sub_filter) or None
     for r in rows:
         if bf and (r.get("brand_name") or "").strip().lower() != bf:
+            continue
+        if sf and (r.get("status") or "").strip().lower() != sf:
+            continue
+        if subf and _norm_sub(r.get("subreddit_name")) != subf:
             continue
         items.append({
             "id": r["id"],
@@ -11614,6 +11645,10 @@ def portal_month_check_live(month):
             brand_filter = (body.get('brand') or '').strip() or None
         except Exception:
             brand_filter = None
+    # FU75: honor the on-screen status/sub filter so "Update status" while filtered to (e.g.) Replaced
+    # rechecks ONLY replaced rows, not the whole month.
+    status_filter = (request.args.get('status') or '').strip() or None
+    sub_filter = (request.args.get('sub') or '').strip() or None
 
     def task(_task_id=None):
         bg = Database(DB_PATH)
@@ -11627,10 +11662,11 @@ def portal_month_check_live(month):
             # never got refreshed because move_post_to_report
             # didn't flip its status.
             rows = bg.get_check_live_items_for_client_month(cid, month)
-            items = _build_check_live_items(rows, brand_filter)
+            items = _build_check_live_items(rows, brand_filter, status_filter, sub_filter)
             return _check_live_batch(
                 items, bg,
-                log_prefix=f"PORTAL-CHECK-LIVE c={cid} m={month} brand={brand_filter or '*'}",
+                log_prefix=(f"PORTAL-CHECK-LIVE c={cid} m={month} brand={brand_filter or '*'} "
+                            f"status={status_filter or '*'} sub={sub_filter or '*'}"),
                 task_id=_task_id,
             )
         finally:
@@ -11663,6 +11699,9 @@ def portal_brand_check_live(bid):
         db.close()
     if not brand_name:
         return abort(404)
+    # FU75: honor an on-screen status/sub filter if the brand page passed one.
+    status_filter = (request.args.get('status') or '').strip() or None
+    sub_filter = (request.args.get('sub') or '').strip() or None
 
     def task(_task_id=None):
         bg = Database(DB_PATH)
@@ -11681,7 +11720,7 @@ def portal_brand_check_live(bid):
                 # `portal_month_check_live` for why this is the
                 # right scope.
                 rows = bg.get_check_live_items_for_client_month(cid, m["month"])
-                items.extend(_build_check_live_items(rows, brand_name))
+                items.extend(_build_check_live_items(rows, brand_name, status_filter, sub_filter))
             return _check_live_batch(
                 items, bg,
                 log_prefix=f"PORTAL-CHECK-LIVE c={cid} brand={brand_name}",
@@ -11741,6 +11780,9 @@ def portal_check_live_all():
     (all brands, all months). The dashboard's global 'Update status'
     button calls this."""
     cid, _ = _acting_client_id()
+    # FU75: honor the dashboard's on-screen status/sub filter.
+    status_filter = (request.args.get('status') or '').strip() or None
+    sub_filter = (request.args.get('sub') or '').strip() or None
 
     def task(_task_id=None):
         bg = Database(DB_PATH)
@@ -11751,10 +11793,10 @@ def portal_check_live_all():
             for m in month_list:
                 # Superset query — see `portal_month_check_live`.
                 rows = bg.get_check_live_items_for_client_month(cid, m["month"])
-                items.extend(_build_check_live_items(rows))
+                items.extend(_build_check_live_items(rows, None, status_filter, sub_filter))
             return _check_live_batch(
                 items, bg,
-                log_prefix=f"PORTAL-CHECK-LIVE-ALL c={cid}",
+                log_prefix=f"PORTAL-CHECK-LIVE-ALL c={cid} status={status_filter or '*'} sub={sub_filter or '*'}",
                 task_id=_task_id,
             )
         finally:

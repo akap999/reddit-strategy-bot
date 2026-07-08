@@ -5022,6 +5022,160 @@ def api_backfill_posted_at_scoped():
     return jsonify({"task_id": start_task("backfill_posted_at", task, pass_task_id=True),
                     "breakdown": breakdown})
 
+@app.route("/api/admin/recompute-removed-replace", methods=["POST"])
+def api_recompute_removed_replace():
+    """FU76: retroactively correct comments ALREADY marked 'removed' that should be 'replace' — a removal
+    within 14 days of publish that got stamped 'removed' because posted_at was NULL at detection (the JSON
+    date API 403s on cloud IPs). These rows are stuck: Check-Live won't re-touch a 'removed' row, the
+    posted_at backfill skips 'removed', and reconcile_replace_window can't anchor a NULL posted_at. For each
+    'removed'/'replace' row in scope this fills posted_at from RSS (best-effort), recomputes the 14-day
+    verdict, and PROMOTES 'removed'→'replace' when it's genuinely within the window. Promote-only: a
+    genuinely-old removal (≥14d, or no fetchable date) stays 'removed'; a prev_status='replaced' row (FU74
+    failed replacement) is never touched.
+
+    Body:
+      {"comment_id": <int>, "source": "comment"|"search_comment"} — SURGICAL single, inline, immediate result.
+      {"month": "YYYY-MM"}   — narrow the sweep to that report_month.
+      {"client_id": <int>}   — restrict to one client's brand rows (matches their dashboard).
+      {"preview": true}      — READ-ONLY scope counts (removed/replace in scope), no fetch, no writes.
+      {}                     — sweep every removed/replace row with a URL.
+    """
+    data = request.get_json(silent=True) or {}
+
+    # --- Surgical single-comment path: inline, immediate result. ---
+    cid_one = data.get("comment_id")
+    if cid_one not in (None, "", 0):
+        try:
+            cid_one = int(cid_one)
+        except (TypeError, ValueError):
+            return jsonify({"error": "comment_id must be an int"}), 400
+        source_one = (data.get("source") or "search_comment").strip()
+        if source_one not in ("comment", "search_comment"):
+            return jsonify({"error": "source must be 'comment' or 'search_comment'"}), 400
+        db = get_db()
+        try:
+            table = "comments" if source_one == "comment" else "search_comments"
+            row = db.conn.execute(
+                f"SELECT status, prev_status, reddit_comment_url, posted_at FROM {table} WHERE id = ?",
+                (cid_one,)).fetchone()
+            if not row:
+                return jsonify({"error": f"{source_one} {cid_one} not found"}), 404
+            status = row["status"]
+            url = (row["reddit_comment_url"] or "").strip()
+            if status not in ("removed", "replace"):
+                return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
+                                "old_status": status, "changed": False, "reason": "not_removed_or_replace"})
+            posted_at = row["posted_at"]
+            if not posted_at and url:
+                posted_at, _r = _fetch_comment_posted_at(url)   # RSS-first (FU69)
+                if posted_at:
+                    db.update_posted_at(cid_one, source_one, posted_at)
+            if (row["prev_status"] or "") == "replaced":
+                return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
+                                "old_status": status, "new_status": status, "changed": False,
+                                "posted_at": posted_at, "reason": "skipped_prev_replaced"})
+            verdict = (db._choose_removed_status(cid_one) if source_one == "comment"
+                       else db._choose_removed_status_search(cid_one))
+            new_status, reason = status, "kept_replace"
+            if status == "removed":
+                if verdict == "replace":
+                    db.reclassify_removed_replace(cid_one, source_one, "replace")
+                    new_status, reason = "replace", "promoted_to_replace"
+                else:
+                    reason = "stays_removed" if posted_at else "stays_removed_no_date"
+            return jsonify({"comment_id": cid_one, "source": source_one, "url": url,
+                            "old_status": status, "new_status": new_status,
+                            "changed": new_status != status, "posted_at": posted_at, "reason": reason})
+        finally:
+            db.close()
+
+    month = (data.get("month") or "").strip() or None
+    client_id = data.get("client_id")
+    try:
+        client_id = int(client_id) if client_id not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        client_id = None
+    preview = bool(data.get("preview"))
+
+    # Read-only scope counts (no Reddit fetch) — how many removed/replace rows the run would touch.
+    _db = get_db()
+    try:
+        scope_rows = _db.get_removed_replace_rows(month, client_id)
+    finally:
+        _db.close()
+    scope_counts = {"total": len(scope_rows),
+                    "removed": sum(1 for r in scope_rows if r["status"] == "removed"),
+                    "replace": sum(1 for r in scope_rows if r["status"] == "replace")}
+
+    if preview:
+        return jsonify({"preview": True, "month": month, "client_id": client_id,
+                        "scope_counts": scope_counts})
+
+    scope = (f"report_month={month}" if month else "all removed/replace")
+    if client_id:
+        scope += f" · client={client_id}"
+
+    def task(_task_id=None):
+        import time as _time
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            rows = bg.get_removed_replace_rows(month, client_id)
+            scanned = len(rows)
+            filled = 0
+            promoted = 0
+            reasons = {}
+            reason_examples = {}
+
+            def _tally(reason, rid):
+                reasons[reason] = reasons.get(reason, 0) + 1
+                ex = reason_examples.setdefault(reason, [])
+                if len(ex) < 5:
+                    ex.append(rid)
+
+            print(f"[recompute removed/replace] scope=({scope}) rows={scanned}", flush=True)
+            for i, r in enumerate(rows):
+                rid, src, status = r["id"], r["source"], r["status"]
+                url = (r["reddit_comment_url"] or "").strip()
+                posted_at = r["posted_at"]
+                if not posted_at and url:
+                    posted_at, _r = _fetch_comment_posted_at(url)   # RSS-first
+                    if posted_at:
+                        bg.update_posted_at(rid, src, posted_at)
+                        filled += 1
+                if (r.get("prev_status") or "") == "replaced":
+                    _tally("skipped_prev_replaced", rid)            # FU74 failed replacement — never touch
+                elif status == "replace":
+                    _tally("kept_replace", rid)                     # promote-only: leave existing 'replace'
+                else:  # currently 'removed' → recompute the 14-day verdict
+                    verdict = (bg._choose_removed_status(rid) if src == "comment"
+                               else bg._choose_removed_status_search(rid))
+                    if verdict == "replace":
+                        bg.reclassify_removed_replace(rid, src, "replace")
+                        promoted += 1
+                        _tally("promoted_to_replace", rid)
+                    else:
+                        _tally("stays_removed" if posted_at else "stays_removed_no_date", rid)
+                if _task_id:
+                    try:
+                        bg.update_task_progress(_task_id, {"checked": i + 1, "total": scanned,
+                                                           "filled": filled, "promoted": promoted})
+                    except Exception:
+                        pass
+                _time.sleep(0.3)  # pace Reddit / conserve residential GB
+            print(f"[recompute removed/replace] done scanned={scanned} filled={filled} "
+                  f"promoted={promoted} reasons={reasons}", flush=True)
+            return {"month": month, "client_id": client_id, "scope": scope,
+                    "scanned": scanned, "filled": filled, "promoted": promoted,
+                    "reasons": reasons, "reason_examples": reason_examples,
+                    "scope_counts": scope_counts}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("recompute_removed_replace", task, pass_task_id=True),
+                    "scope_counts": scope_counts})
+
 @app.route("/api/brands/all")
 def api_all_brands():
     db = get_db()

@@ -5847,6 +5847,78 @@ class Database:
                         "reddit_comment_url": r["url"]} for r in rows)
         return out
 
+    def get_removed_replace_rows(self, month=None, client_id=None):
+        """FU76: rows currently status 'removed'/'replace' (with a reddit_comment_url), for the
+        retroactive removed↔replace recompute. Same brand-match chain + optional report_month narrowing
+        as `get_rows_missing_posted_at`. Returns [{id, source, reddit_comment_url, status, posted_at,
+        prev_status}] across comments + search_comments."""
+        brand_ids = self.client_brand_ids(client_id) if client_id else None
+        if client_id and not brand_ids:
+            return []
+        out = []
+        for tbl, src in (("comments", "comment"), ("search_comments", "search_comment")):
+            a = "c" if src == "comment" else "sc"
+            if brand_ids:
+                ph = ",".join("?" * len(brand_ids))
+                if src == "comment":
+                    join = " JOIN posts p ON c.post_id = p.id"
+                    match = (f" AND (c.brand_id IN ({ph})"
+                             f" OR (c.brand_id IS NULL AND p.brand_id IN ({ph}))"
+                             f" OR (c.brand_id IS NULL AND p.id IN"
+                             f" (SELECT post_id FROM post_brands WHERE brand_id IN ({ph}))))")
+                    bparams = brand_ids * 3
+                else:
+                    join = " JOIN search_posts sp ON sc.search_post_id = sp.id"
+                    match = (f" AND (sc.brand_id IN ({ph})"
+                             f" OR (sc.brand_id IS NULL AND sp.brand_id IN ({ph})))")
+                    bparams = brand_ids * 2
+            else:
+                join = match = ""
+                bparams = []
+            try:
+                q = (f"SELECT {a}.id AS id, {a}.reddit_comment_url AS url, {a}.status AS status, "
+                     f"{a}.posted_at AS posted_at, {a}.prev_status AS prev_status "
+                     f"FROM {tbl} {a}{join} "
+                     f"WHERE {a}.status IN ('removed','replace') "
+                     f"AND {a}.reddit_comment_url IS NOT NULL AND TRIM({a}.reddit_comment_url) != ''")
+                params = []
+                if month:
+                    q += f" AND {a}.report_month = ?"
+                    params.append(month)
+                q += match
+                params += bparams
+                rows = self.conn.execute(q, params).fetchall()
+            except Exception:
+                continue
+            out.extend({"id": r["id"], "source": src, "reddit_comment_url": r["url"],
+                        "status": r["status"], "posted_at": r["posted_at"],
+                        "prev_status": r["prev_status"]} for r in rows)
+        return out
+
+    def reclassify_removed_replace(self, comment_id, source, new_status):
+        """FU76: flip a row BETWEEN 'removed' and 'replace' only, preserving prev_status / report_month /
+        report_added_at / deleted_at (touches `status` alone — mirrors the one-row promote
+        `reconcile_replace_window` does). Guarded: acts only when the current status is in
+        ('removed','replace'), the target differs, and prev_status != 'replaced' (never resurrect a
+        deliberately-removed FAILED replacement — FU74). Returns the previous status on success, else None."""
+        if new_status not in ("removed", "replace") or not comment_id:
+            return None
+        table = "comments" if source == "comment" else "search_comments"
+        row = self.conn.execute(
+            f"SELECT status, prev_status FROM {table} WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if not row:
+            return None
+        old = row["status"]
+        if old not in ("removed", "replace") or old == new_status:
+            return None
+        if (row["prev_status"] or "") == "replaced":
+            return None
+        self.conn.execute(
+            f"UPDATE {table} SET status = ? WHERE id = ?", (new_status, comment_id))
+        self.conn.commit()
+        return old
+
     def report_posted_at_coverage(self, month=None, client_id=None):
         """FU68: read-only diagnostic (NO Reddit fetch) that explains a posted_at backfill's scope —
         it answers "why did month=X scan only N when the dashboard shows 50+".

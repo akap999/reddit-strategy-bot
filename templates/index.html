@@ -9881,6 +9881,7 @@ function renderLsSearch(c) {
                         <div><label class="text-xs text-gray-400">Days Old</label><input id="ls-days" type="number" value="1" oninput="document.getElementById('ls-fs-days').textContent=this.value||'-'" title="Upper bound on post age in days. For values ≤ 7 the bot uses a 'tight-window' fast path: fetches recent posts per sub once (no keyword filter upstream) then matches keywords client-side — works around Pullpush's search-index lag for recent posts."></div>
                         <div><label class="text-xs text-gray-400">Sort By</label><select id="ls-sort"><option value="relevance">Relevance</option><option value="score">Score</option><option value="comments">Comments</option><option value="new">New</option></select></div>
                         <div><label class="text-xs text-gray-400">Limit</label><input id="ls-limit" type="number" value="50" oninput="document.getElementById('ls-fs-limit').textContent=this.value||'50'"></div>
+                        <div><label class="text-xs text-gray-400">Max / subreddit</label><input id="ls-maxpersub" type="number" value="5" min="1" placeholder="blank = no cap" title="Cap how many posts any single subreddit may contribute, so results spread across subs instead of a busy sub dominating. Blank = no cap. Applies to the named subreddits AND the Reddit-wide top-up."></div>
                     </div>
                     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
                         <div><label class="text-xs text-gray-400">Sort Order</label><select id="ls-sortorder"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
@@ -10145,6 +10146,7 @@ async function lsRunSearch() {
         limit: parseInt(document.getElementById('ls-limit').value) || 50,
         force_refresh: document.getElementById('ls-fresh').checked,
         reddit_wide: document.getElementById('ls-reddit-wide')?.checked ?? true,
+        max_per_sub: parseInt(document.getElementById('ls-maxpersub')?.value) || undefined,
         nsfw: nsfwVal === '' ? undefined : nsfwVal === 'true',
         min_upvote_ratio: isNaN(ratioVal) ? undefined : ratioVal,
         max_subscribers: isNaN(maxSubsVal) ? undefined : maxSubsVal,

@@ -8442,6 +8442,11 @@ def api_search_reddit():
                 # When named subs underfill the limit, top up Reddit-wide by keyword.
                 # Default ON for Live Search (only acts when subreddits are specified).
                 reddit_wide=bool(data.get("reddit_wide", True)),
+                # FU77: cap how many posts any single subreddit may contribute (spread across subs).
+                # Blank / 0 → None (no cap). Applied to the named-sub balance AND the reddit-wide top-up.
+                max_per_sub=(int(data["max_per_sub"])
+                             if str(data.get("max_per_sub") or "").strip() not in ("", "0")
+                             else None),
             )
 
             if keyword:

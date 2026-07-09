@@ -667,8 +667,13 @@ class RedditSearchBot:
         elif subreddit_path:
             # keyword-less OR tight-window keyword search: chronological recent posts; keyword relevance
             # is applied client-side by the cascade's keyword-presence filter (which honors the window).
+            # FU77: fetch Reddit's MAX (100) for the chronological /new.rss. The per-sub `limit` in a big
+            # fan-out is small (e.g. 25 for 20+ subs), which for a BUSY sub only covers the last hour or
+            # two — so keyword matches from earlier in the SAME day/week window were silently missed.
+            # /new.rss is cheap (~2s/100) and we filter by keyword + date client-side, so grab the full
+            # recent slice regardless of the small per-sub quota.
             url = f"{rss_base}/r/{subreddit_path}/new.rss"
-            params = {"limit": min(limit, 100)}
+            params = {"limit": 100}
         else:
             url = f"{rss_base}/search.rss"
             params = {
@@ -1107,6 +1112,7 @@ class RedditSearchBot:
         force_refresh=False,
         keywords=None,
         reddit_wide=False,
+        max_per_sub=None,
         _deadline=None,
     ):
         # `keywords` (optional): the ORIGINAL term list when `keyword` is a
@@ -1156,6 +1162,7 @@ class RedditSearchBot:
             "sort": sort_by, "order": sort_order, "limit": limit, "api": api,
             "nsfw": nsfw, "ratio": min_upvote_ratio, "maxsub": max_subscribers,
             "minsub": min_subscribers, "scrut": max_scrutiny, "wide": bool(reddit_wide),
+            "mpsub": max_per_sub,
         }, sort_keys=True, default=str)
         if not force_refresh:
             with RedditSearchBot._result_cache_lock:
@@ -1642,8 +1649,10 @@ class RedditSearchBot:
             filtered.sort(key=lambda x: str(x.get("id") or ""))
             filtered.sort(key=lambda x: x.get(key, 0), reverse=(sort_order == "desc"))
 
-        # Equal distribution across subreddits when multiple are searched
-        result = balance_posts_by_subreddit(filtered, limit, subreddits)
+        # Equal distribution across subreddits when multiple are searched.
+        # FU77: `max_per_sub` (default None) caps how many any single sub may contribute so no busy
+        # sub over-represents; the Reddit-wide top-up below honors the same cap on the merged result.
+        result = balance_posts_by_subreddit(filtered, limit, subreddits, max_per_sub=max_per_sub)
 
         # Reddit-wide top-up: the named subreddits didn't have enough matching posts
         # to fill the limit → search ALL of Reddit by the same keyword(s) + filters
@@ -1655,6 +1664,15 @@ class RedditSearchBot:
                 and time.time() < search_deadline):
             seen_ids = {p.get("id") for p in result if p.get("id")}
             needed = limit - len(result)
+            # FU77: enforce max_per_sub across the WHOLE result — seed per-sub counts from the
+            # already-balanced named-sub result so a Reddit-wide top-up post is skipped when its sub is
+            # already at the cap (else a popular sub could over-represent via the global fill).
+            sub_counts = {}
+            if max_per_sub is not None:
+                for p in result:
+                    s = (p.get("subreddit") or "").lower()
+                    if s:
+                        sub_counts[s] = sub_counts.get(s, 0) + 1
             try:
                 global_hits = self.search(
                     keyword, subreddit=None, subreddits=None,
@@ -1672,10 +1690,16 @@ class RedditSearchBot:
                     if len(result) >= limit:
                         break
                     pid = p.get("id")
-                    if pid and pid not in seen_ids:
-                        seen_ids.add(pid)
-                        result.append(p)
-                        added += 1
+                    if not pid or pid in seen_ids:
+                        continue
+                    s = (p.get("subreddit") or "").lower()
+                    if max_per_sub is not None and s and sub_counts.get(s, 0) >= max_per_sub:
+                        continue  # this sub already at the cap — don't let the global fill over-represent it
+                    seen_ids.add(pid)
+                    result.append(p)
+                    if s:
+                        sub_counts[s] = sub_counts.get(s, 0) + 1
+                    added += 1
                 if added:
                     print(f"    Reddit-wide top-up: named subs had {len(result) - added}, "
                           f"added {added} from all of Reddit (target {limit})")

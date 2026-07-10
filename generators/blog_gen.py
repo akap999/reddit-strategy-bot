@@ -39,10 +39,26 @@ _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources fol
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
+_FACT_RESCUE_TRIES = 3          # FU78: broad-search retries to fetch a vendor's MISSING key facts (pricing,
+                                # commercial-use/license) when its own (often JS-rendered) pages don't yield
+                                # them, BEFORE dropping the cell/row
+# FU78: signals that a given KEY comparison fact is actually PRESENT in the fetched text. A vendor page found
+# WITHOUT one of these means the fact wasn't captured (a JS page, a thin snippet) → escalate with broad
+# searches TARGETING that fact instead of shipping a one-try "see their site" punt. This generalizes beyond
+# price to the columns that most often go "not confirmed": pricing AND commercial-use / license / royalty-free.
+_PRICE_SIGNAL_RE = re.compile(
+    r"(\$\s?\d|[€£]\s?\d|\b\d+(?:\.\d+)?\s?(?:usd|eur|gbp)\b|"
+    r"\b\d+(?:\.\d+)?\s?(?:/|per\s+)mo(?:nth)?\b|\bper\s+month\b|\bfree\s+(?:tier|plan|version|forever)\b)",
+    re.IGNORECASE)
+_LICENSE_SIGNAL_RE = re.compile(
+    r"\b(commercial(?:ly|[- ]use)?|licen[sc]e[ds]?|royalty[- ]free|copyright|monetiz\w*|own\s+the\s+(?:output|rights))\b",
+    re.IGNORECASE)
+_FACT_SIGNALS = {"price": _PRICE_SIGNAL_RE, "license": _LICENSE_SIGNAL_RE}
 
-# FU56: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
-# skipped (search result tokens are ~90% of a blog's cost), keeping a full gen under ~$2. Env-overridable.
-_BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "1.5"))
+# FU56/FU78: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
+# skipped (search result tokens are ~90% of a blog's cost). Bumped 1.5→2.0 (FU78) to leave headroom for the
+# price-rescue searches so public pricing gets fetched rather than punted. Env-overridable.
+_BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "2.0"))
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
 # i.e. plan + prioritize instead of a first-come cutoff. The remainder is reserved for verify_and_complete.
@@ -503,12 +519,25 @@ class BlogGenerator:
         return "\n\n".join(parts)
 
     _PUNT_CELL_RE = re.compile(
-        r"^\s*(?:verify\b|check\b|consult\b|confirm\b|varies?\s+by\s+plan|not\s+publicly\s+documented)",
+        r"^\s*(?:verify\b|check\b|consult\b|confirm\b|refer\s+to\b|visit\b|"
+        # FU78: "See <site>/pricing/terms/license …" punt (covers pricing AND commercial-use/license cells)
+        r"see\s+[^|]*?(?:pricing|plans?|terms|licen[sc]e|commercial|\.(?:com|io|ai|co|net|org))|"
+        r"varies?\s+by\s+plan|not\s+publicly\s+documented)",
         re.IGNORECASE)
     _PUNT_SENT_RE = re.compile(
         r"[^.\n]*\b(?:(?:always\s+|be\s+sure\s+to\s+|please\s+)?(?:verify|confirm|check)\b[^.\n]*"
         r"\bbefore\s+(?:publishing|monetiz|you\s+publish)|always\s+verify|varies?\s+by\s+plan|"
-        r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented)\b[^.\n]*\.",
+        r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented|"
+        # FU78: "See/refer to/visit/check <site> for (current) pricing / plans / terms / license / commercial"
+        r"(?:see|refer\s+to|visit|check)\s+[^.\n]*?\bfor\b[^.\n]*?(?:pricing|prices?|plans?|current\s+plan|terms|licen[sc]e|commercial\s+use)|"
+        r"(?:see|visit|check)\s+(?:the\s+)?[^.\n]*?(?:pricing|plans?|terms|licen[sc]e)\s+page)\b[^.\n]*\.",
+        re.IGNORECASE)
+    # FU78: same "see/visit/check … pricing/plans/terms/license …" pointer but URL-tolerant — a URL's internal
+    # dots break the [^.\n] sentence class above, so this variant allows dots and uses a period-then-whitespace
+    # (or EOL) as the real sentence boundary. Catches "See mubert.com/render/pricing for current plan pricing."
+    _PUNT_URL_SENT_RE = re.compile(
+        r"(?:^|(?<=[.\n]))\s*(?:see|visit|refer\s+to|check)\b[^\n]*?"
+        r"\b(?:pricing|prices?|plans?|current\s+plan|terms|licen[sc]e|commercial\s+use)\b[^\n]*?(?:\.(?=\s)|\.$|(?=\n)|$)",
         re.IGNORECASE)
 
     # FU54 substance guard: section splitter (## / ### headings) + concrete-stat detector.
@@ -544,6 +573,7 @@ class BlogGenerator:
             lines.append(line)
         body = "\n".join(lines)
         body = self._PUNT_SENT_RE.sub(" ", body)          # drop pure go-verify-yourself sentences
+        body = self._PUNT_URL_SENT_RE.sub(" ", body)      # FU78: URL-bearing "see <site> for pricing" pointers
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
@@ -1161,10 +1191,45 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 n3 = len(added)
                 tool_blocks = tool_blocks + added
 
+            # FU78 — KEY-FACT RESCUE (generalized beyond price). The tiers above stop as soon as they have ANY
+            # vendor page, but a vendor's own pricing/terms pages are often JS-rendered, so the fetched text can
+            # lack the specific fact the comparison needs — PRICE and/or COMMERCIAL-USE/LICENSE — the recurring
+            # "See <site> for …" punt (which hits license cells as well as pricing). Those facts ARE publicly
+            # indexed, so while a KEY fact is still missing, escalate with up to _FACT_RESCUE_TRIES BROAD
+            # (un-pinned) searches TARGETING the missing fact(s), keeping only results that carry a fact signal.
+            # Only AFTER these are exhausted does the reconcile drop the cell/row — never a one-try give-up.
+            # Budget-bounded: search_sources short-circuits once the cost ceiling hits.
+            def _missing_facts(blocks):
+                t = " ".join(b.get("text", "") for b in (blocks or []))
+                return [k for k, rx in _FACT_SIGNALS.items() if not rx.search(t)]
+            rescue_tries = 0
+            while rescue_tries < _FACT_RESCUE_TRIES and _missing_facts(tool_blocks):
+                miss = _missing_facts(tool_blocks)
+                wants = []
+                if "price" in miss:
+                    wants.append("pricing — plan names and the exact monthly cost (e.g. $X/month), any free tier")
+                if "license" in miss:
+                    wants.append("commercial-use / license terms — is commercial use allowed, is the output "
+                                 "royalty-free, who owns the generated output")
+                brief = f"{tool}: {'; '.join(wants) or 'pricing and commercial-use license terms'} — the exact, current facts"
+                rescue_tries += 1
+                try:
+                    rsc = self.claude.search_sources(brief, max_searches=2)
+                except Exception:
+                    rsc = []
+                cand = [s for s in (rsc or [])
+                        if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()
+                        and _dom(s.get("url")) not in _STALE_AGGREGATORS
+                        and any(_FACT_SIGNALS[k].search(s.get("fact") or "") for k in miss)]
+                add = _blocks_from(cand)
+                if add:
+                    tool_blocks = tool_blocks + add
+
             if tool_blocks:
                 fresh.extend(tool_blocks)
                 print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} "
-                      f"t1={n1} t2={int(t2_added)} t3={n3} -> "
+                      f"t1={n1} t2={int(t2_added)} t3={n3} rescue={rescue_tries} "
+                      f"missing={','.join(_missing_facts(tool_blocks)) or 'none'} -> "
                       f"{'vendor' if _has_vendor(tool_blocks) else 'third-party'} <- "
                       f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
             else:

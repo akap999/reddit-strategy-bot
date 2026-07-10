@@ -12603,6 +12603,7 @@ async function openBlog(id) {
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-description')" title="Copy the description as plain text">Copy description</button>
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-script')" title="Copy the script as plain text">Copy script</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube" target="_blank" title="Open the full package (title · script · description · shot-list · CTA)">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube&amp;dl=1" title="Download the full formatted package as an .html file">⬇ Download HTML</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube-captions&amp;dl=1" title="Download the caption transcript (.txt) to upload to YouTube">⬇ Download captions</a>
                 </div>
             </div>

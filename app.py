@@ -1804,6 +1804,30 @@ def _reddit_status_note(status):
     }.get(status, "")
 
 
+def _blog_link_target(blog, brand):
+    """FU81 — the URL the LinkedIn `{link}` placeholder should resolve to. A LinkedIn CTA names the
+    BRAND, so the brand's own site wins; fall back to the blog's published website URL; "" when
+    neither exists (the caller then strips the placeholder instead of shipping a literal `{link}`)."""
+    dom = ((brand or {}).get("domain_url") or "").strip()
+    if dom:
+        return dom if dom.startswith(("http://", "https://")) else "https://" + dom
+    for p in ((blog or {}).get("platforms") or []):
+        if p.get("platform") == "website" and (p.get("published_url") or "").strip():
+            return p["published_url"].strip()
+    return ""
+
+
+def _sub_link(text, url):
+    """FU81 — substitute the `{link}` placeholder with a real URL, or (when no URL is resolvable)
+    scrub it cleanly — never ship a literal `{link}` (the reported "Outsail ({link})" defect)."""
+    if not text or "{link}" not in text:
+        return text
+    if url:
+        return text.replace("{link}", url)
+    text = re.sub(r"\s*\(\s*\{link\}\s*\)", "", text)   # "Outsail ({link})" -> "Outsail"
+    return text.replace("{link}", "").replace("  ", " ")
+
+
 def _ensure_brand_byline_logo(claude, db, brand):
     """Lazy auto-fill with a NEGATIVE CACHE: when a brand is missing an author byline or logo,
     fetch a REAL author + logo from the brand's own site, persist ONLY the empty fields (never
@@ -1931,7 +1955,8 @@ def api_blog_generate():
                 meta_description=blog.get("meta_description", ""),
                 keywords=blog.get("keywords") or [],
                 body_markdown=blog.get("body_markdown", ""),
-                linkedin_text=blog.get("linkedin_text", ""),
+                # FU81: resolve the short post's {link} placeholder (brand site) before persisting.
+                linkedin_text=_sub_link(blog.get("linkedin_text", ""), _blog_link_target({}, brand)),
                 claims_flagged=blog.get("claims_flagged") or [],
                 status="draft",
                 prompt_version=blog.get("prompt_version", ""),
@@ -2007,7 +2032,8 @@ def api_blog_regenerate(blog_id):
                     meta_description=fresh.get("meta_description", ""),
                     keywords=fresh.get("keywords") or [],
                     body_markdown=fresh.get("body_markdown", ""),
-                    linkedin_text=fresh.get("linkedin_text", ""),
+                    linkedin_text=_sub_link(fresh.get("linkedin_text", ""),
+                                            _blog_link_target(blog, brand)),   # FU81
                     claims_flagged=fresh.get("claims_flagged") or [])
             elif part == "article":
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence)
@@ -2045,7 +2071,8 @@ def api_blog_regenerate(blog_id):
                                claims_flagged=flagged)
             elif part == "linkedin":
                 li = gen.generate_linkedin(brand, seed, article)
-                bg.update_blog(blog_id, linkedin_text=li or "")
+                bg.update_blog(blog_id, linkedin_text=_sub_link(li or "",
+                                                                _blog_link_target(blog, brand)))   # FU81
             if stored_reddit:
                 bg.update_blog(blog_id, reddit_status=reddit_status)
             regen_cost = round(claude.usage_cost(), 4)   # FU54: cost of this regeneration
@@ -2150,9 +2177,12 @@ def api_blog_linkedin_article(blog_id):
             if not art or not art.get("body_markdown"):
                 raise ValueError(claude.last_error or "LinkedIn article generation failed")
             cost = round(claude.usage_cost(), 4)
+            # FU81: resolve the {link} placeholder NOW (brand site, else published blog URL) so the
+            # stored article / Copy / export never ship a literal "({link})".
+            link = _blog_link_target(blog, brand)
             bg.update_blog(blog_id,
                            linkedin_article_title=art.get("title", ""),
-                           linkedin_article=art.get("body_markdown", ""),
+                           linkedin_article=_sub_link(art.get("body_markdown", ""), link),
                            linkedin_article_persona=persona,
                            gen_cost=cost)
             return {"blog_id": blog_id, "gen_cost": cost}
@@ -2380,6 +2410,9 @@ def api_blog_export(blog_id):
         art_body = (blog.get("linkedin_article") or "").strip()
         if not art_body:
             return jsonify({"error": "no LinkedIn article generated yet"}), 404
+        # FU81 backstop: articles generated BEFORE the persist-time substitution still carry a
+        # literal {link} — resolve it at render so a re-export fixes them without a regen.
+        art_body = _sub_link(art_body, _blog_link_target(blog, brand))
         md_src = (f"# {art_title}\n\n{art_body}") if art_title else art_body
         try:
             import markdown as _md
@@ -2436,13 +2469,28 @@ def api_blog_export(blog_id):
         cta = _fill(yt_meta.get("cta"))
         shot_list = yt_meta.get("shot_list") or []
         thumb = (yt_meta.get("thumbnail_text") or "").strip()
-        md_src = f"# {yt_title}\n\n## Script\n\n{yt_script}\n\n## Description\n\n{yt_desc}\n"
+        demo_title = (yt_meta.get("demo_title") or "").strip()
+        chapters = [c for c in (yt_meta.get("chapters") or []) if isinstance(c, dict)]
+        caps = (blog.get("youtube_captions") or "").strip()
+        # The COMPLETE hand-off doc: everything needed to record + upload, in publish order.
+        md_src = f"# {yt_title}\n\n## Video title\n\n{yt_title}\n"
+        if demo_title:
+            md_src += f"\n**Alternate title (how/demo angle):** {demo_title}\n"
+        md_src += f"\n## Description (paste into YouTube)\n\n{yt_desc}\n"
+        if chapters:
+            md_src += ("\n## Chapters\n\n"
+                       + "\n".join(f"- {(c.get('ts') or '00:00').strip()} — {(c.get('question') or '').strip()}"
+                                   for c in chapters) + "\n")
+        md_src += f"\n## Script\n\n{yt_script}\n"
         if shot_list:
             md_src += "\n## Shot list\n\n" + "\n".join(f"- {s}" for s in shot_list) + "\n"
         if thumb:
             md_src += f"\n## Thumbnail text\n\n{thumb}\n"
         if cta:
             md_src += f"\n## End-screen CTA\n\n{cta}\n"
+        if caps:
+            # fenced so the one-sentence-per-line transcript keeps its line breaks when rendered
+            md_src += f"\n## Captions transcript (upload as the caption track)\n\n```\n{caps}\n```\n"
         try:
             import markdown as _md
             inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),

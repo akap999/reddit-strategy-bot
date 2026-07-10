@@ -1489,6 +1489,10 @@ Rules:
   - Then a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
     "Unpopular opinion:", "I've been thinking a lot about…". Commit to a specific, distinctive point of
     view — no generic thought-leadership filler.
+  - WRITE IN FIRST PERSON THROUGHOUT — "I/we", a practitioner speaking — NOT a third-person explainer.
+    If a sentence reads like neutral documentation ("Most HR leaders spend months…"), recast it as the
+    author's own point of view ("I watch HR leaders spend months…"). This is a person's article, not a
+    report.
   - PRESERVE the source's distinctive ANGLE / FRAMING (its core positioning or central contrast) and its
     hook ENERGY — rephrased in different words (still NO sentence reuse). Do NOT flatten a sharp hook or
     contrast into a generic explainer.

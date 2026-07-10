@@ -253,6 +253,12 @@ class BlogGenerator:
             print("[blog_gen] evidence: NO independent third-party sources found", flush=True)
         return out[:_MAX_WEB_SOURCES]
 
+    def _fetch_url(self, url):
+        """Fetch a URL and return its stripped visible text ("" on failure). Shared by
+        `_gather_evidence`'s pasted-source path and FU79 `finish_pending_blog`'s manual-link path."""
+        txt = _extract_visible_text(_fetch_homepage(url))
+        return (txt or "").strip()
+
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
                          use_web_search=False, reddit_thread=None):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
@@ -269,8 +275,7 @@ class BlogGenerator:
         blocks = []   # {label, url, text}
 
         def _fetch(url):
-            txt = _extract_visible_text(_fetch_homepage(url))
-            return (txt or "").strip()
+            return self._fetch_url(url)
 
         # ----- subject + competitor domains -----
         targets = []  # (label, domain, validate)
@@ -1006,21 +1011,29 @@ Return JSON only:
         }
 
     def verify_and_complete(self, brand, seed, article, deep=False):
-        """FU49 — the always-on VERIFY + COMPLETE agent. After the draft is written it:
-          (a) extracts the comparison TOOLS + DIMENSIONS + high-risk claims;
-          (b) SOURCES every named competitor tool by pulling its OWN public facts (pricing / license /
-              royalty-free / capability) — `find_official_domain` + `fetch_site_facts` (web-search pinned
-              to that tool's domain, so it works on a cloud IP). Vendor sites are ALLOWED: this is the
-              publicly-available info that fills the table;
-          (c) runs an INDEPENDENT corroboration search for the SUBJECT's own self-claims + the risk/policy
-              narrative, blocking ONLY the subject's own domain + already-used third-party URLs (NOT
-              competitors);
-          (d) reconciles: FILLS every comparison cell with a verified, cited value, KEEPS/EXPANDS the
-              dimensions, corrects wrong values, and NEVER leaves "—" (drop a whole column / remove a tool
-              rather than show a blank). Never fabricates — a cell is filled only from a fetched/cited fact.
-        Fresh sources are appended to self._evidence_blocks in [S#] order for _rebuild_sources. `deep`
-        bumps the corroboration search budget. Returns {body_markdown, flagged} or None (draft unchanged).
-        Never raises."""
+        """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
+        then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
+        into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
+        `_reconcile_and_finish` (phase d: reconcile). This wrapper preserves the original
+        drop-on-unsourced behavior for DIRECT callers (regenerate part='verify'/'article'); the FU79
+        pause path lives in `generate_blog(allow_pause=True)`. Returns {body_markdown, flagged} or None
+        (draft unchanged). Never raises."""
+        sr = self._source_for_completion(brand, seed, article, deep=deep)
+        if not sr:
+            return None
+        if not sr.get("fresh"):
+            print("[blog_gen] verify+complete: no fresh evidence gathered — draft unchanged", flush=True)
+            return None
+        return self._reconcile_and_finish(brand, seed, article, sr)
+
+    def _source_for_completion(self, brand, seed, article, deep=False):
+        """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
+        claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
+        the FU78 key-fact rescue, and run the independent corroboration search. Does NOT reconcile and
+        does NOT mutate self._evidence_blocks. Returns a JSON-able sourcing dict
+        {name,cat,tools,dims,claims,core_topic,fresh,unsourced} — where `unsourced` lists the tools that
+        produced ZERO evidence after ALL tiers+rescue (the FU79 pause trigger) — or None when there is
+        nothing to source/verify. Never raises."""
         name, _url, _block = self._brand_block(brand)
         body = (article or {}).get("body_markdown") or ""
         if not body.strip():
@@ -1066,6 +1079,7 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
             return None  # nothing to source or check
 
         fresh = []   # each: {"label","url","text"} — appended to _evidence_blocks in [S#] order
+        unsourced = []   # FU79: tools with ZERO evidence after all tiers+rescue — the pause trigger
 
         # PRIORITY ORDER (FU56): under a cost ceiling, secure the highest-VALUE sources FIRST so a budget
         # cutoff only ever drops the least-important searches. Rank: (c2) authoritative core-topic source →
@@ -1233,8 +1247,10 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                       f"{'vendor' if _has_vendor(tool_blocks) else 'third-party'} <- "
                       f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
             else:
+                unsourced.append({"tool": tool, "dom": dom or "",
+                                  "facts": _missing_facts([])})   # FU79: which key facts were wanted
                 print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} t1=0 t2=0 t3=0 -> none "
-                      f"(could NOT source individually — row will be dropped, not generalized)", flush=True)
+                      f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
@@ -1267,8 +1283,22 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 fresh.append({"label": f"third-party · {c.get('title') or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
 
-        if not fresh:
-            print("[blog_gen] verify+complete: no fresh evidence gathered — draft unchanged", flush=True)
+        return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
+                "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced}
+
+    def _reconcile_and_finish(self, brand, seed, article, sourcing):
+        """FU79 — phase (d) of verify+complete: reconcile the draft against the sourced FRESH FACTS,
+        appending them to self._evidence_blocks in [S#] order. `sourcing` is `_source_for_completion`'s
+        dict (optionally augmented on resume with manual, tool-labeled blocks). Returns
+        {body_markdown, flagged} or None. Never raises."""
+        name = sourcing.get("name") or self._brand_block(brand)[0]
+        cat = sourcing.get("cat") or ""
+        tools = sourcing.get("tools") or []
+        dims = sourcing.get("dims") or []
+        claims = sourcing.get("claims") or []
+        fresh = sourcing.get("fresh") or []
+        body = (article or {}).get("body_markdown") or ""
+        if not fresh or not body.strip():
             return None
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
@@ -1489,7 +1519,7 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
-                      deep_verify=False):
+                      deep_verify=False, allow_pause=False):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -1497,7 +1527,11 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         `reddit_thread` (optional) is a pre-fetched live thread {subreddit,title,url,text}
         the article may cite as COMMUNITY social proof (the brand's own live post + comments).
         `deep_verify` (opt-in): deepen the independent CORROBORATION of the brand's own claims (FU48).
-        The competitor-sourcing + comparison-table FILL (FU49) runs on EVERY blog regardless."""
+        The competitor-sourcing + comparison-table FILL (FU49) runs on EVERY blog regardless.
+        `allow_pause` (FU79): when a tool STILL can't be sourced after all retries, RETURN a
+        `{"_pending": {...}}` sentinel (checkpoint of the partial generation) instead of dropping its
+        row — so the caller can ask the user for a manual link/fact and resume via `finish_pending_blog`.
+        Default False keeps the original drop-on-unsourced behavior for programmatic callers."""
         self.claude.reset_usage()   # FU54: cost this generation from real API usage
         # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
         # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
@@ -1520,16 +1554,40 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
             article["claims_flagged"] = v["flagged"]
         else:
             article["claims_flagged"] = []
-        # FU49: ALWAYS run verify+complete — source every named competitor's OWN public facts, FILL the
-        # comparison (no "—"), correct wrong values, add cited sources. `deep` deepens the independent
-        # corroboration of the brand's own claims (FU48).
-        vc = self.verify_and_complete(brand, seed, article, deep=deep_verify)
-        if vc:
-            article["body_markdown"] = vc["body_markdown"]
-            article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
+        # FU49/FU79: source every named competitor's OWN public facts + FILL the comparison. FU79 —
+        # when `allow_pause` and a tool STILL can't be sourced after all retries, PAUSE: checkpoint the
+        # partial generation and return a `_pending` sentinel so the caller can ask the user for a manual
+        # link/fact, instead of silently dropping the tool's row. `deep` deepens corroboration (FU48).
+        sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify)
+        if allow_pause and sourcing and sourcing.get("unsourced"):
+            print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
+                  f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
+            return {"_pending": {
+                "missing": sourcing["unsourced"],
+                "checkpoint": {
+                    "sourcing": sourcing,
+                    "evidence_blocks": list(getattr(self, "_evidence_blocks", None) or []),
+                    "article": {k: article.get(k) for k in
+                                ("title", "meta_description", "keywords", "body_markdown", "claims_flagged")},
+                    "draft_body": draft_body,
+                },
+                "gen_cost": round(self.claude.usage_cost(), 4),
+                "gen_usage": dict(self.claude._usage),
+            }}
+        if sourcing and sourcing.get("fresh"):
+            vc = self._reconcile_and_finish(brand, seed, article, sourcing)
+            if vc:
+                article["body_markdown"] = vc["body_markdown"]
+                article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
+        return self._finalize_article(brand, seed, article, draft_body)
+
+    def _finalize_article(self, brand, seed, article, draft_body):
+        """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
+        ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. Mutates + returns
+        `article`."""
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
-        article["body_markdown"] = self._restore_dropped_sections(draft_body, article["body_markdown"])
+        article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
         missing_stats = self._dropped_stats(draft_body, article["body_markdown"])
         if missing_stats:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)
@@ -1541,6 +1599,54 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         article["gen_cost"] = round(self.claude.usage_cost(), 4)
         article["gen_usage"] = dict(self.claude._usage)
         return article
+
+    def finish_pending_blog(self, brand, seed, checkpoint, provided):
+        """FU79 resume — complete a blog paused for manual sources WITHOUT re-gathering / re-generating /
+        re-sourcing. `checkpoint` is what `generate_blog`'s `_pending` sentinel stored; `provided` is a
+        list of {tool, url?, fact?, skip?}. For each non-skipped item that yields text (url fetched
+        verbatim, else the pasted fact), build a TOOL-LABELED evidence block so the reconcile KEEPS that
+        tool's row; skipped/blank tools stay dropped. Then runs only the reconcile + finalize tail.
+        Returns the finished article dict (same shape as generate_blog). Never raises for a bad item."""
+        ck = checkpoint or {}
+        sourcing = dict(ck.get("sourcing") or {})
+        sourcing["fresh"] = list(sourcing.get("fresh") or [])
+        sourcing["unsourced"] = list(sourcing.get("unsourced") or [])
+        article = dict(ck.get("article") or {})
+        draft_body = ck.get("draft_body") or ""
+        # restore the base evidence set so [S#] numbering + _rebuild_sources stay correct
+        self._evidence_blocks = list(ck.get("evidence_blocks") or [])
+
+        resolved = set()
+        for item in (provided or []):
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool") or "").strip()
+            if not tool or item.get("skip"):
+                continue
+            url = str(item.get("url") or "").strip()
+            fact = str(item.get("fact") or "").strip()
+            text = ""
+            if url:
+                try:
+                    text = self._fetch_url(url)
+                except Exception:
+                    text = ""
+            if not text and fact:
+                text = fact
+            if not text:
+                continue   # nothing usable for this tool → it stays dropped
+            sourcing["fresh"].append({"label": tool, "url": url, "text": text[:_EVIDENCE_TEXT_CAP]})
+            resolved.add(tool.lower())
+        if resolved:
+            sourcing["unsourced"] = [u for u in sourcing["unsourced"]
+                                     if str(u.get("tool") or "").lower() not in resolved]
+
+        if sourcing.get("fresh"):
+            vc = self._reconcile_and_finish(brand, seed, article, sourcing)
+            if vc:
+                article["body_markdown"] = vc["body_markdown"]
+                article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
+        return self._finalize_article(brand, seed, article, draft_body)
 
 
 # ----------------------------------------------------------------------------- JSON-LD

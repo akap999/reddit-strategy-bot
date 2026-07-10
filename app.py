@@ -1893,9 +1893,38 @@ def api_blog_generate():
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
-                deep_verify=deep_verify)
+                deep_verify=deep_verify, allow_pause=True)   # FU79: pause if a tool can't be sourced
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
+            # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
+            # (draft body + a JSON checkpoint) as 'awaiting_sources' and ask the user for a manual
+            # link/fact; the blog is finished later via POST /api/blogs/<id>/provide-sources.
+            pending = blog.get("_pending") if isinstance(blog, dict) else None
+            if pending:
+                ck = pending.get("checkpoint") or {}
+                cart = ck.get("article") or {}
+                gcost = pending.get("gen_cost", 0)
+                blog_id = bg.save_blog(
+                    brand_id, seed,
+                    title=cart.get("title", ""),
+                    meta_description=cart.get("meta_description", ""),
+                    keywords=cart.get("keywords") or [],
+                    body_markdown=cart.get("body_markdown", ""),
+                    linkedin_text="",
+                    claims_flagged=cart.get("claims_flagged") or [],
+                    status="awaiting_sources",
+                    prompt_version="",
+                    source_urls=source_urls, research_notes=research_notes,
+                    use_web_search=use_web_search, reddit_url=reddit_url,
+                    reddit_status=reddit_status, deep_verify=deep_verify,
+                    gen_cost=gcost, **byline,
+                )
+                bg.update_blog(blog_id, pending_state=json.dumps(pending))
+                return {"blog_id": blog_id, "needs_sources": True,
+                        "missing": pending.get("missing") or [],
+                        "reddit_status": reddit_status,
+                        "reddit_note": _reddit_status_note(reddit_status),
+                        "gen_cost": gcost}
             blog_id = bg.save_blog(
                 brand_id, seed,
                 title=blog.get("title", ""),
@@ -2027,6 +2056,68 @@ def api_blog_regenerate(blog_id):
             bg.close()
 
     return jsonify({"task_id": start_task("blog_regenerate", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>/provide-sources", methods=["POST"])
+def api_blog_provide_sources(blog_id):
+    """FU79 — finish a blog PAUSED awaiting manual sources. Body: {sources:[{tool,url,fact}]}.
+    Each provided tool's url (fetched verbatim) or pasted fact becomes a tool-labeled evidence block
+    so the reconcile keeps that tool's row; any missing tool the user does NOT provide (blank / skipped
+    / a 'Skip all' with empty sources) is dropped, exactly as the silent behavior would have. Only the
+    reconcile TAIL runs (no re-gather / re-generate / re-source). Returns a task_id."""
+    data = request.get_json() or {}
+    raw = data.get("sources")
+    sources = [s for s in raw if isinstance(s, dict)] if isinstance(raw, list) else []
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            pending = blog.get("pending_state") or {}
+            checkpoint = (pending or {}).get("checkpoint") or {}
+            if not checkpoint:
+                raise ValueError("blog is not awaiting sources")
+            brand = bg.get_brand(blog.get("brand_id"))
+            if not brand:
+                raise ValueError("brand not found")
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()   # cost only the resume (added to the prior gen_cost)
+            try:
+                from generators.blog_gen import _BLOG_COST_CEILING
+                claude.set_cost_ceiling(_BLOG_COST_CEILING)
+            except Exception:
+                pass
+            brand = _ensure_brand_byline_logo(claude, bg, brand)
+            gen = BlogGenerator(claude, bg)
+            seed = blog.get("seed") or ""
+            art = gen.finish_pending_blog(brand, seed, checkpoint, sources)
+            if not art:
+                raise ValueError(claude.last_error or "Finishing the blog failed")
+            resume_cost = round(claude.usage_cost(), 4)
+            total_cost = round(float(blog.get("gen_cost") or 0) + resume_cost, 4)
+            bg.update_blog(
+                blog_id,
+                title=art.get("title", ""),
+                meta_description=art.get("meta_description", ""),
+                keywords=art.get("keywords") or [],
+                body_markdown=art.get("body_markdown", ""),
+                linkedin_text=art.get("linkedin_text", ""),
+                claims_flagged=art.get("claims_flagged") or [],
+                status="draft",
+                prompt_version=art.get("prompt_version", ""),
+                pending_state="",   # clear the checkpoint — no longer awaiting sources
+                gen_cost=total_cost,
+            )
+            return {"blog_id": blog_id, "resumed": True, "gen_cost": total_cost}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_provide_sources", task, pass_task_id=True)})
 
 @app.route("/api/blogs/<int:blog_id>/linkedin-article", methods=["POST"])
 def api_blog_linkedin_article(blog_id):

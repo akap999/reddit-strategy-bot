@@ -12337,11 +12337,15 @@ function _blogRow(b) {
     return `<tr>
         <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span><div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
         <td>${_blogEsc(b.brand_name || '—')}</td>
-        <td><span class="badge">${_blogEsc(b.status)}</span></td>
+        <td>${b.status === 'awaiting_sources'
+            ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'
+            : `<span class="badge">${_blogEsc(b.status)}</span>`}</td>
         <td>${chips}</td>
         <td class="text-xs text-gray-400">${upd}</td>
         <td><div class="flex gap-1">
-            <button class="btn btn-sm btn-secondary" onclick="openBlog(${b.id})">Open</button>
+            ${b.status === 'awaiting_sources'
+                ? `<button class="btn btn-sm btn-primary" onclick="openBlog(${b.id})" title="Add the missing source(s) and finish">Provide sources</button>`
+                : `<button class="btn btn-sm btn-secondary" onclick="openBlog(${b.id})">Open</button>`}
             <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="deleteBlog(${b.id})">Delete</button>
         </div></td>
     </tr>`;
@@ -12397,6 +12401,60 @@ function _blogCostToast(res) {
     if (res && res.gen_cost) toast('≈ $' + Number(res.gen_cost).toFixed(2) + ' to generate', 'info');
 }
 
+// FU79 — generation PAUSED: the model couldn't source a tool after all retries. Ask for a link/fact
+// per missing tool (or skip → drop it), then finish via /api/blogs/<id>/provide-sources.
+function _blogFactLabel(facts) {
+    const map = { price: 'pricing', license: 'commercial-use / license terms' };
+    const f = (facts || []).map(x => map[x] || x).filter(Boolean);
+    return f.length ? f.join(' + ') : 'a usable source';
+}
+
+function blogProvideSourcesModal(blogId, missing) {
+    missing = missing || [];
+    if (!missing.length) { openBlog(blogId); return; }
+    window._blogPendingId = blogId;
+    window._blogPendingTools = missing.map(m => m.tool);
+    const rows = missing.map((m, i) => `
+        <div class="border border-gray-700 rounded p-2 mb-2">
+            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}</div>
+            <div class="text-xs text-gray-500 mb-2">Couldn't find: ${_blogEsc(_blogFactLabel(m.facts))}. Paste a link to its page, or the fact itself.</div>
+            <input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://… (page with the pricing / license — fetched verbatim)">
+            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="…or paste the fact directly, e.g. 'Creator plan $14/mo, commercial use allowed, royalty-free'"></textarea>
+            <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
+                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop it from the comparison
+            </label>
+        </div>`).join('');
+    showModal(`<div style="max-width:640px">
+        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">Generation paused — needs a source</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each tool below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
+        ${rows}
+        <div class="flex gap-2 justify-end mt-3">
+            <button class="btn btn-sm btn-secondary" onclick="_blogSubmitSources(true)">Skip all &amp; finish now</button>
+            <button class="btn btn-sm btn-primary" onclick="_blogSubmitSources(false)">Generate with these</button>
+        </div>
+    </div>`);
+}
+
+function _blogSubmitSources(skipAll) {
+    const id = window._blogPendingId;
+    const tools = window._blogPendingTools || [];
+    const sources = [];
+    if (!skipAll) {
+        tools.forEach((tool, i) => {
+            const skip = !!document.getElementById('blog-ps-skip-' + i)?.checked;
+            const url = (document.getElementById('blog-ps-url-' + i)?.value || '').trim();
+            const fact = (document.getElementById('blog-ps-fact-' + i)?.value || '').trim();
+            sources.push({ tool, url, fact, skip });
+        });
+    }
+    closeModal();
+    runTask('/api/blogs/' + id + '/provide-sources', { sources }, (res) => {
+        blogReload();
+        _blogCostToast(res);
+        if (res && res.blog_id) openBlog(res.blog_id);
+    }, 'Finishing blog');
+}
+
 function blogGenerate() {
     const brand_id = +document.getElementById('blog-gen-brand').value;
     const seed = document.getElementById('blog-gen-seed').value.trim();
@@ -12425,6 +12483,7 @@ function blogGenerate() {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
+        if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
 }
@@ -12467,9 +12526,22 @@ async function openBlog(id) {
     window._blogArticlePersonas = _liFit;   // stashed for the prefill handler
     const _liPersonaOpts = '<option value="">(type your own voice below)</option>' +
         _liFit.map((p, i) => `<option value="${i}">${_blogEsc(p.label)}${String(p.fit).toLowerCase() === 'maybe' ? ' (maybe)' : ''}</option>`).join('');
+    // FU79 — restart-proof resume: an awaiting_sources blog shows a banner to provide the missing links/facts.
+    let pendBanner = '';
+    if (b.status === 'awaiting_sources') {
+        const miss = ((b.pending_state || {}).missing) || [];
+        window._blogOpenMissing = miss;
+        const names = miss.map(m => _blogEsc(m.tool)).join(', ') || 'a source';
+        pendBanner = `<div class="card p-2 mb-2" style="background:#4a3a12;border:1px solid #a16207">
+            <div class="text-sm" style="color:#fbbf24">⏸ Paused — waiting for a manual source for: <b>${names}</b></div>
+            <div class="text-xs text-gray-400 mt-1">Add a link or paste the fact so it stays in the comparison, or skip to drop it.</div>
+            <button class="btn btn-sm btn-primary mt-2" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing)">Provide sources</button>
+        </div>`;
+    }
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
+        ${pendBanner}
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>

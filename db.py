@@ -1081,6 +1081,10 @@ class Database:
             blog["source_urls"] = json.loads(blog.get("source_urls") or "[]")
         except (json.JSONDecodeError, TypeError):
             blog["source_urls"] = []
+        try:   # FU79: JSON checkpoint of a generation paused awaiting manual sources ({} when none)
+            blog["pending_state"] = json.loads(blog.get("pending_state") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["pending_state"] = {}
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1123,13 +1127,16 @@ class Database:
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
                    "reddit_status", "deep_verify", "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
-                   "linkedin_article", "linkedin_article_title", "linkedin_article_persona"}
+                   "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
+                   "pending_state"}   # FU79
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
+            elif k == "pending_state" and not isinstance(v, str):   # FU79: JSON dict checkpoint
+                v = json.dumps(v or {})
             sets.append(f"{k} = ?")
             params.append(v)
         if not sets:
@@ -2270,7 +2277,9 @@ class Database:
                     "reviewer_name", "reviewer_title", "disclosure", "image_url",
                     "reddit_status",
                     # FU59: long-form LinkedIn ARTICLE (distinct from the short linkedin_text post).
-                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona"):
+                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
+                    # FU79: JSON checkpoint of a generation PAUSED awaiting manual sources.
+                    "pending_state"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

@@ -1643,6 +1643,14 @@ DESCRIPTION SUPPORT — also return, so the description + captions can be assemb
   - `shot_list`: ["a demo/B-roll shot to record", …] — favor UNCUT demonstrations of what's demonstrable.
   - `thumbnail_text`: a short, HONEST thumbnail line (no bait, no claim the footage doesn't show).
   - `cta`: one end-screen call-to-action naming {name} with a link placeholder written exactly as {{link}}.
+  - `pinned_comment`: 1-2 natural, genuinely useful sentences to post as the video's PINNED comment (the
+    most-read text after the description). You MAY include 1-2 KEY source URLs from the blog's ## Sources
+    (official / vendor pages only). Do NOT include the blog link or the disclosure — both are appended
+    automatically.
+  - `tags`: 10-15 YouTube tags (plain phrases, NO '#') — the target prompt's vocabulary, the product /
+    platform names compared, and the category terms.
+  - `category`: the best-fit YouTube category name (e.g. "Science & Technology", "Education",
+    "Howto & Style").
 
 Never put a Reddit link anywhere. START nothing with the disclosure (it is added deterministically) — but
 you MAY assume the description will carry: "{disc}".
@@ -1650,13 +1658,28 @@ you MAY assume the description will carry: "{disc}".
 Return JSON only:
 {{"title": "", "demo_title": "", "mini_answer": "", "script_markdown": "",
   "chapters": [{{"question": "", "ts": ""}}], "captions_transcript": "",
-  "shot_list": [], "thumbnail_text": "", "cta": ""}}"""
+  "shot_list": [], "thumbnail_text": "", "cta": "",
+  "pinned_comment": "", "tags": [], "category": ""}}"""
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("script_markdown") or "").strip():
             return {}
         chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
         mini_answer = (res.get("mini_answer") or "").strip()
         description = self._assemble_youtube_description(mini_answer, chapters, "{link}", disc)
+        # FU82 — pinned comment: the LLM's useful line (reddit-scrubbed; vendor source URLs allowed)
+        # + the blog link + the disclosure REPEATED — the most-read text after the description.
+        pinned_raw = self._youtube_scrub((res.get("pinned_comment") or "").strip())
+        pinned = "\n\n".join(p for p in
+                             (pinned_raw, "Full comparison with sources: {link}", disc.strip()) if p)
+        # FU82 — tags: deduped (case-insensitive), '#' stripped, capped at 15.
+        tags, _seen_tags = [], set()
+        for t in (res.get("tags") or []):
+            t = str(t).strip().lstrip("#").strip()
+            if t and t.lower() not in _seen_tags:
+                _seen_tags.add(t.lower())
+                tags.append(t)
+            if len(tags) >= 15:
+                break
         meta = {
             "variant": "demo" if is_demo else "question",
             "demo_title": (res.get("demo_title") or "").strip(),
@@ -1665,6 +1688,9 @@ Return JSON only:
             "thumbnail_text": (res.get("thumbnail_text") or "").strip(),
             "cta": self._youtube_scrub((res.get("cta") or "").strip()),
             "mini_answer": mini_answer,
+            "pinned_comment": pinned,
+            "tags": tags,
+            "category": (res.get("category") or "").strip(),
         }
         return {
             "title": (res.get("title") or "").strip(),

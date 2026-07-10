@@ -12533,6 +12533,12 @@ async function openBlog(id) {
     const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
     const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
     const _ytCta = _blogEsc(_ytMeta.cta || '');
+    // FU82 — pinned comment ({link} filled from the published website URL when present) + tags.
+    const _ytSite = (((b.platforms || []).find(p => p.platform === 'website' && (p.published_url || '').trim()) || {}).published_url || '').trim();
+    const _ytPinnedRaw = (_ytMeta.pinned_comment || '').replace(/\{link\}/g, _ytSite || '{link}');
+    const _ytTagsStr = (_ytMeta.tags || []).map(t => String(t).trim()).filter(Boolean).join(', ');
+    window._ytPinnedCopy = _ytPinnedRaw;
+    window._ytTagsCopy = _ytTagsStr;
     // FU79 — restart-proof resume: an awaiting_sources blog shows a banner to provide the missing links/facts.
     let pendBanner = '';
     if (b.status === 'awaiting_sources') {
@@ -12599,7 +12605,11 @@ async function openBlog(id) {
                 ${_ytShots ? `<div class="text-xs text-gray-400 mt-2">Shot list (demonstrate what's demonstrable)<ul class="list-disc ml-4 text-gray-300 mt-1">${_ytShots}</ul></div>` : ''}
                 ${_ytThumb ? `<div class="text-xs text-gray-400 mt-2">Thumbnail text: <span class="text-gray-300">${_ytThumb}</span></div>` : ''}
                 ${_ytCta ? `<div class="text-xs text-gray-400 mt-1">End-screen CTA: <span class="text-gray-300">${_ytCta}</span></div>` : ''}
+                ${_ytPinnedRaw ? `<div class="text-xs text-gray-400 mt-2">Pinned comment (post + pin after upload)<div class="text-gray-300 mt-1" style="white-space:pre-wrap">${_blogEsc(_ytPinnedRaw)}</div></div>` : ''}
+                ${_ytTagsStr ? `<div class="text-xs text-gray-400 mt-2">Tags: <span class="text-gray-300">${_blogEsc(_ytTagsStr)}</span></div>` : ''}
                 <div class="flex flex-wrap gap-2 mt-2">
+                    ${_ytPinnedRaw ? `<button class="btn btn-sm btn-secondary" onclick="_blogCopyText(window._ytPinnedCopy)" title="Copy the pinned comment to post after upload">Copy pinned comment</button>` : ''}
+                    ${_ytTagsStr ? `<button class="btn btn-sm btn-secondary" onclick="_blogCopyText(window._ytTagsCopy)" title="Copy the tags (paste into the tags field)">Copy tags</button>` : ''}
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-description')" title="Copy the description as plain text">Copy description</button>
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-script')" title="Copy the script as plain text">Copy script</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube" target="_blank" title="Open the full package (title · script · description · shot-list · CTA)">Open formatted</a>
@@ -12666,6 +12676,12 @@ function blogCopy(elId) {
     const el = document.getElementById(elId);
     if (!el) return;
     navigator.clipboard.writeText(el.value).then(() => toast('Copied', 'success'), () => toast('Copy failed', 'error'));
+}
+
+function _blogCopyText(txt) {
+    // FU82 — copy a plain string (pinned comment / tags) rather than an element's value.
+    if (!txt) return;
+    navigator.clipboard.writeText(txt).then(() => toast('Copied', 'success'), () => toast('Copy failed', 'error'));
 }
 
 // FU59 — LinkedIn ARTICLE helpers (voice-seed prefill, generate, plain-text copy).

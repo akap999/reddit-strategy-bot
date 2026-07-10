@@ -2491,6 +2491,32 @@ def api_blog_export(blog_id):
         if caps:
             # fenced so the one-sentence-per-line transcript keeps its line breaks when rendered
             md_src += f"\n## Captions transcript (upload as the caption track)\n\n```\n{caps}\n```\n"
+        # FU82 — pinned comment / tags / upload settings + checklist. Guarded on the new meta keys so
+        # packages generated before FU82 render exactly as before.
+        pinned = _fill((yt_meta.get("pinned_comment") or "").strip())
+        yt_tags = [str(t).strip() for t in (yt_meta.get("tags") or []) if str(t).strip()]
+        yt_category = (yt_meta.get("category") or "").strip()
+        if pinned:
+            md_src += f"\n## Pinned comment (post + pin after upload)\n\n{pinned}\n"
+        if yt_tags:
+            md_src += "\n## Tags\n\n" + ", ".join(yt_tags) + "\n"
+        if pinned or yt_tags or yt_category:
+            # {link} resolution check — computed at render; auto-flips to ✓ once the blog's website
+            # URL is published (the _fill above substitutes it everywhere).
+            unresolved = sum((s or "").count("{link}") for s in (yt_desc, pinned, cta))
+            link_line = (f"⚠ {unresolved} unresolved {{link}} placeholder(s) — publish the blog's "
+                         f"website URL (or paste the link) before upload"
+                         if unresolved else "✓ all links resolved")
+            md_src += ("\n## Upload settings & checklist\n\n"
+                       f"- [ ] Links: {link_line}\n"
+                       "- [ ] Upload the corrected captions transcript above (don't trust auto-captions "
+                       "with brand / license terms)\n"
+                       "- [ ] Post + PIN the pinned comment\n"
+                       f"- [ ] Settings: category = {yt_category or 'Science & Technology'} · "
+                       "language = English · audience = NOT made for kids\n"
+                       "- [ ] Paid-promotion flag: NOT needed — this is the brand's own channel with the "
+                       "disclosure in the description (the flag is for third-party paid endorsements); "
+                       "do not flip it on\n")
         try:
             import markdown as _md
             inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),

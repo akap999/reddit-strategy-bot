@@ -2152,6 +2152,7 @@ def api_blog_linkedin_article(blog_id):
     (distinct from the short linkedin_text post). Background task; poll for {blog_id, gen_cost}."""
     data = request.get_json() or {}
     persona = (data.get("persona") or "").strip()
+    manual_title = (data.get("title") or "").strip()   # FU83: user-entered headline → LOCKED verbatim
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 
     def task(_task_id=None):
@@ -2173,7 +2174,8 @@ def api_blog_linkedin_article(blog_id):
                 brand,
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
                 persona_voice=persona, disclosure=disclosure,
-                target_query=(blog.get("seed") or "").strip())   # FU61: anchor to the exact target prompt
+                target_query=(blog.get("seed") or "").strip(),   # FU61: anchor to the exact target prompt
+                manual_title=manual_title)                       # FU83: lock a user-typed headline
             if not art or not art.get("body_markdown"):
                 raise ValueError(claude.last_error or "LinkedIn article generation failed")
             cost = round(claude.usage_cost(), 4)

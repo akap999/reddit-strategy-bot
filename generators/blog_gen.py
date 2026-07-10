@@ -1425,7 +1425,8 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             return ""
         return (res.get("linkedin_text") or "").strip()
 
-    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure="", target_query=""):
+    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure="", target_query="",
+                                  manual_title=""):
         """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE (distinct from the short
         `generate_linkedin` post) in a chosen persona's VOICE. Returns {"title","body_markdown"} or {}.
 
@@ -1434,11 +1435,14 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         one-line affiliation disclosure (the caller passes the blog/brand disclosure, else "" → a default).
         `target_query` (FU61) is the blog's seed / exact target prompt — when set, its phrasing is placed in
         ONE high-weight position (a question-form subhead) so the article also anchors on the exact query.
+        `manual_title` (FU83): a user-entered headline — when set it is LOCKED: used verbatim (prompted AND
+        code-enforced, like the FU44 custom post title) and the article is written to deliver on it.
         """
         name, _url, _block = self._brand_block(brand)
         title = (article or {}).get("title") or ""
         body = (article or {}).get("body_markdown") or ""
         pv = (persona_voice or "").strip()
+        mt = (manual_title or "").strip()
         # Default = collaboration/partnership language (NOT "I work with", which implies employment).
         # A blog/brand-supplied disclosure overrides this verbatim.
         disc = (disclosure or "").strip() or \
@@ -1461,17 +1465,33 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             )
 
         # FU61: retrieval anchor — weave the EXACT target query into ONE high-weight position only.
+        # FU83: in manual-title mode the "keep the headline distinctive / don't put it in the headline"
+        # clause is dropped — the headline is the USER'S, not ours to steer.
         tq = (target_query or "").strip()
         query_rule = ""
         if tq:
+            headline_clause = ("" if mt else
+                               "do NOT put it in the headline (keep the headline distinctive), and ")
             query_rule = (
                 f'\n  - RETRIEVAL ANCHOR: this article must also help retrieval for the EXACT target query: '
                 f'"{tq}". Put that query\'s phrasing (verbatim or a close natural variant) in ONE high-weight '
                 f'position — a QUESTION-FORM `##` subhead just before the comparison/recommendation section '
                 f'(e.g. "So, {tq}?") — and you MAY echo it once in the opening paragraph. AT MOST twice total; '
-                f'do NOT keyword-stuff, do NOT put it in the headline (keep the headline distinctive), and do '
+                f'do NOT keyword-stuff, {headline_clause}do '
                 f'NOT mirror the source blog\'s wording elsewhere.'
             )
+
+        # FU83: a user-entered headline is LOCKED — used verbatim; the article delivers on it.
+        if mt:
+            headline_rule = (
+                f'THE ARTICLE HEADLINE IS FIXED — the author already chose it. Return `title` EXACTLY as '
+                f'given, verbatim, character for character: "{mt}". Do NOT rewrite, shorten, extend, or '
+                f'"improve" it in any way. Write the article to DELIVER on that exact headline.')
+        else:
+            headline_rule = (
+                'Return a compelling, DISTINCTIVE, specific ARTICLE HEADLINE as `title` — draw on the source\'s core\n'
+                '    framing/contrast; NOT the source title verbatim. AVOID curiosity-gap / clickbait patterns ("The Real\n'
+                '    Reason…", "…The AI That Fixes It", "You won\'t believe…") that pre-announce a sales pitch.')
 
         prompt = f"""{persona_block}Rewrite the source article below into a LONG-FORM LinkedIn ARTICLE (not a short post).
 
@@ -1481,9 +1501,7 @@ SOURCE ARTICLE (facts to carry over — do NOT copy its wording):
 {body[:8000]}
 
 Rules:
-  - Return a compelling, DISTINCTIVE, specific ARTICLE HEADLINE as `title` — draw on the source's core
-    framing/contrast; NOT the source title verbatim. AVOID curiosity-gap / clickbait patterns ("The Real
-    Reason…", "…The AI That Fixes It", "You won't believe…") that pre-announce a sales pitch.
+  - {headline_rule}
   - START the body with the affiliation DISCLOSURE as the VERY FIRST line, BEFORE any mention of {name}
     (FTC "clear and conspicuous"), written exactly as: {disc}
   - Then a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
@@ -1517,7 +1535,8 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         if not res or not isinstance(res, dict):
             return {}
         return {
-            "title": (res.get("title") or "").strip(),
+            # FU83: a manual title is code-enforced verbatim — never trust the model alone with it.
+            "title": mt if mt else (res.get("title") or "").strip(),
             "body_markdown": (res.get("body_markdown") or "").strip(),
         }
 

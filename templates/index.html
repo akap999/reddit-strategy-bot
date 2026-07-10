@@ -12524,7 +12524,10 @@ async function openBlog(id) {
     try { _liPersonas = JSON.parse((_liBrand && _liBrand.personas) || '[]'); } catch (e) {}
     const _liFit = (_liPersonas || []).filter(p => p && p.label && ['yes', 'maybe'].includes(String(p.fit || '').toLowerCase()));
     window._blogArticlePersonas = _liFit;   // stashed for the prefill handler
+    window._blogArticleBrandName = (_liBrand && _liBrand.name) || b.brand_name || '';   // FU83: role seeds
     const _liPersonaOpts = '<option value="">(type your own voice below)</option>' +
+        '<option value="__founder">🏢 Founder / CEO</option>' +
+        '<option value="__team">🏢 Team member (generic — anyone on the team)</option>' +
         _liFit.map((p, i) => `<option value="${i}">${_blogEsc(p.label)}${String(p.fit).toLowerCase() === 'maybe' ? ' (maybe)' : ''}</option>`).join('');
     // FU80 — YouTube package render vars (chapters / shot-list / thumbnail / cta come from youtube_meta).
     const _ytMeta = b.youtube_meta || {};
@@ -12569,8 +12572,8 @@ async function openBlog(id) {
                 <label class="text-xs text-gray-400">Persona / author voice — written AS this voice (perspective &amp; style only; no invented biography). Pick a saved persona to prefill, or type your own.</label>
                 <select id="blog-e-li-article-persona-sel" onchange="_blogArticlePersonaPick()" class="mb-1">${_liPersonaOpts}</select>
                 <textarea id="blog-e-li-article-persona" rows="2" placeholder="e.g. a pragmatic founder who shares real numbers and skips the hype">${_blogEsc(b.linkedin_article_persona || '')}</textarea>
-                <label class="text-xs text-gray-400 mt-1">Article headline</label>
-                <input id="blog-e-li-article-title" value="${_blogEsc(b.linkedin_article_title || '')}" placeholder="generated headline">
+                <label class="text-xs text-gray-400 mt-1">Article headline <span class="text-gray-600">— type your own to LOCK it (used verbatim on Generate); leave blank to auto-generate</span></label>
+                <input id="blog-e-li-article-title" value="${_blogEsc(b.linkedin_article_title || '')}" placeholder="leave blank to auto-generate, or type your exact headline">
                 <label class="text-xs text-gray-400 mt-1">Article body (Markdown)</label>
                 <textarea id="blog-e-li-article" rows="14">${_blogEsc(b.linkedin_article || '')}</textarea>
                 <div class="flex gap-2 mt-1">
@@ -12701,10 +12704,20 @@ function _renderPersonaVoice(pd) {
     return parts.join(' — ');
 }
 
+function _personaRoleSeed(val) {
+    // FU83 — built-in AUTHOR-ROLE voice seeds (editable prefills; voice only, never a claimed identity).
+    const bn = window._blogArticleBrandName || 'the brand';
+    if (val === '__founder') return `the founder/CEO of ${bn} — first person, hands-on, owns the product decisions; plain-spoken about what it does and doesn't do; no invented personal history or numbers`;
+    if (val === '__team') return `a team member at ${bn} (any role) — writes as "we", practical and specific about how the product works day to day; never claims a specific name, title, or credentials`;
+    return '';
+}
+
 function _blogArticlePersonaPick() {
     const sel = document.getElementById('blog-e-li-article-persona-sel');
     const ta = document.getElementById('blog-e-li-article-persona');
     if (!sel || !ta || sel.value === '') return;
+    const role = _personaRoleSeed(sel.value);   // FU83: founder / team-member options
+    if (role) { ta.value = role; return; }
     const pd = (window._blogArticlePersonas || [])[parseInt(sel.value)];
     const v = _renderPersonaVoice(pd);
     if (v) ta.value = v;   // prefill — editable
@@ -12712,7 +12725,9 @@ function _blogArticlePersonaPick() {
 
 function blogGenLinkedInArticle(id) {
     const persona = (document.getElementById('blog-e-li-article-persona')?.value || '').trim();
-    runTask(`/api/blogs/${id}/linkedin-article`, { persona }, (res) => {
+    // FU83: a typed headline is sent and LOCKED (used verbatim); blank → the model writes one.
+    const title = (document.getElementById('blog-e-li-article-title')?.value || '').trim();
+    runTask(`/api/blogs/${id}/linkedin-article`, { persona, title }, (res) => {
         openBlog(id);
         _blogCostToast(res);
     }, 'Generating LinkedIn article');
@@ -12723,6 +12738,8 @@ function _youtubePersonaPick() {
     const sel = document.getElementById('blog-e-yt-persona-sel');
     const ta = document.getElementById('blog-e-yt-persona');
     if (!sel || !ta || sel.value === '') return;
+    const role = _personaRoleSeed(sel.value);   // FU83: founder / team-member options
+    if (role) { ta.value = role; return; }
     const pd = (window._blogArticlePersonas || [])[parseInt(sel.value)];
     const v = _renderPersonaVoice(pd);
     if (v) ta.value = v;   // prefill — editable

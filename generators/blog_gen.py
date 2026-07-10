@@ -1517,6 +1517,159 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
             "body_markdown": (res.get("body_markdown") or "").strip(),
         }
 
+    # ---------------------------------------------------------------- FU80: YouTube video package
+    @staticmethod
+    def _assemble_youtube_description(mini_answer, chapters, blog_link, disclosure):
+        """Deterministic YouTube description (rules 12/13/15): first the mini-answer (the title's
+        answer in the prompt's language, heavily indexed) → a timestamped chapter block phrased as
+        the questions each answers → the blog link → the disclosure line. `blog_link` is the resolved
+        blog URL or the literal `{link}` placeholder."""
+        parts = [(mini_answer or "").strip()]
+        chap_lines = []
+        for c in (chapters or []):
+            if not isinstance(c, dict):
+                continue
+            q = (c.get("question") or "").strip()
+            ts = (c.get("ts") or "00:00").strip()
+            if q:
+                chap_lines.append(f"{ts} — {q}")
+        if chap_lines:
+            parts.append("Chapters:\n" + "\n".join(chap_lines))
+        parts.append(f"Full comparison with sources: {blog_link}")
+        if (disclosure or "").strip():
+            parts.append(disclosure.strip())
+        return "\n\n".join(p for p in parts if p)
+
+    @staticmethod
+    def _youtube_scrub(text):
+        """Loop-safety backstop (rule 18): a Reddit link is a recorded, timestamped pointer to a placed
+        thread — it must NEVER ship on a permanent surface. Strip any reddit.com URL from the script /
+        description / captions. (PR-as-independent framing is handled in the prompt, like the blogs.)"""
+        if not text:
+            return text
+        # scheme OPTIONAL — a bare "reddit.com/r/…" reference is just as much a recorded pointer.
+        return re.sub(r"(?:https?://)?(?:www\.|old\.|np\.|m\.)?reddit\.com/\S+", "", text)
+
+    def generate_youtube_script(self, brand, article, persona_voice="", disclosure="",
+                                target_query="", variant="question"):
+        """FU80 — turn a saved blog into a full YouTube video PACKAGE (script + title + description +
+        chapters + a corrected caption transcript + a demo shot-list + thumbnail text + end-screen CTA),
+        in the same-facts / DIFFERENT-voice model as `generate_linkedin_article`. Every spoken claim is
+        constrained to the blog's already-VERIFIED, cited facts (the blog body carries its `## Sources`),
+        so prices/license/coverage match the blog by construction — never re-sourced, never contradicted.
+
+        `variant` ∈ {"question","demo"}: "question" → the head-query title verbatim in the prompt's
+        vocabulary; "demo" → the "how/demo" angle so the video covers the cluster without cannibalizing
+        the blog (rule 4). `persona_voice` = the on-camera presenter voice (voice/perspective only, never
+        a fabricated biography). Returns {title, script, description, captions, meta} or {} on failure.
+        Never raises."""
+        name, _url, _block = self._brand_block(brand)
+        title = (article or {}).get("title") or ""
+        body = (article or {}).get("body_markdown") or ""      # carries the blog's cited `## Sources`
+        pv = (persona_voice or "").strip()
+        disc = (disclosure or "").strip() or \
+            f"This channel is run by {name}, which sells the products discussed."
+        tq = (target_query or "").strip()
+        is_demo = str(variant).strip().lower() == "demo"
+
+        if pv:
+            presenter = ("ON-CAMERA PRESENTER VOICE (first person):\n"
+                         f"{pv}\n"
+                         "Adopt THIS presenter's perspective, stance, and vocabulary. Speak in first "
+                         "person as a real practitioner. Do NOT invent the presenter's personal history, "
+                         "job history, credentials, specific numbers, or anecdotes — voice only, never a "
+                         "fabricated biography.\n\n")
+        else:
+            presenter = (f"Write in a natural first-person on-camera voice for a practitioner at {name}. "
+                         "Do NOT invent personal history, credentials, or anecdotes.\n\n")
+
+        title_rule = (
+            'a DEMO/HOW-TO angle title ("How to …") in the prompt\'s own vocabulary — the video covers '
+            'the "how/demo" variant of the cluster so it does NOT duplicate the blog\'s head-query title'
+            if is_demo else
+            "a QUESTION-FORM title in the prompt's OWN vocabulary (semantic match to the target query is "
+            "the strongest retrieval signal you control)")
+        query_rule = ""
+        if tq:
+            query_rule = (f'\n  - RETRIEVAL ANCHOR: this video targets the EXACT prompt "{tq}". Put that '
+                          f'phrasing (verbatim or a close natural variant) in the TITLE and speak it in '
+                          f'the FIRST lines, and again as spoken section transitions.')
+
+        prompt = f"""{presenter}Turn the SOURCE BLOG below into a YouTube video PACKAGE for {name}.
+This is a DIFFERENT surface from the blog: SAME FACTS, DIFFERENT WORDS AND STRUCTURE — never narrate the
+blog verbatim (a read-aloud is a duplicate; a video that DEMONSTRATES what the blog asserts is corroborating
+format diversity).
+
+BRAND (the product you can recommend): {name}
+BLOG TITLE: {title}
+SOURCE BLOG (the ONLY admissible facts — its `## Sources` are your citations; carry facts over, do NOT copy wording):
+{body[:12000]}
+
+TITLE
+  - Return {title_rule} as `title`. Be HONEST — the title must be answerable by the video's actual content;
+    NO curiosity-gap / clickbait bait ("You Won't Believe…", "The Real Reason…"). A comparison title may
+    name competitors FAIRLY ("X vs Y: Which Syncs Music to Video?") but NEVER a dunk-title ("Why X Is
+    Terrible"). Also return `demo_title` = the OTHER angle (the how/demo variant of the same cluster).{query_rule}
+
+SCRIPT (`script_markdown`)
+  - ANSWER-FIRST: in the FIRST 15 SECONDS, SPEAK the question and then the direct answer, BEFORE any intro
+    or branding (the transcript is retrieved like text; openings are weighted).
+  - SAY THE PROMPT LANGUAGE OUT LOUD: the target phrasing + its natural variants occur verbatim in the
+    spoken opening AND as spoken SECTION TRANSITIONS (those transitions become the chapters).
+  - CLAIMS DISCIPLINE — every factual claim spoken on camera must be literally true and CONSISTENT WITH THE
+    BLOG: same prices, same license terms, same platform coverage. Assert ONLY what the blog sources;
+    demonstrate what's demonstrable (an uncut screen recording beats an edited montage). Never state a fact
+    the blog doesn't support.
+  - MANDATORY HONEST-TRADEOFFS segment: name where competitors WIN and name your OWN limits (the on-camera
+    equivalent of the blog's "who should use an alternative" section). This is the credibility engine.
+  - NO MANUFACTURED SOCIAL PROOF: no staged reactions, no reading self-written "user testimonials", and do
+    NOT cite the brand's OWN press releases / PR-wire syndication as if it were INDEPENDENT reporting. A
+    vendor-sourced stat is attributed as yours ("our internal numbers show"), never "reports confirm".
+  - YMYL: if this is a health/finance topic, name a credentialed presenter/reviewer on screen and in the
+    description, and make NO off-label or ahead-of-evidence claims.
+  - Structure the script in clear SEGMENTS with a spoken transition question at the top of each.
+
+DESCRIPTION SUPPORT — also return, so the description + captions can be assembled:
+  - `mini_answer`: 2-3 sentences that DIRECTLY answer the title's question in the prompt's language
+    (this text is heavily indexed and often quoted by engines).
+  - `chapters`: [{{"question": "the question this segment answers", "ts": "MM:SS estimate"}}], one per
+    segment, in order (the user adjusts timings after recording).
+  - `captions_transcript`: the clean SPOKEN lines of the whole script, with every brand / product / license
+    term spelled CORRECTLY (auto-captions mangle these) — one sentence per line, plain text.
+  - `shot_list`: ["a demo/B-roll shot to record", …] — favor UNCUT demonstrations of what's demonstrable.
+  - `thumbnail_text`: a short, HONEST thumbnail line (no bait, no claim the footage doesn't show).
+  - `cta`: one end-screen call-to-action naming {name} with a link placeholder written exactly as {{link}}.
+
+Never put a Reddit link anywhere. START nothing with the disclosure (it is added deterministically) — but
+you MAY assume the description will carry: "{disc}".
+
+Return JSON only:
+{{"title": "", "demo_title": "", "mini_answer": "", "script_markdown": "",
+  "chapters": [{{"question": "", "ts": ""}}], "captions_transcript": "",
+  "shot_list": [], "thumbnail_text": "", "cta": ""}}"""
+        res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
+        if not res or not isinstance(res, dict) or not (res.get("script_markdown") or "").strip():
+            return {}
+        chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
+        mini_answer = (res.get("mini_answer") or "").strip()
+        description = self._assemble_youtube_description(mini_answer, chapters, "{link}", disc)
+        meta = {
+            "variant": "demo" if is_demo else "question",
+            "demo_title": (res.get("demo_title") or "").strip(),
+            "chapters": chapters,
+            "shot_list": [str(s).strip() for s in (res.get("shot_list") or []) if str(s).strip()],
+            "thumbnail_text": (res.get("thumbnail_text") or "").strip(),
+            "cta": self._youtube_scrub((res.get("cta") or "").strip()),
+            "mini_answer": mini_answer,
+        }
+        return {
+            "title": (res.get("title") or "").strip(),
+            "script": self._youtube_scrub((res.get("script_markdown") or "").strip()),
+            "description": self._youtube_scrub(description),
+            "captions": self._youtube_scrub((res.get("captions_transcript") or "").strip()),
+            "meta": meta,
+        }
+
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False):

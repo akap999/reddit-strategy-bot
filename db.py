@@ -1085,6 +1085,10 @@ class Database:
             blog["pending_state"] = json.loads(blog.get("pending_state") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["pending_state"] = {}
+        try:   # FU80: YouTube package structured extras (chapters/shot_list/thumbnail/cta/variant)
+            blog["youtube_meta"] = json.loads(blog.get("youtube_meta") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["youtube_meta"] = {}
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1128,14 +1132,16 @@ class Database:
                    "reddit_status", "deep_verify", "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
-                   "pending_state"}   # FU79
+                   "pending_state",   # FU79
+                   "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
+                   "youtube_persona", "youtube_meta"}   # FU80
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
-            elif k == "pending_state" and not isinstance(v, str):   # FU79: JSON dict checkpoint
+            elif k in ("pending_state", "youtube_meta") and not isinstance(v, str):   # FU79/FU80: JSON dict
                 v = json.dumps(v or {})
             sets.append(f"{k} = ?")
             params.append(v)
@@ -2279,7 +2285,10 @@ class Database:
                     # FU59: long-form LinkedIn ARTICLE (distinct from the short linkedin_text post).
                     "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
                     # FU79: JSON checkpoint of a generation PAUSED awaiting manual sources.
-                    "pending_state"):
+                    "pending_state",
+                    # FU80: YouTube video package derived from the blog (youtube_meta is JSON).
+                    "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
+                    "youtube_persona", "youtube_meta"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

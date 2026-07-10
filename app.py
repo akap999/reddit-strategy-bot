@@ -2161,6 +2161,55 @@ def api_blog_linkedin_article(blog_id):
 
     return jsonify({"task_id": start_task("blog_linkedin_article", task, pass_task_id=True)})
 
+@app.route("/api/blogs/<int:blog_id>/youtube-script", methods=["POST"])
+def api_blog_youtube_script(blog_id):
+    """FU80: turn a saved blog into a full YouTube video PACKAGE — title, spoken script, description +
+    chapters, a corrected caption transcript, a demo shot-list, thumbnail text, and an end-screen CTA —
+    in a chosen presenter voice, constrained to the blog's already-verified facts. Background task; poll
+    for {blog_id, gen_cost}. `variant` ∈ {question,demo} picks the head-query vs how/demo angle (rule 4)."""
+    data = request.get_json() or {}
+    persona = (data.get("persona") or "").strip()
+    variant = (data.get("variant") or "question").strip().lower()
+    if variant not in ("question", "demo"):
+        variant = "question"
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            brand = bg.get_brand(blog.get("brand_id")) or {}
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()
+            gen = BlogGenerator(claude, bg)
+            disclosure = (blog.get("disclosure") or brand.get("disclosure") or "").strip()
+            pkg = gen.generate_youtube_script(
+                brand,
+                {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
+                persona_voice=persona, disclosure=disclosure,
+                target_query=(blog.get("seed") or "").strip(), variant=variant)   # FU61 anchor
+            if not pkg or not pkg.get("script"):
+                raise ValueError(claude.last_error or "YouTube script generation failed")
+            cost = round(claude.usage_cost(), 4)
+            bg.update_blog(blog_id,
+                           youtube_title=pkg.get("title", ""),
+                           youtube_script=pkg.get("script", ""),
+                           youtube_description=pkg.get("description", ""),
+                           youtube_captions=pkg.get("captions", ""),
+                           youtube_persona=persona,
+                           youtube_meta=pkg.get("meta") or {},
+                           gen_cost=cost)
+            return {"blog_id": blog_id, "gen_cost": cost}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_youtube_script", task, pass_task_id=True)})
+
 @app.route("/api/blogs/<int:blog_id>", methods=["PATCH"])
 def api_blog_patch(blog_id):
     """Manual edits to a blog's content fields."""
@@ -2169,7 +2218,9 @@ def api_blog_patch(blog_id):
               ("title", "meta_description", "keywords", "body_markdown", "linkedin_text",
                "author_name", "author_title", "reviewer_name", "reviewer_title",
                "disclosure", "image_url",
-               "linkedin_article", "linkedin_article_title", "linkedin_article_persona")
+               "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
+               "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
+               "youtube_persona")   # FU80
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -2188,8 +2239,8 @@ def api_blog_publish(blog_id):
     data = request.get_json() or {}
     platform = (data.get("platform") or "").strip().lower()
     url = (data.get("published_url") or "").strip()
-    if platform not in ("website", "linkedin"):
-        return jsonify({"error": "platform must be website|linkedin"}), 400
+    if platform not in ("website", "linkedin", "youtube"):   # FU80: youtube video publish
+        return jsonify({"error": "platform must be website|linkedin|youtube"}), 400
     if not url:
         return jsonify({"error": "published_url is required"}), 400
     db = get_db()
@@ -2205,8 +2256,8 @@ def api_blog_publish(blog_id):
 def api_blog_unpublish(blog_id):
     data = request.get_json() or {}
     platform = (data.get("platform") or "").strip().lower()
-    if platform not in ("website", "linkedin"):
-        return jsonify({"error": "platform must be website|linkedin"}), 400
+    if platform not in ("website", "linkedin", "youtube"):   # FU80: youtube video publish
+        return jsonify({"error": "platform must be website|linkedin|youtube"}), 400
     db = get_db()
     try:
         if not db.get_blog(blog_id):
@@ -2352,6 +2403,68 @@ def api_blog_export(blog_id):
             _slug = (re.sub(r"[^a-z0-9]+", "-", _base.lower()).strip("-") or "linkedin-article")[:60]
             li_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-linkedin.html"'
         return li_resp
+
+    # FU80: the YouTube CAPTION transcript — plain text (upload as a transcript; YouTube auto-syncs
+    # timing). Corrected brand/license spelling so retrieval doesn't read a mangled auto-caption.
+    if fmt == "youtube-captions":
+        caps = (blog.get("youtube_captions") or "").strip()
+        if not caps:
+            return jsonify({"error": "no YouTube captions generated yet"}), 404
+        yc_resp = Response(caps + "\n", mimetype="text/plain; charset=utf-8")
+        if (request.args.get("dl") or "").strip():
+            _base = blog.get("youtube_title") or blog.get("title") or "captions"
+            _slug = (re.sub(r"[^a-z0-9]+", "-", _base.lower()).strip("-") or "captions")[:60]
+            yc_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-captions.txt"'
+        return yc_resp
+
+    # FU80: the full YouTube PACKAGE (title · script · description · chapters · shot-list · thumbnail ·
+    # CTA), rendered INLINE. The description/CTA `{link}` placeholder is filled with the blog's published
+    # website URL when one exists (owned-to-owned interlink, rule 16).
+    if fmt == "youtube":
+        yt_title = (blog.get("youtube_title") or "").strip()
+        yt_script = (blog.get("youtube_script") or "").strip()
+        if not yt_script:
+            return jsonify({"error": "no YouTube script generated yet"}), 404
+        yt_meta = blog.get("youtube_meta") or {}
+        site_url = ""
+        for p in (blog.get("platforms") or []):
+            if p.get("platform") == "website" and (p.get("published_url") or "").strip():
+                site_url = p["published_url"].strip()
+                break
+        _fill = (lambda s: (s or "").replace("{link}", site_url) if site_url else (s or ""))
+        yt_desc = _fill(blog.get("youtube_description"))
+        cta = _fill(yt_meta.get("cta"))
+        shot_list = yt_meta.get("shot_list") or []
+        thumb = (yt_meta.get("thumbnail_text") or "").strip()
+        md_src = f"# {yt_title}\n\n## Script\n\n{yt_script}\n\n## Description\n\n{yt_desc}\n"
+        if shot_list:
+            md_src += "\n## Shot list\n\n" + "\n".join(f"- {s}" for s in shot_list) + "\n"
+        if thumb:
+            md_src += f"\n## Thumbnail text\n\n{thumb}\n"
+        if cta:
+            md_src += f"\n## End-screen CTA\n\n{cta}\n"
+        try:
+            import markdown as _md
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
+                                 extensions=["tables", "fenced_code"])
+        except Exception:
+            inner = "<pre>" + _html.escape(md_src) + "</pre>"
+        inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
+        yt_css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+                  "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+                  "h1,h2,h3{line-height:1.25}")
+        yt_head = (f'<meta charset="utf-8">\n'
+                   f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+                   f'<title>{_html.escape(yt_title or "YouTube script")}</title>\n'
+                   f'<style>{yt_css}</style>')
+        yt_page = (f'<!doctype html>\n<html lang="en"><head>\n{yt_head}\n</head>\n<body>\n'
+                   f'{inner}\n</body></html>\n')
+        yt_resp = Response(yt_page, mimetype="text/html")
+        if (request.args.get("dl") or "").strip():
+            _base = yt_title or blog.get("title") or "youtube-script"
+            _slug = (re.sub(r"[^a-z0-9]+", "-", _base.lower()).strip("-") or "youtube-script")[:60]
+            yt_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-youtube.html"'
+        return yt_resp
 
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"

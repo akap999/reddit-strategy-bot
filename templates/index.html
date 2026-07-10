@@ -12491,7 +12491,7 @@ function blogGenerate() {
 async function openBlog(id) {
     let b;
     try { b = await api('/api/blogs/' + id); } catch (e) { return; }
-    const platRows = ['website', 'linkedin'].map(pf => {
+    const platRows = ['website', 'linkedin', 'youtube'].map(pf => {
         const p = (b.platforms || []).find(x => x.platform === pf);
         const live = p && p.status === 'published';
         return `<div class="flex items-center gap-2 mb-1">
@@ -12526,6 +12526,13 @@ async function openBlog(id) {
     window._blogArticlePersonas = _liFit;   // stashed for the prefill handler
     const _liPersonaOpts = '<option value="">(type your own voice below)</option>' +
         _liFit.map((p, i) => `<option value="${i}">${_blogEsc(p.label)}${String(p.fit).toLowerCase() === 'maybe' ? ' (maybe)' : ''}</option>`).join('');
+    // FU80 — YouTube package render vars (chapters / shot-list / thumbnail / cta come from youtube_meta).
+    const _ytMeta = b.youtube_meta || {};
+    const _ytVariant = _ytMeta.variant || 'question';
+    const _ytChapters = (_ytMeta.chapters || []).map(c => `${_blogEsc(c.ts || '00:00')} — ${_blogEsc(c.question || '')}`).join('<br>');
+    const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
+    const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
+    const _ytCta = _blogEsc(_ytMeta.cta || '');
     // FU79 — restart-proof resume: an awaiting_sources blog shows a banner to provide the missing links/facts.
     let pendBanner = '';
     if (b.status === 'awaiting_sources') {
@@ -12564,6 +12571,39 @@ async function openBlog(id) {
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article')" title="Copy as clean plain text — LinkedIn's editor ignores raw Markdown">Copy (plain text)</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;dl=1" title="Download the formatted article as an .html file">⬇ Download HTML</a>
+                </div>
+            </div>
+            <div class="card p-2" style="background:#0f1a12;border:1px solid #14532d">
+                <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold" style="color:#4ade80">YouTube video (script · description · captions — same facts as the blog)</label>
+                    <div class="flex items-center gap-1">
+                        <select id="blog-e-yt-variant" class="text-xs" title="Same question = shares the blog's head query (different surface, no cannibalization); How-to/demo = the 'how/demo' variant of the cluster (rule 4)">
+                            <option value="question"${_ytVariant === 'question' ? ' selected' : ''}>Same question</option>
+                            <option value="demo"${_ytVariant === 'demo' ? ' selected' : ''}>How-to / demo</option>
+                        </select>
+                        <button class="btn btn-sm" style="background:#14532d;color:#bbf7d0" onclick="blogGenYouTube(${id})">✨ Generate YouTube package</button>
+                    </div>
+                </div>
+                <label class="text-xs text-gray-400">Presenter voice — spoken AS this voice (perspective &amp; style only; no invented biography). Pick a saved persona to prefill, or type your own.</label>
+                <select id="blog-e-yt-persona-sel" onchange="_youtubePersonaPick()" class="mb-1">${_liPersonaOpts}</select>
+                <textarea id="blog-e-yt-persona" rows="2" placeholder="e.g. a hands-on editor who shows the actual workflow on screen">${_blogEsc(b.youtube_persona || '')}</textarea>
+                <label class="text-xs text-gray-400 mt-1">Video title</label>
+                <input id="blog-e-yt-title" value="${_blogEsc(b.youtube_title || '')}" placeholder="question-form title">
+                <label class="text-xs text-gray-400 mt-1">Script (spoken — answer-first, honest-tradeoffs, claims match the blog)</label>
+                <textarea id="blog-e-yt-script" rows="14">${_blogEsc(b.youtube_script || '')}</textarea>
+                <label class="text-xs text-gray-400 mt-1">Description (mini-answer · chapters · blog link · disclosure)</label>
+                <textarea id="blog-e-yt-description" rows="8">${_blogEsc(b.youtube_description || '')}</textarea>
+                <label class="text-xs text-gray-400 mt-1">Captions transcript (upload as a transcript — YouTube auto-syncs timing)</label>
+                <textarea id="blog-e-yt-captions" rows="6">${_blogEsc(b.youtube_captions || '')}</textarea>
+                ${_ytChapters ? `<div class="text-xs text-gray-400 mt-2">Chapters<div class="text-gray-300 mt-1">${_ytChapters}</div></div>` : ''}
+                ${_ytShots ? `<div class="text-xs text-gray-400 mt-2">Shot list (demonstrate what's demonstrable)<ul class="list-disc ml-4 text-gray-300 mt-1">${_ytShots}</ul></div>` : ''}
+                ${_ytThumb ? `<div class="text-xs text-gray-400 mt-2">Thumbnail text: <span class="text-gray-300">${_ytThumb}</span></div>` : ''}
+                ${_ytCta ? `<div class="text-xs text-gray-400 mt-1">End-screen CTA: <span class="text-gray-300">${_ytCta}</span></div>` : ''}
+                <div class="flex flex-wrap gap-2 mt-2">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-description')" title="Copy the description as plain text">Copy description</button>
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-yt-script')" title="Copy the script as plain text">Copy script</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube" target="_blank" title="Open the full package (title · script · description · shot-list · CTA)">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=youtube-captions&amp;dl=1" title="Download the caption transcript (.txt) to upload to YouTube">⬇ Download captions</a>
                 </div>
             </div>
             <details>
@@ -12610,6 +12650,11 @@ async function blogSave(id) {
             linkedin_article: _v('blog-e-li-article'),
             linkedin_article_title: _v('blog-e-li-article-title'),
             linkedin_article_persona: _v('blog-e-li-article-persona'),
+            youtube_title: _v('blog-e-yt-title'),
+            youtube_script: _v('blog-e-yt-script'),
+            youtube_description: _v('blog-e-yt-description'),
+            youtube_captions: _v('blog-e-yt-captions'),
+            youtube_persona: _v('blog-e-yt-persona'),
         }});
         toast('Saved', 'success');
         blogReload();
@@ -12654,6 +12699,25 @@ function blogGenLinkedInArticle(id) {
         openBlog(id);
         _blogCostToast(res);
     }, 'Generating LinkedIn article');
+}
+
+// FU80 — YouTube package helpers (presenter voice-seed prefill + generate).
+function _youtubePersonaPick() {
+    const sel = document.getElementById('blog-e-yt-persona-sel');
+    const ta = document.getElementById('blog-e-yt-persona');
+    if (!sel || !ta || sel.value === '') return;
+    const pd = (window._blogArticlePersonas || [])[parseInt(sel.value)];
+    const v = _renderPersonaVoice(pd);
+    if (v) ta.value = v;   // prefill — editable
+}
+
+function blogGenYouTube(id) {
+    const persona = (document.getElementById('blog-e-yt-persona')?.value || '').trim();
+    const variant = (document.getElementById('blog-e-yt-variant')?.value || 'question');
+    runTask(`/api/blogs/${id}/youtube-script`, { persona, variant }, (res) => {
+        openBlog(id);
+        _blogCostToast(res);
+    }, 'Generating YouTube package');
 }
 
 function _stripMd(md) {

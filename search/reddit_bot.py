@@ -1326,6 +1326,35 @@ class RedditSearchBot:
                                     for _fut in futures:
                                         _fut.cancel()
                                     break
+                    elif not subreddit_path and len(_terms) >= 2:
+                        # FU86 — GLOBAL multi-keyword search: fan out ONE precise query PER original
+                        # term instead of a single combined-OR blob. Measured (5-term OR, t=day):
+                        # 98 raw -> 87 off-keyword noise -> 9 usable; a single term ("shopify") alone
+                        # returned 72 usable. Reddit's global search matches an OR blob loosely (often
+                        # via comments), so the Reddit-wide top-up was precision-starved. Per-term
+                        # queries mirror what the Arctic leg already does (it has no OR either).
+                        g_terms = _terms[:6]   # bounded — a pathological keyword list can't 429-storm
+                        per_term = max(needed_raw // max(len(g_terms), 1), 50)
+                        batch = []
+
+                        def _staggered_global(idx, term):
+                            time.sleep(min(idx * 0.4, 2.0) + random.uniform(0, 0.2))
+                            return self._search_reddit_rss(
+                                term, None, reddit_sort, time_filter, per_term)
+                        with ThreadPoolExecutor(max_workers=min(len(g_terms), 3)) as ex:
+                            futures = [
+                                ex.submit(_staggered_global, i, t)
+                                for i, t in enumerate(g_terms)
+                            ]
+                            for f in as_completed(futures):
+                                try:
+                                    batch.extend(f.result() or [])
+                                except Exception as e:
+                                    print(f"    per-term fetch error (reddit rss): {e}")
+                                if time.time() > search_deadline:
+                                    for _fut in futures:
+                                        _fut.cancel()
+                                    break
                     else:
                         batch = self._search_reddit_rss(
                             keyword, subreddit_path, reddit_sort, time_filter, needed_raw

@@ -92,6 +92,14 @@ def _as_list(raw):
     return out
 
 
+def _brand_in_comparison(body, name):
+    """FU84 — True when the brand appears in a Markdown TABLE ROW of the body, i.e. the brand is one
+    of the options being COMPARED. Drives the factually-safe disclosure fallback wording."""
+    if not body or not (name or "").strip():
+        return False
+    return bool(re.search(r"^\|[^\n]*" + re.escape(name.strip()), body, re.MULTILINE | re.IGNORECASE))
+
+
 def _norm_domain(u):
     """Registrable-ish domain from a url/bare domain: strip scheme + path + a leading 'www.' so a
     www / non-www variant compares equal (FU54). Module-level so it's unit-testable."""
@@ -116,7 +124,8 @@ class BlogGenerator:
         b = brand or {}
         name = (b.get("name") or "the brand").strip()
         url = (b.get("domain_url") or "").strip()
-        lines = [f"Brand name: {name}"]
+        # FU84: the brand controls its casing (e.g. "OutSail") — the model must never normalize it.
+        lines = [f"Brand name: {name}   (write the brand name with this EXACT spelling and casing everywhere)"]
         if url:
             lines.append(f"Website: {url}")
         if b.get("category"):
@@ -922,11 +931,22 @@ exact question" citation signal):
     the FAQ, so the liftable answer sits directly beneath the matching heading and the page still
     covers the variant phrasings.
 
+DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
+  - Also return `disclosure`: ONE transparency sentence stating {name}'s TRUE relationship to THIS
+    article, derived from the brand context and what the article actually is. Pick the wording that is
+    true: if {name} is one of the options/platforms being COMPARED in the article → "This guide is
+    published by {name}, which is one of the platforms compared in this guide."; if {name} SELLS the
+    products discussed → "This guide is published by {name}, which sells the products discussed."; if
+    {name} PROVIDES the service discussed → "This guide is published by {name}, which provides the
+    services discussed."; otherwise adapt the clause to what {name} actually does. NEVER a claim that
+    isn't true of {name}.
+
 Return JSON only:
 {{"title": "matches the primary query, cleaned up, under 60 chars",
   "meta_description": "under 160 chars",
   "keywords": ["target queries + key terms this page should be cited for"],
-  "body_markdown": "the full article in Markdown"}}"""
+  "body_markdown": "the full article in Markdown",
+  "disclosure": "one factually-accurate transparency sentence"}}"""
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("body_markdown") or "").strip():
             return None
@@ -946,6 +966,7 @@ Return JSON only:
             "meta_description": (res.get("meta_description") or "").strip(),
             "keywords": merged,
             "body_markdown": body,
+            "disclosure": (res.get("disclosure") or "").strip(),   # FU84: adaptive, factually-accurate
         }
 
     def verify_claims(self, brand, article, evidence=""):
@@ -1479,6 +1500,15 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
                 f'(e.g. "So, {tq}?") — and you MAY echo it once in the opening paragraph. AT MOST twice total; '
                 f'do NOT keyword-stuff, {headline_clause}do '
                 f'NOT mirror the source blog\'s wording elsewhere.'
+                f'\n  - ANSWER-FIRST UNDER THE ANCHOR (FU85 — engines lift heading + first sentence as ONE '
+                f'chunk): the FIRST sentence DIRECTLY under that question-form subhead must BE the complete, '
+                f'self-contained answer — NAME the specific tools/platforms/options (the entities an engine '
+                f'should quote) IN that first sentence. NEVER open it with a stall or transition ("Let us go '
+                f'through…", "The honest answer is: it depends…", "Let me break down…"). Keep any nuance as a '
+                f'SECOND clause AFTER the named answer — e.g. "Four platforms are worth your time — X, Y, Z '
+                f'and W — but they are not doing the same job, and the right one depends on where you are." '
+                f'The heading + its first sentence must stand alone as a liftable, citable answer. Apply the '
+                f'same answer-first principle to every OTHER question-form subhead in the article too.'
             )
 
         # FU83: a user-entered headline is LOCKED — used verbatim; the article delivers on it.
@@ -1590,8 +1620,11 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         title = (article or {}).get("title") or ""
         body = (article or {}).get("body_markdown") or ""      # carries the blog's cited `## Sources`
         pv = (persona_voice or "").strip()
-        disc = (disclosure or "").strip() or \
-            f"This channel is run by {name}, which sells the products discussed."
+        # FU84: the default must be factually safe — "sells the products discussed" is wrong for a
+        # broker/comparison brand. A passed blog/brand disclosure still wins verbatim.
+        disc = (disclosure or "").strip() or (
+            f"This channel is run by {name}, which is one of the options compared in this video."
+            if _brand_in_comparison(body, name) else f"This channel is run by {name}.")
         tq = (target_query or "").strip()
         is_demo = str(variant).strip().lower() == "demo"
 

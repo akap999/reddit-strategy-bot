@@ -1988,6 +1988,10 @@ async function editBrandContext(brandName) {
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
         <div class="space-y-3">
             <div>
+                <label class="text-xs text-gray-400">Brand name <span class="text-gray-600">(exact spelling &amp; casing — used verbatim in every generated post/blog/article, e.g. "OutSail")</span></label>
+                <input id="edit-brand-name" value="${_ev(brandName)}" class="w-full">
+            </div>
+            <div>
                 <label class="text-xs text-gray-400">Website URL</label>
                 <input id="edit-brand-url" value="${domainUrl}" class="w-full">
             </div>
@@ -2100,9 +2104,14 @@ async function saveBrandContext(brandName) {
     const allBrands = _brandsViewState._allBrands || [];
     const brandInstances = allBrands.filter(b => b.name === brandName);
 
+    // FU84: renaming (esp. casing, e.g. "Outsail" -> "OutSail") applies to ALL instances; the exact
+    // spelling/casing then flows verbatim into every future generation.
+    const newName = (document.getElementById('edit-brand-name')?.value || '').trim();
+
     // Update all instances of this brand across subreddits
     for (const b of brandInstances) {
         await api(`/api/brands/${b.id}`, { method: 'PUT', body: {
+            name: newName || undefined,
             context,
             domain_url: domainUrl,
             keywords,

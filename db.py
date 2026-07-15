@@ -279,11 +279,14 @@ class Database:
                      search_subreddits=None, focus=None, learned_context=None,
                      personas=None, competitor_domains=None, author_name=None,
                      author_title=None, reviewer_name=None, reviewer_title=None,
-                     disclosure=None, logo_url=None, meta_autofetched_at=None):
-        """Update a brand's editable fields. Pass only the fields you want to change."""
+                     disclosure=None, logo_url=None, meta_autofetched_at=None,
+                     name=None):
+        """Update a brand's editable fields. Pass only the fields you want to change.
+        `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
         params = []
         field_map = {
+            "name": name,
             "context": context, "domain_url": domain_url, "keywords": keywords,
             "category": category, "audience": audience, "use_cases": use_cases,
             "pain_points": pain_points, "features": features,

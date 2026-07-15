@@ -1535,6 +1535,7 @@ def api_update_brand(bid):
         enrich_fields = _extract_brand_enrichment_fields(data)
         db.update_brand(
             brand_id=bid,
+            name=(data.get("name") or "").strip() or None,   # FU84: rename (exact casing followed)
             context=data.get("context"),
             domain_url=data.get("domain_url"),
             keywords=json.dumps(data["keywords"]) if "keywords" in data else None,
@@ -1949,6 +1950,10 @@ def api_blog_generate():
                         "reddit_status": reddit_status,
                         "reddit_note": _reddit_status_note(reddit_status),
                         "gen_cost": gcost}
+            # FU84: adaptive disclosure — a user-typed byline disclosure wins; else the article's
+            # generated, factually-accurate line (e.g. "one of the platforms compared in this guide").
+            if not byline.get("disclosure"):
+                byline["disclosure"] = (blog.get("disclosure") or "").strip()
             blog_id = bg.save_blog(
                 brand_id, seed,
                 title=blog.get("title", ""),
@@ -2035,6 +2040,9 @@ def api_blog_regenerate(blog_id):
                     linkedin_text=_sub_link(fresh.get("linkedin_text", ""),
                                             _blog_link_target(blog, brand)),   # FU81
                     claims_flagged=fresh.get("claims_flagged") or [])
+                # FU84: fill a BLANK stored disclosure from the fresh generation (never clobber an edit).
+                if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
+                    bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
             elif part == "article":
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence)
                 if not a:
@@ -2594,10 +2602,16 @@ def api_blog_export(blog_id):
             rt = _bp("reviewer_title")
             byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
         meta_byline = " · ".join(byline_bits)
-        # Disclosure: use the supplied one, else a default transparency line (first-party content).
+        # Disclosure: the supplied one (per-blog — now generated adaptively at gen time, FU84 — else
+        # the brand's), else a FACTUALLY-SAFE fallback: "sells the products discussed" was wrong for
+        # broker/comparison brands (e.g. Outsail IS one of the platforms compared), so the fallback is
+        # comparison-aware and never claims a business model.
         disclosure = _bp("disclosure")
         if not disclosure and brand_name:
-            disclosure = f"This guide is published by {brand_name}, which sells the products discussed."
+            from generators.blog_gen import _brand_in_comparison
+            disclosure = (f"This guide is published by {brand_name}, which is one of the options "
+                          f"compared in this guide." if _brand_in_comparison(body, brand_name)
+                          else f"This guide is published by {brand_name}.")
         dline = []
         if published:
             dline.append("Published: " + published)

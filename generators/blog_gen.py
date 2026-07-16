@@ -262,6 +262,18 @@ class BlogGenerator:
             print("[blog_gen] evidence: NO independent third-party sources found", flush=True)
         return out[:_MAX_WEB_SOURCES]
 
+    @staticmethod
+    def _force_h1(body, seed):
+        """FU88 — the on-page H1 IS the user's seed, verbatim (H1 = the exact target prompt is the
+        core retrieval design). Replace the body's first H1 line with the seed; if the body has no
+        H1, prepend one. Deterministic — the model can't drift the visible heading."""
+        s = (seed or "").strip()
+        if not s or not (body or "").strip():
+            return body
+        if re.search(r"(?m)^#\s+\S", body):
+            return re.sub(r"(?m)^#\s+[^\n]*", lambda m: "# " + s, body, count=1)
+        return f"# {s}\n\n{body}"
+
     def _fetch_url(self, url):
         """Fetch a URL and return its stripped visible text ("" on failure). Shared by
         `_gather_evidence`'s pasted-source path and FU79 `finish_pending_blog`'s manual-link path."""
@@ -920,13 +932,11 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - If you cited any external sources, END the body with a "## Sources" section listing them
     (title + URL). Omit this section entirely if there were no external claims to cite.
 
-TITLE — MATCH THE PRIMARY QUERY (this is a top retrieval signal + a strong "this page answers this
-exact question" citation signal):
-  - Make the title match the primary target query as CLOSELY as possible — use the query's exact
-    wording when it is already a clean, well-formed phrase. Do NOT invent a "creative" headline.
-  - Only CLEANUP is allowed: fix typos/filler, normalize casing, trim to under 60 chars, and turn a
-    keyword fragment into its natural full-query form — never change the meaning. No keyword-stuffing,
-    no appended years.
+TITLE — THE TITLE IS FIXED (FU88: it is the user's exact target prompt — a top retrieval signal and a
+strong "this page answers this exact question" citation signal):
+  - The title IS the seed, EXACTLY as entered: "{seed}". Return it as `title` verbatim — do NOT
+    rewrite, trim, re-case, "clean up", or otherwise modify it in any way. Write the article to
+    ANSWER that exact title.
   - ALSO put the exact query phrasing (and its close variants) in the FIRST H2 (as a question) and in
     the FAQ, so the liftable answer sits directly beneath the matching heading and the page still
     covers the variant phrasings.
@@ -942,7 +952,7 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
     isn't true of {name}.
 
 Return JSON only:
-{{"title": "matches the primary query, cleaned up, under 60 chars",
+{{"title": "the seed, verbatim",
   "meta_description": "under 160 chars",
   "keywords": ["target queries + key terms this page should be cited for"],
   "body_markdown": "the full article in Markdown",
@@ -958,11 +968,14 @@ Return JSON only:
                 seen.add(kk)
                 merged.append(k)
         body = res.get("body_markdown") or ""
+        body = self._force_h1(body, seed)      # FU88: the on-page H1 == the seed, deterministically
         byline = self._byline_md(brand)        # "" unless the brand supplies author/reviewer/disclosure
         if byline and body:
             body = byline + body
         return {
-            "title": (res.get("title") or "").strip(),
+            # FU88: the title IS the user's seed — code-enforced verbatim (prompt + override, like
+            # the FU83 locked headline); the model's version is discarded if it drifted.
+            "title": (seed or "").strip() or (res.get("title") or "").strip(),
             "meta_description": (res.get("meta_description") or "").strip(),
             "keywords": merged,
             "body_markdown": body,
@@ -1843,6 +1856,9 @@ Return JSON only:
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
+        # FU88: re-pin the H1 to the seed AFTER the verify/reconcile rewrites (they preserve structure
+        # but could still reword the heading) — the visible H1 must stay the exact target prompt.
+        article["body_markdown"] = self._force_h1(article["body_markdown"], seed)
         missing_stats = self._dropped_stats(draft_body, article["body_markdown"])
         if missing_stats:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)

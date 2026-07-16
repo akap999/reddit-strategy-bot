@@ -2447,6 +2447,21 @@ def api_blog_export(blog_id):
             li_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-linkedin.html"'
         return li_resp
 
+    # FU87: the short LinkedIn POST — plain text (LinkedIn ignores Markdown anyway). Inline by
+    # default; ?dl=1 downloads it as a .txt. The {link} placeholder is resolved at render as a
+    # backstop for posts persisted before FU81.
+    if fmt == "linkedin-post":
+        post_txt = (blog.get("linkedin_text") or "").strip()
+        if not post_txt:
+            return jsonify({"error": "no LinkedIn post generated yet"}), 404
+        post_txt = _sub_link(post_txt, _blog_link_target(blog, brand))
+        lp_resp = Response(post_txt + "\n", mimetype="text/plain; charset=utf-8")
+        if (request.args.get("dl") or "").strip():
+            _base = blog.get("title") or "linkedin-post"
+            _slug = (re.sub(r"[^a-z0-9]+", "-", _base.lower()).strip("-") or "linkedin-post")[:60]
+            lp_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-linkedin-post.txt"'
+        return lp_resp
+
     # FU80: the YouTube CAPTION transcript — plain text (upload as a transcript; YouTube auto-syncs
     # timing). Corrected brand/license spelling so retrieval doesn't read a mangled auto-caption.
     if fmt == "youtube-captions":

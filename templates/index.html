@@ -12572,7 +12572,18 @@ async function openBlog(id) {
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="blog-e-kw" value="${_blogEsc((b.keywords || []).join(', '))}"></div>
             <div><label class="text-xs text-gray-400">Website body (Markdown)</label><textarea id="blog-e-body" rows="12">${_blogEsc(b.body_markdown || '')}</textarea></div>
-            <div><label class="text-xs text-gray-400">LinkedIn post</label><textarea id="blog-e-li" rows="6">${_blogEsc(b.linkedin_text || '')}</textarea></div>
+            <div>
+                <div class="flex items-center justify-between">
+                    <label class="text-xs text-gray-400">LinkedIn post (retrieval-first: question + named answer above the fold)</label>
+                    <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'linkedin')" title="Regenerate ONLY the LinkedIn post from the blog's verified facts">↻ Regen post</button>
+                </div>
+                <textarea id="blog-e-li" rows="6">${_blogEsc(b.linkedin_text || '')}</textarea>
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li')" title="Copy the post as clean plain text">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post" target="_blank" title="Open the post as plain text ({link} resolved)">Open</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;dl=1" title="Download the post as a .txt file ({link} resolved)">⬇ Download .txt</a>
+                </div>
+            </div>
             <div class="card p-2" style="background:#141026;border:1px solid #3b0764">
                 <div class="flex items-center justify-between mb-1">
                     <label class="text-xs font-bold" style="color:#c084fc">LinkedIn article (long-form, in a persona's voice)</label>

@@ -1420,22 +1420,42 @@ Return JSON only:
         return {"body_markdown": rres["revised_body_markdown"], "flagged": flagged}
 
     def generate_linkedin(self, brand, seed, article):
-        """LinkedIn-native adaptation of the article. Returns the post text or ""."""
+        """LinkedIn-native adaptation of the article. Returns the post text or "".
+
+        FU87 — the post is a RETRIEVAL asset, not a teaser: it opens with the target query as a
+        question and the NAMED answer lands before the "see more" fold (the FU85 answer-first
+        principle on the post surface), carries ONE quotable datum from the blog's verified facts,
+        and always includes an against-interest line. A post that answers in-line can be cited;
+        a teaser can't."""
         name, _url, _block = self._brand_block(brand)
         title = (article or {}).get("title") or seed
         body = (article or {}).get("body_markdown") or ""
-        prompt = f"""Adapt this article into a LinkedIn-native post for {name} (first-party voice).
-It should be useful and shareable, and it should name {name}.
+        prompt = f"""Adapt this article into a LinkedIn-native post for {name} (first-party company voice).
+The post's job is RETRIEVAL for the target query below — a self-contained citation candidate —
+as well as being useful and shareable to humans.
 
-TOPIC: {seed}
+TARGET QUERY: {seed}
 ARTICLE TITLE: {title}
-ARTICLE (source material):
-{body[:4000]}
+ARTICLE (the ONLY admissible facts — carry facts over, do NOT copy its wording):
+{body[:6000]}
 
 Write the post:
-  - A strong first-line hook (NOT "I'm excited to share").
-  - 3-6 short, skimmable takeaways (use line breaks, NOT Markdown headings).
-  - First-party voice; name {name} once as the natural recommendation.
+  - OPENING = THE LIFTABLE CHUNK (engines and LinkedIn's "see more" fold both cut here):
+    LINE 1: the target query as a natural QUESTION (verbatim or a close natural variant).
+    LINE 2: the direct ANSWER with the specific tools/platforms/options NAMED — a complete,
+    self-contained answer; keep any nuance as a SECOND clause AFTER the named answer.
+    NEVER open with a teaser, a stall, or a curiosity hook ("The honest answer is: it depends…",
+    "Let me break down…", "I'm excited to share", "Hot take:").
+  - ONE CONCRETE NUGGET: include exactly ONE specific, quotable datum in the visible text — a
+    number, a price, a license clause, or a specific capability claim — taken ONLY from the
+    ARTICLE's facts. Never invent it and never strengthen it beyond what the article states.
+  - AGAINST-INTEREST LINE (mandatory): one sentence naming where an ALTERNATIVE beats {name}
+    ("If you want X, <alternative> is the better pick — that's not what we optimized for").
+    This is what makes a brand post shareable instead of scrollable.
+  - Then 3-6 short, skimmable lines (line breaks, NOT Markdown headings) — same facts as the
+    article, DIFFERENT words.
+  - First-party company voice ("we"); name {name} once as the natural recommendation. NEVER use
+    fake-discovery framing about {name} ("just found this tool…") and no manufactured social proof.
   - A soft CTA with a link placeholder written exactly as {{link}}.
   - 3-5 relevant hashtags at the end.
   - About 1300-1800 characters. Plain text only — no Markdown headings, no tables.

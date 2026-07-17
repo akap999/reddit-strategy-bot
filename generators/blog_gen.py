@@ -897,6 +897,31 @@ backbone below is still mandatory in every case):
 Pick exactly ONE dominant block. The dominant block MUST itself be extractable — a real Markdown
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
 
+GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
+  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+    "Australia", a state or city) or another strong qualifier (a company size, an industry). If it does
+    NOT, SKIP this whole section — it is inert for a generic seed.
+  - When one IS present, this page is that VARIANT of the topic, and it competes with the generic page:
+    it must contain substance the generic page cannot have, or it is a duplicate.
+  - ANTI-DOORWAY (hard rule): NEVER produce the generic answer with the geography/qualifier inserted
+    into the headings and topic sentences — that is a doorway page (search engines devalue it, and it
+    cannibalizes the generic page instead of adding coverage). Every heading that PROMISES the
+    geography/qualifier must DELIVER genuinely specific substance directly under it.
+  - REQUIRED SUBSTANCE — at least 2-3 sections (or major section-parts) that are ONLY true for this
+    geography/qualifier, i.e. what is actually DIFFERENT about the topic THERE:
+      • the applicable REGULATORY / COMPLIANCE regime, NAMED concretely (e.g. for US HR software:
+        multi-state payroll tax, W-2/1099 handling, ACA reporting, 401(k) administration, I-9
+        verification, state leave-law variance in CA/NY as evaluation criteria — the equivalents for
+        whatever the topic and geography actually are);
+      • local standards / certifications buyers there expect;
+      • which of the compared options are native / strong / available in that geography — ONLY from the
+        EVIDENCE, never an invented vendor claim (an option whose local coverage is unknown is stated
+        as unknown or left out of that point);
+      • geography-specific EVALUATION CRITERIA a local buyer should apply.
+  - The FAQ must include geography/qualifier-specific questions, and the meta_description carries the
+    geography. General (non-brand) regulatory facts are allowed as domain knowledge; any
+    medical/financial/legal-grade claim still follows the cite-a-primary-source rule above.
+
 WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
   - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names {name}
     as a fit. (AI engines lift this as the extractable answer.)
@@ -1089,7 +1114,9 @@ Return JSON only:
   - CORE_TOPIC: the article's CENTRAL subject AND the authority that officially documents it — a short
     phrase naming the platform / regulator / standard whose OWN page is the highest-authority source
     (e.g. "TikTok — synthetic-media / AI-content labeling / monetization policy", "FDA guidance on <X>",
-    "GDPR data-retention rules"). Empty if the article has no such external authority.
+    "GDPR data-retention rules"). FU89: when the article targets a specific GEOGRAPHY, the authority is
+    the one governing the topic THERE (e.g. IRS/DOL for US payroll & benefits compliance, HMRC for the
+    UK, the ATO for Australia). Empty if the article has no such external authority.
 
 ARTICLE:
 {body[:6000]}

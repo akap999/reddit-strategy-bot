@@ -1890,6 +1890,7 @@ def api_blog_generate():
     use_web_search = bool(data.get("use_web_search"))
     deep_verify = bool(data.get("deep_verify"))   # FU48: run the independent verify agent (opt-in)
     reddit_url = (data.get("reddit_url") or "").strip()
+    geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
     # Optional per-blog byline override (falls back to the brand byline when blank).
     byline = {k: (data.get(k) or "").strip() for k in
               ("author_name", "author_title", "reviewer_name", "reviewer_title",
@@ -1914,11 +1915,18 @@ def api_blog_generate():
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
+            # FU90: sibling titles so geo variants differentiate instead of converging.
+            try:
+                sibling_titles = [b.get("title") for b in bg.get_all_blogs(brand_id=brand_id)
+                                  if (b.get("title") or "").strip()][:10]
+            except Exception:
+                sibling_titles = []
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
-                deep_verify=deep_verify, allow_pause=True)   # FU79: pause if a tool can't be sourced
+                deep_verify=deep_verify, allow_pause=True,   # FU79: pause if a tool can't be sourced
+                geo=geo, sibling_titles=sibling_titles)      # FU90
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -1945,6 +1953,8 @@ def api_blog_generate():
                     gen_cost=gcost, **byline,
                 )
                 bg.update_blog(blog_id, pending_state=json.dumps(pending))
+                if geo:
+                    bg.update_blog(blog_id, geo=geo)   # FU90: reused by resume/regenerate
                 return {"blog_id": blog_id, "needs_sources": True,
                         "missing": pending.get("missing") or [],
                         "reddit_status": reddit_status,
@@ -1970,9 +1980,12 @@ def api_blog_generate():
                 reddit_status=reddit_status, deep_verify=deep_verify,
                 gen_cost=blog.get("gen_cost", 0), **byline,
             )
+            if geo:
+                bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
-                    "gen_cost": blog.get("gen_cost", 0)}
+                    "gen_cost": blog.get("gen_cost", 0),
+                    "geo_warning": blog.get("geo_warning", "")}   # FU90: doorway signal → toast
         finally:
             bg.close()
 
@@ -2017,6 +2030,12 @@ def api_blog_regenerate(blog_id):
             stored_web = bool(blog.get("use_web_search"))
             stored_deep = bool(blog.get("deep_verify"))   # FU48: reuse the verify-agent choice
             stored_reddit = (blog.get("reddit_url") or "").strip()
+            stored_geo = (blog.get("geo") or "").strip()   # FU90: reuse the blog's geography
+            try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
+                sib_titles = [b.get("title") for b in bg.get_all_blogs(brand_id=blog.get("brand_id"))
+                              if b.get("id") != blog_id and (b.get("title") or "").strip()][:10]
+            except Exception:
+                sib_titles = []
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, stored_reddit)
             evidence = gen._gather_evidence(brand, seed, source_urls=stored_urls,
                                             research_notes=stored_notes,
@@ -2029,7 +2048,8 @@ def api_blog_regenerate(blog_id):
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
                                           use_web_search=stored_web, reddit_thread=reddit_thread,
-                                          deep_verify=stored_deep)
+                                          deep_verify=stored_deep,
+                                          geo=stored_geo, sibling_titles=sib_titles)   # FU90
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -2044,14 +2064,15 @@ def api_blog_regenerate(blog_id):
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
             elif part == "article":
-                a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence)
+                a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence,
+                                         geo=stored_geo, sibling_titles=sib_titles)   # FU90
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 v = gen.verify_claims(brand, a, evidence=evidence)
                 a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
                 flagged = (v or {}).get("flagged") or []
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
-                vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep)
+                vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo)
                 if vc:
                     a["body_markdown"] = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -2071,22 +2092,25 @@ def api_blog_regenerate(blog_id):
                 flagged = v["flagged"]
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
                 vc = gen.verify_and_complete(brand, seed, {**article, "body_markdown": body_md},
-                                             deep=stored_deep)
+                                             deep=stored_deep, geo=stored_geo)
                 if vc:
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
                 bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(body_md),
                                claims_flagged=flagged)
             elif part == "linkedin":
-                li = gen.generate_linkedin(brand, seed, article)
+                li = gen.generate_linkedin(brand, seed, article, geo=stored_geo)   # FU91
                 bg.update_blog(blog_id, linkedin_text=_sub_link(li or "",
                                                                 _blog_link_target(blog, brand)))   # FU81
             if stored_reddit:
                 bg.update_blog(blog_id, reddit_status=reddit_status)
             regen_cost = round(claude.usage_cost(), 4)   # FU54: cost of this regeneration
             bg.update_blog(blog_id, gen_cost=regen_cost)
+            # FU90: surface the doorway signal from a full regen (part=all runs _finalize_article).
+            _geo_warn = (fresh.get("geo_warning", "") if part == "all" else "")
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
-                    "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost}
+                    "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost,
+                    "geo_warning": _geo_warn}
         finally:
             bg.close()
 
@@ -2183,7 +2207,8 @@ def api_blog_linkedin_article(blog_id):
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
                 persona_voice=persona, disclosure=disclosure,
                 target_query=(blog.get("seed") or "").strip(),   # FU61: anchor to the exact target prompt
-                manual_title=manual_title)                       # FU83: lock a user-typed headline
+                manual_title=manual_title,                       # FU83: lock a user-typed headline
+                geo=(blog.get("geo") or "").strip())             # FU91: preserve the geo focus
             if not art or not art.get("body_markdown"):
                 raise ValueError(claude.last_error or "LinkedIn article generation failed")
             cost = round(claude.usage_cost(), 4)
@@ -2232,7 +2257,8 @@ def api_blog_youtube_script(blog_id):
                 brand,
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
                 persona_voice=persona, disclosure=disclosure,
-                target_query=(blog.get("seed") or "").strip(), variant=variant)   # FU61 anchor
+                target_query=(blog.get("seed") or "").strip(), variant=variant,   # FU61 anchor
+                geo=(blog.get("geo") or "").strip())                              # FU91 geo focus
             if not pkg or not pkg.get("script"):
                 raise ValueError(claude.last_error or "YouTube script generation failed")
             cost = round(claude.usage_cost(), 4)
@@ -2260,7 +2286,8 @@ def api_blog_patch(blog_id):
                "disclosure", "image_url",
                "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
                "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
-               "youtube_persona")   # FU80
+               "youtube_persona",   # FU80
+               "geo")   # FU90
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400

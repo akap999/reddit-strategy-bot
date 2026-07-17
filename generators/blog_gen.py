@@ -92,6 +92,37 @@ def _as_list(raw):
     return out
 
 
+_GEO_LEXICON = [
+    # (canonical term, word-boundary alternation) — common countries/regions only; states/cities/any
+    # other region come from the EXPLICIT geo input (FU90), which always wins. ACRONYMS are matched
+    # case-sensitively ("US" must not hit the pronoun "us"); full names case-insensitively via (?i:…).
+    ("the US", r"US|USA|U\.S\.A?\.?|(?i:united states|america|american)"),
+    ("the UK", r"UK|U\.K\.|(?i:united kingdom|britain|british|england)"),
+    ("Australia", r"AUS|(?i:australia|australian)"),
+    ("Canada", r"(?i:canada|canadian)"),
+    ("Europe", r"EU|(?i:europe|european)"),
+    ("India", r"(?i:india|indian)"),
+    ("Germany", r"(?i:germany|german)"),
+    ("France", r"(?i:france|french)"),
+    ("Singapore", r"(?i:singapore)"),
+    ("the UAE", r"UAE|(?i:dubai)"),
+    ("New Zealand", r"NZ|(?i:new zealand)"),
+]
+
+
+def _seed_geo(seed):
+    """FU90 — deterministically detect a COMMON geography named in the seed; returns the canonical
+    term or "". Word-boundary so "usage"/"aus…" can't false-hit. The operator's explicit geo input
+    always wins over this fallback (it covers states, cities, and any region the lexicon can't)."""
+    s = (seed or "").strip()
+    if not s:
+        return ""
+    for canon, alt in _GEO_LEXICON:
+        if re.search(rf"\b(?:{alt})\b", s):
+            return canon
+    return ""
+
+
 def _brand_in_comparison(body, name):
     """FU84 — True when the brand appears in a Markdown TABLE ROW of the body, i.e. the brand is one
     of the options being COMPARED. Drives the factually-safe disclosure fallback wording."""
@@ -806,11 +837,15 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         return out
 
     # ------------------------------------------------------------------- article
-    def generate_article(self, brand, seed, extra_keywords=None, evidence=""):
+    def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
+                         sibling_titles=None):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
         EVIDENCE block from `_gather_evidence` — when present, factual claims must cite it.
+        `geo` (FU90): the operator's explicit geography (wins over seed auto-detect) — makes the
+        FU89 differentiation block concrete. `sibling_titles` (FU90): the brand's OTHER blog titles,
+        so geo variants differentiate instead of converging into near-duplicates.
         Returns {title, meta_description, keywords, body_markdown} (body carries the
         brand byline when supplied) or None on failure. Does NOT run the claims pass."""
         seed = (seed or "").strip()
@@ -825,13 +860,24 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
                         + "\n".join(f"- {k}" for k in kws) + "\n")
         evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
         link = f" Link to {url} where it reads naturally." if url else ""
+        # FU90 — resolved geography: explicit operator input WINS; else deterministic seed detection.
+        rgeo = (geo or "").strip() or _seed_geo(seed)
+        geo_line = (f"  - GEOGRAPHY FOR THIS PAGE: {rgeo} (operator-specified or detected from the "
+                    f"seed) — apply everything in this section to it.\n" if rgeo else "")
+        # FU90 — sibling variants: tell the model what already exists so this page differentiates.
+        sibs = [str(t).strip() for t in (sibling_titles or []) if str(t).strip()][:10]
+        sibling_block = ""
+        if sibs:
+            sibling_block = ("\nOTHER PAGES ALREADY PUBLISHED FOR THIS BRAND (do NOT duplicate their "
+                             "content — THIS page's geography/qualifier substance is what distinguishes "
+                             "it from them):\n" + "\n".join(f"  - {t}" for t in sibs) + "\n")
         prompt = f"""You are writing a FIRST-PARTY article published on {name}'s own site. The ONLY
 goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
 and CITE this page when someone asks about the seed topic, AND for that answer to name {name}.
 Optimize for EXTRACTION & CITATION, not for sales copy.
 
 SEED TOPIC (what the reader is asking): {seed}
-{kw_block}
+{kw_block}{sibling_block}
 BRAND (first-party — you MAY name and recommend {name}):
 {block}
 {evidence_block}
@@ -898,9 +944,9 @@ Pick exactly ONE dominant block. The dominant block MUST itself be extractable �
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
 
 GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
-  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+{geo_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
     "Australia", a state or city) or another strong qualifier (a company size, an industry). If it does
-    NOT, SKIP this whole section — it is inert for a generic seed.
+    NOT (and no geography is stated above), SKIP this whole section — it is inert for a generic seed.
   - When one IS present, this page is that VARIANT of the topic, and it competes with the generic page:
     it must contain substance the generic page cannot have, or it is a duplicate.
   - ANTI-DOORWAY (hard rule): NEVER produce the generic answer with the geography/qualifier inserted
@@ -915,8 +961,10 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
         whatever the topic and geography actually are);
       • local standards / certifications buyers there expect;
       • which of the compared options are native / strong / available in that geography — ONLY from the
-        EVIDENCE, never an invented vendor claim (an option whose local coverage is unknown is stated
-        as unknown or left out of that point);
+        EVIDENCE, never an invented vendor claim. When the EVIDENCE has nothing geo-specific for an
+        option, use and cite its GENERAL sourced facts as usual and keep the WRITING geo-focused (apply
+        the local criteria/framing to them) — NEVER write hedge language like "unverified", "coverage
+        unknown", or "not confirmed for this region" in the body;
       • geography-specific EVALUATION CRITERIA a local buyer should apply.
   - The FAQ must include geography/qualifier-specific questions, and the meta_description carries the
     geography. General (non-brand) regulatory facts are allowed as domain knowledge; any
@@ -1069,15 +1117,16 @@ Return JSON only:
             "flagged": [f for f in (res.get("flagged") or []) if isinstance(f, dict)],
         }
 
-    def verify_and_complete(self, brand, seed, article, deep=False):
+    def verify_and_complete(self, brand, seed, article, deep=False, geo=""):
         """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
         then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
         into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
         `_reconcile_and_finish` (phase d: reconcile). This wrapper preserves the original
         drop-on-unsourced behavior for DIRECT callers (regenerate part='verify'/'article'); the FU79
-        pause path lives in `generate_blog(allow_pause=True)`. Returns {body_markdown, flagged} or None
-        (draft unchanged). Never raises."""
-        sr = self._source_for_completion(brand, seed, article, deep=deep)
+        pause path lives in `generate_blog(allow_pause=True)`. `geo` (FU90): explicit geography — wins
+        over seed auto-detect for the geo-aware briefs + reconcile rules. Returns {body_markdown, flagged}
+        or None (draft unchanged). Never raises."""
+        sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo)
         if not sr:
             return None
         if not sr.get("fresh"):
@@ -1085,15 +1134,18 @@ Return JSON only:
             return None
         return self._reconcile_and_finish(brand, seed, article, sr)
 
-    def _source_for_completion(self, brand, seed, article, deep=False):
+    def _source_for_completion(self, brand, seed, article, deep=False, geo=""):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
-        the FU78 key-fact rescue, and run the independent corroboration search. Does NOT reconcile and
-        does NOT mutate self._evidence_blocks. Returns a JSON-able sourcing dict
-        {name,cat,tools,dims,claims,core_topic,fresh,unsourced} — where `unsourced` lists the tools that
-        produced ZERO evidence after ALL tiers+rescue (the FU79 pause trigger) — or None when there is
-        nothing to source/verify. Never raises."""
+        the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
+        resolves (explicit `geo` wins, else seed auto-detect), every brief also asks for the tool's
+        availability/coverage/compliance in that geography, plus a one-shot GEO RESCUE per tool whose
+        blocks carry no geo signal. Does NOT reconcile and does NOT mutate self._evidence_blocks.
+        Returns a JSON-able sourcing dict {name,cat,tools,dims,claims,core_topic,fresh,unsourced,geo} —
+        where `unsourced` lists the tools that produced ZERO evidence after ALL tiers+rescue (the FU79
+        pause trigger) — or None when there is nothing to source/verify. Never raises."""
         name, _url, _block = self._brand_block(brand)
+        rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
         body = (article or {}).get("body_markdown") or ""
         if not body.strip():
             return None
@@ -1166,9 +1218,13 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
 
         # (b) SOURCE each named competitor tool from its OWN public pages (vendor domains ALLOWED)
         ctx = f"{cat} {seed}".strip()
+        # FU90: for a geo blog the evidence must CARRY local-coverage facts, or the claims-gate strips
+        # the geo points the article needs — so every brief also asks about the geography.
+        geo_brief = (f"; availability, local coverage and compliance support in {rgeo} (local tax/"
+                     f"payroll/regulatory support or market presence, as applicable)" if rgeo else "")
         fetch_brief = ("pricing and plans; commercial-use & license terms (is monetization/commercial use "
                        "allowed, royalty-free or not); whether it imitates or clones real artists' voices; "
-                       "video / all-in-one capability; key features")
+                       "video / all-in-one capability; key features" + geo_brief)
         for tool in tools:
             try:
                 dom = self.claude.find_official_domain(tool, ctx)
@@ -1228,7 +1284,9 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 try:
                     pin = self.claude.search_sources(
                         f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
-                        f"key capabilities", max_searches=2, allowed_domains=[_dom(dom)],
+                        f"key capabilities"
+                        + (f", availability / coverage / compliance support in {rgeo}" if rgeo else ""),
+                        max_searches=2, allowed_domains=[_dom(dom)],
                         first_party=True)   # FU55: vendor's OWN pages — don't tell it to avoid the vendor
                 except Exception:
                     pin = []
@@ -1300,6 +1358,28 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 if add:
                     tool_blocks = tool_blocks + add
 
+            # FU90 — GEO RESCUE: a geo blog needs per-tool LOCAL coverage facts. When the tool has
+            # sources but NONE mention the geography, try ONE targeted broad search before settling for
+            # general facts (the article then stays geo-FOCUSED via framing — never hedge language).
+            if rgeo and tool_blocks:
+                _geo_key = re.sub(r"^the\s+", "", rgeo, flags=re.I)
+                _geo_rx = re.compile(r"\b" + re.escape(_geo_key) + r"\b", re.I)
+                if not any(_geo_rx.search(b.get("text") or "") for b in tool_blocks):
+                    try:
+                        gsc = self.claude.search_sources(
+                            f"{tool}: availability, operations, local coverage and compliance support "
+                            f"in {rgeo}", max_searches=2)
+                    except Exception:
+                        gsc = []
+                    gcand = [s for s in (gsc or [])
+                             if tool.lower() in ((s.get("title") or "") + " "
+                                                 + (s.get("fact") or "")).lower()
+                             and _geo_rx.search((s.get("fact") or "") + " " + (s.get("title") or ""))
+                             and _dom(s.get("url")) not in _STALE_AGGREGATORS]
+                    gadd = _blocks_from(gcand)
+                    if gadd:
+                        tool_blocks = tool_blocks + gadd
+
             if tool_blocks:
                 fresh.extend(tool_blocks)
                 print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} "
@@ -1330,7 +1410,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
         subj_cat = f" ({cat})" if cat else ""
         corr_brief = (f"Find reputable INDEPENDENT sources (reviews, documentation, news, analyst pages) "
                       f"that CONFIRM or REFUTE these claims about {name}{subj_cat} and its space, returning "
-                      f"the true value + a source URL for each. Claims: {claim_lines or seed}")
+                      f"the true value + a source URL for each. Claims: {claim_lines or seed}"
+                      + (f" Focus on {rgeo}-specific coverage where available." if rgeo else ""))
         try:
             corr = self.claude.search_sources(
                 corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 3),   # FU56: was 4
@@ -1345,7 +1426,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
 
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
-                "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced}
+                "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
+                "geo": rgeo}   # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
         """FU79 — phase (d) of verify+complete: reconcile the draft against the sourced FRESH FACTS,
@@ -1361,6 +1443,19 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
         body = (article or {}).get("body_markdown") or ""
         if not fresh or not body.strip():
             return None
+        # FU90 — geo variant protection: the reconcile is the LAST writer; without these rules it can
+        # dilute the geo sections back to generic or hedge missing geo facts.
+        rgeo = (sourcing.get("geo") or "").strip() or _seed_geo(seed)
+        geo_rules = ""
+        if rgeo:
+            geo_rules = f"""
+  - GEO VARIANT: this article targets {rgeo}. PRESERVE and STRENGTHEN the geography-specific sections —
+    never dilute them into generic text. A claim about an option's local coverage/compliance in {rgeo}
+    may ONLY be filled from a FRESH FACT that is about {rgeo}. When NO {rgeo}-specific fact exists for a
+    tool, keep its GENERAL sourced facts (cited as usual) and keep the WRITING geo-focused — apply the
+    {rgeo} evaluation criteria and framing to them. NEVER write hedge language about missing geo sourcing
+    ("unverified", "coverage unknown", "not confirmed for {rgeo}") and NEVER invent a {rgeo} coverage
+    claim. Geography-specific FAQ entries and evaluation criteria MUST survive this rewrite."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -1427,7 +1522,7 @@ COMPLETE and every stated fact is sourced:
     ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
     honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
   - NO COMPETITOR-JAB: do NOT add or keep any FAQ entry or "Note on <competitor>" blockquote whose function
-    is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown.
+    is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown.{geo_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -1459,17 +1554,27 @@ Return JSON only:
               f"{changed} cell(s)/claim(s) filled-or-changed, {len(fresh)} fresh source(s)", flush=True)
         return {"body_markdown": rres["revised_body_markdown"], "flagged": flagged}
 
-    def generate_linkedin(self, brand, seed, article):
+    def generate_linkedin(self, brand, seed, article, geo=""):
         """LinkedIn-native adaptation of the article. Returns the post text or "".
 
         FU87 — the post is a RETRIEVAL asset, not a teaser: it opens with the target query as a
         question and the NAMED answer lands before the "see more" fold (the FU85 answer-first
         principle on the post surface), carries ONE quotable datum from the blog's verified facts,
         and always includes an against-interest line. A post that answers in-line can be cited;
-        a teaser can't."""
+        a teaser can't. `geo` (FU91): the blog's target geography (explicit wins, else detected
+        from the seed) — keeps the post geo-focused instead of genericizing on rewrite."""
         name, _url, _block = self._brand_block(brand)
         title = (article or {}).get("title") or seed
         body = (article or {}).get("body_markdown") or ""
+        rgeo = (geo or "").strip() or _seed_geo(seed)   # FU91: explicit geo wins, lexicon fallback
+        geo_rule = ""
+        if rgeo:
+            geo_rule = (
+                f"\n  - GEOGRAPHIC FOCUS: this post targets {rgeo}. The LINE-1 question must "
+                f"naturally name {rgeo} (as a close natural variant if the target query doesn't "
+                f"already contain it); prefer the article's {rgeo}-specific facts for the nugget "
+                f"and the body lines. NEVER write hedge language ('unverified', 'coverage unknown', "
+                f"'not confirmed for this region').")
         prompt = f"""Adapt this article into a LinkedIn-native post for {name} (first-party company voice).
 The post's job is RETRIEVAL for the target query below — a self-contained citation candidate —
 as well as being useful and shareable to humans.
@@ -1491,7 +1596,7 @@ Write the post:
     ARTICLE's facts. Never invent it and never strengthen it beyond what the article states.
   - AGAINST-INTEREST LINE (mandatory): one sentence naming where an ALTERNATIVE beats {name}
     ("If you want X, <alternative> is the better pick — that's not what we optimized for").
-    This is what makes a brand post shareable instead of scrollable.
+    This is what makes a brand post shareable instead of scrollable.{geo_rule}
   - Then 3-6 short, skimmable lines (line breaks, NOT Markdown headings) — same facts as the
     article, DIFFERENT words.
   - First-party company voice ("we"); name {name} once as the natural recommendation. NEVER use
@@ -1507,7 +1612,7 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         return (res.get("linkedin_text") or "").strip()
 
     def generate_linkedin_article(self, brand, article, persona_voice="", disclosure="", target_query="",
-                                  manual_title=""):
+                                  manual_title="", geo=""):
         """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE (distinct from the short
         `generate_linkedin` post) in a chosen persona's VOICE. Returns {"title","body_markdown"} or {}.
 
@@ -1518,6 +1623,8 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         ONE high-weight position (a question-form subhead) so the article also anchors on the exact query.
         `manual_title` (FU83): a user-entered headline — when set it is LOCKED: used verbatim (prompted AND
         code-enforced, like the FU44 custom post title) and the article is written to deliver on it.
+        `geo` (FU91): the blog's target geography — the rewrite must PRESERVE the geo focus; with a
+        manual_title the geo rule applies to the BODY ONLY (the fixed headline is never steered).
         """
         name, _url, _block = self._brand_block(brand)
         title = (article or {}).get("title") or ""
@@ -1571,6 +1678,22 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
                 f'same answer-first principle to every OTHER question-form subhead in the article too.'
             )
 
+        # FU91: preserve the blog's geographic focus in the rewrite. With a manual title the rule is
+        # BODY-ONLY — the FU83 fixed headline is never steered (and stays code-enforced below).
+        rgeo = (geo or "").strip() or _seed_geo(tq)
+        geo_rule = ""
+        if rgeo:
+            headline_geo = (
+                "The FIXED headline is NOT touched by this rule — apply the geographic focus to the "
+                "BODY only." if mt else
+                f"The headline may naturally reflect {rgeo}.")
+            geo_rule = (
+                f"\n  - GEOGRAPHIC FOCUS: the source blog targets {rgeo}. PRESERVE that focus in the "
+                f"rewrite: keep the geo-specific facts and evaluation criteria (rephrased, never "
+                f"dropped), and the retrieval-anchor subhead's first-sentence answer should name "
+                f"{rgeo} naturally. NEVER write hedge language ('unverified', 'coverage unknown', "
+                f"'not confirmed for this region'). {headline_geo}")
+
         # FU83: a user-entered headline is LOCKED — used verbatim; the article delivers on it.
         if mt:
             headline_rule = (
@@ -1616,7 +1739,7 @@ Rules:
     coverage as if it were INDEPENDENT third-party validation. Describe how the product works DIRECTLY
     (the concrete mechanism) rather than leaning on marketing or press quotes.
   - Name {name} as the natural recommendation (don't over-repeat it), with a soft CTA and a link
-    placeholder written exactly as {{link}}.{query_rule}
+    placeholder written exactly as {{link}}.{query_rule}{geo_rule}
   - End with 3-5 relevant hashtags.
   - About 800-1500 words. Markdown is allowed (subheads, bold, lists) — but NO tables and NO horizontal rules.
 
@@ -1664,7 +1787,7 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         return re.sub(r"(?:https?://)?(?:www\.|old\.|np\.|m\.)?reddit\.com/\S+", "", text)
 
     def generate_youtube_script(self, brand, article, persona_voice="", disclosure="",
-                                target_query="", variant="question"):
+                                target_query="", variant="question", geo=""):
         """FU80 — turn a saved blog into a full YouTube video PACKAGE (script + title + description +
         chapters + a corrected caption transcript + a demo shot-list + thumbnail text + end-screen CTA),
         in the same-facts / DIFFERENT-voice model as `generate_linkedin_article`. Every spoken claim is
@@ -1710,6 +1833,16 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
             query_rule = (f'\n  - RETRIEVAL ANCHOR: this video targets the EXACT prompt "{tq}". Put that '
                           f'phrasing (verbatim or a close natural variant) in the TITLE and speak it in '
                           f'the FIRST lines, and again as spoken section transitions.')
+        # FU91: preserve the blog's geographic focus on the video surface (explicit geo wins,
+        # else detected from the target prompt). Empty → no prompt change.
+        rgeo = (geo or "").strip() or _seed_geo(tq)
+        geo_rule = ""
+        if rgeo:
+            geo_rule = (f'\n  - GEOGRAPHIC FOCUS: this video targets {rgeo}. The `title` should '
+                        f'naturally reflect {rgeo}; SPEAK {rgeo} in the opening lines; keep the '
+                        f"blog's {rgeo}-specific coverage/compliance facts in the script (never "
+                        f"genericized, never hedged — no 'unverified' / 'coverage unknown'); "
+                        f'include {rgeo} terms in `tags`.')
 
         prompt = f"""{presenter}Turn the SOURCE BLOG below into a YouTube video PACKAGE for {name}.
 This is a DIFFERENT surface from the blog: SAME FACTS, DIFFERENT WORDS AND STRUCTURE — never narrate the
@@ -1725,7 +1858,7 @@ TITLE
   - Return {title_rule} as `title`. Be HONEST — the title must be answerable by the video's actual content;
     NO curiosity-gap / clickbait bait ("You Won't Believe…", "The Real Reason…"). A comparison title may
     name competitors FAIRLY ("X vs Y: Which Syncs Music to Video?") but NEVER a dunk-title ("Why X Is
-    Terrible"). Also return `demo_title` = the OTHER angle (the how/demo variant of the same cluster).{query_rule}
+    Terrible"). Also return `demo_title` = the OTHER angle (the how/demo variant of the same cluster).{query_rule}{geo_rule}
 
 SCRIPT (`script_markdown`)
   - ANSWER-FIRST: in the FIRST 15 SECONDS, SPEAK the question and then the direct answer, BEFORE any intro
@@ -1814,7 +1947,7 @@ Return JSON only:
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
-                      deep_verify=False, allow_pause=False):
+                      deep_verify=False, allow_pause=False, geo="", sibling_titles=None):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -1826,7 +1959,9 @@ Return JSON only:
         `allow_pause` (FU79): when a tool STILL can't be sourced after all retries, RETURN a
         `{"_pending": {...}}` sentinel (checkpoint of the partial generation) instead of dropping its
         row — so the caller can ask the user for a manual link/fact and resume via `finish_pending_blog`.
-        Default False keeps the original drop-on-unsourced behavior for programmatic callers."""
+        `geo` (FU90): the operator's explicit geography — wins over seed auto-detect everywhere (article
+        block, sourcing briefs, reconcile protection, geo-check). `sibling_titles` (FU90): the brand's
+        other blog titles so geo variants differentiate. Defaults keep all existing callers unchanged."""
         self.claude.reset_usage()   # FU54: cost this generation from real API usage
         # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
         # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
@@ -1839,7 +1974,7 @@ Return JSON only:
                                          reddit_thread=reddit_thread)
         self.claude.set_cost_ceiling(_BLOG_COST_CEILING)   # raise to the full budget for the priority stage
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
-                                        evidence=evidence)
+                                        evidence=evidence, geo=geo, sibling_titles=sibling_titles)
         if not article:
             return None
         draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
@@ -1853,7 +1988,7 @@ Return JSON only:
         # when `allow_pause` and a tool STILL can't be sourced after all retries, PAUSE: checkpoint the
         # partial generation and return a `_pending` sentinel so the caller can ask the user for a manual
         # link/fact, instead of silently dropping the tool's row. `deep` deepens corroboration (FU48).
-        sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify)
+        sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo)
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
@@ -1874,12 +2009,13 @@ Return JSON only:
             if vc:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
-        return self._finalize_article(brand, seed, article, draft_body)
+        return self._finalize_article(brand, seed, article, draft_body, geo=geo)
 
-    def _finalize_article(self, brand, seed, article, draft_body):
+    def _finalize_article(self, brand, seed, article, draft_body, geo=""):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
-        ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. Mutates + returns
-        `article`."""
+        ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
+        geo-check — a WARNING (never a block) when a geo page barely mentions its geography. Mutates +
+        returns `article`."""
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
@@ -1891,7 +2027,20 @@ Return JSON only:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
-        article["linkedin_text"] = self.generate_linkedin(brand, seed, article)
+        # FU90 — geo-check (soft signal, never blocks): a geo page whose BODY barely mentions its
+        # geography is the doorway pattern; warn the operator immediately instead of at review.
+        rgeo = (geo or "").strip() or _seed_geo(seed)
+        if rgeo:
+            _geo_key = re.sub(r"^the\s+", "", rgeo, flags=re.I)
+            _body_no_heads = "\n".join(l for l in (article["body_markdown"] or "").splitlines()
+                                       if not l.lstrip().startswith("#"))
+            _hits = len(re.findall(r"\b" + re.escape(_geo_key) + r"\b", _body_no_heads, re.I))
+            if _hits < 3:
+                note = (f"geo-check: this page targets '{rgeo}' but the body mentions it only "
+                        f"{_hits}× — possible doorway output; review the geo sections")
+                print(f"[blog_gen] {note}", flush=True)
+                article["geo_warning"] = note
+        article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.
         article["gen_cost"] = round(self.claude.usage_cost(), 4)
@@ -1944,7 +2093,9 @@ Return JSON only:
             if vc:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
-        return self._finalize_article(brand, seed, article, draft_body)
+        # FU90: the checkpoint's sourcing carries the resolved geo — the resume stays geo-aware.
+        return self._finalize_article(brand, seed, article, draft_body,
+                                      geo=(sourcing.get("geo") or ""))
 
 
 # ----------------------------------------------------------------------------- JSON-LD

@@ -1137,7 +1137,8 @@ class Database:
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
                    "pending_state",   # FU79
                    "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
-                   "youtube_persona", "youtube_meta"}   # FU80
+                   "youtube_persona", "youtube_meta",   # FU80
+                   "geo"}   # FU90
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2291,7 +2292,9 @@ class Database:
                     "pending_state",
                     # FU80: YouTube video package derived from the blog (youtube_meta is JSON).
                     "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
-                    "youtube_persona", "youtube_meta"):
+                    "youtube_persona", "youtube_meta",
+                    # FU90: the blog's target geography (explicit operator input; wins over auto-detect).
+                    "geo"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

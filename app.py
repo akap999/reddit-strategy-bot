@@ -1891,6 +1891,7 @@ def api_blog_generate():
     deep_verify = bool(data.get("deep_verify"))   # FU48: run the independent verify agent (opt-in)
     reddit_url = (data.get("reddit_url") or "").strip()
     geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
+    qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     # Optional per-blog byline override (falls back to the brand byline when blank).
     byline = {k: (data.get(k) or "").strip() for k in
               ("author_name", "author_title", "reviewer_name", "reviewer_title",
@@ -1926,7 +1927,8 @@ def api_blog_generate():
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
                 deep_verify=deep_verify, allow_pause=True,   # FU79: pause if a tool can't be sourced
-                geo=geo, sibling_titles=sibling_titles)      # FU90
+                geo=geo, sibling_titles=sibling_titles,      # FU90
+                qualifier=qualifier)                         # FU93
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -1955,6 +1957,8 @@ def api_blog_generate():
                 bg.update_blog(blog_id, pending_state=json.dumps(pending))
                 if geo:
                     bg.update_blog(blog_id, geo=geo)   # FU90: reused by resume/regenerate
+                if qualifier:
+                    bg.update_blog(blog_id, qualifier=qualifier)   # FU93
                 return {"blog_id": blog_id, "needs_sources": True,
                         "missing": pending.get("missing") or [],
                         "reddit_status": reddit_status,
@@ -1982,6 +1986,8 @@ def api_blog_generate():
             )
             if geo:
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
+            if qualifier:
+                bg.update_blog(blog_id, qualifier=qualifier)   # FU93: same
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
@@ -2031,6 +2037,7 @@ def api_blog_regenerate(blog_id):
             stored_deep = bool(blog.get("deep_verify"))   # FU48: reuse the verify-agent choice
             stored_reddit = (blog.get("reddit_url") or "").strip()
             stored_geo = (blog.get("geo") or "").strip()   # FU90: reuse the blog's geography
+            stored_qual = (blog.get("qualifier") or "").strip()   # FU93: reuse the qualifier
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
                 sib_titles = [b.get("title") for b in bg.get_all_blogs(brand_id=blog.get("brand_id"))
                               if b.get("id") != blog_id and (b.get("title") or "").strip()][:10]
@@ -2049,7 +2056,8 @@ def api_blog_regenerate(blog_id):
                                           source_urls=stored_urls, research_notes=stored_notes,
                                           use_web_search=stored_web, reddit_thread=reddit_thread,
                                           deep_verify=stored_deep,
-                                          geo=stored_geo, sibling_titles=sib_titles)   # FU90
+                                          geo=stored_geo, sibling_titles=sib_titles,   # FU90
+                                          qualifier=stored_qual)                       # FU93
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -2065,14 +2073,16 @@ def api_blog_regenerate(blog_id):
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
             elif part == "article":
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence,
-                                         geo=stored_geo, sibling_titles=sib_titles)   # FU90
+                                         geo=stored_geo, sibling_titles=sib_titles,   # FU90
+                                         qualifier=stored_qual)                       # FU93
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 v = gen.verify_claims(brand, a, evidence=evidence)
                 a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
                 flagged = (v or {}).get("flagged") or []
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
-                vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo)
+                vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo,
+                                             qualifier=stored_qual)   # FU93
                 if vc:
                     a["body_markdown"] = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -2092,7 +2102,8 @@ def api_blog_regenerate(blog_id):
                 flagged = v["flagged"]
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
                 vc = gen.verify_and_complete(brand, seed, {**article, "body_markdown": body_md},
-                                             deep=stored_deep, geo=stored_geo)
+                                             deep=stored_deep, geo=stored_geo,
+                                             qualifier=stored_qual)   # FU93
                 if vc:
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -2200,12 +2211,11 @@ def api_blog_linkedin_article(blog_id):
             claude = ClaudeClient(api_key)
             claude.reset_usage()   # cost this article from real API usage (FU54 accumulator)
             gen = BlogGenerator(claude, bg)
-            # Affiliation disclosure: per-blog override, else the brand's, else the generator's default.
-            disclosure = (blog.get("disclosure") or brand.get("disclosure") or "").strip()
+            # FU92: the LinkedIn article carries NO disclosure line (removed per user request).
             art = gen.generate_linkedin_article(
                 brand,
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
-                persona_voice=persona, disclosure=disclosure,
+                persona_voice=persona,
                 target_query=(blog.get("seed") or "").strip(),   # FU61: anchor to the exact target prompt
                 manual_title=manual_title,                       # FU83: lock a user-typed headline
                 geo=(blog.get("geo") or "").strip())             # FU91: preserve the geo focus
@@ -2287,7 +2297,8 @@ def api_blog_patch(blog_id):
                "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
                "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
                "youtube_persona",   # FU80
-               "geo")   # FU90
+               "geo",               # FU90
+               "qualifier")         # FU93
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400

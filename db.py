@@ -1138,7 +1138,8 @@ class Database:
                    "pending_state",   # FU79
                    "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
                    "youtube_persona", "youtube_meta",   # FU80
-                   "geo"}   # FU90
+                   "geo",   # FU90
+                   "qualifier"}   # FU93
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2294,7 +2295,9 @@ class Database:
                     "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
                     "youtube_persona", "youtube_meta",
                     # FU90: the blog's target geography (explicit operator input; wins over auto-detect).
-                    "geo"):
+                    "geo",
+                    # FU93: the blog's variant qualifier ("financing", "free shipping"; explicit wins).
+                    "qualifier"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

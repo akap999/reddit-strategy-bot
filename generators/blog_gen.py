@@ -72,6 +72,19 @@ _STALE_AGGREGATORS = {
     "goodfirms.co", "sourceforge.net", "slashdot.org", "toolify.ai", "futurepedia.io",
 }
 
+# FU93 (P2) — source-selection hygiene: a hit-piece/"products to avoid" roundup is opposition
+# research, not comparison sourcing — citing one turns the page into a takedown. Matched on the
+# source TITLE at every evidence accept-point; a drop is logged, never silent.
+_HIT_PIECE_RE = re.compile(
+    r"steer\s+clear|stay\s+away|\bavoid\b|\bworst\b|(?:don'?t|do\s+not|should\s+not|never)\s+buy|"
+    r"\bterrible\b|\bscam\b|rip-?off|\bbeware\b",
+    re.IGNORECASE)
+
+
+def _is_hit_piece(src):
+    """True when a search result's title reads as a hit-piece/negative roundup (FU93 P2)."""
+    return bool(_HIT_PIECE_RE.search((src or {}).get("title") or ""))
+
 
 def _as_list(raw):
     """Best-effort list of non-empty strings from a JSON string / delimited string /
@@ -120,6 +133,37 @@ def _seed_geo(seed):
     for canon, alt in _GEO_LEXICON:
         if re.search(rf"\b(?:{alt})\b", s):
             return canon
+    return ""
+
+
+def _seed_qualifier(seed):
+    """FU93 (P1) — deterministically detect a trailing purchase/variant QUALIFIER in the seed
+    ("with financing", "without a contract", "under $5000"); returns the phrase or "".
+    HIGH-PRECISION on purpose: ambiguous forms ("for beginners", "for small teams") are NOT
+    auto-captured — they come from the EXPLICIT qualifier input, which always wins."""
+    s = (seed or "").strip().rstrip("?!. \t")
+    if not s:
+        return ""
+
+    def _strip_geo_tail(q):
+        # "financing in the US" -> "financing" (the geo axis is handled separately by _seed_geo)
+        for _canon, alt in _GEO_LEXICON:
+            q = re.sub(rf"[\s,]+(?:in|across|for|throughout)\s+(?:the\s+)?(?:{alt})\s*$", "", q)
+        return q.strip(" ,")
+
+    m = re.search(r"\bwith\s+([\w$][\w$%/&' -]{1,40})$", s, re.IGNORECASE)
+    if m:
+        q = _strip_geo_tail(m.group(1))
+        if q:
+            return q
+    m = re.search(r"\b(without\s+[\w$][\w$%/&' -]{1,40})$", s, re.IGNORECASE)
+    if m:
+        q = _strip_geo_tail(m.group(1))
+        if q and q.lower() != "without":
+            return q
+    m = re.search(r"\b((?:under|over|below|above)\s+\$?\d[\d,.]*[km]?)\b", s, re.IGNORECASE)
+    if m:
+        return m.group(1)
     return ""
 
 
@@ -257,6 +301,10 @@ class BlogGenerator:
 
         def _take(srcs):
             for s in (srcs or []):
+                if _is_hit_piece(s):   # FU93 P2: never ingest a negative roundup as evidence
+                    print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
                 url = (s.get("url") or "").strip()
                 fact = (s.get("fact") or s.get("title") or "").strip()
                 if not url or not fact:
@@ -274,7 +322,9 @@ class BlogGenerator:
                     break
                 brief = (f'Find {ang} about "{nm}"' + (f' ({cat})' if cat else "")
                          + f'. Topic: {seed}. Prefer recent (2024-2025) coverage. It MUST be an '
-                           "INDEPENDENT third-party page, NOT the brand's own website.")
+                           "INDEPENDENT third-party page, NOT the brand's own website. Do NOT return "
+                           "negative-review roundups or 'products/brands to avoid' listicles — seek "
+                           "factual coverage (features, pricing, terms, scale).")
                 try:
                     got = self.claude.search_sources(brief, max_searches=2,   # FU56: was 3
                                                      allowed_domains=_THIRD_PARTY_DOMAINS)
@@ -838,7 +888,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
 
     # ------------------------------------------------------------------- article
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
-                         sibling_titles=None):
+                         sibling_titles=None, qualifier=""):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
@@ -864,6 +914,11 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         rgeo = (geo or "").strip() or _seed_geo(seed)
         geo_line = (f"  - GEOGRAPHY FOR THIS PAGE: {rgeo} (operator-specified or detected from the "
                     f"seed) — apply everything in this section to it.\n" if rgeo else "")
+        # FU93 — resolved qualifier (same rule: explicit input wins, else trailing-pattern detection).
+        rqual = (qualifier or "").strip() or _seed_qualifier(seed)
+        qual_line = (f"  - QUALIFIER FOR THIS PAGE: {rqual} (operator-specified or detected from the "
+                     f"seed) — this is the page's reason to exist; apply everything in this section "
+                     f"to it.\n" if rqual else "")
         # FU90 — sibling variants: tell the model what already exists so this page differentiates.
         sibs = [str(t).strip() for t in (sibling_titles or []) if str(t).strip()][:10]
         sibling_block = ""
@@ -944,9 +999,10 @@ Pick exactly ONE dominant block. The dominant block MUST itself be extractable �
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
 
 GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
-{geo_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
-    "Australia", a state or city) or another strong qualifier (a company size, an industry). If it does
-    NOT (and no geography is stated above), SKIP this whole section — it is inert for a generic seed.
+{geo_line}{qual_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+    "Australia", a state or city) or another strong qualifier (a purchasing mechanism like "with
+    financing", a company size, an industry). If it does NOT (and no geography or qualifier is stated
+    above), SKIP this whole section — it is inert for a generic seed.
   - When one IS present, this page is that VARIANT of the topic, and it competes with the generic page:
     it must contain substance the generic page cannot have, or it is a duplicate.
   - ANTI-DOORWAY (hard rule): NEVER produce the generic answer with the geography/qualifier inserted
@@ -965,7 +1021,16 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
         option, use and cite its GENERAL sourced facts as usual and keep the WRITING geo-focused (apply
         the local criteria/framing to them) — NEVER write hedge language like "unverified", "coverage
         unknown", or "not confirmed for this region" in the body;
-      • geography-specific EVALUATION CRITERIA a local buyer should apply.
+      • geography-specific EVALUATION CRITERIA a local buyer should apply;
+      • when the variant qualifier is a PURCHASING/COMMERCIAL mechanism (financing, leasing, free
+        shipping, warranty, tax treatment, …), the page's core substance must EXPLAIN THE MECHANISM
+        ITSELF for this product category: the main options/structures (e.g. lease vs. loan for
+        equipment), what providers/lenders actually evaluate, typical terms/ranges, and the governing
+        tax/regulatory angle (e.g. the relevant tax deduction for equipment purchases) — general
+        (non-brand) domain knowledge is allowed here, with the cite-a-primary-source rule for
+        financial/legal-grade specifics. The qualifier must anchor MAJORITY-substance sections —
+        NEVER one sentence restating {name}'s own terms; the last words of the title are the page's
+        reason to exist, and they must earn real word count.
   - The FAQ must include geography/qualifier-specific questions, and the meta_description carries the
     geography. General (non-brand) regulatory facts are allowed as domain knowledge; any
     medical/financial/legal-grade claim still follows the cite-a-primary-source rule above.
@@ -992,6 +1057,12 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - AVOID UNQUALIFIED SUPERLATIVES / BLANKET CLAIMS ("the best", "#1", "largest", "all 50
     states", "the only") unless that exact fact is in the BRAND context above — prefer
     specific, verifiable phrasing ("offers X, Y and Z" beats "the best at everything").
+  - CONDITIONED COMMERCE CLAIMS (FU93): when a source states a claim WITH a condition ("no sales tax
+    on qualifying purchases", "free shipping on equipment orders", "financing up to $100k"), EVERY
+    restatement — INCLUDING the Quick answer and the `meta_description` — must carry that condition;
+    NEVER flatten it into a blanket claim ("no sales tax"). US sales tax specifically: online
+    retailers generally must collect tax in states where they have nexus, so never assert a blanket
+    "no sales tax" — use the vendor's own qualified phrasing and attribute it.
   - STAY CREDIBLE, NOT PROMOTIONAL — a relentlessly self-praising page reads as marketing and
     gets cited LESS. Present {name} as *a* strong fit backed by specifics, not as an
     unqualified winner. Do NOT stack praise ("best / strongest / ranks first") on it.
@@ -1104,6 +1175,10 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - COMPETITOR-NEGATIVE claims (asserting a NAMED competitor lacks a feature) — never assert a
     bald negative about a named third party; soften to a {name}-strength framing or
     date/attribute it ("as of publication").
+  - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
+    remove them, or balance with {name}'s SAME metric cited alongside (FU93).
+  - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
+    condition ("on qualifying purchases", "in most states") — restore the condition (FU93).
 Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
 
 Return JSON only:
@@ -1117,16 +1192,17 @@ Return JSON only:
             "flagged": [f for f in (res.get("flagged") or []) if isinstance(f, dict)],
         }
 
-    def verify_and_complete(self, brand, seed, article, deep=False, geo=""):
+    def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier=""):
         """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
         then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
         into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
         `_reconcile_and_finish` (phase d: reconcile). This wrapper preserves the original
         drop-on-unsourced behavior for DIRECT callers (regenerate part='verify'/'article'); the FU79
         pause path lives in `generate_blog(allow_pause=True)`. `geo` (FU90): explicit geography — wins
-        over seed auto-detect for the geo-aware briefs + reconcile rules. Returns {body_markdown, flagged}
-        or None (draft unchanged). Never raises."""
-        sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo)
+        over seed auto-detect for the geo-aware briefs + reconcile rules. `qualifier` (FU93): the page's
+        variant qualifier ("financing", "free shipping") — same explicit-wins rule. Returns
+        {body_markdown, flagged} or None (draft unchanged). Never raises."""
+        sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo, qualifier=qualifier)
         if not sr:
             return None
         if not sr.get("fresh"):
@@ -1134,7 +1210,7 @@ Return JSON only:
             return None
         return self._reconcile_and_finish(brand, seed, article, sr)
 
-    def _source_for_completion(self, brand, seed, article, deep=False, geo=""):
+    def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier=""):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -1146,6 +1222,7 @@ Return JSON only:
         pause trigger) — or None when there is nothing to source/verify. Never raises."""
         name, _url, _block = self._brand_block(brand)
         rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
+        rqual = (qualifier or "").strip() or _seed_qualifier(seed)   # FU93: same rule for the qualifier
         body = (article or {}).get("body_markdown") or ""
         if not body.strip():
             return None
@@ -1168,7 +1245,10 @@ Return JSON only:
     (e.g. "TikTok — synthetic-media / AI-content labeling / monetization policy", "FDA guidance on <X>",
     "GDPR data-retention rules"). FU89: when the article targets a specific GEOGRAPHY, the authority is
     the one governing the topic THERE (e.g. IRS/DOL for US payroll & benefits compliance, HMRC for the
-    UK, the ATO for Australia). Empty if the article has no such external authority.
+    UK, the ATO for Australia). FU93: likewise, when the article targets a purchasing/commercial
+    QUALIFIER (financing, leasing, tax treatment, …), the authority is the one governing THAT mechanism
+    in the target market (e.g. IRS Section 179 for US equipment-financing write-offs). Empty if the
+    article has no such external authority.
 
 ARTICLE:
 {body[:6000]}
@@ -1222,9 +1302,11 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
         # the geo points the article needs — so every brief also asks about the geography.
         geo_brief = (f"; availability, local coverage and compliance support in {rgeo} (local tax/"
                      f"payroll/regulatory support or market presence, as applicable)" if rgeo else "")
+        # FU93: a qualifier page needs per-tool facts about the qualifier's mechanism too.
+        qual_brief = (f"; {rqual} — terms, options and conditions offered" if rqual else "")
         fetch_brief = ("pricing and plans; commercial-use & license terms (is monetization/commercial use "
                        "allowed, royalty-free or not); whether it imitates or clones real artists' voices; "
-                       "video / all-in-one capability; key features" + geo_brief)
+                       "video / all-in-one capability; key features" + geo_brief + qual_brief)
         for tool in tools:
             try:
                 dom = self.claude.find_official_domain(tool, ctx)
@@ -1259,6 +1341,10 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                 Uses each result's ACTUAL url so citations deep-link. Deduped by url."""
                 out_, seen_ = [], set()
                 for s in (srcs or []):
+                    if _is_hit_piece(s):   # FU93 P2: never cite a "steer clear of"-style roundup
+                        print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                              f"'{(s.get('title') or '')[:70]}'", flush=True)
+                        continue
                     u = (s.get("url") or "").strip()
                     fc = (s.get("fact") or s.get("title") or "").strip()
                     key = u.lower().split("?")[0].rstrip("/")
@@ -1285,7 +1371,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
                     pin = self.claude.search_sources(
                         f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
                         f"key capabilities"
-                        + (f", availability / coverage / compliance support in {rgeo}" if rgeo else ""),
+                        + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
+                        + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
                         max_searches=2, allowed_domains=[_dom(dom)],
                         first_party=True)   # FU55: vendor's OWN pages — don't tell it to avoid the vendor
                 except Exception:
@@ -1410,15 +1497,35 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
         subj_cat = f" ({cat})" if cat else ""
         corr_brief = (f"Find reputable INDEPENDENT sources (reviews, documentation, news, analyst pages) "
                       f"that CONFIRM or REFUTE these claims about {name}{subj_cat} and its space, returning "
-                      f"the true value + a source URL for each. Claims: {claim_lines or seed}"
-                      + (f" Focus on {rgeo}-specific coverage where available." if rgeo else ""))
+                      f"the true value + a source URL for each. Do NOT return negative-review roundups or "
+                      f"'products/brands to avoid' listicles — seek factual coverage (features, pricing, "
+                      f"terms, scale). Claims: {claim_lines or seed}"
+                      + (f" Focus on {rgeo}-specific coverage where available." if rgeo else "")
+                      + (f" Focus also on {rqual}-related terms, options and mechanics." if rqual else ""))
         try:
             corr = self.claude.search_sources(
                 corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 3),   # FU56: was 4
                 blocked_domains=(blocked or None))
         except Exception:
             corr = []
+        # FU93 (P1) — ONE bounded topic-level search for the QUALIFIER'S MECHANISM itself (not
+        # per-tool): the page's reason to exist needs sourced substance (options/structures, terms,
+        # what's evaluated, the governing tax/regulatory provision), or the claims-gate strips it.
+        if rqual:
+            try:
+                qsc = self.claude.search_sources(
+                    f"how {rqual} works for {cat or seed}: the main options/structures, typical "
+                    f"terms, what providers evaluate, and governing tax/regulatory provisions"
+                    + (f" in {rgeo}" if rgeo else "")
+                    + " — official/authoritative sources preferred", max_searches=2)
+            except Exception:
+                qsc = []
+            corr = (corr or []) + (qsc or [])
         for c in (corr or []):
+            if _is_hit_piece(c):   # FU93 P2: opposition research never becomes evidence
+                print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
             u = (c.get("url") or "").strip()
             fct = (c.get("fact") or c.get("title") or "").strip()
             if u and fct:
@@ -1427,7 +1534,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
 
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
-                "geo": rgeo}   # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
+                "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
+                "qualifier": rqual}  # FU93: same for the qualifier
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
         """FU79 — phase (d) of verify+complete: reconcile the draft against the sourced FRESH FACTS,
@@ -1456,6 +1564,17 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
     {rgeo} evaluation criteria and framing to them. NEVER write hedge language about missing geo sourcing
     ("unverified", "coverage unknown", "not confirmed for {rgeo}") and NEVER invent a {rgeo} coverage
     claim. Geography-specific FAQ entries and evaluation criteria MUST survive this rewrite."""
+        # FU93 — qualifier variant protection: the qualifier is the page's reason to exist; the
+        # reconcile (the LAST writer) must never dilute its sections into a restatement of the
+        # subject's own terms.
+        rqual = (sourcing.get("qualifier") or "").strip() or _seed_qualifier(seed)
+        qual_rules = ""
+        if rqual:
+            qual_rules = f"""
+  - QUALIFIER VARIANT: this article targets "{rqual}" — that is the page's reason to exist. PRESERVE
+    and STRENGTHEN the sections explaining the {rqual} MECHANISM itself (options/structures, terms,
+    what is evaluated, the governing tax/regulatory angle); never dilute them into a restatement of
+    {name}'s own terms. {rqual}-specific FAQ entries MUST survive this rewrite."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -1522,7 +1641,15 @@ COMPLETE and every stated fact is sourced:
     ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
     honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
   - NO COMPETITOR-JAB: do NOT add or keep any FAQ entry or "Note on <competitor>" blockquote whose function
-    is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown.{geo_rules}
+    is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown. NEVER
+    build a body claim on a competitor's review-site AGGREGATE star score (Trustpilot, Reviews.io, etc.) —
+    large-retailer aggregates measure delivery/store complaints, not product quality — unless {name}'s SAME
+    metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
+    legitimately favor {name}, and STATE the competitors' real advantages (store count / pickup, breadth,
+    returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - Never STRENGTHEN a conditioned commerce claim by dropping its condition — keep "on qualifying
+    purchases" / "in most states" / "up to $N" attached EVERYWHERE the claim is restated, including the
+    Quick answer.{geo_rules}{qual_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -1611,14 +1738,14 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
             return ""
         return (res.get("linkedin_text") or "").strip()
 
-    def generate_linkedin_article(self, brand, article, persona_voice="", disclosure="", target_query="",
+    def generate_linkedin_article(self, brand, article, persona_voice="", target_query="",
                                   manual_title="", geo=""):
         """FU59: rewrite a saved blog into a LONG-FORM LinkedIn ARTICLE (distinct from the short
         `generate_linkedin` post) in a chosen persona's VOICE. Returns {"title","body_markdown"} or {}.
 
         Author's-voice = adopt the persona's PERSPECTIVE/stance/vocabulary on the topic (first person),
-        NEVER fabricate the author's personal history/credentials/numbers/anecdotes. `disclosure` is a
-        one-line affiliation disclosure (the caller passes the blog/brand disclosure, else "" → a default).
+        NEVER fabricate the author's personal history/credentials/numbers/anecdotes. (FU92: the article
+        carries NO affiliation-disclosure line — removed per user request.)
         `target_query` (FU61) is the blog's seed / exact target prompt — when set, its phrasing is placed in
         ONE high-weight position (a question-form subhead) so the article also anchors on the exact query.
         `manual_title` (FU83): a user-entered headline — when set it is LOCKED: used verbatim (prompted AND
@@ -1631,10 +1758,6 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         body = (article or {}).get("body_markdown") or ""
         pv = (persona_voice or "").strip()
         mt = (manual_title or "").strip()
-        # Default = collaboration/partnership language (NOT "I work with", which implies employment).
-        # A blog/brand-supplied disclosure overrides this verbatim.
-        disc = (disclosure or "").strip() or \
-            f"Disclosure: This article was written in collaboration with {name}."
 
         if pv:
             persona_block = (
@@ -1715,9 +1838,7 @@ SOURCE ARTICLE (facts to carry over — do NOT copy its wording):
 
 Rules:
   - {headline_rule}
-  - START the body with the affiliation DISCLOSURE as the VERY FIRST line, BEFORE any mention of {name}
-    (FTC "clear and conspicuous"), written exactly as: {disc}
-  - Then a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
+  - Open the body with a strong opening hook. BAN these clichéd openers: "I'm excited to share", "Hot take:",
     "Unpopular opinion:", "I've been thinking a lot about…". Commit to a specific, distinctive point of
     view — no generic thought-leadership filler.
   - WRITE IN FIRST PERSON THROUGHOUT — "I/we", a practitioner speaking — NOT a third-person explainer.
@@ -1947,7 +2068,8 @@ Return JSON only:
 
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
-                      deep_verify=False, allow_pause=False, geo="", sibling_titles=None):
+                      deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
+                      qualifier=""):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -1974,7 +2096,8 @@ Return JSON only:
                                          reddit_thread=reddit_thread)
         self.claude.set_cost_ceiling(_BLOG_COST_CEILING)   # raise to the full budget for the priority stage
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
-                                        evidence=evidence, geo=geo, sibling_titles=sibling_titles)
+                                        evidence=evidence, geo=geo, sibling_titles=sibling_titles,
+                                        qualifier=qualifier)   # FU93
         if not article:
             return None
         draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
@@ -1988,7 +2111,8 @@ Return JSON only:
         # when `allow_pause` and a tool STILL can't be sourced after all retries, PAUSE: checkpoint the
         # partial generation and return a `_pending` sentinel so the caller can ask the user for a manual
         # link/fact, instead of silently dropping the tool's row. `deep` deepens corroboration (FU48).
-        sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo)
+        sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo,
+                                               qualifier=qualifier)   # FU93
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
@@ -2009,9 +2133,10 @@ Return JSON only:
             if vc:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
-        return self._finalize_article(brand, seed, article, draft_body, geo=geo)
+        return self._finalize_article(brand, seed, article, draft_body, geo=geo,
+                                      qualifier=qualifier)   # FU93
 
-    def _finalize_article(self, brand, seed, article, draft_body, geo=""):
+    def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier=""):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
         geo-check — a WARNING (never a block) when a geo page barely mentions its geography. Mutates +
@@ -2040,6 +2165,38 @@ Return JSON only:
                         f"{_hits}× — possible doorway output; review the geo sections")
                 print(f"[blog_gen] {note}", flush=True)
                 article["geo_warning"] = note
+        # FU93 — qualifier-check (soft signal, same channel as the geo-check so the app/UI wiring is
+        # untouched): a variant page that barely mentions its own qualifier is the doorway pattern.
+        # (Substance-share isn't reliably measurable in code — this only catches the near-zero case;
+        # the real enforcement is the prompt + sourcing + reconcile rules.)
+        rqual = (qualifier or "").strip() or _seed_qualifier(seed)
+        if rqual:
+            _body_no_heads = "\n".join(l for l in (article["body_markdown"] or "").splitlines()
+                                       if not l.lstrip().startswith("#"))
+            _qhits = len(re.findall(r"\b" + re.escape(rqual) + r"\b", _body_no_heads, re.I))
+            _qtail = rqual.split()[-1]
+            if _qtail.lower() != rqual.lower():
+                _qhits = max(_qhits, len(re.findall(r"\b" + re.escape(_qtail) + r"\b",
+                                                    _body_no_heads, re.I)))
+            if _qhits < 3:
+                qnote = (f"qualifier-check: this page targets '{rqual}' but the body mentions it only "
+                         f"{_qhits}× — possible doorway output; review the qualifier sections")
+                print(f"[blog_gen] {qnote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), qnote] if x)
+        # FU93 (P3) — claim-check (warning only, deliberately narrow): an UNQUALIFIED "no sales tax"
+        # in the meta description or the page opening is very likely wrong post-Wayfair (nexus states)
+        # and creates checkout disputes. Never rewrites — the operator confirms the policy + regens.
+        _claim_zone = (article.get("meta_description") or "") + "\n" + \
+                      (article.get("body_markdown") or "")[:800]
+        if re.search(r"\bno sales tax\b(?![^.;\n]{0,50}(?:qualif|most|some|where|eligible|select|"
+                     r"certain))|\btax[- ]free\b(?![^.;\n]{0,50}(?:qualif|most|some|where|eligible|"
+                     r"select|certain))", _claim_zone, re.I):
+            cnote = ("claim-check: unqualified 'no sales tax' in the meta/opening — confirm the "
+                     "client's actual tax policy and qualify before publishing")
+            print(f"[blog_gen] {cnote}", flush=True)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), cnote] if x)
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.
@@ -2095,7 +2252,8 @@ Return JSON only:
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
         # FU90: the checkpoint's sourcing carries the resolved geo — the resume stays geo-aware.
         return self._finalize_article(brand, seed, article, draft_body,
-                                      geo=(sourcing.get("geo") or ""))
+                                      geo=(sourcing.get("geo") or ""),
+                                      qualifier=(sourcing.get("qualifier") or ""))   # FU93
 
 
 # ----------------------------------------------------------------------------- JSON-LD

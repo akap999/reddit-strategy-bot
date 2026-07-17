@@ -12299,6 +12299,7 @@ async function renderBlogs(c) {
                 <div><label class="text-xs text-gray-400">Research notes / testimonials (optional) <span class="text-gray-600">— real facts or a customer quote the article may cite</span></label><textarea id="blog-gen-notes" rows="2" placeholder="e.g. &quot;Cut our reporting time in half&quot; — Jane, VP Growth · or: Competitor X raised \$20M (TechCrunch 2025)"></textarea></div>
                 <div><label class="text-xs text-gray-400">Reddit thread URL (optional) <span class="text-gray-600">— a live thread (your post + comments incl. the brand comment) the article cites as community proof</span></label><input id="blog-gen-reddit-url" type="text" placeholder="https://www.reddit.com/r/Construction/comments/abc123/..."></div>
                 <div><label class="text-xs text-gray-400">Geography / location (optional) <span class="text-gray-600">— e.g. US, California, London. Makes the page a genuine geo variant (geo-specific sourcing + content); auto-detected from the seed when blank</span></label><input id="blog-gen-geo" type="text" placeholder="e.g. US · California · London — blank = auto-detect from the seed"></div>
+                <div><label class="text-xs text-gray-400">Focus / qualifier (optional) <span class="text-gray-600">— e.g. financing, free shipping, for beginners. The page's variant angle; gets dedicated sourcing + substance. Auto-detected from a trailing "with …" when blank</span></label><input id="blog-gen-qualifier" type="text" placeholder="e.g. financing · free shipping — blank = auto-detect"></div>
             </div>
             <p class="text-xs text-gray-500 mt-1">The brand's own site + known competitor sites are auto-fetched and cited; add URLs/notes here only to supplement.</p>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
@@ -12484,13 +12485,14 @@ function blogGenerate() {
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
+    const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
         author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, reddit_url, geo, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -12654,6 +12656,7 @@ async function openBlog(id) {
                 <div class="mt-2"><label class="text-xs text-gray-400">Disclosure line</label><input id="blog-e-disclosure" value="${_blogEsc(b.disclosure || '')}" placeholder="e.g. This comparison is published by the brand."></div>
                 <div class="mt-2"><label class="text-xs text-gray-400">Article image URL <span class="text-gray-600">(Article schema image)</span></label><input id="blog-e-image" value="${_blogEsc(b.image_url || '')}" placeholder="https://…/hero.jpg"></div>
                 <div class="mt-2"><label class="text-xs text-gray-400">Geography <span class="text-gray-600">(the page's target geo — drives geo-specific sourcing + content on regenerate; blank = auto-detect from the seed)</span></label><input id="blog-e-geo" value="${_blogEsc(b.geo || '')}" placeholder="e.g. US · California · London"></div>
+                <div class="mt-2"><label class="text-xs text-gray-400">Focus / qualifier <span class="text-gray-600">(the page's variant angle — drives qualifier-specific sourcing + substance on regenerate; blank = auto-detect from a trailing "with …")</span></label><input id="blog-e-qualifier" value="${_blogEsc(b.qualifier || '')}" placeholder="e.g. financing · free shipping"></div>
             </details>
             <div class="card p-2" style="background:#1a1030"><div class="text-xs text-gray-400 mb-1">Publish (paste the live URL after you post it)</div>${platRows}</div>
         </div>
@@ -12694,6 +12697,7 @@ async function blogSave(id) {
             youtube_captions: _v('blog-e-yt-captions'),
             youtube_persona: _v('blog-e-yt-persona'),
             geo: _v('blog-e-geo'),
+            qualifier: _v('blog-e-qualifier'),
         }});
         toast('Saved', 'success');
         blogReload();

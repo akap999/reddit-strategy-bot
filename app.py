@@ -8891,6 +8891,75 @@ def api_save_search_posts_bulk():
         db.close()
 
 
+@app.route("/api/search/posts/import", methods=["POST"])
+def api_import_search_posts_by_url():
+    """FU95 — Live Search: import Reddit post URL(s) DIRECTLY (skipping the keyword search) as
+    `search_posts` rows so the EXISTING comment pipeline (generate / HQ / regenerate / Comments tab)
+    runs on them unchanged. Body: {brand_id, reddit_urls: list OR newline/comma-separated string}.
+    Each thread's REAL title/subreddit/body is fetched via comment_gen.fetch_post (the FU42 pattern);
+    dedupe rides save_search_post's reddit_url UNIQUE upsert (a re-import re-points the brand).
+    Returns a task_id; result = {imported, imported_ids, duplicates, invalid, failed}."""
+    data = request.json or {}
+    bid = data.get("brand_id")
+    raw = data.get("reddit_urls")
+    if isinstance(raw, str):
+        raw = raw.replace("\n", ",").split(",")
+    urls, invalid = [], 0
+    for u in (raw or []):
+        u = str(u).strip()
+        if not u:
+            continue
+        if re.search(r"/comments/[a-z0-9]+", u, re.IGNORECASE):
+            if u not in urls:
+                urls.append(u)
+        else:
+            invalid += 1
+    if not bid:
+        return jsonify({"error": "brand_id is required (comments can't generate without one)"}), 400
+    if not urls:
+        return jsonify({"error": "No valid Reddit post URLs (must contain /comments/<id>/)."}), 400
+    db_check = get_db()
+    try:
+        if not db_check.get_brand(bid):
+            return jsonify({"error": "Brand not found"}), 404
+    finally:
+        db_check.close()
+    n_invalid = invalid
+
+    def task():
+        db, _claude, _sg, _pg, comment_gen = make_generators()
+        try:
+            imported, duplicates, failed = [], 0, 0
+            for u in urls:
+                try:
+                    fetched = comment_gen.fetch_post(u)
+                    if not (fetched.get("subreddit") or "").strip():
+                        failed += 1
+                        print(f"[ls-import] no subreddit resolvable from {u} — skipped", flush=True)
+                        continue
+                    pid, is_new = db.save_search_post({
+                        "reddit_url": u,
+                        "title": fetched["title"],
+                        "subreddit": fetched["subreddit"],
+                        "body_preview": fetched.get("body") or "",
+                        "brand_id": bid,
+                    })
+                    if pid is not None and is_new:
+                        imported.append({"id": pid, "title": fetched["title"],
+                                         "subreddit": fetched["subreddit"]})
+                    else:
+                        duplicates += 1
+                except Exception as e:
+                    failed += 1
+                    print(f"[ls-import] {u} failed: {e}", flush=True)
+            return {"imported": imported, "imported_ids": [p["id"] for p in imported],
+                    "duplicates": duplicates, "invalid": n_invalid, "failed": failed}
+        finally:
+            db.close()
+
+    return jsonify({"task_id": start_task("search-posts-import", task)})
+
+
 @app.route("/api/search/posts/<int:pid>", methods=["DELETE"])
 def api_delete_search_post(pid):
     db = get_db()

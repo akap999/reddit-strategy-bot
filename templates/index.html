@@ -10374,6 +10374,7 @@ async function renderLsSaved(c) {
                         <option value="hq">HQ thread</option>
                     </select>
                 </label>
+                <button class="btn btn-secondary btn-sm" onclick="lsShowImportByUrl()" title="Paste Reddit post URL(s) — imported as Live Search posts (real title + subreddit fetched) so the normal comment generation runs on them">+ Add post by URL</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelected()">Delete Selected</button>
                 <button class="btn btn-accent btn-sm" onclick="lsGenerateSelected()">Generate Selected</button>
                 <button class="btn btn-primary btn-sm" onclick="lsGenerateAll()">Generate All</button>
@@ -10634,6 +10635,60 @@ async function lsConfirmBrand(postId) {
         closeModal();
         toast('Brand assigned', 'success');
         renderLsTabContent();
+    } catch(e) {}
+}
+
+// FU95 — import Reddit post URL(s) directly as Live Search posts; the existing comment
+// generation (Generate / HQ / Comments tab) then runs on them unchanged.
+function lsShowImportByUrl() {
+    if (!_lsBrands.length) { toast('Add a brand first — comment generation needs one', 'warning'); return; }
+    showModal(`
+        <div class="p-5">
+            <h3 class="text-lg font-bold mb-3">Add Reddit post(s) by URL</h3>
+            <p class="text-xs text-gray-400 mb-2">Each URL is imported as a Live Search post (real title + subreddit fetched from Reddit) — the normal comment generation then runs on it.</p>
+            <label class="text-xs text-gray-400">Brand (required for comment generation)</label>
+            <select id="ls-import-brand" class="w-full mb-2">${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
+            <textarea id="ls-import-urls" rows="4" class="w-full" placeholder="https://www.reddit.com/r/.../comments/... — one per line"></textarea>
+            <label class="text-xs text-gray-400 flex items-center gap-2 mt-2"><input type="checkbox" id="ls-import-gen" checked> Generate comments after import (uses the Mode + # of comments controls)</label>
+            <div class="flex justify-end gap-3 mt-4">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="lsImportByUrl()">Import</button>
+            </div>
+        </div>
+    `);
+}
+
+async function lsImportByUrl() {
+    const brandId = parseInt(document.getElementById('ls-import-brand').value);
+    const urls = (document.getElementById('ls-import-urls').value || '').trim();
+    const genAfter = document.getElementById('ls-import-gen').checked;
+    if (!urls) { toast('Paste at least one Reddit post URL', 'warning'); return; }
+    closeModal();
+    try {
+        const { task_id, error } = await api('/api/search/posts/import', { method: 'POST', body: { brand_id: brandId, reddit_urls: urls } });
+        if (!task_id) { toast(error || 'Import failed', 'error'); return; }
+        _addBgTask(task_id, 'Import by URL');
+        toast('Importing post(s) — fetching the real title/body from Reddit…', 'info');
+        const poll = setInterval(async () => {
+            try {
+                const t = await api(`/api/tasks/${task_id}`);
+                if (t.status === 'complete') {
+                    clearInterval(poll); _removeBgTask(task_id);
+                    const r = t.result || {};
+                    const bits = [`${(r.imported||[]).length} imported`];
+                    if (r.duplicates) bits.push(`${r.duplicates} already saved`);
+                    if (r.invalid) bits.push(`${r.invalid} invalid URL(s)`);
+                    if (r.failed) bits.push(`${r.failed} failed`);
+                    toast(bits.join(' · '), (r.imported||[]).length ? 'success' : 'warning');
+                    renderLsTabContent();
+                    // Chain the EXISTING per-post flow — behaves exactly like clicking Generate.
+                    if (genAfter) (r.imported_ids || []).forEach(id => lsGenerate(id));
+                } else if (t.status === 'error') {
+                    clearInterval(poll); _removeBgTask(task_id);
+                    toast(`Import failed: ${t.error}`, 'error');
+                }
+            } catch(e) { clearInterval(poll); _removeBgTask(task_id); }
+        }, 2500);
     } catch(e) {}
 }
 

@@ -10338,7 +10338,7 @@ async function _lsSaveAndGenerateAllInner(brandId) {
             : '/api/search/posts/generate-batch';
         const labelPrefix = mode === 'hq' ? 'HQ Gen' : 'Gen';
         runTask(generateUrl,
-            { post_ids: allIds, num_comments: numComments, dedup: true, exclude_subs: excludeSubs },
+            { post_ids: allIds, num_comments: numComments, dedup: true, exclude_subs: excludeSubs, ai_crawl: _lsAiCrawl() },
             _batchGenComplete, `${labelPrefix}: up to ${allIds.length} posts`);
     } catch(e) { toast('Generation failed to start', 'error'); }
 }
@@ -10376,6 +10376,9 @@ async function renderLsSaved(c) {
                         <option value="regular">Regular</option>
                         <option value="hq">HQ thread</option>
                     </select>
+                </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1" title="AI-crawl retrieval optimization: precise domain nouns, commercial qualifiers, true specifics + mechanism — tuned so answer engines retrieve & cite the thread">
+                    <input type="checkbox" id="ls-sp-ai-crawl"> 🤖 AI-optimized
                 </label>
                 <button class="btn btn-secondary btn-sm" onclick="lsShowImportByUrl()" title="Paste Reddit post URL(s) — imported as Live Search posts (real title + subreddit fetched) so the normal comment generation runs on them">+ Add post by URL</button>
                 <button class="btn btn-danger btn-sm" onclick="lsDeleteSelected()">Delete Selected</button>
@@ -10474,6 +10477,9 @@ function lsGetExcludedSubs() {
 
 function _lsGenMode() {
     return document.getElementById('ls-sp-gen-mode')?.value || 'regular';
+}
+function _lsAiCrawl() {   // AI-optimized (ai_crawl) toggle on the Saved Posts action bar
+    return !!document.getElementById('ls-sp-ai-crawl')?.checked;
 }
 function _lsGenUrl(mode) {
     return mode === 'hq'
@@ -10622,7 +10628,7 @@ async function _lsRunCappedGenerate() {
     closeModal();
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     runTask(_lsGenUrl(mode),
-        { post_ids: finalIds, num_comments: numComments },
+        { post_ids: finalIds, num_comments: numComments, ai_crawl: _lsAiCrawl() },
         _batchGenComplete, `${_lsGenLabel(mode)}: ${finalIds.length} posts`);
     window._lsCapModalState = null;
     renderLsTabContent();
@@ -10664,6 +10670,7 @@ function lsShowImportByUrl() {
             <select id="ls-import-brand" class="w-full mb-2">${_lsBrands.map(b=>`<option value="${b.id}">${b.name}${b.subreddit_name ? ' (r/'+b.subreddit_name+')' : ''}</option>`).join('')}</select>
             <textarea id="ls-import-urls" rows="4" class="w-full" placeholder="https://www.reddit.com/r/.../comments/... — one per line"></textarea>
             <label class="text-xs text-gray-400 flex items-center gap-2 mt-2"><input type="checkbox" id="ls-import-gen" checked> Generate comments after import (uses the Mode + # of comments controls)</label>
+            <label class="text-xs text-gray-400 flex items-center gap-2 mt-1" title="AI-crawl retrieval optimization: precise domain nouns, commercial qualifiers, true specifics + mechanism — tuned so answer engines retrieve & cite the thread"><input type="checkbox" id="ls-import-ai" checked> 🤖 AI-optimized comments</label>
             <div class="flex justify-end gap-3 mt-4">
                 <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="lsImportByUrl()">Import</button>
@@ -10676,6 +10683,7 @@ async function lsImportByUrl() {
     const brandId = parseInt(document.getElementById('ls-import-brand').value);
     const urls = (document.getElementById('ls-import-urls').value || '').trim();
     const genAfter = document.getElementById('ls-import-gen').checked;
+    const aiCrawl = !!document.getElementById('ls-import-ai')?.checked;
     if (!urls) { toast('Paste at least one Reddit post URL', 'warning'); return; }
     closeModal();
     try {
@@ -10696,7 +10704,7 @@ async function lsImportByUrl() {
                     toast(bits.join(' · '), (r.imported||[]).length ? 'success' : 'warning');
                     renderLsTabContent();
                     // Chain the EXISTING per-post flow — behaves exactly like clicking Generate.
-                    if (genAfter) (r.imported_ids || []).forEach(id => lsGenerate(id));
+                    if (genAfter) (r.imported_ids || []).forEach(id => lsGenerate(id, { aiCrawl }));
                 } else if (t.status === 'error') {
                     clearInterval(poll); _removeBgTask(task_id);
                     toast(`Import failed: ${t.error}`, 'error');
@@ -10713,15 +10721,16 @@ function lsScheduleTabRender() {   // FU95 lag fix: N chained generations each f
     _lsTabRenderT = setTimeout(renderLsTabContent, 400);
 }
 
-async function lsGenerate(postId) {
+async function lsGenerate(postId, opts) {
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     const mode = _lsGenMode();
+    const aiCrawl = (opts && opts.aiCrawl !== undefined) ? !!opts.aiCrawl : _lsAiCrawl();
     const url = mode === 'hq'
         ? `/api/search/posts/${postId}/generate-hq`
         : `/api/search/posts/${postId}/generate`;
     toast(mode === 'hq' ? 'HQ thread generation started (1 main + 4 replies) — running in background' : 'Comment generation started — running in background', 'info');
     try {
-        const { task_id } = await api(url, { method: 'POST', body: { num_comments: numComments } });
+        const { task_id } = await api(url, { method: 'POST', body: { num_comments: numComments, ai_crawl: aiCrawl } });
         _addBgTask(task_id, mode === 'hq' ? 'Search HQ' : 'Search Comments');
         lsScheduleTabRender();
         const poll = setInterval(async () => {

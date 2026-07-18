@@ -157,6 +157,9 @@ class RedditSearchBot:
         # timeout + a wider RSS fan-out (below). Force OFF with REDDIT_SEARCH_USE_RESIDENTIAL=0/false.
         _sflag = os.environ.get("REDDIT_SEARCH_USE_RESIDENTIAL", "").strip().lower()
         self._search_use_residential = _sflag not in ("0", "false", "no", "off")
+        # FU94: metered-GB visibility — bytes fetched through the residential proxy, accumulated
+        # across a search (incl. its recursive reddit-wide top-up) and logged once per outer search.
+        self._resi_bytes = 0
         if self._reddit_proxies:
             _sr = "ON" if self._search_use_residential else "OFF (search uses Arctic/Pullpush; "\
                   "residential still covers check-live + comments)"
@@ -610,6 +613,20 @@ class RedditSearchBot:
             "_source": "reddit_rss",
         }
 
+    def _resi_active(self):
+        """FU94: True when the residential proxy is configured AND enabled for search — the
+        worker-health latches (_reddit_rss_dead / the 429 cooldown) must NOT skip the RSS leg
+        then, because the residential PRIMARY doesn't share the worker's blocks."""
+        return bool(self._reddit_proxies and self._search_use_residential)
+
+    def _count_resi_bytes(self, resp):
+        """FU94: accumulate residential (metered) response bytes for the per-search log line."""
+        try:
+            with self._lock:
+                self._resi_bytes += len(resp.content or b"")
+        except Exception:
+            pass
+
     def _search_reddit_rss(self, keyword, subreddit_path, sort, time_filter, limit):
         """Concurrency-gated entry for Reddit RSS (see `_rss_sem`)."""
         with RedditSearchBot._rss_sem:
@@ -626,8 +643,8 @@ class RedditSearchBot:
         which is set by REDDIT_RSS_DISABLED or a real RSS 403, NOT by
         the REDDIT_API_DISABLED (JSON-leg) opt-out.
         """
-        if self._reddit_rss_dead:
-            return []
+        if self._reddit_rss_dead and not self._resi_active():
+            return []   # FU94: the dead latch reflects the WORKER's 403 — residential bypasses it
         # Three URL shapes:
         #   - /r/<sub>/search.rss?q=KEYWORD  → keyword search within sub
         #   - /search.rss?q=KEYWORD          → global keyword search
@@ -699,52 +716,50 @@ class RedditSearchBot:
         _has_resi = bool(self._reddit_proxies and self._search_use_residential)
         results = []
         try:
-            # Retry transient 429 (rate limit) up to 2× with backoff
-            # BEFORE giving up. A 429 on one sub during a 20-sub fan-out
-            # is a momentary throughput spike, NOT a permanent block —
-            # we must NOT latch _reddit_dead on it or one slow sub kills
-            # the whole RSS leg for the run. Only a 403 (hard block)
-            # latches dead.
             resp = None
-            # ONE retry on a transient 429 before giving up (was 2). A throttled
-            # RSS leg is expensive and low-yield, so we fail fast and let the
-            # cooldown route subsequent searches straight to Pullpush/Arctic.
-            for rss_attempt in range(2):
-                resp = requests.get(url, params=params, headers=headers, timeout=20)
-                if resp.status_code == 429 and rss_attempt < 1 and not _has_resi:
-                    # The shared-IP worker 429s nearly every sub; when a residential proxy is available,
-                    # DON'T waste ~2s retrying the doomed worker — break out and fall straight to the
-                    # clean residential path below (saves ~2s/sub, so more subs fit in the time budget).
-                    # Honor Retry-After when Reddit sends it (capped at 5s so a big
-                    # server value can't stall the whole search); else short backoff.
-                    # Jitter so concurrent per-sub retries don't re-collide.
-                    try:
-                        wait = float(resp.headers.get("Retry-After") or 0)
-                    except (TypeError, ValueError):
-                        wait = 0
-                    if wait <= 0:
-                        wait = 2.0
-                    wait = min(wait, 5.0) + random.uniform(0, 0.5)
-                    print(f"\n    ⏳ RSS 429 on {url} — retry in {wait:.1f}s", flush=True)
-                    time.sleep(wait)
-                    continue
-                break
-            # FU57: normal path blocked/throttled → retry ONCE through the residential proxy, DIRECT
-            # to old.reddit.com (distinct IP). Fallback-only, so metered GB is spent only on a block.
             used_residential = False
-            if (resp is None or resp.status_code != 200) and _has_resi:
+            resi_attempted = False
+            # FU94: residential-FIRST — the clean distinct-IP proxy is the RELIABLE leg (the shared-IP
+            # worker 429s / serves stale empties intermittently, which is what made run-to-run counts
+            # uneven). Metered GB is the price of consistency; usage is accounted + logged per search.
+            if _has_resi:
                 direct_url = _resi_base + url[len(rss_base):]
+                resi_attempted = True
                 try:
                     presp = requests.get(direct_url, params=params, headers=_resi_headers,
                                          timeout=12, proxies=self._reddit_proxies)
+                    self._count_resi_bytes(presp)
                     if presp.status_code == 200:
                         print(f"\n    ✓ RSS via residential proxy for {direct_url}", flush=True)
                         resp = presp
                         used_residential = True
                     else:
-                        print(f"\n    ⚠ RSS residential-proxy retry got {presp.status_code}", flush=True)
+                        print(f"\n    ⚠ RSS residential primary got {presp.status_code} — "
+                              f"falling back to the worker", flush=True)
                 except Exception as _pe:
-                    print(f"\n    ⚠ RSS residential-proxy retry failed: {_pe}", flush=True)
+                    print(f"\n    ⚠ RSS residential primary failed: {_pe} — "
+                          f"falling back to the worker", flush=True)
+            # Worker/direct path — the ONLY path when no residential proxy is configured, else the
+            # FALLBACK when the residential attempt failed. Retry a transient 429 once with backoff;
+            # only a 403 (hard block) latches `_reddit_rss_dead`.
+            if resp is None or resp.status_code != 200:
+                for rss_attempt in range(2):
+                    resp = requests.get(url, params=params, headers=headers, timeout=20)
+                    if resp.status_code == 429 and rss_attempt < 1:
+                        # Honor Retry-After when Reddit sends it (capped at 5s so a big
+                        # server value can't stall the whole search); else short backoff.
+                        # Jitter so concurrent per-sub retries don't re-collide.
+                        try:
+                            wait = float(resp.headers.get("Retry-After") or 0)
+                        except (TypeError, ValueError):
+                            wait = 0
+                        if wait <= 0:
+                            wait = 2.0
+                        wait = min(wait, 5.0) + random.uniform(0, 0.5)
+                        print(f"\n    ⏳ RSS 429 on {url} — retry in {wait:.1f}s", flush=True)
+                        time.sleep(wait)
+                        continue
+                    break
             if resp.status_code != 200:
                 print(f"\n    ⚠ Reddit RSS returned {resp.status_code} for {url}", flush=True)
                 # Only a persistent 403 means the wall expanded to RSS.
@@ -787,12 +802,13 @@ class RedditSearchBot:
             # 100 via a clean IP but ~0 via the worker). When the worker path yields ZERO entries and a
             # residential proxy is available, retry through the clean residential IP and re-parse. Only
             # fires on 0 results (the paid GB is spent exactly where the worker came back empty).
-            if (not results and not used_residential and _has_resi
+            if (not results and not used_residential and not resi_attempted and _has_resi
                     and rss_base != _resi_base):
                 direct_url = _resi_base + url[len(rss_base):]
                 try:
                     presp = requests.get(direct_url, params=params, headers=_resi_headers,
                                          timeout=12, proxies=self._reddit_proxies)
+                    self._count_resi_bytes(presp)
                     if presp.status_code == 200 and presp.text.lstrip()[:5] == "<?xml":
                         _parse_rss_into(presp.text, results)
                         if results:
@@ -1149,6 +1165,8 @@ class RedditSearchBot:
         Returns:
             List of post dicts.
         """
+        if _deadline is None:
+            self._resi_bytes = 0   # FU94: fresh metered-GB tally for this outer search
         # Short-TTL result cache: an identical back-to-back search returns the
         # SAME set instead of re-rolling the rate-limited upstream legs (which
         # is what makes the count swing run-to-run, e.g. 3 then 10). Keyed by
@@ -1258,10 +1276,13 @@ class RedditSearchBot:
             # cloud IPs). Skip it only when the RSS path itself is dead
             # — NOT when _reddit_dead is set (that only reflects the
             # JSON-leg opt-out / block, which RSS bypasses).
-            if api_name == "reddit" and self._reddit_rss_dead:
+            if api_name == "reddit" and self._reddit_rss_dead and not self._resi_active():
                 print(f"    Skipping reddit RSS API (marked dead: {self._reddit_rss_dead_reason})", flush=True)
                 continue
-            if api_name == "reddit" and time.time() < RedditSearchBot._reddit_rss_cooldown_until:
+            if (api_name == "reddit" and not self._resi_active()
+                    and time.time() < RedditSearchBot._reddit_rss_cooldown_until):
+                # FU94: the 429 cooldown protects the WORKER path only — with the residential
+                # PRIMARY available, the RSS leg always runs (this was the run-to-run variance).
                 left = int(RedditSearchBot._reddit_rss_cooldown_until - time.time())
                 print(f"    Skipping reddit RSS API (recently 429'd — cooling down {left}s)", flush=True)
                 continue
@@ -1740,6 +1761,9 @@ class RedditSearchBot:
         # WITHOUT caching, so a transient total failure isn't locked in.
         with RedditSearchBot._result_cache_lock:
             RedditSearchBot._result_cache[cache_sig] = (time.time(), list(result))
+        if _deadline is None and self._resi_bytes:
+            print(f"    [reddit_bot] residential egress ≈ "
+                  f"{self._resi_bytes / 1_048_576:.1f} MB this search", flush=True)
         return result
 
     # Class-level subscriber cache (persists across searches within same process)
@@ -2246,7 +2270,7 @@ class RedditSearchBot:
         # only when the RSS path is dead (REDDIT_RSS_DISABLED or a real
         # RSS 403). Note: this checks _reddit_rss_dead, NOT _reddit_dead
         # — the JSON-leg opt-out must not disable RSS.
-        use_rss = not self._reddit_rss_dead
+        use_rss = (not self._reddit_rss_dead) or self._resi_active()   # FU94
         # Map period of `max_days_old` to a Reddit `t` window. RSS
         # also accepts `t=day/week/month/year/all` for the listings
         # path but not for /new (which is purely chronological).

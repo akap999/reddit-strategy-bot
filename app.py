@@ -952,36 +952,35 @@ def _reddit_comment_meta_via_rss(comment_url, timeout=15):
 
 
 def _reddit_get(path, timeout=15, max_retries=3):
-    """GET a Reddit API path. Three transport modes, in priority order:
+    """GET a Reddit API path. FU94 — FREE path first, metered residential LAST:
 
-    1. Residential HTTP proxy (REDDIT_HTTP_PROXY) — tunnels to
-       old.reddit.com directly through a residential IP + a browser UA.
-       Reddit 403s anonymous www.reddit.com/.json even from residential,
-       but old.reddit.com serves it, so this is the preferred path when set.
-    2. Cloudflare worker (REDDIT_PROXY_URL) — path-rewrite proxy; serves
-       RSS but Reddit 403s its JSON.
-    3. Direct old.reddit.com — last resort.
+    1. Cloudflare worker (REDDIT_PROXY_URL) when set, else direct
+       old.reddit.com — no proxy, costs nothing.
+    2. Residential HTTP proxy (REDDIT_HTTP_PROXY) — ONE fallback attempt at
+       old.reddit.com through the residential IP, only when the free path
+       failed (blocked / HTML / exception). Before FU94 every JSON call was
+       forced through the metered proxy, silently burning GB on check-live
+       stats, subreddit fit/dup checks, user enrichment, etc. — and a dead
+       (out-of-credit) proxy made all of them ~55s doomed calls.
 
     path should start with / e.g. /user/spez/about.json
-    Retries on transient errors (403/429/5xx, HTML-instead-of-JSON).
+    Retries transient errors (403/429/5xx, HTML-instead-of-JSON) on the FREE
+    path; the residential attempt is single-shot.
     """
     import requests as _requests
     import time as _time
-    http_proxies = _reddit_http_proxies()
     proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
-    if http_proxies:
-        # Residential proxy: hit OLD.reddit.com (NOT www) — Reddit 403s anonymous www.reddit.com/.json
-        # even from a residential IP, but old.reddit.com has much lighter bot-blocking and serves the
-        # same JSON. Combined with the browser UA below, this is what actually gets .json through.
-        base = "https://old.reddit.com"
-    else:
-        base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
+    base = proxy.rstrip("/") if proxy else "https://old.reddit.com"
     url = f"{base}{path}"
-    # Browser UA: Reddit serves .json to a residential IP + browser UA where it 403s a bot UA like
-    # REDDIT_USER_AGENT. Harmless on the worker/direct paths, and often helps there too.
+    # Browser UA: Reddit serves .json to a browser UA in places where it 403s a bot UA.
     ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     headers = {"User-Agent": ua, "Accept": "application/json"}
+    no_proxy = {"http": None, "https": None}   # pin the free path off any env HTTP(S)_PROXY
+
+    def _is_json_ok(r):
+        return r is not None and r.status_code == 200 and r.text.lstrip()[:1] != "<"
+
     last_exc = None
     last_resp = None
     for attempt in range(max_retries):
@@ -990,16 +989,19 @@ def _reddit_get(path, timeout=15, max_retries=3):
                 wait = min(2 ** attempt * 2, 15)
                 print(f"[REDDIT_GET] Retry {attempt}/{max_retries-1} in {wait}s for {path}", flush=True)
                 _time.sleep(wait)
-            print(f"[REDDIT_GET] {url} (transport={'residential' if http_proxies else ('worker' if proxy else 'direct')}, attempt={attempt+1})", flush=True)
-            resp = _requests.get(url, headers=headers, timeout=timeout,
-                                 proxies=http_proxies)
+            print(f"[REDDIT_GET] {url} (transport={'worker' if proxy else 'direct'}, "
+                  f"attempt={attempt+1})", flush=True)
+            resp = _requests.get(url, headers=headers, timeout=timeout, proxies=no_proxy)
             # Retry on transient errors
             if resp.status_code in (429, 403, 500, 502, 503, 504) and attempt < max_retries - 1:
                 print(f"[REDDIT_GET] Got {resp.status_code}, will retry", flush=True)
+                last_resp = resp
                 continue
-            # Retry if we got HTML instead of JSON (proxy not updated yet)
+            # Retry if we got HTML instead of JSON (blocked / interstitial)
             if resp.status_code == 200 and resp.text.lstrip()[:1] == "<" and attempt < max_retries - 1:
-                print(f"[REDDIT_GET] Got HTML instead of JSON (Content-Type: {resp.headers.get('Content-Type','')}), will retry", flush=True)
+                print(f"[REDDIT_GET] Got HTML instead of JSON "
+                      f"(Content-Type: {resp.headers.get('Content-Type','')}), will retry", flush=True)
+                last_resp = resp
                 continue
             last_resp = resp
             break
@@ -1007,28 +1009,30 @@ def _reddit_get(path, timeout=15, max_retries=3):
             last_exc = e
             print(f"[REDDIT_GET] {type(e).__name__} on attempt {attempt+1}: {e}", flush=True)
             if attempt >= max_retries - 1:
-                last_resp = None
                 break
 
-    # If the chosen transport returned HTML after all retries, try
-    # old.reddit.com as a fallback (routed through the residential
-    # proxy too when set). old.reddit.com has lighter bot-blocking and
-    # often returns JSON even when www.reddit.com serves HTML/403.
-    if (proxy or http_proxies) and last_resp and last_resp.status_code == 200 and last_resp.text.lstrip()[:1] == "<":
-        fallback_url = f"https://old.reddit.com{path}"
-        print(f"[REDDIT_GET] Got HTML after retries, trying old.reddit.com fallback: {fallback_url}", flush=True)
-        try:
-            fb_resp = _requests.get(fallback_url, headers=headers, timeout=timeout,
-                                    proxies=http_proxies)
-            if fb_resp.status_code == 200 and fb_resp.text.lstrip()[:1] != "<":
-                print(f"[REDDIT_GET] old.reddit.com fallback succeeded (JSON)", flush=True)
-                return fb_resp
-            else:
-                print(f"[REDDIT_GET] old.reddit.com fallback failed (status={fb_resp.status_code}, html={fb_resp.text.lstrip()[:1] == '<'})", flush=True)
-        except Exception as fb_err:
-            print(f"[REDDIT_GET] old.reddit.com fallback error: {fb_err}", flush=True)
+    if _is_json_ok(last_resp):
+        return last_resp
 
-    if last_resp:
+    # FU94 — the free path is blocked/HTML/down: ONE metered residential attempt at
+    # old.reddit.com (lighter bot-blocking than www; the browser UA is what gets .json through).
+    hp = _reddit_http_proxies()
+    if hp.get("http"):
+        fb_url = f"https://old.reddit.com{path}"
+        print(f"[REDDIT_GET] free path failed — residential fallback: {fb_url}", flush=True)
+        try:
+            fb = _requests.get(fb_url, headers=headers, timeout=timeout, proxies=hp)
+            if _is_json_ok(fb):
+                print("[REDDIT_GET] ✓ JSON via residential proxy", flush=True)
+                return fb
+            print(f"[REDDIT_GET] residential fallback failed (status={fb.status_code}, "
+                  f"html={fb.text.lstrip()[:1] == '<'})", flush=True)
+            if last_resp is None:
+                last_resp = fb
+        except Exception as fb_err:
+            print(f"[REDDIT_GET] residential fallback error: {fb_err}", flush=True)
+
+    if last_resp is not None:
         return last_resp
     if last_exc:
         raise last_exc

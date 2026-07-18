@@ -7395,7 +7395,10 @@ function lsMatchKeywords(text, brandId) {
     if (brandId && lower) {
         const brand = _lsBrands.find(b => b.id == brandId);
         if (brand) {
-            const kws = typeof brand.keywords === 'string' ? JSON.parse(brand.keywords || '[]') : (brand.keywords || []);
+            if (brand._kwsParsed === undefined) {   // FU95 lag fix: parse once per brand, not per row per render
+                brand._kwsParsed = typeof brand.keywords === 'string' ? JSON.parse(brand.keywords || '[]') : (brand.keywords || []);
+            }
+            const kws = brand._kwsParsed;
             kws.forEach(kw => { if (kw && lower.includes(kw.toLowerCase()) && !matched.some(m => m.toLowerCase() === kw.toLowerCase())) matched.push(kw); });
         }
     }
@@ -10353,7 +10356,7 @@ async function renderLsSaved(c) {
     const brands = [...new Set(_lsSavedPosts.map(p => p.brand_name).filter(Boolean))];
     c.innerHTML = `
         <div class="flex gap-3 mb-3 items-center flex-wrap">
-            <input id="ls-sp-keyword" placeholder="Filter by keyword..." value="${_lsSavedFilter.keyword}" oninput="_lsSavedFilter.keyword=this.value;lsRenderSavedTable()" class="w-48">
+            <input id="ls-sp-keyword" placeholder="Filter by keyword..." value="${_lsSavedFilter.keyword}" oninput="_lsSavedFilter.keyword=this.value;lsDebouncedSavedRender()" class="w-48">
             <select id="ls-sp-brand" onchange="_lsSavedFilter.brand=this.value;lsRenderSavedTable()" class="w-40">
                 <option value="">All Brands</option>
                 <option value="none" ${_lsSavedFilter.brand==='none'?'selected':''}>No Brand</option>
@@ -10419,12 +10422,23 @@ function _lsSubredditCounts(postsList) {
 }
 
 
+let _lsShowAllSaved = false;
+let _lsSavedRenderT = null;
+function lsDebouncedSavedRender() {   // FU95 lag fix: coalesce keystroke-driven full-table rebuilds
+    clearTimeout(_lsSavedRenderT);
+    _lsSavedRenderT = setTimeout(lsRenderSavedTable, 250);
+}
 function lsRenderSavedTable() {
     const el = document.getElementById('ls-saved-table');
     if (!el) return;
-    const filtered = lsGetFilteredSaved();
-    if (!filtered.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
-    el.innerHTML = `
+    const filteredAll = lsGetFilteredSaved();
+    if (!filteredAll.length) { el.innerHTML = '<p class="text-gray-500 py-2">No posts match filters.</p>'; return; }
+    const CAP = 300;   // FU95 lag fix: a thousands-row innerHTML rebuild froze the tab
+    const filtered = _lsShowAllSaved ? filteredAll : filteredAll.slice(0, CAP);
+    const capNote = (!_lsShowAllSaved && filteredAll.length > CAP)
+        ? `<p class="text-xs text-gray-400 py-2">Showing ${CAP} of ${filteredAll.length} posts — refine the filters, or <a href="#" onclick="_lsShowAllSaved=true;lsRenderSavedTable();return false" style="color:#0079D3">show all</a>.</p>`
+        : '';
+    el.innerHTML = capNote + `
         <table>
             <thead><tr><th style="width:30px"></th><th>Title</th><th>Keywords</th><th>Subreddit</th><th>Score</th><th>Brand</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>${filtered.map(p => {
@@ -10441,7 +10455,7 @@ function lsRenderSavedTable() {
                     <td><span class="badge ${p.status==='complete'?'badge-complete':p.status==='generating'?'badge-assigned':p.status==='irrelevant'?'badge-removed':'badge-draft'}">${p.status}</span></td>
                     <td class="flex gap-2">
                         ${p.status==='irrelevant' ? `<span class="text-xs" style="color:#ff6b6b">Not relevant</span>` : p.brand_id ? `<button class="btn btn-accent btn-sm" onclick="lsGenerate(${p.id})" ${p.status==='generating'?'disabled':''}>Generate</button><button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})" title="Change brand for this post">Change Brand</button>` : `<button class="btn btn-secondary btn-sm" onclick="lsSetBrand(${p.id})">Set Brand</button>`}
-                        <button class="btn btn-danger btn-sm" onclick="lsDeletePost(${p.id})">Del</button>
+                        <button class="btn btn-danger btn-sm" onclick="lsDeleteSavedPost(${p.id})">Del</button>
                     </td>
                 </tr>`;
             }).join('')}</tbody>
@@ -10692,6 +10706,13 @@ async function lsImportByUrl() {
     } catch(e) {}
 }
 
+let _lsTabRenderT = null;
+function lsScheduleTabRender() {   // FU95 lag fix: N chained generations each forced a full
+    // tab re-fetch + rebuild; coalesce bursts into one render.
+    clearTimeout(_lsTabRenderT);
+    _lsTabRenderT = setTimeout(renderLsTabContent, 400);
+}
+
 async function lsGenerate(postId) {
     const numComments = parseInt(document.getElementById('ls-num-comments')?.value) || 2;
     const mode = _lsGenMode();
@@ -10702,7 +10723,7 @@ async function lsGenerate(postId) {
     try {
         const { task_id } = await api(url, { method: 'POST', body: { num_comments: numComments } });
         _addBgTask(task_id, mode === 'hq' ? 'Search HQ' : 'Search Comments');
-        renderLsTabContent();
+        lsScheduleTabRender();
         const poll = setInterval(async () => {
             try {
                 const t = await api(`/api/tasks/${task_id}`);
@@ -10714,19 +10735,21 @@ async function lsGenerate(postId) {
                     } else {
                         toast(`Generated ${t.result.generated} comments (relevance: ${t.result.relevance_score}/10)`, 'success');
                     }
-                    renderLsTabContent();
+                    lsScheduleTabRender();
                 } else if (t.status === 'error') {
                     clearInterval(poll);
                     _removeBgTask(task_id);
                     toast(`Generation failed: ${t.error}`, 'error');
-                    renderLsTabContent();
+                    lsScheduleTabRender();
                 }
             } catch(e) { clearInterval(poll); _removeBgTask(task_id); }
         }, 3000);
     } catch(e) {}
 }
 
-async function lsDeletePost(postId) {
+async function lsDeleteSavedPost(postId) {   // FU95 fix: was `lsDeletePost`, silently
+    // OVERRIDDEN by the Comments-tab function of the same name (later definition wins) —
+    // the Saved-tab Del button ran the wrong code and the row never disappeared.
     if (!confirm('Delete this post and all its generated comments?')) return;
     try {
         await api(`/api/search/posts/${postId}`, { method: 'DELETE' });
@@ -13700,7 +13723,7 @@ async function lsUnarchivePost(postId) {
 }
 
 async function lsDeletePost(postId) {
-    const postComments = _lsComments.filter(c => c.search_post_id == postId && c.status !== 'deleted');
+    const postComments = (_lsComments || []).filter(c => c.search_post_id == postId && c.status !== 'deleted');
     if (!confirm(`Delete this post and all ${postComments.length} comment(s)? This cannot be undone.`)) return;
     try {
         await api(`/api/search/posts/${postId}`, { method: 'DELETE' });

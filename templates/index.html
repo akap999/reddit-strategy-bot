@@ -12633,6 +12633,7 @@ async function openBlog(id) {
     // FU80 — YouTube package render vars (chapters / shot-list / thumbnail / cta come from youtube_meta).
     const _ytMeta = b.youtube_meta || {};
     const _ytVariant = _ytMeta.variant || 'question';
+    const _ytDuration = _ytMeta.duration_min || '';   // FU97: prefill the target-length input
     const _ytChapters = (_ytMeta.chapters || []).map(c => `${_blogEsc(c.ts || '00:00')} — ${_blogEsc(c.question || '')}`).join('<br>');
     const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
     const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
@@ -12702,6 +12703,7 @@ async function openBlog(id) {
                             <option value="question"${_ytVariant === 'question' ? ' selected' : ''}>Same question</option>
                             <option value="demo"${_ytVariant === 'demo' ? ' selected' : ''}>How-to / demo</option>
                         </select>
+                        <input id="blog-e-yt-duration" type="number" min="1" max="30" value="${_ytDuration}" placeholder="min" class="text-xs" style="width:52px" title="Target length in minutes (optional — blank = auto). The script is written to this budget; the mandatory structure (answer-first, prompt language, claims parity, honest tradeoffs) is never cut to fit.">
                         <button class="btn btn-sm" style="background:#14532d;color:#bbf7d0" onclick="blogGenYouTube(${id})">✨ Generate YouTube package</button>
                     </div>
                 </div>
@@ -12864,7 +12866,8 @@ function _youtubePersonaPick() {
 function blogGenYouTube(id) {
     const persona = (document.getElementById('blog-e-yt-persona')?.value || '').trim();
     const variant = (document.getElementById('blog-e-yt-variant')?.value || 'question');
-    runTask(`/api/blogs/${id}/youtube-script`, { persona, variant }, (res) => {
+    const duration_min = parseInt(document.getElementById('blog-e-yt-duration')?.value) || 0;   // FU97
+    runTask(`/api/blogs/${id}/youtube-script`, { persona, variant, duration_min }, (res) => {
         openBlog(id);
         _blogCostToast(res);
     }, 'Generating YouTube package');

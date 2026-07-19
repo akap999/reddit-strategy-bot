@@ -2251,6 +2251,10 @@ def api_blog_youtube_script(blog_id):
     variant = (data.get("variant") or "question").strip().lower()
     if variant not in ("question", "demo"):
         variant = "question"
+    try:   # FU97: operator-set target length in minutes (0/blank/garbage = model-decided, as today)
+        duration_min = max(0, min(30, int(data.get("duration_min") or 0)))
+    except (TypeError, ValueError):
+        duration_min = 0
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 
     def task(_task_id=None):
@@ -2272,7 +2276,8 @@ def api_blog_youtube_script(blog_id):
                 {"title": blog.get("title") or "", "body_markdown": blog.get("body_markdown") or ""},
                 persona_voice=persona, disclosure=disclosure,
                 target_query=(blog.get("seed") or "").strip(), variant=variant,   # FU61 anchor
-                geo=(blog.get("geo") or "").strip())                              # FU91 geo focus
+                geo=(blog.get("geo") or "").strip(),                              # FU91 geo focus
+                duration_min=duration_min)                                        # FU97 target length
             if not pkg or not pkg.get("script"):
                 raise ValueError(claude.last_error or "YouTube script generation failed")
             cost = round(claude.usage_cost(), 4)
@@ -2574,7 +2579,11 @@ def api_blog_export(blog_id):
             link_line = (f"⚠ {unresolved} unresolved {{link}} placeholder(s) — publish the blog's "
                          f"website URL (or paste the link) before upload"
                          if unresolved else "✓ all links resolved")
+            _yt_dur = yt_meta.get("duration_min")   # FU97: guarded — old packages have no key
+            _dur_line = (f"- [ ] Target length: ~{int(_yt_dur)} min (the script was written to this "
+                         f"budget)\n" if _yt_dur else "")
             md_src += ("\n## Upload settings & checklist\n\n"
+                       + _dur_line +
                        f"- [ ] Links: {link_line}\n"
                        "- [ ] Upload the corrected captions transcript above (don't trust auto-captions "
                        "with brand / license terms)\n"

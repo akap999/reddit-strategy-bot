@@ -1908,7 +1908,7 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         return re.sub(r"(?:https?://)?(?:www\.|old\.|np\.|m\.)?reddit\.com/\S+", "", text)
 
     def generate_youtube_script(self, brand, article, persona_voice="", disclosure="",
-                                target_query="", variant="question", geo=""):
+                                target_query="", variant="question", geo="", duration_min=0):
         """FU80 — turn a saved blog into a full YouTube video PACKAGE (script + title + description +
         chapters + a corrected caption transcript + a demo shot-list + thumbnail text + end-screen CTA),
         in the same-facts / DIFFERENT-voice model as `generate_linkedin_article`. Every spoken claim is
@@ -1964,6 +1964,26 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
                         f"blog's {rgeo}-specific coverage/compliance facts in the script (never "
                         f"genericized, never hedged — no 'unverified' / 'coverage unknown'); "
                         f'include {rgeo} terms in `tags`.')
+        # FU97 — operator-set target duration. 0 = today's model-decided length (byte-identical
+        # prompt + token cap). Length is a WORD BUDGET only: the package's mandatory structure is
+        # explicitly non-negotiable, so a short target compresses segments, never the purpose.
+        try:
+            dm = max(0, min(30, int(duration_min or 0)))
+        except (TypeError, ValueError):
+            dm = 0
+        duration_rule = ""
+        if dm:
+            words = dm * 145   # ~conversational YouTube pace
+            duration_rule = (
+                f"\n  - TARGET LENGTH: about {dm} minute{'s' if dm != 1 else ''} spoken "
+                f"≈ {words} words (±10%) for `script_markdown` — plan the SEGMENT COUNT to fit. "
+                f"NON-NEGOTIABLE AT ANY LENGTH (compress by using FEWER/LEANER segments and less "
+                f"elaboration, NEVER by dropping these): the answer-first opening, the spoken "
+                f"target-prompt language + section-transition questions, the claims discipline, "
+                f"and the honest-tradeoffs segment. For 3 minutes or less use the tightest viable "
+                f"structure: answer → one comparison segment → tradeoffs → CTA. Spread the "
+                f"`chapters` ts estimates realistically across ~{dm} minutes. "
+                f"`captions_transcript` still covers the FULL spoken script.")
 
         prompt = f"""{presenter}Turn the SOURCE BLOG below into a YouTube video PACKAGE for {name}.
 This is a DIFFERENT surface from the blog: SAME FACTS, DIFFERENT WORDS AND STRUCTURE — never narrate the
@@ -1997,7 +2017,7 @@ SCRIPT (`script_markdown`)
     vendor-sourced stat is attributed as yours ("our internal numbers show"), never "reports confirm".
   - YMYL: if this is a health/finance topic, name a credentialed presenter/reviewer on screen and in the
     description, and make NO off-label or ahead-of-evidence claims.
-  - Structure the script in clear SEGMENTS with a spoken transition question at the top of each.
+  - Structure the script in clear SEGMENTS with a spoken transition question at the top of each.{duration_rule}
 
 DESCRIPTION SUPPORT — also return, so the description + captions can be assembled:
   - `mini_answer`: 2-3 sentences that DIRECTLY answer the title's question in the prompt's language
@@ -2026,7 +2046,10 @@ Return JSON only:
   "chapters": [{{"question": "", "ts": ""}}], "captions_transcript": "",
   "shot_list": [], "thumbnail_text": "", "cta": "",
   "pinned_comment": "", "tags": [], "category": ""}}"""
-        res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
+        # FU97 — captions duplicate the script, so a long target would overflow a fixed 6000-token
+        # cap and truncate the JSON; scale the budget with the duration (floor 6000, cap 16000).
+        _max_tok = 6000 if not dm else max(6000, min(16000, int(dm * 145 * 2 * 1.4) + 1500))
+        res = self.claude.call(prompt, max_tokens=_max_tok, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("script_markdown") or "").strip():
             return {}
         chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
@@ -2058,6 +2081,8 @@ Return JSON only:
             "tags": tags,
             "category": (res.get("category") or "").strip(),
         }
+        if dm:
+            meta["duration_min"] = dm   # FU97: shown in the export checklist + prefills the UI
         return {
             "title": (res.get("title") or "").strip(),
             "script": self._youtube_scrub((res.get("script_markdown") or "").strip()),

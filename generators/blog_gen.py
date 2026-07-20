@@ -316,6 +316,19 @@ class BlogGenerator:
                 out.append({"label": f"third-party · {s.get('title') or url}",
                             "url": url, "text": fact[:_EVIDENCE_TEXT_CAP]})
 
+        # FU98 — peer discovery, SUBJECT only: the writer needs REAL same-type competitors to
+        # name (the model defaults to famous SaaS tools it already knows). One brief, ~2 searches.
+        if (subject or "").strip():
+            pbrief = (f'Find the DIRECT COMPETITORS of "{subject}"' + (f' ({cat})' if cat else "")
+                      + '. Return real competing providers of the SAME TYPE serving the same market '
+                        "— each competitor's NAME, its OWN website URL, and one concrete fact about "
+                        "it. NOT the brand's own site; no 'best of' listicles from content farms; "
+                        "no negative roundups.")
+            try:
+                _take(self.claude.search_sources(pbrief, max_searches=2,
+                                                 blocked_domains=own_domains))
+            except Exception as e:
+                print(f"[blog_gen] peer-discovery search skipped: {e}", flush=True)
         for nm in brands:
             for ang in angles:
                 if len(out) >= _MAX_WEB_SOURCES:
@@ -1011,10 +1024,13 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
     geography/qualifier must DELIVER genuinely specific substance directly under it.
   - REQUIRED SUBSTANCE — at least 2-3 sections (or major section-parts) that are ONLY true for this
     geography/qualifier, i.e. what is actually DIFFERENT about the topic THERE:
-      • the applicable REGULATORY / COMPLIANCE regime, NAMED concretely (e.g. for US HR software:
-        multi-state payroll tax, W-2/1099 handling, ACA reporting, 401(k) administration, I-9
-        verification, state leave-law variance in CA/NY as evaluation criteria — the equivalents for
-        whatever the topic and geography actually are);
+      • the applicable REGULATORY / COMPLIANCE regime, NAMED concretely — MULTIPLE named
+        provisions/rules, EACH with its ACTUAL stated implication for the topic (what it CHANGES
+        about how the reader should act — e.g. for US HR software: multi-state payroll tax,
+        W-2/1099 handling, ACA reporting, I-9 verification, state leave-law variance as evaluation
+        criteria; the equivalents for whatever the topic and geography actually are). NEVER a single
+        one-sentence nod. The geography/qualifier sections together should carry roughly 250+ words
+        of substance that is ONLY true for this variant;
       • local standards / certifications buyers there expect;
       • which of the compared options are native / strong / available in that geography — ONLY from the
         EVIDENCE, never an invented vendor claim. When the EVIDENCE has nothing geo-specific for an
@@ -1040,6 +1056,14 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     as a fit. (AI engines lift this as the extractable answer.)
   - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
+  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
+    platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
+    MULTIPLE real entities of THAT type — {name}'s direct competitors — profiled fairly with their
+    genuine wins credited; {name} wins on its actual differentiators, never by default. A DIFFERENT
+    entity type (e.g. self-serve tools when AGENCIES are asked for) may appear ONLY as a
+    clearly-labeled supplementary category and NEVER substitutes for peers. A page where {name} is
+    the only entity of the asked-for type is a self-crowning comparison that answer engines discount
+    and readers distrust — do not ship it.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
@@ -1236,6 +1260,9 @@ Return JSON only:
     Include ONLY tools that perform the article's CORE function ({cat or "the subject's product type"}) —
     EXCLUDE tools of a different product type (e.g. a video-only generator when the article is about music
     generators); those don't belong in the comparison.
+  - PEER_TOOLS (FU98): the subset of TOOLS that are the SAME TYPE of entity the article's title asks
+    for (competing AGENCIES for a "best agencies" title, competing PLATFORMS for a platforms title) —
+    a tool is NOT a peer of an agency even in the same space.
   - DIMENSIONS: the comparison columns / attributes being compared (e.g. pricing, commercial license,
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
@@ -1253,11 +1280,26 @@ Return JSON only:
 ARTICLE:
 {body[:6000]}
 
-Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
+Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["..."], "core_topic": "",
   "claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
         cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
         cres = cres if isinstance(cres, dict) else {}
         core_topic = str(cres.get("core_topic") or "").strip()
+        # FU98 — peer-field check (warning only, rides the geo_warning toast): a "best/top <type>"
+        # title where the comparison has <2 same-type competitors is the self-crowning pattern.
+        self._peer_note = ""
+        _m_bt = re.search(r"\b(?:best|top)\s+[\w /&-]*?(agencies|platforms|tools|companies|"
+                          r"providers|services|firms|clinics|apps|software|retailers|vendors)\b",
+                          seed or "", re.I)
+        if _m_bt:
+            _peers = [str(t).strip() for t in (cres.get("peer_tools") or [])
+                      if str(t).strip() and str(t).strip().lower() != name.lower()]
+            if len(_peers) < 2:
+                self._peer_note = (f"peer-check: 'best {_m_bt.group(1)}' title but only "
+                                   f"{len(_peers)} same-type competitor(s) in the comparison — "
+                                   f"possible self-crowning field; name real competing "
+                                   f"{_m_bt.group(1)}")
+                print(f"[blog_gen] {self._peer_note}", flush=True)
         tools = [str(t).strip() for t in (cres.get("tools") or [])
                  if str(t).strip() and str(t).strip().lower() != name.lower()]
         dims = [str(d).strip() for d in (cres.get("dimensions") or []) if str(d).strip()]
@@ -1563,7 +1605,9 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
     tool, keep its GENERAL sourced facts (cited as usual) and keep the WRITING geo-focused — apply the
     {rgeo} evaluation criteria and framing to them. NEVER write hedge language about missing geo sourcing
     ("unverified", "coverage unknown", "not confirmed for {rgeo}") and NEVER invent a {rgeo} coverage
-    claim. Geography-specific FAQ entries and evaluation criteria MUST survive this rewrite."""
+    claim. Each geography-specific section must KEEP multiple concrete, NAMED local provisions/facts
+    with their stated implications — compressing a geo section to a one-line nod is the doorway
+    pattern. Geography-specific FAQ entries and evaluation criteria MUST survive this rewrite."""
         # FU93 — qualifier variant protection: the qualifier is the page's reason to exist; the
         # reconcile (the LAST writer) must never dilute its sections into a restatement of the
         # subject's own terms.
@@ -1574,7 +1618,8 @@ Return JSON only: {{"tools": ["..."], "dimensions": ["..."], "core_topic": "",
   - QUALIFIER VARIANT: this article targets "{rqual}" — that is the page's reason to exist. PRESERVE
     and STRENGTHEN the sections explaining the {rqual} MECHANISM itself (options/structures, terms,
     what is evaluated, the governing tax/regulatory angle); never dilute them into a restatement of
-    {name}'s own terms. {rqual}-specific FAQ entries MUST survive this rewrite."""
+    {name}'s own terms — each must keep multiple concrete named facts with their implications, never a
+    one-line nod. {rqual}-specific FAQ entries MUST survive this rewrite."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -1649,7 +1694,11 @@ COMPLETE and every stated fact is sourced:
     returns infrastructure) plainly — an honest ledger is what earns the citation.
   - Never STRENGTHEN a conditioned commerce claim by dropping its condition — keep "on qualifying
     purchases" / "in most states" / "up to $N" attached EVERYWHERE the claim is restated, including the
-    Quick answer.{geo_rules}{qual_rules}
+    Quick answer.
+  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
+    comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
+    a supplementary category, and NEVER remove same-type competitors so that {name} becomes the only
+    one of its type.{geo_rules}{qual_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -2222,6 +2271,10 @@ Return JSON only:
             print(f"[blog_gen] {cnote}", flush=True)
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), cnote] if x)
+        _pn = getattr(self, "_peer_note", "")
+        if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _pn] if x)
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.

@@ -2094,11 +2094,18 @@ async function saveBrandContext(brandName) {
     const focus = focusRaw.split(/\n+/).map(s => s.trim()).filter(Boolean);
 
     // Blog byline + competitor domains (EEAT / evidence sourcing).
+    // The textarea is AUTHORITATIVE for the whole competitor set: it saves BOTH the names
+    // list (`competitors`) and the name→domain map (`competitor_domains`). Previously only
+    // the map was sent, so a deleted competitor's NAME survived in `competitors` and the
+    // union-render resurrected it on every reopen (and it stayed a blog-evidence target).
     const _val = id => (document.getElementById(id)?.value || '').trim();
     const competitor_domains = {};
+    const competitor_names = [];
     (_val('edit-brand-compdomains')).split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
         const [name, dom] = line.split('|').map(x => (x || '').trim());
-        if (name && dom) competitor_domains[name] = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        if (!name) return;
+        if (!competitor_names.some(n => n.toLowerCase() === name.toLowerCase())) competitor_names.push(name);
+        if (dom) competitor_domains[name] = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     });
 
     const allBrands = _brandsViewState._allBrands || [];
@@ -2123,6 +2130,7 @@ async function saveBrandContext(brandName) {
             reviewer_title: _val('edit-brand-reviewer-title'),
             disclosure: _val('edit-brand-disclosure'),
             logo_url: _val('edit-brand-logo'),
+            competitors: competitor_names,
             competitor_domains,
         }});
     }

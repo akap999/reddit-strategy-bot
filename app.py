@@ -4024,14 +4024,16 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                 db.set_search_comment_live_check(item["id"])
 
     def _resolve_live_or_orphaned(item, clean_url, via):
-        """A comment can be 'live' on its own permalink yet sit under a REMOVED
-        post (mod-removed posts keep their comment tree, so the comment shell
-        survives). That comment isn't surfaced in the sub → treat it as dead.
-        Confirms the parent post before accepting a 'live' verdict."""
+        """HQ ('comment' source) ONLY: a comment can be 'live' on its own permalink
+        yet sit under a REMOVED post (mod-removed posts keep their comment tree, so
+        the comment shell survives) — confirm the parent post before accepting a
+        'live' verdict. FU99 (user decision): Live Search MENTIONS ('search_comment')
+        are judged on the COMMENT's own liveness ONLY — no parent-post consideration
+        (also saves one RSS fetch per live mention)."""
         nonlocal live, dead
         src = item.get("source", "comment")
-        parent = _parse_comment_url(clean_url)[0]
-        if parent and _post_liveness_via_rss(parent) == "removed":
+        parent = _parse_comment_url(clean_url)[0] if src == "comment" else None
+        if src == "comment" and parent and _post_liveness_via_rss(parent) == "removed":
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (parent post gone; comment was {via}-live)", flush=True)
             if _mark_dead(item): dead += 1
         else:

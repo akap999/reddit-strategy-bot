@@ -7852,6 +7852,10 @@ function renderLsubsGenerate(c) {
                     <input type="checkbox" id="lsubs-general">
                     🧑 General mode <span class="text-gray-600">(natural human phrasing — still targets the prompt; much harder to auto-remove)</span>
                 </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Anti-fingerprint texture for Reddit's LLM detection (July 2026): forced sentence-rhythm variance, one concrete specific per post, skeleton + length rotation across the batch, single-use phrasing, varied title formats, controlled imperfections. Stacks with General mode; retrieval targeting unchanged.">
+                    <input type="checkbox" id="lsubs-entropy">
+                    🎲 Anti-fingerprint style <span class="text-gray-600">(max human variance — for Reddit's AI-content detection; opt-in, stacks with General mode)</span>
+                </label>
                 <label class="text-xs text-gray-400 block" style="flex-basis:100%">
                     Observed fan-out queries <span class="text-gray-600">(optional — paste the REAL fanned-out queries you captured from ChatGPT/Perplexity/Gemini, one per line; each is region-classified and added only if its region is new)</span>
                     <textarea id="lsubs-observed" rows="2" class="w-full text-xs mt-1"
@@ -8153,12 +8157,14 @@ async function lsubsGeneratePosts(force = false) {
     const seed = (document.getElementById('lsubs-seed')?.value || '').trim();
     const aiSearch = !!document.getElementById('lsubs-ai-search')?.checked;
     const general = !!document.getElementById('lsubs-general')?.checked;
+    const entropy = !!document.getElementById('lsubs-entropy')?.checked;   // FU101
     const observed = (document.getElementById('lsubs-observed')?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
     if (seed) reqBody.seed = seed;
     if (aiSearch) reqBody.ai_search = true;
     if (general) reqBody.general = true;
+    if (entropy) reqBody.entropy = true;   // FU101
     if (aiSearch && observed.length) reqBody.observed_queries = observed;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
@@ -8315,7 +8321,11 @@ function lsubsShowCustomModal() {
         </div>
         <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer mt-2">
             <input type="checkbox" id="lsubs-custom-general">
-            🧑 General mode <span class="text-gray-600">(rewrite my title into a natural human style)</span>
+            🧑 General mode <span class="text-gray-600">(natural human style for the BODY — your title is used verbatim)</span>
+        </label>
+        <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer mt-1" title="Anti-fingerprint texture for Reddit's LLM detection: sentence-rhythm variance, one concrete specific, broken paragraph logic, controlled imperfections — body only; your title is used verbatim.">
+            <input type="checkbox" id="lsubs-custom-entropy">
+            🎲 Anti-fingerprint style <span class="text-gray-600">(body only — your title is used verbatim)</span>
         </label>
         <div class="flex gap-2 mt-4 justify-end">
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -8329,19 +8339,20 @@ async function lsubsSubmitCustom(force) {
     const topic = (document.getElementById('lsubs-custom-topic')?.value || '').trim();
     if (!topic) { toast('Enter a topic', 'error'); return; }
     const general = !!document.getElementById('lsubs-custom-general')?.checked;
+    const entropy = !!document.getElementById('lsubs-custom-entropy')?.checked;   // FU101
 
     let res;
     try {
         res = await api('/api/live-posts/custom', {
             method: 'POST',
-            body: { brand_id: bid, subreddit_name: sub, topic, force, general }
+            body: { brand_id: bid, subreddit_name: sub, topic, force, general, entropy }
         });
     } catch (e) {
         try {
             const r = await fetch('/api/live-posts/custom', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force, general })
+                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force, general, entropy })
             });
             if (r.status === 409) {
                 const d = await r.json();

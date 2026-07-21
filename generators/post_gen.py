@@ -120,6 +120,48 @@ the target brand).
   • Do NOT reuse any fixed phrasing or structure; vary naturally across the batch.
 """
 
+# FU101 — OPT-IN anti-fingerprint overlay (Reddit's July-2026 LLM detection analyzes stylistic
+# patterns: "repeated phrasal structures, unnatural semantic coherence", posting cadence, account
+# clusters). This block adds HUMAN ENTROPY on top of whatever mode is active. Principles + negative
+# constraints ONLY — deliberately NO sample sentences (samples get cloned into output).
+_ENTROPY_STYLE_BLOCK = """
+ANTI-FINGERPRINT MODE (applies ON TOP of everything above — retrieval keywords, the
+recommendation ask, and every prior rule still hold; this changes TEXTURE only):
+  • SENTENCE-LENGTH VARIANCE (the strongest stylometric signal): never write 3 sentences of
+    similar length in a row. Follow a long winding sentence with a fragment of 2-5 words.
+    Uniform rhythm is the machine tell.
+  • EXACTLY ONE messy, concrete specific per post — a model/part family, a year, a quantity,
+    a timeframe, a cost ballpark — TRUE or clearly plausible for the persona, never invented
+    precision. It replaces one polished category phrase; do not stack several specifics.
+  • MAX ONE polished category noun-phrase per paragraph. Every other key term appears inside
+    the person's own casual phrasing, mid-sentence, never as a listed capability.
+  • BREAK the paragraph logic ONCE: one out-of-order thought, or a short parenthetical aside
+    mid-flow. Paragraphs must NOT each perform exactly one tidy job in sequence
+    (situation → requirements → concern → ask is the generated-post skeleton — disrupt it).
+  • OPENER: never start with "I'm/We're a <role> and…". Open mid-problem, with the earlier
+    failure, with the question itself, or with a detail — vary it every time.
+  • The ASK does not have to close the post — it may lead, sit mid-post, or stay implicit.
+  • BAN balanced three-item lists with matching rhythm ("X, Y, and Z" with parallel shapes).
+    Use two items, four, or a lopsided list.
+  • ONE line of genuine mood somewhere (frustration, fatigue, relief) — not neutral
+    reporting throughout.
+  • NUMBERS formatted like a human types them, inconsistently within the post ("40+ weeks",
+    "10 companies", a rounded cost with a suffix) — never uniformly styled figures.
+  • 0-2 IMPERFECTIONS of VARIED kind (a typo, a missing hyphen, inconsistent capitalization
+    of the same word, a comma splice). Never the same imperfection type twice in the batch —
+    a repeated signature typo is itself a fingerprint.
+WHEN GENERATING MULTIPLE POSTS in this batch, ALSO:
+  • ROTATE structural skeletons — no two posts share a shape. Draw from: very short + blunt
+    (2-4 sentences); failure-story-led; question-first then context; rambling with a trailing
+    "EDIT:" clarification; the standard multi-paragraph shape (use that one at most once).
+  • VARY LENGTH HARD across the batch — from ~40 words up to ~250; never a batch of
+    similar-length posts.
+  • Distinctive collocations are SINGLE-USE — no vivid phrase appears in two posts.
+  • VARY the title format across the batch (clean question / statement then question /
+    lowercase / with or without a question mark) — no house style.
+  • Alternate I vs we, and the register (pragmatic / irritated / matter-of-fact) across posts.
+"""
+
 
 class PostGenerator:
     def __init__(self, claude: ClaudeClient, db: Database):
@@ -130,7 +172,7 @@ class PostGenerator:
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
                        ai_search=False, observed_queries=None, target_rewrites=None,
-                       follow_persona=False, persona=None, general=False):
+                       follow_persona=False, persona=None, general=False, entropy=False):
         """Generate GEO-style posts (posts NEVER mention target brands).
 
         `ai_search` (optional, default False): the new AI-Search semantic-coverage
@@ -419,7 +461,8 @@ class PostGenerator:
                         self._select_storylines_from_dist(merged_dist, 1),
                         existing_titles, 2, context_only=context_only,
                         seed_focus=None, coverage_focus=single_focus, facet_targets=None,
-                        follow_persona=follow_persona, persona_override=None, general=general)
+                        follow_persona=follow_persona, persona_override=None, general=general,
+                        entropy=entropy)
                     if not cands:
                         print(f"[post_gen] AI-Search: no candidate for region «{gap_q[:60]}» — gap left open")
                         continue
@@ -473,6 +516,7 @@ class PostGenerator:
                 facet_targets=facet_targets,
                 follow_persona=follow_persona, persona_override=persona_override,
                 general=general,
+                entropy=entropy,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -703,14 +747,13 @@ strings, in the SAME order as above."""
         return posts
 
     def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None,
-                                 general=False):
+                                 general=False, entropy=False):
         """Live Subreddits — flesh out one full post from a user-supplied title.
 
-        The user-supplied `topic` is the FINAL post title, used verbatim — UNLESS
-        `general=True`, in which case the LLM REWRITES it into the natural-human
-        "general mode" style (keeping its EXACT target + recommendation ask, just
-        stripping markety/headline phrasing). The LLM writes the body, storyline,
-        and intent (and, in general mode, the rewritten title too).
+        The user-supplied `topic` is the FINAL post title, used VERBATIM — ALWAYS
+        (FU101, user decision: general mode no longer rewrites it). `general` and
+        `entropy` (the FU101 anti-fingerprint overlay) style the BODY only; the
+        title is prompt-locked AND code-enforced.
 
         Reuses the same brand-context scaffolding as `generate_posts` but:
         - num_posts = 1
@@ -757,32 +800,27 @@ strings, in the SAME order as above."""
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
         storylines_list = ", ".join(STORYLINE_TYPES.keys())
 
-        if general:
-            title_directive = f'''The USER'S SUPPLIED TITLE below is the TARGET the post must answer — REWRITE it
-into a natural, human recommendation question per GENERAL MODE (below). Keep its
-EXACT target/ask (the same product / need / recommendation it is about) and keep it
-a recommendation question a helpful AI would answer by NAMING a specific product /
-service — only strip marketer / headline phrasing and make it read like a real
-person typed it. Strip polished product-category nouns ("AI platform / tool /
-generator"), rhetorical "which one actually…?" framing, and capability-stacking
-(express a bundle via the PAIN, not "X and Y"). Do NOT drift to a different topic.
-
-USER'S SUPPLIED TITLE (rewrite into the general style; keep its target):
-\"\"\"{final_title}\"\"\"
-{_GENERAL_STYLE_BLOCK}'''
-            title_json_field = '    "title": "the rewritten natural-human title — still a recommendation question targeting the SAME thing",\n'
-            json_note = ""
-        else:
-            title_directive = f'''The TITLE is FIXED — it is the user's exact text. Do NOT rewrite,
+        # FU101 (user decision): the typed title is FIXED in EVERY mode — general/entropy
+        # style the BODY only. Prompt-locked here, code-enforced at the return.
+        title_directive = f'''The TITLE is FIXED — it is the user's exact text. Do NOT rewrite,
 shorten, expand, paraphrase, or improve the title in any way. Your job
 is ONLY to write a body, storyline, and intent that fit this title.
 
 POST TITLE (FIXED — use exactly as given, do not modify):
 \"\"\"{final_title}\"\"\"'''
-            title_json_field = ""
-            json_note = " (note: NO \"title\" field — the title is fixed and we will use the user's input verbatim)"
+        if general:
+            title_directive += (
+                "\n\nGENERAL MODE — applies to the BODY ONLY (the title above stays exactly as "
+                "given; IGNORE the TITLE bullets in the block below):\n" + _GENERAL_STYLE_BLOCK)
+        if entropy:
+            title_directive += (
+                "\n\nANTI-FINGERPRINT MODE — applies to the BODY ONLY (the title above stays "
+                "exactly as given; IGNORE any title/batch bullets in the block below):\n"
+                + _ENTROPY_STYLE_BLOCK)
+        title_json_field = ""
+        json_note = " (note: NO \"title\" field — the title is fixed and we will use the user's input verbatim)"
 
-        prompt = f"""Write {'a Reddit post (title + body)' if general else 'the BODY of a Reddit post'} for r/{subreddit['name']}.
+        prompt = f"""Write the BODY of a Reddit post for r/{subreddit['name']}.
 
 {title_directive}
 
@@ -856,18 +894,14 @@ Return JSON only{json_note}:
         if intent not in INTENT_TYPES:
             intent = "informational"
 
-        # In general mode the model returns a rewritten (natural-human) title; fall
-        # back to the user's input if it didn't. Non-general = verbatim, as before.
+        # FU101: the user's typed title is CODE-ENFORCED verbatim in every mode — even if the
+        # model returns a "title" field, it is ignored.
         out_title = final_title
-        if general:
-            _rw = (result.get("title") or "").strip()
-            if _rw:
-                out_title = _rw
 
         ai_score = self._score_ai_query_relevance(out_title, body)
 
         return {
-            "title": out_title,  # verbatim (non-general) or the general-style rewrite
+            "title": out_title,  # ALWAYS the user's exact input
             "body": body,
             "storyline": storyline,
             "intent": intent,
@@ -1928,7 +1962,7 @@ Return JSON only: {{"body": "the new post body"}}"""
                                         existing_titles, count, context_only=False,
                                         seed_focus=None, coverage_focus=None,
                                         facet_targets=None, follow_persona=False,
-                                        persona_override=None, general=False):
+                                        persona_override=None, general=False, entropy=False):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -2342,7 +2376,10 @@ tool / generator"), no capability-stacking (express a bundle via the PAIN, not "
 still weaves in every relevant keyword naturally.
 """
 
-        prompt = header + intent_tail + general_tail + json_tail
+        # FU101: the anti-fingerprint overlay also sits at the END (recency wins); only when
+        # opted in — otherwise the prompt is byte-identical.
+        entropy_tail = _ENTROPY_STYLE_BLOCK if entropy else ""
+        prompt = header + intent_tail + general_tail + entropy_tail + json_tail
         result = self.claude.call(prompt, max_tokens=4000, temperature=0.9)
         if not result or "posts" not in result:
             return []

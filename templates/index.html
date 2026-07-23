@@ -7356,6 +7356,7 @@ let _lsBrands = [];
 let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
 let _lsRankedByPrompt = undefined;   // FU102: true/false on prompt runs, undefined otherwise
+let _lsBrandFitCount = 0;            // FU104: how many top results got an LLM brand-fit score
 let _lsSavedPosts = [];
 let _lsComments = [];
 let _lsGenBusy = false;   // guards against double-spawning a Live Search generate batch
@@ -10199,6 +10200,8 @@ async function lsRunSearch() {
     const kwList = keyword ? keyword.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
     const body = {
         prompt: promptOn ? promptText : undefined,   // FU102
+        brand_id: promptOn ? (document.getElementById('ls-brand')?.value || undefined) : undefined,   // FU104
+
         keyword: (promptOn || autoOn) ? undefined : (kwList.length <= 1 ? (kwList[0] || keyword) : undefined),
         keywords: (promptOn || autoOn) ? undefined : (kwList.length > 1 ? kwList : undefined),
         auto_brand: promptOn ? undefined : autoBrand,
@@ -10242,7 +10245,8 @@ async function lsRunSearch() {
                         _lsGeneratedKeywords = (payload && payload.generated_keywords) || null;
                         if (payload && payload.prompt !== undefined || (payload && 'ranked_by_prompt' in payload)) {
                             _lsRankedByPrompt = payload.ranked_by_prompt;   // FU102 (undefined for non-prompt runs)
-                        } else { _lsRankedByPrompt = undefined; }
+                            _lsBrandFitCount = payload.brand_fit_count || 0;   // FU104
+                        } else { _lsRankedByPrompt = undefined; _lsBrandFitCount = 0; }
                     }
                     // Clear regenerate flag after successful request
                     _lsForceRegenerate = false;
@@ -10292,33 +10296,148 @@ function lsRenderResults() {
             ${_lsRankedByPrompt === false ? '<div class="text-xs mt-1" style="color:#f59e0b">semantic ranking unavailable (no embed key) — showing keyword matches</div>' : ''}
         </div>
     ` : '';
+    // FU104: closeness (prompt mode) + per-result brand-fit columns
+    const showMatch = _lsRankedByPrompt !== undefined && _lsSearchResults.some(r => r.prompt_relevance != null);
+    const showBrandFit = _lsSearchResults.some(r => r.brand_relevance != null);
+    const fitLegend = showBrandFit ? `
+        <div class="text-xs mt-1" style="color:#9ca3af">
+            <strong>Brand fit</strong> — solid = LLM-scored opportunity to naturally recommend this brand (top ${_lsBrandFitCount || 0}); <em>~N</em> = quick embedding estimate. Higher = better fit.
+        </div>` : '';
     el.innerHTML = `
         ${genChips}
+        ${fitLegend}
         <div class="flex justify-between items-center mb-2">
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>
-            <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
+            <div class="flex gap-3 items-center">
+                <button class="btn btn-secondary" style="padding:2px 10px;font-size:12px" onclick="lsBulkImportThirdParty()" title="Import the checked posts into this brand's Live Subreddits as 3rd-party posts">➕ Import selected → Live Subs</button>
+                <label class="text-xs text-gray-400"><input type="checkbox" id="ls-select-all" onchange="lsToggleAll(this.checked)" class="mr-1"> Select All</label>
+            </div>
         </div>
         <table>
             <thead><tr>
                 <th style="width:24px"></th>
                 <th>Title</th>
+                ${showMatch ? '<th style="width:60px">Match&nbsp;%</th>' : ''}
+                ${showBrandFit ? '<th style="width:70px">Brand&nbsp;fit</th>' : ''}
                 <th style="width:120px">Subreddit</th>
                 <th style="width:60px">Stats</th>
                 <th style="width:90px">Date / Author</th>
+                <th style="width:80px"></th>
             </tr></thead>
             <tbody>${_lsSearchResults.map((r,i)=>{
                 const title = r.title || '';
+                const matchCell = showMatch ? `<td class="text-xs" style="white-space:nowrap">${r.prompt_relevance != null ? lsMatchPill(r.prompt_relevance) : ''}</td>` : '';
+                const fitCell = showBrandFit ? `<td class="text-xs" style="white-space:nowrap">${r.brand_relevance != null ? lsBrandFitPill(r.brand_relevance, r.brand_scored) : ''}</td>` : '';
                 return `
                 <tr>
                     <td><input type="checkbox" class="ls-check" data-idx="${i}"></td>
                     <td style="word-break:break-word"><a href="${r.url}" target="_blank" class="hover:underline" style="color:#0079D3">${title.length > 100 ? title.substring(0, 100) + '...' : title}</a></td>
+                    ${matchCell}
+                    ${fitCell}
                     <td class="text-xs" style="word-break:break-word">r/${r.subreddit}${r.sub_subscribers != null ? `<br><span class="text-gray-600">${r.sub_subscribers >= 1000 ? (r.sub_subscribers/1000).toFixed(1)+'K' : r.sub_subscribers} subs</span>` : ''}${lsScrutinyPill(r.scrutiny_score)}</td>
                     <td class="text-xs text-gray-400" style="white-space:nowrap">↑${r.score}<br>💬${r.comments}</td>
                     <td class="text-xs"><span class="text-gray-400">${(r.date||'').substring(0,10)}</span><br><span class="text-gray-500">u/${r.author}</span></td>
+                    <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:11px;white-space:nowrap" onclick="lsImportResultThirdParty(${i})" title="Add this post to Live Subreddits as a 3rd-party post under the selected brand">➕ Live&nbsp;Subs</button></td>
                 </tr>`;
             }).join('')}</tbody>
         </table>
     `;
+}
+
+// FU104: closeness pill (0-100) — green→amber gradient by score
+function lsMatchPill(pct) {
+    const p = Math.max(0, Math.min(100, Math.round(pct)));
+    const col = p >= 75 ? '#22c55e' : (p >= 50 ? '#84cc16' : (p >= 30 ? '#f59e0b' : '#9ca3af'));
+    return `<span style="color:${col};font-weight:600">${p}%</span>`;
+}
+
+// FU104: brand-fit pill — solid when LLM-scored, lighter "~N" for embedding estimate
+function lsBrandFitPill(val, scored) {
+    const p = Math.max(0, Math.min(100, Math.round(val)));
+    const col = p >= 70 ? '#22c55e' : (p >= 45 ? '#84cc16' : (p >= 25 ? '#f59e0b' : '#9ca3af'));
+    return scored
+        ? `<span style="color:${col};font-weight:600" title="LLM fit-score">${p}</span>`
+        : `<span style="color:${col};opacity:.6" title="embedding estimate (not LLM-scored)">~${p}</span>`;
+}
+
+// FU104: import a single search result into Live Subreddits as a 3rd-party post
+async function lsImportResultThirdParty(idx) {
+    const brandId = document.getElementById('ls-brand') ? document.getElementById('ls-brand').value : '';
+    if (!brandId) { toast('Select a brand first (top of the Search tab)', 'error'); return; }
+    const r = _lsSearchResults[idx];
+    if (!r || !r.url) { toast('No post URL for that row', 'error'); return; }
+    if (!/\/comments\/[a-z0-9]+/i.test(r.url)) { toast('That row is not a Reddit post thread (no /comments/<id>/)', 'error'); return; }
+    let res;
+    try {
+        res = await api('/api/live-posts/import-thirdparty', {
+            method: 'POST', body: { brand_id: parseInt(brandId), reddit_url: r.url }
+        });
+    } catch (e) { toast(e.message || 'Import failed', 'error'); return; }
+    if (res && res.duplicate) {
+        toast(`Already in Live Subs as post #${res.post_number || res.post_id}: "${(res.title || '').substring(0, 60)}"`, 'info');
+        return;
+    }
+    const tid = res.task_id;
+    toast('Importing into Live Subreddits…', 'info');
+    _addBgTask(tid, '3rd-party import');
+    const poll = setInterval(async () => {
+        try {
+            const t = await api(`/api/tasks/${tid}`);
+            if (t.status === 'complete') {
+                clearInterval(poll); _removeBgTask(tid);
+                const rr = t.result || {};
+                toast(`✓ Added to Live Subs as 3rd-party post #${rr.post_number || rr.post_id} — ready for + HQ / + Cmts.`, 'success');
+            } else if (t.status === 'error') {
+                clearInterval(poll); _removeBgTask(tid);
+                toast(`Import error: ${t.error || ''}`, 'error');
+            }
+        } catch(e) {}
+    }, 2000);
+}
+
+// FU104: bulk-import the checked search results into Live Subreddits as 3rd-party posts
+async function lsBulkImportThirdParty() {
+    const brandId = document.getElementById('ls-brand') ? document.getElementById('ls-brand').value : '';
+    if (!brandId) { toast('Select a brand first (top of the Search tab)', 'error'); return; }
+    const checks = document.querySelectorAll('.ls-check:checked');
+    if (!checks.length) { toast('Check at least one post to import', 'error'); return; }
+    const rows = [];
+    checks.forEach(cb => {
+        const r = _lsSearchResults[parseInt(cb.dataset.idx)];
+        if (r && r.url && /\/comments\/[a-z0-9]+/i.test(r.url)) rows.push(r);
+    });
+    if (!rows.length) { toast('None of the checked rows are Reddit post threads', 'error'); return; }
+    let imported = 0, dupes = 0, failed = 0;
+    // small concurrency cap so we don't hammer the import endpoint
+    const queue = rows.slice();
+    const worker = async () => {
+        while (queue.length) {
+            const r = queue.shift();
+            try {
+                const res = await api('/api/live-posts/import-thirdparty', {
+                    method: 'POST', body: { brand_id: parseInt(brandId), reddit_url: r.url }
+                });
+                if (res && res.duplicate) { dupes++; continue; }
+                const tid = res.task_id;
+                if (tid) {
+                    _addBgTask(tid, '3rd-party import');
+                    // wait for this one to finish before freeing the slot
+                    await new Promise(resolve => {
+                        const poll = setInterval(async () => {
+                            try {
+                                const t = await api(`/api/tasks/${tid}`);
+                                if (t.status === 'complete') { clearInterval(poll); _removeBgTask(tid); imported++; resolve(); }
+                                else if (t.status === 'error') { clearInterval(poll); _removeBgTask(tid); failed++; resolve(); }
+                            } catch(e) {}
+                        }, 2000);
+                    });
+                } else { imported++; }
+            } catch (e) { failed++; }
+        }
+    };
+    toast(`Importing ${rows.length} post(s) into Live Subreddits…`, 'info');
+    await Promise.all([worker(), worker(), worker()]);
+    toast(`Live Subs import done — ${imported} added${dupes ? `, ${dupes} already there` : ''}${failed ? `, ${failed} failed` : ''}.`, imported ? 'success' : (failed ? 'error' : 'info'));
 }
 
 function lsToggleAll(checked) {

@@ -8707,6 +8707,8 @@ def _search_request_signature(data):
     kws = data.get("keywords") or []
     if (data.get("prompt") or "").strip():   # FU102: prompt search keys on the prompt text
         subject = "prompt:" + (data.get("prompt") or "").strip().lower()
+        if data.get("brand_id"):   # FU104: brand-scored results must not be served from a brandless key
+            subject += "|b:" + str(data.get("brand_id"))
     elif data.get("auto_brand"):
         subject = f"brand:{data.get('auto_brand')}"
     elif kws:
@@ -8789,15 +8791,15 @@ def _resolve_prompt_keywords(prompt, claude=None):
 
 
 def _rank_posts_by_prompt(pg, prompt, posts, limit):
-    """FU102 — sort posts by embedding cosine to the PROMPT, trim to `limit`. Reuses
-    PostGenerator._embed_texts + _cosine (same as blog_gen._filter_relevant). Returns
-    (posts, ranked): ranked=False (graceful) when embeddings are unavailable → returns
-    posts[:limit] in the search order (never empties the result)."""
+    """FU102/104 — sort posts by embedding cosine to the PROMPT, closest FIRST, keep all (trim to
+    `limit`). Reuses PostGenerator._embed_texts + _cosine. FU104: attaches the closeness score to
+    each kept post as `prompt_relevance` (0-100) so the UI can show it. Returns (posts, ranked):
+    ranked=False (graceful) when embeddings are unavailable → returns posts[:limit] in search order."""
     posts = posts or []
     if not posts:
         return [], False
     try:
-        floor = float(os.environ.get("PROMPT_RANK_FLOOR", "0") or 0)
+        floor = float(os.environ.get("PROMPT_RANK_FLOOR", "0") or 0)   # default 0 = keep all (user)
     except (TypeError, ValueError):
         floor = 0.0
     try:
@@ -8809,11 +8811,43 @@ def _rank_posts_by_prompt(pg, prompt, posts, limit):
         q = qv[0]
         scored = [(pg._cosine(q, pv[i]), posts[i]) for i in range(len(posts))]
         scored.sort(key=lambda x: x[0], reverse=True)
-        ranked = [p for s, p in scored if s >= floor] if floor > 0 else [p for _, p in scored]
-        return ranked[:limit], True
+        kept = []
+        for s, p in scored:
+            if floor > 0 and s < floor:
+                continue
+            p["prompt_relevance"] = round(max(0.0, min(1.0, s)) * 100)   # FU104: surface closeness
+            kept.append(p)
+        return kept[:limit], True
     except Exception as e:
         print(f"⚠ _rank_posts_by_prompt fell back to search order: {e}", flush=True)
         return posts[:limit], False
+
+
+def _score_brand_fit(claude, brand_blurb, brand_name, category, post):
+    """FU104 — ONE LLM call rating 0-100 how good an opportunity a Reddit post is to NATURALLY
+    recommend a brand of this kind (genuine topical + buyer/discussion intent, not a stretch — a
+    post that merely shares a keyword scores LOW). Returns int 0-100 or None on failure."""
+    try:
+        title = (post.get("title") or "").strip()
+        body = (post.get("text") or "").strip()[:600]
+        ask = (
+            "Rate 0-100 how good an opportunity this Reddit thread is to NATURALLY recommend the "
+            "brand below in a helpful reply — i.e. is this a genuine, on-topic discussion where "
+            "someone is asking for / open to a recommendation of this KIND of product/service. A "
+            "thread that just happens to share a keyword but isn't a real fit scores LOW (0-30); a "
+            "thread where recommending this kind of thing is exactly what's wanted scores HIGH "
+            "(70-100). Judge FIT, not just topic overlap.\n\n"
+            f"BRAND: {brand_name}" + (f" ({category})" if category else "") + "\n"
+            f"WHAT THE BRAND IS / WHO IT'S FOR: {brand_blurb[:900]}\n\n"
+            f"REDDIT THREAD\nTitle: {title}\nBody: {body}\n\n"
+            'Return ONLY JSON: {"score": <0-100 integer>}.'
+        )
+        res = claude.call(ask, max_tokens=120, temperature=0.2)
+        if isinstance(res, dict) and res.get("score") is not None:
+            return max(0, min(100, int(res["score"])))
+    except Exception as e:
+        print(f"⚠ _score_brand_fit failed: {e}", flush=True)
+    return None
 
 
 @app.route("/api/search/reddit", methods=["POST"])
@@ -8831,6 +8865,7 @@ def api_search_reddit():
     keywords_list = data.get("keywords") or []  # comma-separated multi-keyword support
     auto_brand = data.get("auto_brand")
     prompt = (data.get("prompt") or "").strip()   # FU102: natural-language prompt search
+    prompt_brand_id = data.get("brand_id")         # FU104: brand for fit-scoring + 3rd-party import
     if not keyword and not keywords_list and not auto_brand and not prompt:
         return jsonify({"error": "keyword, keywords, auto_brand, or prompt is required"}), 400
 
@@ -8917,7 +8952,11 @@ def api_search_reddit():
                 # Filter OFF only when we can rank (embeddings) AND the expansion is trustworthy.
                 use_kw_filter = not (embed_ok and _exp_ok)
                 fetch_limit = max(requested_limit * 3, 60) if (embed_ok and _exp_ok) else requested_limit
-                combined = RedditSearchBot.build_query(any_of=kws) if len(kws) > 1 else (kws[0] if kws else prompt)
+                # FU104: seed the fetch with the exact prompt as one extra OR term so whole-phrase
+                # matches enter the pool ("focus extra on the exact prompt"); `keywords=kws` still
+                # drives the presence filter so the extra term doesn't over-narrow it.
+                _or_terms = kws + [prompt] if prompt else kws
+                combined = RedditSearchBot.build_query(any_of=_or_terms) if len(_or_terms) > 1 else (_or_terms[0] if _or_terms else prompt)
                 print(f"    Prompt search: {len(kws)} terms (exp_ok={_exp_ok}, embed_ok={embed_ok}, "
                       f"kw_filter={use_kw_filter}); query={combined}")
                 pool = bot.search(keyword=combined, keywords=kws, kw_filter=use_kw_filter,
@@ -8925,8 +8964,50 @@ def api_search_reddit():
                 from generators.post_gen import PostGenerator
                 _pg = PostGenerator(_claude, task_db)
                 ranked_posts, ranked = _rank_posts_by_prompt(_pg, prompt, pool, requested_limit)
+                # FU104 — per-result BRAND-FIT score: embedding estimate for ALL, LLM fit-score the top N.
+                brand_fit_count = 0
+                if prompt_brand_id:
+                    try:
+                        _brand = task_db.get_brand(int(prompt_brand_id))
+                    except Exception:
+                        _brand = None
+                    if _brand and ranked_posts:
+                        _blurb = " · ".join(str(_brand.get(f) or "").strip() for f in
+                                            ("context", "category", "use_cases", "pain_points",
+                                             "keywords", "features") if str(_brand.get(f) or "").strip())
+                        _bname = _brand.get("name") or ""
+                        _cat = (_brand.get("category") or "").strip()
+                        # (a) cheap embedding estimate for every result
+                        try:
+                            _bv = _pg._embed_texts([_blurb]) if _blurb else None
+                            if _bv:
+                                _pvb = _pg._embed_texts([((p.get("title") or "") + " " +
+                                                          (p.get("text") or "")).strip() for p in ranked_posts])
+                                if _pvb and len(_pvb) == len(ranked_posts):
+                                    for i, p in enumerate(ranked_posts):
+                                        p["brand_relevance"] = round(max(0.0, min(1.0, _pg._cosine(_bv[0], _pvb[i]))) * 100)
+                                        p["brand_scored"] = False
+                        except Exception as e:
+                            print(f"⚠ brand embedding estimate skipped: {e}", flush=True)
+                        # (b) LLM fit-score the TOP N (by prompt relevance / search order)
+                        try:
+                            top_n = int(os.environ.get("BRAND_FIT_TOP_N", "15"))
+                        except (TypeError, ValueError):
+                            top_n = 15
+                        top = ranked_posts[:max(0, top_n)]
+                        if top:
+                            from concurrent.futures import ThreadPoolExecutor
+                            def _fit(p):
+                                return p, _score_brand_fit(_claude, _blurb, _bname, _cat, p)
+                            with ThreadPoolExecutor(max_workers=4) as ex:
+                                for p, sc in ex.map(_fit, top):
+                                    if sc is not None:
+                                        p["brand_relevance"] = sc
+                                        p["brand_scored"] = True
+                                        brand_fit_count += 1
                 return _finish({"results": ranked_posts, "generated_keywords": kws,
-                                "ranked_by_prompt": ranked})
+                                "ranked_by_prompt": ranked, "brand_id": prompt_brand_id,
+                                "brand_fit_count": brand_fit_count})
 
             if keyword:
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)

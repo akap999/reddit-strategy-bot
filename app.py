@@ -36,7 +36,7 @@ for _pv in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session
 from authlib.integrations.flask_client import OAuth
 from config import (
-    ANTHROPIC_API_KEY, DB_PATH, DEFAULT_BRAND_MENTION_RATIO,
+    ANTHROPIC_API_KEY, DB_PATH, DEFAULT_BRAND_MENTION_RATIO, DEFAULT_MODEL,
     SECRET_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAILS,
     REDDIT_PROXY_URL, REDDIT_USER_AGENT,
 )
@@ -7948,7 +7948,7 @@ def _resolve_brand_keywords(data, db=None):
             "Return ONLY a JSON array of 6 lowercase strings. No other text."
         )
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=DEFAULT_MODEL,   # FU103: was hardcoded "claude-sonnet-4-20250514" (404s → silent fail)
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -8728,48 +8728,64 @@ def _search_request_signature(data):
     }, sort_keys=True, default=str)
 
 
-def _resolve_prompt_keywords(prompt):
-    """FU102 — brand-free sibling of `_resolve_brand_keywords`: expand a natural-language
-    PROMPT into 6-8 SHORT (2-5 word) Reddit search queries covering its intent + variants.
-    Returns list[str] (cap 8). Graceful: on any failure, fall back to the prompt's own
-    distinctive words so search still runs."""
+def _prompt_keyword_fallback(prompt):
+    """FU103 — degrade-safe expansion when the LLM is unavailable: emit a FEW short OR-able
+    phrases (the meaningful tail phrase + its trailing bigram/trigram, filler stripped), NOT
+    one long AND blob — so combined-OR + the keyword filter still match real posts."""
+    import re as _re
+    words = [w for w in _re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", (prompt or "").lower())
+             if w not in {"any", "the", "for", "and", "with", "get", "how", "does", "can",
+                          "you", "your", "what", "where", "which", "who", "are", "that",
+                          "this", "best", "good", "online", "source", "sources", "platform",
+                          "app", "apps", "site", "sites", "tool", "tools", "recommendation",
+                          "recommendations", "vendor", "vendors", "service", "services",
+                          "provider", "providers", "reliable", "premium", "top"}]
+    if not words:
+        return [(prompt or "").strip()[:60]] if (prompt or "").strip() else []
+    out = []
+    tail = words[-4:] if len(words) >= 4 else words
+    out.append(" ".join(tail))                 # meaningful tail phrase
+    if len(words) >= 3:
+        out.append(" ".join(words[-3:]))       # tighter trigram
+    if len(words) >= 2:
+        out.append(" ".join(words[-2:]))       # trailing bigram
+    # dedup, keep order
+    seen, uniq = set(), []
+    for t in out:
+        if t and t not in seen:
+            seen.add(t); uniq.append(t)
+    return uniq[:4]
+
+
+def _resolve_prompt_keywords(prompt, claude=None):
+    """FU102/103 — expand a natural-language PROMPT into 6-8 SHORT (2-5 word) Reddit search
+    queries. Uses the app's proven ClaudeClient (DEFAULT_MODEL — the model that actually works),
+    NOT a raw call with a hardcoded/stale model. Returns (queries: list[str], ok: bool) — ok=True
+    only when the LLM produced real terms; ok=False → the degrade-safe multi-phrase fallback."""
     prompt = (prompt or "").strip()
     if not prompt:
-        return []
-    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        return [], False
     try:
-        if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY not set")
-        import anthropic
-        import re as _re
-        client = anthropic.Anthropic(api_key=api_key)
+        cl = claude or ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
         ask = (
             "You are generating Reddit SEARCH queries to FIND existing posts related to a "
-            "user's prompt. Given the prompt, return 6-8 diverse SHORT search queries "
+            "user's prompt. Given the prompt, produce 6-8 diverse SHORT search queries "
             "(2-5 words each) that real Reddit users would write about this topic — cover "
             "the core need, close paraphrases, and adjacent phrasings. Do NOT answer the "
             "prompt; produce SEARCH TERMS.\n\n"
             f"Prompt: {prompt}\n\n"
-            "Return ONLY a JSON array of 6-8 lowercase strings. No other text."
+            'Return ONLY JSON: {"queries": ["...", "..."]}  (6-8 lowercase strings).'
         )
-        resp = client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=400,
-            messages=[{"role": "user", "content": ask}])
-        text = resp.content[0].text.strip()
-        m = _re.search(r'\[.*\]', text, _re.DOTALL)
-        raw = json.loads(m.group() if m else text)
-        kws = [str(k).strip() for k in raw if str(k).strip()][:8]
-        if kws:
-            return kws
+        res = cl.call(ask, max_tokens=400, temperature=0.4)
+        if isinstance(res, dict):
+            raw = res.get("queries") or res.get("keywords") or []
+            kws = [str(k).strip() for k in raw if str(k).strip()][:8]
+            if kws:
+                return kws, True
+        print(f"⚠ _resolve_prompt_keywords: LLM returned no usable queries — using fallback", flush=True)
     except Exception as e:
-        print(f"⚠ _resolve_prompt_keywords fell back to word-split: {e}", flush=True)
-    # Fallback: the prompt's own distinctive words (drop stopwords), as one broad term.
-    import re as _re2
-    words = [w for w in _re2.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", prompt.lower())
-             if w not in {"any", "the", "for", "and", "with", "get", "how", "does", "can",
-                          "you", "your", "what", "where", "which", "who", "are", "that",
-                          "this", "platform", "app", "recommendation", "vendor"}]
-    return [" ".join(words[:5])] if words else [prompt[:60]]
+        print(f"⚠ _resolve_prompt_keywords fell back: {e}", flush=True)
+    return _prompt_keyword_fallback(prompt), False
 
 
 def _rank_posts_by_prompt(pg, prompt, posts, limit):
@@ -8889,17 +8905,25 @@ def api_search_reddit():
                              else None),
             )
 
-            # FU102 — PROMPT search: expand → filtered combined-OR fetch (strict pivot filter
-            # OFF, kw_filter=False) → embedding re-rank by relevance to the prompt → trim.
+            # FU102/103 — PROMPT search: expand (real ClaudeClient) → filtered combined-OR fetch →
+            # embedding re-rank by relevance to the prompt → trim. Degrade-safe: the strict
+            # keyword-presence filter is turned OFF only when embeddings are available to re-rank;
+            # without an embed key (or a failed expansion) it stays ON so lexical relevance holds —
+            # never the both-safeties-off noise of FU102's bug.
             if prompt:
-                kws = _resolve_prompt_keywords(prompt)
+                _claude = ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
+                kws, _exp_ok = _resolve_prompt_keywords(prompt, claude=_claude)
+                embed_ok = bool(os.environ.get("OPENAI_API_KEY"))
+                # Filter OFF only when we can rank (embeddings) AND the expansion is trustworthy.
+                use_kw_filter = not (embed_ok and _exp_ok)
+                fetch_limit = max(requested_limit * 3, 60) if (embed_ok and _exp_ok) else requested_limit
                 combined = RedditSearchBot.build_query(any_of=kws) if len(kws) > 1 else (kws[0] if kws else prompt)
-                print(f"    Prompt search: {len(kws)} expanded terms (combined OR); query={combined}")
-                pool = bot.search(keyword=combined, keywords=kws, kw_filter=False,
-                                  limit=max(requested_limit * 3, 60), **common_filters)
+                print(f"    Prompt search: {len(kws)} terms (exp_ok={_exp_ok}, embed_ok={embed_ok}, "
+                      f"kw_filter={use_kw_filter}); query={combined}")
+                pool = bot.search(keyword=combined, keywords=kws, kw_filter=use_kw_filter,
+                                  limit=fetch_limit, **common_filters)
                 from generators.post_gen import PostGenerator
-                _pg = PostGenerator(ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")),
-                                    task_db)
+                _pg = PostGenerator(_claude, task_db)
                 ranked_posts, ranked = _rank_posts_by_prompt(_pg, prompt, pool, requested_limit)
                 return _finish({"results": ranked_posts, "generated_keywords": kws,
                                 "ranked_by_prompt": ranked})

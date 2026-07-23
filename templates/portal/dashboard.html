@@ -11,7 +11,11 @@
     <!-- Global live-check: runs across every brand and every month
          the client has reports in. Brand-scoped checks live on the
          brand overview page. -->
-    <button id="global-check-btn" type="button" onclick="runGlobalCheckLive()" class="btn-ghost">
+    <!-- FU100: portal-WIDE update HIDDEN per request (updates happen brand-wise only, via the
+         brand/month pages' filtered buttons). Restore by removing style="display:none" —
+         runGlobalCheckLive() and POST /portal/check-live-all remain fully wired. -->
+    <button id="global-check-btn" type="button" onclick="runGlobalCheckLive()" class="btn-ghost"
+            style="display:none">
       🔄 Update status for all brands
     </button>
     <!-- View toggle: By Month (default) | By Brand -->

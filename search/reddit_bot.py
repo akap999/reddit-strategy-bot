@@ -1129,6 +1129,7 @@ class RedditSearchBot:
         keywords=None,
         reddit_wide=False,
         max_per_sub=None,
+        kw_filter=True,
         _deadline=None,
     ):
         # `keywords` (optional): the ORIGINAL term list when `keyword` is a
@@ -1180,7 +1181,7 @@ class RedditSearchBot:
             "sort": sort_by, "order": sort_order, "limit": limit, "api": api,
             "nsfw": nsfw, "ratio": min_upvote_ratio, "maxsub": max_subscribers,
             "minsub": min_subscribers, "scrut": max_scrutiny, "wide": bool(reddit_wide),
-            "mpsub": max_per_sub,
+            "mpsub": max_per_sub, "kwf": bool(kw_filter),
         }, sort_keys=True, default=str)
         if not force_refresh:
             with RedditSearchBot._result_cache_lock:
@@ -1626,8 +1627,9 @@ class RedditSearchBot:
         # not "through". Single distinctive token (not all tokens) so a
         # multi-word keyword like "physiotherapy australia" matches a post
         # titled "physiotherapy clinic?" without requiring every word.
-        # Opt out with REDDIT_KW_FILTER=0.
-        if ((keyword and keyword.strip()) or _terms) and \
+        # Opt out with REDDIT_KW_FILTER=0, or per-call kw_filter=False (FU102 prompt search:
+        # the embedding re-rank decides relevance, so lexical pivot-presence must NOT pre-drop).
+        if kw_filter and ((keyword and keyword.strip()) or _terms) and \
                 os.environ.get("REDDIT_KW_FILTER", "1").strip().lower() not in ("0", "false", "no"):
             import re as _kwre
             # For a combined-OR query keep a post matching ANY original term

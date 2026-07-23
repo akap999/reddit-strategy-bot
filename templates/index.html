@@ -7355,6 +7355,7 @@ let _lsTab = 'search';
 let _lsBrands = [];
 let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
+let _lsRankedByPrompt = undefined;   // FU102: true/false on prompt runs, undefined otherwise
 let _lsSavedPosts = [];
 let _lsComments = [];
 let _lsGenBusy = false;   // guards against double-spawning a Live Search generate batch
@@ -9855,6 +9856,15 @@ function renderLsSearch(c) {
                 <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer ml-auto" title="Use Claude to generate 6 diverse search queries from the brand's name + context">
                     <input type="checkbox" id="ls-auto-kw" onchange="lsToggleAutoKeywords(this.checked)"> 🤖 Auto-generate keywords
                 </label>
+                <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer" title="Describe what you're looking for in plain language; the app expands it to search terms and ranks posts by semantic relevance to your prompt. All filters apply.">
+                    <input type="checkbox" id="ls-prompt-mode" onchange="lsTogglePromptSearch(this.checked)"> 🧠 Prompt search
+                </label>
+            </div>
+
+            <!-- FU102: prompt search panel (visible only when the toggle above is on) -->
+            <div id="ls-prompt-panel" class="mb-4 p-3" style="display:none;background:#0e1418;border:1px solid #2a3540;border-radius:6px">
+                <label class="text-xs text-gray-400 mb-1 block">Prompt <span class="text-gray-600">— describe what you're looking for; finds related posts (semantic). All filters below still apply.</span></label>
+                <textarea id="ls-prompt" rows="2" class="w-full" placeholder="e.g. Any platform to get a credit builder loan in Texas?" style="resize:vertical;font-family:inherit"></textarea>
             </div>
 
             <!-- Two big input areas: keywords on the left, subreddits on the right -->
@@ -10005,6 +10015,27 @@ function lsToggleAutoKeywords(on) {
     }
 }
 
+function lsTogglePromptSearch(on) {   // FU102
+    const panel = document.getElementById('ls-prompt-panel');
+    const kwInput = document.getElementById('ls-keyword');
+    const kwReq = document.getElementById('ls-keyword-req');
+    if (on) {
+        panel.style.display = '';
+        // prompt mode drives the search; disable the keyword box (mirrors auto mode)
+        kwInput.disabled = true; kwInput.style.opacity = 0.4;
+        kwInput.placeholder = 'Disabled — prompt search is on';
+        if (kwReq) kwReq.style.display = 'none';
+        // prompt + auto are mutually exclusive
+        const auto = document.getElementById('ls-auto-kw');
+        if (auto && auto.checked) { auto.checked = false; lsToggleAutoKeywords(false); }
+    } else {
+        panel.style.display = 'none';
+        kwInput.disabled = false; kwInput.style.opacity = 1;
+        kwInput.placeholder = 'e.g. best testosterone clinic';
+        if (kwReq) kwReq.style.display = '';
+    }
+}
+
 function lsOnBrandChange() {
     const brandId = document.getElementById('ls-brand').value;
     const saveBtn = document.getElementById('ls-save-to-brand-btn');
@@ -10134,10 +10165,13 @@ async function lsSuggestSubreddits() {
 }
 
 async function lsRunSearch() {
+    const promptOn = document.getElementById('ls-prompt-mode')?.checked;   // FU102
+    const promptText = (document.getElementById('ls-prompt')?.value || '').trim();
     const autoOn = document.getElementById('ls-auto-kw')?.checked;
     const keyword = document.getElementById('ls-keyword').value.trim();
     let autoBrand = undefined;
-    let labelForBgTask = keyword;
+    let labelForBgTask = promptOn ? promptText : keyword;
+    if (promptOn && !promptText) { toast('Enter a prompt', 'error'); return; }
     if (autoOn) {
         const brandId = document.getElementById('ls-brand').value;
         const autoName = document.getElementById('ls-auto-name').value.trim();
@@ -10164,9 +10198,10 @@ async function lsRunSearch() {
     // Support comma- or newline-separated keywords
     const kwList = keyword ? keyword.split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [];
     const body = {
-        keyword: autoOn ? undefined : (kwList.length <= 1 ? (kwList[0] || keyword) : undefined),
-        keywords: autoOn ? undefined : (kwList.length > 1 ? kwList : undefined),
-        auto_brand: autoBrand,
+        prompt: promptOn ? promptText : undefined,   // FU102
+        keyword: (promptOn || autoOn) ? undefined : (kwList.length <= 1 ? (kwList[0] || keyword) : undefined),
+        keywords: (promptOn || autoOn) ? undefined : (kwList.length > 1 ? kwList : undefined),
+        auto_brand: promptOn ? undefined : autoBrand,
         subreddits: (() => { const r = document.getElementById('ls-subreddit').value.trim(); if (!r) return undefined; const l = r.split(/[,\n]/).map(s => s.trim()).filter(Boolean); return l.length ? l : undefined; })(),
         excluded_subreddits: excludeRaw ? excludeRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined,
         min_comments: parseInt(document.getElementById('ls-mincom').value) || 0,
@@ -10205,6 +10240,9 @@ async function lsRunSearch() {
                     } else {
                         _lsSearchResults = (payload && payload.results) || [];
                         _lsGeneratedKeywords = (payload && payload.generated_keywords) || null;
+                        if (payload && payload.prompt !== undefined || (payload && 'ranked_by_prompt' in payload)) {
+                            _lsRankedByPrompt = payload.ranked_by_prompt;   // FU102 (undefined for non-prompt runs)
+                        } else { _lsRankedByPrompt = undefined; }
                     }
                     // Clear regenerate flag after successful request
                     _lsForceRegenerate = false;
@@ -10249,8 +10287,9 @@ function lsRenderResults() {
     if (modeWrap) modeWrap.style.display = '';
     const genChips = (_lsGeneratedKeywords && _lsGeneratedKeywords.length) ? `
         <div class="mb-2 p-2" style="background:#1a1a1a;border:1px solid #333;border-radius:6px">
-            <span class="text-xs text-gray-400 mr-2">🤖 Auto-generated keywords:</span>
+            <span class="text-xs text-gray-400 mr-2">${_lsRankedByPrompt !== undefined ? '🧠 Searched these terms (ranked by relevance to your prompt):' : '🤖 Auto-generated keywords:'}</span>
             ${_lsGeneratedKeywords.map(k => `<span style="background:#0b2a3d;color:#60a5fa;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px;display:inline-block;margin-bottom:2px">${k}</span>`).join('')}
+            ${_lsRankedByPrompt === false ? '<div class="text-xs mt-1" style="color:#f59e0b">semantic ranking unavailable (no embed key) — showing keyword matches</div>' : ''}
         </div>
     ` : '';
     el.innerHTML = `

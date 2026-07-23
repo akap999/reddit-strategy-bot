@@ -8705,7 +8705,9 @@ def _search_request_signature(data):
     keywords don't change the key); explicit keyword(s) key on their text."""
     kw = (data.get("keyword") or "").strip().lower()
     kws = data.get("keywords") or []
-    if data.get("auto_brand"):
+    if (data.get("prompt") or "").strip():   # FU102: prompt search keys on the prompt text
+        subject = "prompt:" + (data.get("prompt") or "").strip().lower()
+    elif data.get("auto_brand"):
         subject = f"brand:{data.get('auto_brand')}"
     elif kws:
         subject = "kws:" + "|".join(sorted(str(k).strip().lower() for k in kws if str(k).strip()))
@@ -8726,13 +8728,85 @@ def _search_request_signature(data):
     }, sort_keys=True, default=str)
 
 
+def _resolve_prompt_keywords(prompt):
+    """FU102 — brand-free sibling of `_resolve_brand_keywords`: expand a natural-language
+    PROMPT into 6-8 SHORT (2-5 word) Reddit search queries covering its intent + variants.
+    Returns list[str] (cap 8). Graceful: on any failure, fall back to the prompt's own
+    distinctive words so search still runs."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return []
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    try:
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        import anthropic
+        import re as _re
+        client = anthropic.Anthropic(api_key=api_key)
+        ask = (
+            "You are generating Reddit SEARCH queries to FIND existing posts related to a "
+            "user's prompt. Given the prompt, return 6-8 diverse SHORT search queries "
+            "(2-5 words each) that real Reddit users would write about this topic — cover "
+            "the core need, close paraphrases, and adjacent phrasings. Do NOT answer the "
+            "prompt; produce SEARCH TERMS.\n\n"
+            f"Prompt: {prompt}\n\n"
+            "Return ONLY a JSON array of 6-8 lowercase strings. No other text."
+        )
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514", max_tokens=400,
+            messages=[{"role": "user", "content": ask}])
+        text = resp.content[0].text.strip()
+        m = _re.search(r'\[.*\]', text, _re.DOTALL)
+        raw = json.loads(m.group() if m else text)
+        kws = [str(k).strip() for k in raw if str(k).strip()][:8]
+        if kws:
+            return kws
+    except Exception as e:
+        print(f"⚠ _resolve_prompt_keywords fell back to word-split: {e}", flush=True)
+    # Fallback: the prompt's own distinctive words (drop stopwords), as one broad term.
+    import re as _re2
+    words = [w for w in _re2.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", prompt.lower())
+             if w not in {"any", "the", "for", "and", "with", "get", "how", "does", "can",
+                          "you", "your", "what", "where", "which", "who", "are", "that",
+                          "this", "platform", "app", "recommendation", "vendor"}]
+    return [" ".join(words[:5])] if words else [prompt[:60]]
+
+
+def _rank_posts_by_prompt(pg, prompt, posts, limit):
+    """FU102 — sort posts by embedding cosine to the PROMPT, trim to `limit`. Reuses
+    PostGenerator._embed_texts + _cosine (same as blog_gen._filter_relevant). Returns
+    (posts, ranked): ranked=False (graceful) when embeddings are unavailable → returns
+    posts[:limit] in the search order (never empties the result)."""
+    posts = posts or []
+    if not posts:
+        return [], False
+    try:
+        floor = float(os.environ.get("PROMPT_RANK_FLOOR", "0") or 0)
+    except (TypeError, ValueError):
+        floor = 0.0
+    try:
+        qv = pg._embed_texts([prompt.strip()])
+        pv = pg._embed_texts([((p.get("title") or "") + " " + (p.get("text") or "")).strip()
+                              for p in posts])
+        if not qv or not pv or len(pv) != len(posts):
+            return posts[:limit], False
+        q = qv[0]
+        scored = [(pg._cosine(q, pv[i]), posts[i]) for i in range(len(posts))]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        ranked = [p for s, p in scored if s >= floor] if floor > 0 else [p for _, p in scored]
+        return ranked[:limit], True
+    except Exception as e:
+        print(f"⚠ _rank_posts_by_prompt fell back to search order: {e}", flush=True)
+        return posts[:limit], False
+
+
 @app.route("/api/search/reddit", methods=["POST"])
 def api_search_reddit():
     """Run a Reddit keyword search via RedditSearchBot (background task).
 
-    Accepts either a manual `keyword` string OR an `auto_brand` dict that
-    triggers multi-keyword search with keywords auto-generated from a brand's
-    name/context (saved or ad-hoc).
+    Accepts a manual `keyword` string, a `keywords` list, an `auto_brand` dict, OR a
+    natural-language `prompt` (FU102 — expanded to search terms, then embedding-ranked
+    by relevance to the prompt).
     """
     from search.reddit_bot import RedditSearchBot, balance_posts_by_subreddit
     import math
@@ -8740,8 +8814,9 @@ def api_search_reddit():
     keyword = (data.get("keyword") or "").strip()
     keywords_list = data.get("keywords") or []  # comma-separated multi-keyword support
     auto_brand = data.get("auto_brand")
-    if not keyword and not keywords_list and not auto_brand:
-        return jsonify({"error": "keyword, keywords, or auto_brand is required"}), 400
+    prompt = (data.get("prompt") or "").strip()   # FU102: natural-language prompt search
+    if not keyword and not keywords_list and not auto_brand and not prompt:
+        return jsonify({"error": "keyword, keywords, auto_brand, or prompt is required"}), 400
 
     _force_refresh = bool(data.get("force_refresh"))
     _req_sig = _search_request_signature(data)
@@ -8813,6 +8888,21 @@ def api_search_reddit():
                              if str(data.get("max_per_sub") or "").strip() not in ("", "0")
                              else None),
             )
+
+            # FU102 — PROMPT search: expand → filtered combined-OR fetch (strict pivot filter
+            # OFF, kw_filter=False) → embedding re-rank by relevance to the prompt → trim.
+            if prompt:
+                kws = _resolve_prompt_keywords(prompt)
+                combined = RedditSearchBot.build_query(any_of=kws) if len(kws) > 1 else (kws[0] if kws else prompt)
+                print(f"    Prompt search: {len(kws)} expanded terms (combined OR); query={combined}")
+                pool = bot.search(keyword=combined, keywords=kws, kw_filter=False,
+                                  limit=max(requested_limit * 3, 60), **common_filters)
+                from generators.post_gen import PostGenerator
+                _pg = PostGenerator(ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")),
+                                    task_db)
+                ranked_posts, ranked = _rank_posts_by_prompt(_pg, prompt, pool, requested_limit)
+                return _finish({"results": ranked_posts, "generated_keywords": kws,
+                                "ranked_by_prompt": ranked})
 
             if keyword:
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)

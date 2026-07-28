@@ -330,6 +330,43 @@ def select_few_shot_examples(n=3):
     return "\n".join(lines)
 
 
+def _forgiving_json_loads(s):
+    """Best-effort local salvage of an ALMOST-valid JSON object string — no API call.
+    Handles the cheap failure modes: stray prose/fences around the object, and a
+    trailing comma before a } or ]. Does NOT try to fix unescaped inner quotes /
+    control chars inside a big string value (that needs the model — see _repair_json).
+    Returns the parsed object or None."""
+    if not s:
+        return None
+    s = s.strip()
+    # strip accidental code fences
+    if s.startswith("```json"):
+        s = s[7:]
+    elif s.startswith("```"):
+        s = s[3:]
+    if s.endswith("```"):
+        s = s[:-3]
+    s = s.strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    # slice to the outermost {...} (drops any leading/trailing prose)
+    i, j = s.find("{"), s.rfind("}")
+    if i != -1 and j != -1 and j > i:
+        sub = s[i:j + 1]
+        try:
+            return json.loads(sub)
+        except Exception:
+            # remove trailing commas: ",  }" / ", ]"
+            sub2 = re.sub(r",(\s*[}\]])", r"\1", sub)
+            try:
+                return json.loads(sub2)
+            except Exception:
+                pass
+    return None
+
+
 class ClaudeClient:
     """Shared Claude API caller extracted from CommentGeneratorBot._call_claude."""
 
@@ -437,6 +474,17 @@ class ClaudeClient:
                 self.last_error = f"JSON parse error: {e}"
                 preview = (last_raw_content or "")[:200].replace("\n", " ")
                 print(f"    JSON parse error (attempt {attempt + 1}/{max_retries}): {e} | body[:200]={preview!r}", flush=True)
+                # 1) cheap local salvage — fences / surrounding prose / trailing comma.
+                salvaged = _forgiving_json_loads(last_raw_content)
+                if isinstance(salvaged, dict):
+                    print("    ↳ recovered via local forgiving parse", flush=True)
+                    return salvaged
+                # 2) model self-repair — fixes the common long-body failure (an unescaped
+                #    " or newline inside a big string) that a blind re-roll reproduces.
+                repaired = self._repair_json(last_raw_content, str(e), max_tokens)
+                if isinstance(repaired, dict):
+                    print("    ↳ recovered via model JSON repair", flush=True)
+                    return repaired
                 if attempt < max_retries - 1:
                     time.sleep(1)
             except anthropic.RateLimitError as e:
@@ -485,6 +533,41 @@ class ClaudeClient:
                     time.sleep(2 ** attempt)
 
         return None
+
+    def _repair_json(self, raw, err, orig_max_tokens):
+        """One corrective API call: hand the model its own unparseable output + the
+        parser error and ask for the SAME object as valid JSON. This fixes the common
+        long-body failure (an unescaped " or newline inside a big `body_markdown`
+        string) that a blind re-roll keeps reproducing. Returns a dict or None; never
+        raises. Bounded to a single repair attempt per parse failure."""
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        try:
+            # give the repaired copy room (~same size as the original) + slack, capped
+            budget = max(int(orig_max_tokens or 1024), len(raw) // 3 + 1024)
+            budget = min(budget, 16000)
+            fix_prompt = (
+                "The text below was meant to be ONE valid JSON object but failed to parse.\n"
+                f"Parser error: {err}\n\n"
+                "Return the SAME object as STRICTLY VALID JSON — identical field names and "
+                "values, nothing added, removed, or summarized. Escape every double-quote "
+                'inside a string value as \\" and every newline inside a string as \\n. '
+                "Output ONLY the raw JSON object — no prose, no code fences.\n\n"
+                "TEXT TO FIX:\n" + raw
+            )
+            msg = self.client.messages.create(
+                model=self.model,
+                max_tokens=budget,
+                system="You repair malformed JSON. Output ONLY the corrected raw JSON object.",
+                messages=[{"role": "user", "content": fix_prompt}],
+            )
+            self._track(msg)
+            txt = msg.content[0].text.strip()
+            return _forgiving_json_loads(txt)
+        except Exception as e:
+            print(f"    JSON repair call failed: {type(e).__name__}: {e}", flush=True)
+            return None
 
     def call_text(self, prompt, max_tokens=1024, temperature=None, system_prompt=None):
         """Make API call and return raw text (not JSON). For non-JSON responses."""

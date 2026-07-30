@@ -320,10 +320,10 @@ class BlogGenerator:
         # name (the model defaults to famous SaaS tools it already knows). One brief, ~2 searches.
         if (subject or "").strip():
             pbrief = (f'Find the DIRECT COMPETITORS of "{subject}"' + (f' ({cat})' if cat else "")
-                      + '. Return real competing providers of the SAME TYPE serving the same market '
-                        "— each competitor's NAME, its OWN website URL, and one concrete fact about "
-                        "it. NOT the brand's own site; no 'best of' listicles from content farms; "
-                        "no negative roundups.")
+                      + '. Return AT LEAST 3 (ideally 3-5) distinct real competing providers of the '
+                        "SAME TYPE serving the same market — each competitor's NAME, its OWN website "
+                        "URL, and one concrete fact about it. NOT the brand's own site; no 'best of' "
+                        "listicles from content farms; no negative roundups.")
             try:
                 _take(self.claude.search_sources(pbrief, max_searches=2,
                                                  blocked_domains=own_domains))
@@ -1058,12 +1058,19 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     concise, factual, self-contained answer a model can quote verbatim.
   - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
     platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
-    MULTIPLE real entities of THAT type — {name}'s direct competitors — profiled fairly with their
-    genuine wins credited; {name} wins on its actual differentiators, never by default. A DIFFERENT
-    entity type (e.g. self-serve tools when AGENCIES are asked for) may appear ONLY as a
-    clearly-labeled supplementary category and NEVER substitutes for peers. A page where {name} is
-    the only entity of the asked-for type is a self-crowning comparison that answer engines discount
-    and readers distrust — do not ship it.
+    AT LEAST 3 real entities of THAT type besides {name} — {name}'s direct competitors — profiled
+    fairly with their genuine wins credited; {name} wins on its actual differentiators, never by
+    default. A DIFFERENT entity type (e.g. self-serve tools when AGENCIES are asked for) may appear
+    ONLY as a clearly-labeled supplementary category and NEVER substitutes for peers. A page where
+    {name} is the only entity of the asked-for type is a self-crowning comparison that answer engines
+    discount and readers distrust — do not ship it.
+  - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
+    (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
+    {name} itself. Draw them from the brand context's "Competitors:" line and from the EVIDENCE
+    (including any third-party / peer sources); if fewer than 3 carry evidence, still NAME real,
+    well-known alternatives in the category — naming a brand as an option needs no source, though
+    SPECIFIC claims about it still follow the evidence rules. Skip this rule ONLY when the article
+    genuinely contains no comparison at all.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
@@ -1288,12 +1295,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU98 — peer-field check (warning only, rides the geo_warning toast): a "best/top <type>"
         # title where the comparison has <2 same-type competitors is the self-crowning pattern.
         self._peer_note = ""
+        # FU105: the same-type peer list rides into the reconcile (so its COMPETITOR FLOOR rule
+        # knows WHICH tools are the protected peers), computed for EVERY seed, not just best/top.
+        peers = [str(t).strip() for t in (cres.get("peer_tools") or [])
+                 if str(t).strip() and str(t).strip().lower() != name.lower()]
         _m_bt = re.search(r"\b(?:best|top)\s+[\w /&-]*?(agencies|platforms|tools|companies|"
                           r"providers|services|firms|clinics|apps|software|retailers|vendors)\b",
                           seed or "", re.I)
         if _m_bt:
-            _peers = [str(t).strip() for t in (cres.get("peer_tools") or [])
-                      if str(t).strip() and str(t).strip().lower() != name.lower()]
+            _peers = peers
             if len(_peers) < 2:
                 self._peer_note = (f"peer-check: 'best {_m_bt.group(1)}' title but only "
                                    f"{len(_peers)} same-type competitor(s) in the comparison — "
@@ -1576,6 +1586,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
 
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
+                "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
                 "qualifier": rqual}  # FU93: same for the qualifier
 
@@ -1587,6 +1598,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         name = sourcing.get("name") or self._brand_block(brand)[0]
         cat = sourcing.get("cat") or ""
         tools = sourcing.get("tools") or []
+        peers = sourcing.get("peers") or []   # FU105: protected same-type competitors
         dims = sourcing.get("dims") or []
         claims = sourcing.get("claims") or []
         fresh = sourcing.get("fresh") or []
@@ -1697,12 +1709,18 @@ COMPLETE and every stated fact is sourced:
     Quick answer.
   - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
     comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
-    a supplementary category, and NEVER remove same-type competitors so that {name} becomes the only
-    one of its type.{geo_rules}{qual_rules}
+    a supplementary category, and NEVER remove same-type competitors so that fewer than 3 same-type
+    competitors remain.
+  - COMPETITOR FLOOR (FU105): the comparison must KEEP AT LEAST 3 non-{name} competitors. When an
+    unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
+    offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
+    from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
+    value to hold the floor.{geo_rules}{qual_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}
@@ -2275,6 +2293,28 @@ Return JSON only:
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pn] if x)
+        # FU105 — competitor-count check (warning only): the FINAL body's comparison table must carry
+        # ≥3 non-{name} competitor rows. Reads the final body directly, so it catches reconcile
+        # row-drops (the FU98 check reads the pre-reconcile draft) and fires on the FU79 resume path
+        # too. No table → silent (a non-comparison blog never warns).
+        _tbl_lines, _bname = [], self._brand_block(brand)[0]
+        for _ln in (article.get("body_markdown") or "").split("\n"):
+            if _ln.lstrip().startswith("|"):
+                _tbl_lines.append(_ln.strip())
+            elif _tbl_lines:
+                break   # first table only
+        if _tbl_lines:
+            _sep_re = re.compile(r"^\|[\s:|-]+\|?$")   # the |---|:---| separator row
+            _rows = [l for l in _tbl_lines if not _sep_re.match(l)]
+            _data = _rows[1:] if len(_rows) > 1 else []   # drop the header row
+            _nm_re = re.compile(r"\b" + re.escape(_bname) + r"\b", re.I) if _bname else None
+            _comp_rows = [r for r in _data if not (_nm_re and _nm_re.search(r))]
+            if len(_comp_rows) < 3:
+                _ccnote = (f"competitor-check: comparison table has only {len(_comp_rows)} competitor "
+                           f"row(s) — minimum 3 expected; add competitors in Edit Brand or regenerate")
+                print(f"[blog_gen] {_ccnote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _ccnote] if x)
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.

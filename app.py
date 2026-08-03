@@ -8730,23 +8730,54 @@ def _search_request_signature(data):
     }, sort_keys=True, default=str)
 
 
+_PROMPT_STOPWORDS = {"any", "the", "for", "and", "with", "get", "how", "does", "can",
+                     "you", "your", "what", "where", "which", "who", "are", "that",
+                     "this", "best", "good", "online", "source", "sources", "platform",
+                     "app", "apps", "site", "sites", "tool", "tools", "recommendation",
+                     "recommendations", "vendor", "vendors", "service", "services",
+                     "provider", "providers", "reliable", "premium", "top",
+                     # FU107: connectors/fillers that were leaking into fallback slices +
+                     # fetch tokens ("distributor FROM china" -> junk slice "from china")
+                     "from", "into", "about", "near", "want", "need", "needs",
+                     "looking", "anyone", "there", "some", "these", "those"}
+
+
+def _prompt_fetch_terms(kws, cap=10):
+    """FU106 — the SEARCH-INDEX query terms for prompt mode: single unquoted TOKENS, not phrases.
+
+    Root cause (verified live): build_query() quotes every multi-word term, and Reddit's search
+    treats a quoted term as an EXACT-PHRASE match — LLM-phrased terms ("property data provider")
+    virtually never appear verbatim, so at days>7 (where the query actually reaches search.rss)
+    the whole OR matched nothing → 0 results. days≤7 worked only because the tight-window path
+    matches client-side and never sends the query. Fix: fetch with a loose token-OR (probe:
+    quoted-phrase OR → 0 entries; token-OR of the same concepts → 25); precision is restored
+    downstream by the keyword-presence filter and/or the embedding re-rank (the FU102 design:
+    legs FETCH broadly, ranking decides)."""
+    import re as _re
+    out, seen = [], set()
+    for kw in kws or []:
+        for w in _re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", str(kw).lower()):
+            if w in _PROMPT_STOPWORDS or w in seen:
+                continue
+            seen.add(w)
+            out.append(w)
+    return out[:cap]
+
+
 def _prompt_keyword_fallback(prompt):
     """FU103 — degrade-safe expansion when the LLM is unavailable: emit a FEW short OR-able
     phrases (the meaningful tail phrase + its trailing bigram/trigram, filler stripped), NOT
     one long AND blob — so combined-OR + the keyword filter still match real posts."""
     import re as _re
     words = [w for w in _re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", (prompt or "").lower())
-             if w not in {"any", "the", "for", "and", "with", "get", "how", "does", "can",
-                          "you", "your", "what", "where", "which", "who", "are", "that",
-                          "this", "best", "good", "online", "source", "sources", "platform",
-                          "app", "apps", "site", "sites", "tool", "tools", "recommendation",
-                          "recommendations", "vendor", "vendors", "service", "services",
-                          "provider", "providers", "reliable", "premium", "top"}]
+             if w not in _PROMPT_STOPWORDS]
     if not words:
         return [(prompt or "").strip()[:60]] if (prompt or "").strip() else []
     out = []
     tail = words[-4:] if len(words) >= 4 else words
     out.append(" ".join(tail))                 # meaningful tail phrase
+    # FU107: `words` is already stopword-filtered, so every slice below is >=2 NON-STOP tokens
+    # by construction (a 1-token term only when the prompt itself reduces to one word).
     if len(words) >= 3:
         out.append(" ".join(words[-3:]))       # tighter trigram
     if len(words) >= 2:
@@ -8771,10 +8802,19 @@ def _resolve_prompt_keywords(prompt, claude=None):
         cl = claude or ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
         ask = (
             "You are generating Reddit SEARCH queries to FIND existing posts related to a "
-            "user's prompt. Given the prompt, produce 6-8 diverse SHORT search queries "
-            "(2-5 words each) that real Reddit users would write about this topic — cover "
-            "the core need, close paraphrases, and adjacent phrasings. Do NOT answer the "
-            "prompt; produce SEARCH TERMS.\n\n"
+            "user's prompt.\n\n"
+            "STEP 1 — identify the CORE SUBJECT of the prompt: the specific product / need / "
+            'entity being asked about (e.g. "real estate data", "credit builder loan", '
+            '"IC chip supplier").\n'
+            "STEP 2 — produce 6-8 SHORT search queries (2-5 words each). HARD RULES:\n"
+            "- EVERY query must CONTAIN the core subject's key noun(s). Never a loose synonym "
+            "or adjacent-topic term that loses the entity — a query that drops the subject "
+            "retrieves unrelated posts.\n"
+            "- Mix: 2-3 DIRECT phrasings of the need; 2-3 COLLOQUIAL phrasings a real Redditor "
+            "would type (content words only, the way people actually talk about it); 1-2 "
+            "category/broader phrasings that still contain the entity.\n"
+            "- lowercase, no punctuation, no quotes, no filler-only terms.\n"
+            "Do NOT answer the prompt; produce SEARCH TERMS.\n\n"
             f"Prompt: {prompt}\n\n"
             'Return ONLY JSON: {"queries": ["...", "..."]}  (6-8 lowercase strings).'
         )
@@ -8952,13 +8992,18 @@ def api_search_reddit():
                 # Filter OFF only when we can rank (embeddings) AND the expansion is trustworthy.
                 use_kw_filter = not (embed_ok and _exp_ok)
                 fetch_limit = max(requested_limit * 3, 60) if (embed_ok and _exp_ok) else requested_limit
-                # FU104: seed the fetch with the exact prompt as one extra OR term so whole-phrase
-                # matches enter the pool ("focus extra on the exact prompt"); `keywords=kws` still
-                # drives the presence filter so the extra term doesn't over-narrow it.
-                _or_terms = kws + [prompt] if prompt else kws
-                combined = RedditSearchBot.build_query(any_of=_or_terms) if len(_or_terms) > 1 else (_or_terms[0] if _or_terms else prompt)
-                print(f"    Prompt search: {len(kws)} terms (exp_ok={_exp_ok}, embed_ok={embed_ok}, "
-                      f"kw_filter={use_kw_filter}); query={combined}")
+                # FU106: the search-index query is a LOOSE, UNQUOTED token-OR — quoted LLM phrases
+                # are exact-phrase matches on Reddit search and matched ~nothing at days>7 (verified
+                # live), which is why prompt search returned 0 except on the tight-window (days≤7)
+                # path that never sends the query. `keywords=kws` still drives the presence filter +
+                # Arctic per-term fan-out; "focus on the exact prompt" lives in the embedding re-rank
+                # (a quoted full-prompt term never matched anything anyway, so it is gone).
+                _fetch_toks = _prompt_fetch_terms(kws) or _prompt_fetch_terms([prompt]) or [prompt]
+                combined = (RedditSearchBot.build_query(any_of=_fetch_toks)
+                            if len(_fetch_toks) > 1 else _fetch_toks[0])
+                print(f"    Prompt search: {len(kws)} terms → {len(_fetch_toks)} fetch tokens "
+                      f"(exp_ok={_exp_ok}, embed_ok={embed_ok}, kw_filter={use_kw_filter}); "
+                      f"query={combined}")
                 pool = bot.search(keyword=combined, keywords=kws, kw_filter=use_kw_filter,
                                   limit=fetch_limit, **common_filters)
                 from generators.post_gen import PostGenerator
@@ -9007,7 +9052,8 @@ def api_search_reddit():
                                         brand_fit_count += 1
                 return _finish({"results": ranked_posts, "generated_keywords": kws,
                                 "ranked_by_prompt": ranked, "brand_id": prompt_brand_id,
-                                "brand_fit_count": brand_fit_count})
+                                "brand_fit_count": brand_fit_count,
+                                "expansion_ok": _exp_ok})   # FU107: fallback ran when False
 
             if keyword:
                 results = bot.search(keyword=keyword, limit=requested_limit, **common_filters)

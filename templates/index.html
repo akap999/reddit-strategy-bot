@@ -7357,6 +7357,7 @@ let _lsSearchResults = [];
 let _lsGeneratedKeywords = null;
 let _lsRankedByPrompt = undefined;   // FU102: true/false on prompt runs, undefined otherwise
 let _lsBrandFitCount = 0;            // FU104: how many top results got an LLM brand-fit score
+let _lsExpansionOk = undefined;      // FU107: false = the LLM term expansion failed (fallback terms)
 let _lsSavedPosts = [];
 let _lsComments = [];
 let _lsGenBusy = false;   // guards against double-spawning a Live Search generate batch
@@ -10246,7 +10247,8 @@ async function lsRunSearch() {
                         if (payload && payload.prompt !== undefined || (payload && 'ranked_by_prompt' in payload)) {
                             _lsRankedByPrompt = payload.ranked_by_prompt;   // FU102 (undefined for non-prompt runs)
                             _lsBrandFitCount = payload.brand_fit_count || 0;   // FU104
-                        } else { _lsRankedByPrompt = undefined; _lsBrandFitCount = 0; }
+                            _lsExpansionOk = payload.expansion_ok;             // FU107 (undefined for non-prompt runs)
+                        } else { _lsRankedByPrompt = undefined; _lsBrandFitCount = 0; _lsExpansionOk = undefined; }
                     }
                     // Clear regenerate flag after successful request
                     _lsForceRegenerate = false;
@@ -10294,6 +10296,7 @@ function lsRenderResults() {
             <span class="text-xs text-gray-400 mr-2">${_lsRankedByPrompt !== undefined ? '🧠 Searched these terms (ranked by relevance to your prompt):' : '🤖 Auto-generated keywords:'}</span>
             ${_lsGeneratedKeywords.map(k => `<span style="background:#0b2a3d;color:#60a5fa;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px;display:inline-block;margin-bottom:2px">${k}</span>`).join('')}
             ${_lsRankedByPrompt === false ? '<div class="text-xs mt-1" style="color:#f59e0b">semantic ranking unavailable (no embed key) — showing keyword matches</div>' : ''}
+            ${_lsExpansionOk === false ? '<div class="text-xs mt-1" style="color:#f59e0b">⚠ LLM term expansion unavailable — searched basic word-split terms (check ANTHROPIC_API_KEY / Railway logs)</div>' : ''}
         </div>
     ` : '';
     // FU104: closeness (prompt mode) + per-result brand-fit columns

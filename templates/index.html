@@ -10188,7 +10188,7 @@ async function lsRunSearch() {
             force_regenerate: _lsForceRegenerate || undefined,
         };
         labelForBgTask = autoName || 'auto brand';
-    } else {
+    } else if (!promptOn) {   // FU107b: prompt mode needs NO keyword — its own check ran above
         if (!keyword) { toast('Enter a keyword', 'error'); return; }
     }
     const excludeRaw = document.getElementById('ls-exclude').value.trim();

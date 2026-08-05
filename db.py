@@ -4843,7 +4843,7 @@ class Database:
         for b in months.values():
             b["replaced"] = b["mentions_replaced"] + b["hq_replaced"]
             b["total"] = b["mentions_total"] + b["hq_total"]
-            b["live"] = b["mentions_live"] + b["hq_live"] + b["replaced"]
+            b["live"] = b["mentions_live"] + b["hq_live"]   # FU108: live = report only (exclusive buckets)
             b["removed"] = b["mentions_removed"] + b["hq_removed"]
             b["replace"] = b["mentions_replace"] + b["hq_replace"]
         return sorted(months.values(), key=lambda x: x["month"], reverse=True)
@@ -5168,13 +5168,13 @@ class Database:
             # Canonical invariant (shared by all four portal surfaces):
             #   TOTAL = report + removed + replace + replaced   (mentions_total /
             #           hq_total already include replaced)
-            #   LIVE  = report + replaced                       (currently standing)
-            # The four status sets are mutually exclusive, so TOTAL never
-            # double-counts. mentions_live / hq_live are report/live-only.
+            #   LIVE  = report ONLY (FU108 — a replaced deliverable shows in its
+            #           own bucket, never inside live, so the four displayed
+            #           buckets are mutually exclusive and sum to TOTAL)
             _replaced = row["mentions_replaced"] + row["hq_replaced"]
             row["replaced"] = _replaced
             row["total"] = row["mentions_total"] + row["hq_total"]
-            row["live"] = row["mentions_live"] + row["hq_live"] + _replaced
+            row["live"] = row["mentions_live"] + row["hq_live"]
             row["removed"] = row["mentions_removed"] + row["hq_removed"]
             row["replace"] = row["mentions_replace"] + row["hq_replace"]
             out.append(row)

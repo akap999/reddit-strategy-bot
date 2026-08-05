@@ -55,8 +55,8 @@
           <span class="text-xs text-slate-500">Mentions</span>
         </div>
         <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-          {# 'replaced' restores a deliverable → folded into live (LIVE, not TOTAL) + its own chip. #}
-          <span class="chip chip-live">{{ m.mentions_live + m.mentions_replaced }} live</span>
+          {# FU108: exclusive buckets — live = report only; replaced shows ONLY in its own chip. #}
+          <span class="chip chip-live">{{ m.mentions_live }} live</span>
           {% if m.mentions_replaced %}<span class="chip chip-replaced">{{ m.mentions_replaced }} replaced</span>{% endif %}
           {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
           {# Replace is already counted under Removed — surfaced
@@ -72,7 +72,7 @@
           <span class="text-xs text-slate-500">HQ Mentions</span>
         </div>
         <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-          <span class="chip chip-live">{{ m.hq_live + m.hq_replaced }} live</span>
+          <span class="chip chip-live">{{ m.hq_live }} live</span>
           {% if m.hq_replaced %}<span class="chip chip-replaced">{{ m.hq_replaced }} replaced</span>{% endif %}
           {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
           {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}

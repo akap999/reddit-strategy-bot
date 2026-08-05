@@ -77,9 +77,9 @@
             <span class="text-xs text-slate-500">Mentions</span>
           </div>
           <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-            {# 'replaced' restores a deliverable → folded into live (counts toward LIVE,
-               not TOTAL), and also shown as its own chip. #}
-            <span class="chip chip-live">{{ m.mentions_live + m.mentions_replaced }} live</span>
+            {# FU108: buckets are mutually exclusive — live = report only; a replaced
+               deliverable shows ONLY in its own chip, so the chips sum to the total. #}
+            <span class="chip chip-live">{{ m.mentions_live }} live</span>
             {% if m.mentions_replaced %}<span class="chip chip-replaced">{{ m.mentions_replaced }} replaced</span>{% endif %}
             {% if m.mentions_removed %}<span class="chip chip-removed">{{ m.mentions_removed }} removed</span>{% endif %}
             {# Replace is a sub-set of Removed — already counted in
@@ -96,7 +96,7 @@
             <span class="text-xs text-slate-500">HQ Mentions</span>
           </div>
           <div class="flex flex-wrap justify-end items-center gap-1.5 text-[11px] min-w-0">
-            <span class="chip chip-live">{{ m.hq_live + m.hq_replaced }} live</span>
+            <span class="chip chip-live">{{ m.hq_live }} live</span>
             {% if m.hq_replaced %}<span class="chip chip-replaced">{{ m.hq_replaced }} replaced</span>{% endif %}
             {% if m.hq_removed %}<span class="chip chip-removed">{{ m.hq_removed }} removed</span>{% endif %}
             {% if m.hq_replace %}<span class="chip chip-replace">{{ m.hq_replace }} replace</span>{% endif %}
@@ -236,12 +236,13 @@ function _aggregate(rows, monthFilter, statusFilter) {
     hqReplace += r.hq_replace || 0;
     hqReplaced += r.hq_replaced || 0;
   }
-  // Canonical invariant (shared by all four portal surfaces): TOTAL already
-  // includes 'replaced' — the server's mentions_total / hq_total are
-  // report+removed+replace+replaced — so do NOT add mReplaced/hqReplaced into
-  // the total again here. LIVE = report + replaced (currently standing).
-  const mLiveAll = mLive + mReplaced, mTotalAll = mTotal;
-  const hqLiveAll = hqLive + hqReplaced, hqTotalAll = hqTotal;
+  // Canonical invariant (shared by all four portal surfaces): TOTAL =
+  // report+removed+replace+replaced, and the four buckets are MUTUALLY
+  // EXCLUSIVE — live = report ONLY (a replaced deliverable shows in its own
+  // chip, never inside live), so the chips visibly sum to the total. (FU108:
+  // replaced removed from the live count per client-clarity request.)
+  const mLiveAll = mLive, mTotalAll = mTotal;
+  const hqLiveAll = hqLive, hqTotalAll = hqTotal;
   // Status filter narrows the "headline" number for each pipeline:
   // when 'live' / 'removed' is picked, the headline shifts to that
   // partition; 'all' shows the pipeline's total.

@@ -11,7 +11,7 @@
    pipeline total. #}
 {% set removed_mentions = search_comments | selectattr('status', 'equalto', 'removed') | list | length %}
 {% set replace_mentions = search_comments | selectattr('status', 'equalto', 'replace') | list | length %}
-{# 'replaced' = a delivered replacement — counts toward LIVE (the deliverable is live again). #}
+{# FU108: exclusive buckets — a 'replaced' deliverable shows ONLY in its own chip, never in live. #}
 {% set replaced_mentions = search_comments | selectattr('status', 'equalto', 'replaced') | list | length %}
 {# HQ verdict (derived_status) is also mutually exclusive: a post
    is exactly one of live / replaced / removed / replace. #}
@@ -49,7 +49,7 @@
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Mentions</div>
     <div class="text-2xl font-semibold mt-1" style="font-variant-numeric: tabular-nums;" id="kpi-mentions">{{ mention_count }}</div>
-    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions + replaced_mentions }} live{% if replaced_mentions %} · {{ replaced_mentions }} replaced{% endif %}{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}{% if replace_mentions %} · {{ replace_mentions }} replace{% endif %}</div>
+    <div class="text-xs text-slate-400 mt-0.5" id="kpi-mentions-sub">{{ live_mentions }} live{% if replaced_mentions %} · {{ replaced_mentions }} replaced{% endif %}{% if removed_mentions %} · {{ removed_mentions }} removed{% endif %}{% if replace_mentions %} · {{ replace_mentions }} replace{% endif %}</div>
   </div>
   <div class="stat-card" style="padding: 16px;">
     <div class="text-xs text-slate-500 uppercase tracking-wider">Showing</div>
@@ -376,15 +376,16 @@ function applyFilters() {
   }
   const mSubEl = document.getElementById('kpi-mentions-sub');
   if (mSubEl) {
-    // LIVE = report + replaced (currently standing) — matches the canonical
-    // definition + the server-rendered subtitle.
-    const parts = [`${liveM + replacedM} live`];
+    // FU108: exclusive buckets — live = report only; replaced is its own part,
+    // so the parts visibly sum to the total.
+    const parts = [`${liveM} live`];
     if (replacedM) parts.push(`${replacedM} replaced`);
     if (removedM) parts.push(`${removedM} removed`);
     if (replaceM) parts.push(`${replaceM} replace`);
     mSubEl.textContent = parts.join(' · ');
   }
-  // Target tile follows the brand/sub scope too (live = report + replaced).
+  // Target tile = STANDING deliverables (report-live + replaced): counts delivery
+  // progress, not the live chip — buckets above stay exclusive.
   const tgtEl = document.getElementById('kpi-target-live');
   if (tgtEl) tgtEl.textContent = hqShown + liveM + replacedM;
 

@@ -8000,25 +8000,22 @@ def api_suggest_subreddits():
         api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not set")
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        # FU109 drive-by: this endpoint carried the SAME stale hardcoded model that broke
+        # prompt expansion (FU103) — it silently 404'd. Use the app's proven ClaudeClient
+        # (DEFAULT_MODEL) and ask for a JSON object it can parse.
+        cl = ClaudeClient(api_key)
         prompt = f"Suggest 5 active Reddit subreddits where someone could find posts related to: {keyword or brand_name}."
         if brand_name:
             prompt += f" The brand is '{brand_name}'."
-        prompt += "\nReturn ONLY a JSON array of objects with 'name' (without r/) and 'reason' (1 sentence why). No other text."
-        resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = resp.content[0].text.strip()
-        # Extract JSON from response
-        import re
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            suggestions = json.loads(match.group())
+        prompt += ('\nReturn ONLY JSON: {"subreddits": [{"name": "without r/", "reason": "1 sentence why"}]}')
+        res = cl.call(prompt, max_tokens=500, temperature=0.3)
+        if isinstance(res, dict):
+            suggestions = res.get("subreddits") or res.get("suggestions") or []
+        elif isinstance(res, list):
+            suggestions = res
         else:
-            suggestions = json.loads(text)
+            raise ValueError(f"suggestion call failed: {cl.last_error or 'no response'}")
+        suggestions = [s for s in suggestions if isinstance(s, dict) and s.get("name")]
         # Check availability via Reddit
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
         for s in suggestions:
@@ -8934,7 +8931,36 @@ def api_search_reddit():
         task_db = Database(DB_PATH)
         task_db.connect()
 
+        # FU109 — the LLM leg of Reddit-wide subreddit DISCOVERY: one Claude call naming
+        # niche communities the lexical /subreddits/search misses. Lazy — only invoked by
+        # the bot when discovery actually runs (global search / top-up). Never raises.
+        def _sub_suggest():
+            try:
+                _c = ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", ""))
+                subject = (prompt or keyword or ", ".join(str(k) for k in keywords_list) or "").strip()
+                if not subject and auto_brand:
+                    subject = str((auto_brand or {}).get("brand_name") or "").strip()
+                if not subject:
+                    return []
+                res = _c.call(
+                    "Name 5-8 REAL, currently-active subreddits where people genuinely discuss: "
+                    f"{subject[:300]}\n\nRules: real communities only — never invent a name; "
+                    'lowercase; no "r/" prefix. Return ONLY JSON: {"subreddits": ["...", "..."]}',
+                    max_tokens=200, temperature=0.3)
+                if isinstance(res, dict):
+                    return [str(s).strip() for s in (res.get("subreddits") or []) if str(s).strip()][:8]
+            except Exception as e:
+                print(f"    ⚠ sub-suggest LLM failed (ignored): {e}", flush=True)
+            return []
+
         def _finish(res):
+            # FU109: surface which subreddits the wide search discovered (chips in the UI).
+            try:
+                _disc = getattr(bot, "last_discovered_subs", None)
+                if _disc and isinstance(res, dict):
+                    res["discovered_subreddits"] = list(_disc)
+            except Exception:
+                pass
             # Cache the assembled result so an identical request is consistent for
             # the TTL — but only when it looks HEALTHY. A starved/partial run (a
             # handful of posts from a throttled fetch) must NOT be frozen for 10
@@ -8978,6 +9004,9 @@ def api_search_reddit():
                 max_per_sub=(int(data["max_per_sub"])
                              if str(data.get("max_per_sub") or "").strip() not in ("", "0")
                              else None),
+                # FU109: LLM leg for Reddit-wide subreddit discovery (lazy — the bot only
+                # calls it when discovery actually runs).
+                sub_suggest_fn=_sub_suggest,
             )
 
             # FU102/103 — PROMPT search: expand (real ClaudeClient) → filtered combined-OR fetch →

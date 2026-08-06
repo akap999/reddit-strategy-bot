@@ -7358,6 +7358,7 @@ let _lsGeneratedKeywords = null;
 let _lsRankedByPrompt = undefined;   // FU102: true/false on prompt runs, undefined otherwise
 let _lsBrandFitCount = 0;            // FU104: how many top results got an LLM brand-fit score
 let _lsExpansionOk = undefined;      // FU107: false = the LLM term expansion failed (fallback terms)
+let _lsDiscoveredSubs = null;        // FU109: subs the Reddit-wide search discovered + searched
 let _lsSavedPosts = [];
 let _lsComments = [];
 let _lsGenBusy = false;   // guards against double-spawning a Live Search generate batch
@@ -10248,7 +10249,8 @@ async function lsRunSearch() {
                             _lsRankedByPrompt = payload.ranked_by_prompt;   // FU102 (undefined for non-prompt runs)
                             _lsBrandFitCount = payload.brand_fit_count || 0;   // FU104
                             _lsExpansionOk = payload.expansion_ok;             // FU107 (undefined for non-prompt runs)
-                        } else { _lsRankedByPrompt = undefined; _lsBrandFitCount = 0; _lsExpansionOk = undefined; }
+                            _lsDiscoveredSubs = payload.discovered_subreddits || null;   // FU109
+                        } else { _lsRankedByPrompt = undefined; _lsBrandFitCount = 0; _lsExpansionOk = undefined; _lsDiscoveredSubs = null; }
                     }
                     // Clear regenerate flag after successful request
                     _lsForceRegenerate = false;
@@ -10299,6 +10301,13 @@ function lsRenderResults() {
             ${_lsExpansionOk === false ? '<div class="text-xs mt-1" style="color:#f59e0b">⚠ LLM term expansion unavailable — searched basic word-split terms (check ANTHROPIC_API_KEY / Railway logs)</div>' : ''}
         </div>
     ` : '';
+    // FU109: which subreddits the Reddit-wide search discovered + searched
+    const discChips = (_lsDiscoveredSubs && _lsDiscoveredSubs.length) ? `
+        <div class="mb-2 p-2" style="background:#101a12;border:1px solid #234d2a;border-radius:6px">
+            <span class="text-xs text-gray-400 mr-2">🌐 Reddit-wide searched these discovered subreddits:</span>
+            ${_lsDiscoveredSubs.map(s => `<span style="background:#123a1a;color:#4ade80;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:4px;display:inline-block;margin-bottom:2px">r/${s}</span>`).join('')}
+        </div>
+    ` : '';
     // FU104: closeness (prompt mode) + per-result brand-fit columns
     const showMatch = _lsRankedByPrompt !== undefined && _lsSearchResults.some(r => r.prompt_relevance != null);
     const showBrandFit = _lsSearchResults.some(r => r.brand_relevance != null);
@@ -10308,6 +10317,7 @@ function lsRenderResults() {
         </div>` : '';
     el.innerHTML = `
         ${genChips}
+        ${discChips}
         ${fitLegend}
         <div class="flex justify-between items-center mb-2">
             <span class="text-sm text-gray-400">${_lsSearchResults.length} results</span>

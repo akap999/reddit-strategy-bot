@@ -1105,6 +1105,141 @@ class RedditSearchBot:
     # Public search interface
     # ------------------------------------------------------------------
 
+    def _sub_search(self, term, deadline=None):
+        """FU109 — one Reddit subreddit-search query (/subreddits/search.json?q=<term>),
+        cached 1h per term. Returns a relevance-ordered list of
+        {name, subscribers, over18} dicts, or [] — NEVER raises."""
+        key = (term or "").strip().lower()
+        if not key:
+            return []
+        now = time.time()
+        with RedditSearchBot._sub_discovery_lock:
+            hit = RedditSearchBot._sub_discovery_cache.get(key)
+            if hit and (now - hit[0]) < RedditSearchBot._SUB_DISCOVERY_TTL:
+                return list(hit[1])
+        if deadline is not None and now > deadline:
+            return []
+        listing = []
+        path = "/subreddits/search.json"
+        params = {"q": term, "limit": 25}
+        try:
+            resp = None
+            # Residential-FIRST (the FU94 pattern): the clean distinct-IP proxy is the
+            # reliable path on cloud IPs; worker/direct is the free fallback.
+            if bool(self._reddit_proxies and self._search_use_residential):
+                try:
+                    presp = requests.get(
+                        "https://www.reddit.com" + path, params=params,
+                        headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                                "Chrome/120.0.0.0 Safari/537.36"),
+                                 "Accept": "application/json"},
+                        timeout=10, proxies=self._reddit_proxies)
+                    self._count_resi_bytes(presp)
+                    if presp.status_code == 200:
+                        resp = presp
+                except Exception:
+                    pass
+            if resp is None:
+                base = (self.apis.get("reddit") or "https://old.reddit.com").rstrip("/")
+                resp = requests.get(
+                    base + path, params=params,
+                    headers={"User-Agent": self.headers.get("User-Agent", "python:reddit-strategy:v1"),
+                             "Accept": "application/json"},
+                    timeout=10)
+            if resp is not None and resp.status_code == 200:
+                data = resp.json()
+                for child in ((data.get("data") or {}).get("children") or []):
+                    d = child.get("data") or {}
+                    nm = d.get("display_name")
+                    if nm:
+                        listing.append({"name": nm, "subscribers": d.get("subscribers"),
+                                        "over18": bool(d.get("over18"))})
+            elif resp is not None:
+                print(f"    ⚠ sub-search '{term}' got {resp.status_code}", flush=True)
+        except Exception as e:
+            print(f"    ⚠ sub-search '{term}' failed: {e}", flush=True)
+        if listing:
+            with RedditSearchBot._sub_discovery_lock:
+                RedditSearchBot._sub_discovery_cache[key] = (now, list(listing))
+        return listing
+
+    def _discover_subreddits(self, terms, exclude=None, nsfw=None, min_subscribers=None,
+                             max_subscribers=None, cap=None, suggest_fn=None, deadline=None):
+        """FU109 — find the subreddits RELEVANT to the search terms, so a Reddit-wide
+        search runs inside topical communities instead of a global keyword blast.
+
+        Two sources, unioned:
+          1. Reddit's own subreddit-search (first 3 terms) — real, relevance-ordered,
+             carries subscribers + over18 for ranking/filtering.
+          2. `suggest_fn` (optional, supplied by the app): ONE LLM call naming niche
+             communities lexical search misses. Names merge UNVALIDATED — a dead name's
+             RSS just 404s harmlessly downstream. Skipped when <10s of budget remain.
+
+        Round-robin across each term's relevance-ranked list (diversity), then the
+        LLM-only names; dedupe case-insensitively; drop over18 unless nsfw is True;
+        apply min/max_subscribers when set (UNKNOWN counts pass — the
+        _filter_by_subscribers convention); drop `exclude`; cap at
+        REDDIT_WIDE_DISCOVER_SUBS (default 10). HARD GUARANTEE: never raises — [] on
+        any failure, and the caller then falls back to today's global search."""
+        try:
+            if cap is None:
+                try:
+                    cap = int(os.environ.get("REDDIT_WIDE_DISCOVER_SUBS", "10"))
+                except (TypeError, ValueError):
+                    cap = 10
+            terms = [str(t).strip() for t in (terms or []) if str(t).strip()][:3]
+            if not terms:
+                return []
+            excl = {str(s).strip().lower().lstrip("r/").strip("/")
+                    for s in (exclude or []) if str(s).strip()}
+            per_term = [l for l in (self._sub_search(t, deadline=deadline) for t in terms) if l]
+            llm_names = []
+            if suggest_fn and (deadline is None or (deadline - time.time()) > 10):
+                try:
+                    llm_names = [str(n).strip().lstrip("r/").strip("/")
+                                 for n in (suggest_fn() or []) if str(n).strip()]
+                except Exception as e:
+                    print(f"    ⚠ LLM sub-suggest failed (ignored): {e}", flush=True)
+            out, seen = [], set()
+
+            def _take(entry):
+                name = (entry.get("name") or "").strip()
+                lc = name.lower()
+                if not name or lc in seen or lc in excl:
+                    return
+                if entry.get("over18") and nsfw is not True:
+                    return
+                subs_n = entry.get("subscribers")
+                if subs_n is not None:
+                    if min_subscribers is not None and subs_n < min_subscribers:
+                        return
+                    if max_subscribers is not None and subs_n > max_subscribers:
+                        return
+                seen.add(lc)
+                out.append(name)
+
+            # Round-robin across the relevance-ordered per-term lists so no term dominates.
+            for i in range(max((len(l) for l in per_term), default=0)):
+                if len(out) >= cap:
+                    break
+                for listing in per_term:
+                    if i < len(listing) and len(out) < cap:
+                        _take(listing[i])
+            for n in llm_names:   # LLM names AFTER the Reddit-verified ones
+                if len(out) >= cap:
+                    break
+                _take({"name": n})
+            if out:
+                self.last_discovered_subs = list(out)
+                print(f"    🌐 wide search discovered {len(out)} subreddit(s): "
+                      + ", ".join(out), flush=True)
+            return out
+        except Exception as e:
+            print(f"    ⚠ subreddit discovery failed (falling back to global search): {e}",
+                  flush=True)
+            return []
+
     def search(
         self,
         keyword,
@@ -1131,6 +1266,9 @@ class RedditSearchBot:
         max_per_sub=None,
         kw_filter=True,
         _deadline=None,
+        sub_suggest_fn=None,      # FU109: optional LLM leg for subreddit discovery
+        _skip_discovery=False,    # FU109: internal — the top-up recursion of a discovered run
+        _discover_exclude=None,   # FU109: internal — subs discovery must skip (already searched)
     ):
         # `keywords` (optional): the ORIGINAL term list when `keyword` is a
         # combined boolean-OR query. OR-capable legs (RSS/JSON) use the combined
@@ -1168,6 +1306,7 @@ class RedditSearchBot:
         """
         if _deadline is None:
             self._resi_bytes = 0   # FU94: fresh metered-GB tally for this outer search
+            self.last_discovered_subs = None   # FU109: reset per OUTER search (recursions may set it)
         # Short-TTL result cache: an identical back-to-back search returns the
         # SAME set instead of re-rolling the rate-limited upstream legs (which
         # is what makes the count swing run-to-run, e.g. 3 then 10). Keyed by
@@ -1198,6 +1337,31 @@ class RedditSearchBot:
             subreddit_path = subreddit
         else:
             subreddit_path = None
+
+        # Hard wall-clock budget (hoisted above discovery so it counts inside it). Shared
+        # across the reddit_wide recursion via _deadline.
+        search_deadline = _deadline or (time.time() + self._SEARCH_TIME_BUDGET)
+
+        # FU109 — Reddit-wide two-stage: a GLOBAL search (no subs given) first DISCOVERS
+        # the relevant subreddits (Reddit's own subreddit-search + optional LLM leg), then
+        # runs the normal SUB-SCOPED machinery inside them. HARD FALLBACK GUARANTEE:
+        # discovery empty/failed → today's global blast runs byte-identically below; and a
+        # discovered run forces reddit_wide=True so the existing top-up fills any tail with
+        # the current global search (its recursion sets _skip_discovery) — discovery can
+        # never REDUCE results vs today.
+        _discovery_driven = False
+        if not subreddit_path and not _skip_discovery:
+            _disc_terms = _terms or ([keyword] if (keyword or "").strip() else [])
+            _disc = self._discover_subreddits(
+                _disc_terms,
+                exclude=list(excluded_subreddits or []) + list(_discover_exclude or []),
+                nsfw=nsfw, min_subscribers=min_subscribers, max_subscribers=max_subscribers,
+                suggest_fn=sub_suggest_fn, deadline=search_deadline)
+            if _disc:
+                subreddits = _disc
+                subreddit_path = "+".join(_disc)
+                _discovery_driven = True
+                reddit_wide = True   # guarantee: the top-up fills any tail globally
 
         reddit_sort_map = {
             "score": "top",
@@ -1259,10 +1423,8 @@ class RedditSearchBot:
                               or min_subscribers is not None
                               or nsfw is not None or excluded_set)
 
-        # Hard wall-clock budget so a search can't grind for minutes when residential RSS underfills and
-        # the slow Arctic (sub×term fan-out) / Pullpush legs + reddit-wide recursion stack up. Shared
-        # across the reddit_wide recursion via _deadline. Returns whatever was gathered by the deadline.
-        search_deadline = _deadline or (time.time() + self._SEARCH_TIME_BUDGET)
+        # (search_deadline computed earlier — above the FU109 discovery hook — so
+        # discovery time counts inside the same budget.)
 
         for api_name in apis_to_try:
             # Stop early if we already have enough results
@@ -1736,6 +1898,13 @@ class RedditSearchBot:
                     min_subscribers=min_subscribers, max_scrutiny=max_scrutiny,
                     db=db, db_path=db_path, force_refresh=force_refresh,
                     keywords=keywords, reddit_wide=False, _deadline=search_deadline,
+                    # FU109: a DISCOVERED run's top-up goes straight global (discovery already
+                    # ran — the fallback-guarantee fill); a NAMED-subs top-up may discover, but
+                    # skips the subs already searched (discovery-only exclusion — post filtering
+                    # is untouched, exactly today's top-up semantics).
+                    sub_suggest_fn=sub_suggest_fn,
+                    _skip_discovery=_discovery_driven,
+                    _discover_exclude=[s for s in (subreddits or []) if s],
                 )
                 added = 0
                 for p in global_hits:
@@ -1771,6 +1940,12 @@ class RedditSearchBot:
     # Class-level subscriber cache (persists across searches within same process)
     _sub_cache = {}  # sub_name_lower -> (subscriber_count, timestamp)
     _SUB_CACHE_TTL = 3600  # 1 hour
+
+    # FU109 — subreddit-DISCOVERY cache: /subreddits/search.json listings per term,
+    # shared across instances so repeat Reddit-wide searches don't re-hit the endpoint.
+    _sub_discovery_cache = {}   # term_lc -> (timestamp, [{name, subscribers, over18}])
+    _SUB_DISCOVERY_TTL = 3600
+    _sub_discovery_lock = threading.Lock()
 
     # Class-level short-TTL RESULT cache, shared across instances (each search
     # builds a fresh bot). Keyed by the result-affecting search inputs so an

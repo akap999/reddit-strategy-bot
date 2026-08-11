@@ -144,14 +144,31 @@ def _extract_logo_url(html: str, domain_url: str) -> str:
     return ""
 
 
-def _build_enrichment_prompt(name: str, domain_url: str, page_text: str) -> str:
+def _build_enrichment_prompt(name: str, domain_url: str, page_text: str,
+                             site_facts: str = "") -> str:
     if page_text:
-        page_section = f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
+        page_section = (
+            f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""\n'
+            "Ground EVERY field ONLY in this page text. The brand NAME may collide with "
+            "unrelated same-named entities (companies, apps, games) — ignore anything you "
+            "associate with the name that is not supported by the page."
+        )
+    elif site_facts:
+        # FU110: the direct fetch failed (datacenter-IP blocks) but web search — which runs
+        # server-side, immune to our IP — read the site. Ground in these facts.
+        page_section = (
+            f'SITE FACTS (gathered via web search of {domain_url}):\n"""\n{site_facts}\n"""\n'
+            "Ground EVERY field ONLY in these facts. Ignore any same-named entity that is "
+            "not this company at this domain."
+        )
     else:
         page_section = (
-            "HOMEPAGE TEXT: (could not fetch homepage — rely on the brand name and "
-            "your general knowledge; flag uncertainty by leaving fields as empty strings "
-            "or empty arrays.)"
+            "HOMEPAGE TEXT: (could not fetch the site.) The DOMAIN is the identity anchor. "
+            "Describe ONLY the company that operates THIS EXACT domain. If you do not have "
+            "specific, reliable knowledge of that company, leave fields as empty strings or "
+            "empty arrays. NEVER substitute a similarly-named company, app, game, or "
+            "organization — name collisions are common and a confident wrong answer is far "
+            "worse than an empty one."
         )
 
     return f"""You are analyzing a brand to extract structured context for a GEO (Generative
@@ -201,7 +218,28 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
     """
     html = _fetch_homepage(domain_url)
     page_text = _extract_visible_text(html)
-    prompt = _build_enrichment_prompt(name, domain_url, page_text)
+    # FU110 — the rantle.com lesson: when the DIRECT fetch fails (sites that block
+    # datacenter IPs return nothing on Railway), do NOT fall back to name-recall — a
+    # colliding name makes the model confidently describe the WRONG entity (a same-named
+    # game, org, …). Instead ground via fetch_site_facts: a web search PINNED to the
+    # brand's own domain that runs server-side (immune to our egress IP). ~1-2¢, only
+    # on fetch failure. If even that returns nothing, the prompt's hardened no-page
+    # branch forbids substituting a similarly-named entity.
+    site_facts = ""
+    if not page_text and (domain_url or "").strip():
+        try:
+            _dom = re.sub(r"^https?://", "", domain_url.strip()).split("/")[0]
+            _dom = _dom[4:] if _dom.startswith("www.") else _dom
+            site_facts = claude.fetch_site_facts(
+                _dom, name or _dom,
+                "what this company is, what it sells/does, who its customers are, "
+                "key products/services, and its main competitors") or ""
+            if site_facts:
+                print(f"[brand_enrichment] direct fetch of {domain_url} failed — grounded "
+                      f"via web-search site facts ({len(site_facts)} chars)", flush=True)
+        except Exception as e:
+            print(f"[brand_enrichment] site-facts fallback failed: {e}", flush=True)
+    prompt = _build_enrichment_prompt(name, domain_url, page_text, site_facts=site_facts)
     # 4000 (was 1500): the prompt asks for ~10 fields incl. competitor_domains;
     # 1500 truncated the JSON mid-object -> JSONDecodeError -> None -> "failed".
     result = claude.call(prompt, max_tokens=4000, temperature=0.3)
@@ -330,9 +368,9 @@ def enrich_brand_for_anchor(claude: ClaudeClient, name: str, domain_url: str, an
         page_section = f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
     else:
         page_section = (
-            "HOMEPAGE TEXT: (could not fetch — rely on the brand name and your "
-            "confident knowledge of this brand; if unsure, set covers=false rather "
-            "than guessing.)"
+            "HOMEPAGE TEXT: (could not fetch.) Describe ONLY the company at this exact "
+            "domain — NEVER a similarly-named company, app, game, or organization (name "
+            "collisions are common). If unsure, set covers=false rather than guessing."
         )
     prompt = f"""You are grounding a GEO campaign. We are about to build content anchored on a
 specific TOPIC for this brand, and need to know what THIS brand actually offers or
@@ -398,8 +436,9 @@ def generate_brand_personas(claude: ClaudeClient, name: str, domain_url: str,
     page_text = _extract_visible_text(html, max_chars=4000)
     page_section = (f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
                     if page_text else
-                    "HOMEPAGE TEXT: (could not fetch — rely on the fields below + your "
-                    "confident knowledge of this brand.)")
+                    "HOMEPAGE TEXT: (could not fetch — rely ONLY on the fields below; "
+                    "NEVER substitute a similarly-named company, app, game, or "
+                    "organization for this brand.)")
     prompt = f"""You are defining the buyer PERSONAS for a GEO campaign — the distinct kinds of
 people who would search for what this brand offers. These personas decide which
 recommendation questions are worth targeting and whether THIS brand is a credible
@@ -497,8 +536,9 @@ def generate_personas_for_regions(claude: ClaudeClient, name: str, domain_url: s
     page_text = _extract_visible_text(html, max_chars=4000)
     page_section = (f'HOMEPAGE TEXT (visible content only):\n"""\n{page_text}\n"""'
                     if page_text else
-                    "HOMEPAGE TEXT: (could not fetch — rely on the fields below + your "
-                    "confident knowledge of this brand.)")
+                    "HOMEPAGE TEXT: (could not fetch — rely ONLY on the fields below; "
+                    "NEVER substitute a similarly-named company, app, game, or "
+                    "organization for this brand.)")
     rlist = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(regions))
     existing_block = ("\n".join(f"  - {l}" for l in existing)
                       if existing else "  (none yet)")

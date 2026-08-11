@@ -5,6 +5,7 @@ user reviews in the UI before saving. Never persists directly.
 """
 
 import json
+import os
 import random
 import re
 import time
@@ -58,27 +59,21 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
     url = domain_url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    # Browser UA (not the Reddit bot UA): some brand sites sit behind Cloudflare which
+    # 403s "SubredditStrategyBot/..." — that empty fetch made enrichment fall back to
+    # the brand NAME and describe the wrong same-named entity (e.g. landportal.com).
+    # Brand-homepage fetch only — unrelated to the Reddit legs.
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     attempts = max(1, int(retries) + 1)
     for i in range(attempts):
         try:
-            resp = requests.get(
-                url,
-                headers={
-                    # Browser UA (not the Reddit bot UA): some brand sites sit behind
-                    # Cloudflare which 403s "SubredditStrategyBot/..." — that empty fetch
-                    # made enrichment fall back to the brand NAME and describe the wrong
-                    # same-named entity (e.g. landportal.com). A browser UA fetches the
-                    # real page; it succeeds everywhere the bot UA did. Brand-homepage
-                    # fetch only — unrelated to the Reddit legs.
-                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/120.0.0.0 Safari/537.36"),
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                timeout=timeout,
-                allow_redirects=True,
-            )
+            resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
             if resp.status_code == 200 and resp.text:
                 return resp.text
         except requests.exceptions.RequestException as e:
@@ -86,6 +81,24 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
                 print(f"[brand_enrichment] fetch error for {url}: {e}")
         if i < attempts - 1:
             time.sleep(0.4 + random.uniform(0, 0.4))
+    # FU111 — residential-proxy fallback (the rantle.com case): sites that block
+    # datacenter IPs return nothing on Railway; the IPRoyal residential IP fetches them
+    # fine. SINGLE shot, only after the free path failed (GB is metered — a homepage is
+    # ~0.1-0.5 MB and enrichment is rare, so the spend is negligible). The FU110
+    # web-search grounding remains the last resort when even this fails.
+    proxy = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+    if proxy:
+        try:
+            resp = requests.get(url, headers=headers, timeout=max(timeout, 12),
+                                allow_redirects=True,
+                                proxies={"http": proxy, "https": proxy})
+            if resp.status_code == 200 and resp.text:
+                print(f"[brand_enrichment] ✓ homepage via residential proxy: {url}", flush=True)
+                return resp.text
+            print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
+                  flush=True)
+        except requests.exceptions.RequestException as e:
+            print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
     return ""
 
 

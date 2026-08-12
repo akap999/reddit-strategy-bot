@@ -1566,48 +1566,48 @@ def api_enrich_brand_draft():
     if not name and not domain_url:
         return jsonify({"error": "name or domain_url is required"}), 400
 
-    claude = ClaudeClient(ANTHROPIC_API_KEY)
-    try:
+    # FU112 — BACKGROUND task. The full Auto-analyze chain (homepage fetch ladder incl.
+    # the FU111 residential fallback + FU110 web-search grounding + enrichment LLM +
+    # personas LLM + byline/logo fetches) can exceed gunicorn's 120s on a blocked site —
+    # the worker got killed mid-request and the browser saw a message-less 502 (the
+    # "empty red toast"). A task can take as long as it needs; the UI polls.
+    def task():
+        claude = ClaudeClient(ANTHROPIC_API_KEY)
         draft = enrich_brand(claude, name, domain_url)
-    except Exception as e:
-        # Never let an unexpected raise (e.g. a prompt-template bug) become a
-        # messageless HTTP 500 — surface the reason so the toast is actionable.
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Enrichment crashed: {type(e).__name__}: {e}"}), 500
-    if not draft:
-        # Surface the ACTUAL reason (auth / model / JSON-parse / rate-limit)
-        # instead of a generic message, so the toast tells us what to fix.
-        return jsonify({
-            "error": "Enrichment failed: " + (
+        if not draft:
+            # Surface the ACTUAL reason (auth / model / JSON-parse / rate-limit)
+            # instead of a generic message, so the toast tells us what to fix.
+            raise ValueError("Enrichment failed: " + (
                 getattr(claude, "last_error", None)
                 or "LLM returned no usable data. Check the URL and try again, "
-                   "or fill fields manually.")
-        }), 502
-    # Effective name = provided, else the name enrich_brand derived from the page.
-    eff_name = name or (draft.get("name") or "")
-    # Auto-analyze does everything: also generate personas from the freshly-enriched
-    # fields so they're shown for review and saved with the brand. Graceful — a persona
-    # failure must never break the enrichment draft.
-    try:
-        draft["personas"] = generate_brand_personas(
-            claude, eff_name, domain_url,
-            category=draft.get("category") or "", audience=draft.get("audience") or "",
-            use_cases=draft.get("use_cases"), pain_points=draft.get("pain_points")) or []
-    except Exception as e:
-        print(f"[enrich] persona generation skipped: {e}", flush=True)
-        draft["personas"] = []
-    # Also fetch a REAL author (founder/owner/team) + logo from the brand's own site, for review.
-    # Graceful — a byline/logo failure must never break the enrichment draft.
-    try:
-        from generators.brand_enrichment import fetch_brand_byline_logo
-        bl = fetch_brand_byline_logo(claude, eff_name, domain_url)
-        draft["author_name"] = bl.get("author_name", "")
-        draft["author_title"] = bl.get("author_title", "")
-        draft["logo_url"] = bl.get("logo_url", "")
-    except Exception as e:
-        print(f"[enrich] byline/logo fetch skipped: {e}", flush=True)
-    return jsonify(draft)
+                   "or fill fields manually."))
+        # Effective name = provided, else the name enrich_brand derived from the page.
+        eff_name = name or (draft.get("name") or "")
+        # Auto-analyze does everything: also generate personas from the freshly-enriched
+        # fields so they're shown for review and saved with the brand. Graceful — a persona
+        # failure must never break the enrichment draft.
+        try:
+            draft["personas"] = generate_brand_personas(
+                claude, eff_name, domain_url,
+                category=draft.get("category") or "", audience=draft.get("audience") or "",
+                use_cases=draft.get("use_cases"), pain_points=draft.get("pain_points")) or []
+        except Exception as e:
+            print(f"[enrich] persona generation skipped: {e}", flush=True)
+            draft["personas"] = []
+        # Also fetch a REAL author (founder/owner/team) + logo from the brand's own site, for
+        # review. Graceful — a byline/logo failure must never break the enrichment draft.
+        try:
+            from generators.brand_enrichment import fetch_brand_byline_logo
+            bl = fetch_brand_byline_logo(claude, eff_name, domain_url)
+            draft["author_name"] = bl.get("author_name", "")
+            draft["author_title"] = bl.get("author_title", "")
+            draft["logo_url"] = bl.get("logo_url", "")
+        except Exception as e:
+            print(f"[enrich] byline/logo fetch skipped: {e}", flush=True)
+        return draft
+
+    tid = start_task("enrich-brand", task)
+    return jsonify({"task_id": tid})
 
 @app.route("/api/brands/<int:bid>/enrich", methods=["POST"])
 def api_enrich_existing_brand(bid):

@@ -320,6 +320,15 @@ def fetch_brand_byline_logo(claude: ClaudeClient, name: str, domain_url: str) ->
     for path in _BYLINE_PATHS:
         html = _fetch_homepage(base + path)
         if not html:
+            # FU112: if even the HOMEPAGE ("" — always first in _BYLINE_PATHS) is
+            # unreachable, the site is blocked/down — don't burn the full fetch ladder
+            # (direct retries + residential shot) on six more paths; that alone could
+            # eat minutes and was a big part of blowing the request past the gateway
+            # timeout on blocked sites.
+            if path == "":
+                print(f"[brand_enrichment] byline: homepage unreachable for {base} — "
+                      "skipping the remaining byline paths", flush=True)
+                break
             continue
         if path == "":
             home_html = html

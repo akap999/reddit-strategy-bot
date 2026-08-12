@@ -1057,8 +1057,16 @@ async function enrichBrandDraft(btnId = 'brand-enrich-btn') {
         setVal('edit-brand-author', draft.author_name || '');
         setVal('edit-brand-author-title', draft.author_title || '');
         setVal('edit-brand-logo', draft.logo_url || '');
-        const msg = draft._page_fetched ? 'Analyzed from homepage — review and Save' : 'Analyzed (homepage unreachable — review carefully)';
-        toast(msg, 'success');
+        // FU113: honest three-way grounding toast — "Analyzed from homepage" must never
+        // show when the model was actually grounded in a bot-wall page or nothing.
+        const g = draft._grounding || (draft._page_fetched ? 'homepage' : 'none');
+        if (g === 'homepage') {
+            toast('Analyzed from homepage — review and Save', 'success');
+        } else if (g === 'web_search') {
+            toast('Site blocks our server — analyzed via web search of the domain; review carefully', 'info');
+        } else {
+            toast('⚠ Could not read the site — only reliably-known fields filled; verify before saving', 'error');
+        }
     } catch (e) {
         // api() already toasted the server's real error message; surface it
         // here too (don't mask it with a generic "Analyze failed").

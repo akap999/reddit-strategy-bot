@@ -47,6 +47,32 @@ class _VisibleTextExtractor(HTMLParser):
         return re.sub(r"\s+", " ", joined).strip()
 
 
+_CHALLENGE_MARKERS = (
+    "just a moment", "attention required", "enable javascript and cookies",
+    "checking your browser", "verify you are a human", "access denied",
+    "you have been blocked", "captcha", "ddos protection by",
+    "cf-browser-verification", "_cf_chl", "cf-challenge",
+)
+
+
+def _looks_blocked(html: str) -> str:
+    """FU113 — content gate for a 200 response: bot walls (WPX Cloud, Cloudflare, …)
+    serve datacenter IPs a block/challenge page WITH STATUS 200, which used to count
+    as a successful fetch — so the residential + web-search fallbacks never fired and
+    the model was 'grounded' in "Just a moment…" text (the rantle.com bug). Returns
+    "challenge-page" / "thin-content" when the page can't be real grounding, else ""."""
+    if not html:
+        return "thin-content"
+    low = html[:8000].lower()
+    for marker in _CHALLENGE_MARKERS:
+        if marker in low:
+            return "challenge-page"
+    # A real company page has real visible text; a JS shell / block stub doesn't.
+    if len(_extract_visible_text(html, max_chars=1000)) < 200:
+        return "thin-content"
+    return ""
+
+
 def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str:
     """Fetch a brand's homepage HTML. Returns empty string on any failure.
 
@@ -75,7 +101,14 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
         try:
             resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
             if resp.status_code == 200 and resp.text:
-                return resp.text
+                # FU113: a 200 is NOT success unless it carries real content — bot walls
+                # serve 200 block/challenge pages, which must fall through the ladder.
+                blocked = _looks_blocked(resp.text)
+                if not blocked:
+                    return resp.text
+                print(f"[brand_enrichment] 200-but-blocked ({blocked}) for {url} — "
+                      "continuing the ladder", flush=True)
+                break   # a bot wall won't change on retry — go straight to residential
         except requests.exceptions.RequestException as e:
             if i == attempts - 1:
                 print(f"[brand_enrichment] fetch error for {url}: {e}")
@@ -93,10 +126,15 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
                                 allow_redirects=True,
                                 proxies={"http": proxy, "https": proxy})
             if resp.status_code == 200 and resp.text:
-                print(f"[brand_enrichment] ✓ homepage via residential proxy: {url}", flush=True)
-                return resp.text
-            print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
-                  flush=True)
+                blocked = _looks_blocked(resp.text)   # FU113: gate the residential rung too
+                if not blocked:
+                    print(f"[brand_enrichment] ✓ homepage via residential proxy: {url}", flush=True)
+                    return resp.text
+                print(f"[brand_enrichment] residential fetch 200-but-blocked ({blocked}) "
+                      f"for {url}", flush=True)
+            else:
+                print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
+                      flush=True)
         except requests.exceptions.RequestException as e:
             print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
     return ""
@@ -231,6 +269,12 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
     """
     html = _fetch_homepage(domain_url)
     page_text = _extract_visible_text(html)
+    # FU113 belt-and-braces: text this thin cannot describe a company — treat it as
+    # NO grounding so the web-search fallback fires (bot-wall stubs, JS shells).
+    if page_text and len(page_text) < 200:
+        print(f"[brand_enrichment] page text too thin ({len(page_text)} chars) — "
+              "treating as unfetched", flush=True)
+        page_text = ""
     # FU110 — the rantle.com lesson: when the DIRECT fetch fails (sites that block
     # datacenter IPs return nothing on Railway), do NOT fall back to name-recall — a
     # colliding name makes the model confidently describe the WRONG entity (a same-named
@@ -252,6 +296,12 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
                       f"via web-search site facts ({len(site_facts)} chars)", flush=True)
         except Exception as e:
             print(f"[brand_enrichment] site-facts fallback failed: {e}", flush=True)
+    # FU113 — grounding visibility: the Railway log now always SHOWS what the model was
+    # grounded in, so "why did it describe X" is diagnosable from the log alone.
+    _grounding = "homepage" if page_text else ("web_search" if site_facts else "none")
+    _preview = (page_text or site_facts or "")[:150].replace("\n", " ")
+    print(f"[brand_enrichment] grounding={_grounding} for {domain_url or name} "
+          f"preview={_preview!r}", flush=True)
     prompt = _build_enrichment_prompt(name, domain_url, page_text, site_facts=site_facts)
     # 4000 (was 1500): the prompt asks for ~10 fields incl. competitor_domains;
     # 1500 truncated the JSON mid-object -> JSONDecodeError -> None -> "failed".
@@ -297,6 +347,7 @@ def enrich_brand(claude: ClaudeClient, name: str, domain_url: str) -> dict:
         "context_summary": _as_str(result.get("context_summary")),
         "keywords":        _as_list(result.get("keywords")),
         "_page_fetched":   bool(page_text),
+        "_grounding":      _grounding,   # FU113: homepage | web_search | none — honest toast
     }
 
 

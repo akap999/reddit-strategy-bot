@@ -13,11 +13,39 @@ generators, blogs are FIRST-PARTY: they name and recommend the brand (owned medi
 import json
 import os
 import re
+import time
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
 
 PROMPT_VERSION = "blog-v2-evidence"
+
+# FU115 — discovery of the brand site's EXISTING live blog posts (sitemap → /blog fallback),
+# used as internal-link candidates when the 🔗 checkbox is on.
+_SITE_POST_PREFIXES = ("/blog/", "/insights/", "/articles/", "/news/", "/resources/",
+                       "/post/", "/guides/")
+_SITE_POST_EXCLUDE = ("/tag/", "/category/", "/author/", "/page/")
+_site_posts_cache = {}    # domain -> (ts, [{url, label}])
+_SITE_POSTS_TTL = 3600
+
+
+def _norm_site_domain(domain_url):
+    d = re.sub(r"^https?://", "", (domain_url or "").strip()).split("/")[0].lower()
+    return d[4:] if d.startswith("www.") else d
+
+
+def _looks_like_site_post(path):
+    """FU115 — is this URL path plausibly a LIVE BLOG POST (not an index/tag/asset)?"""
+    low = (path or "").lower()
+    if any(x in low for x in _SITE_POST_EXCLUDE):
+        return False
+    if "?" in low or low.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf",
+                                   ".xml", ".css", ".js")):
+        return False
+    for pref in _SITE_POST_PREFIXES:
+        if low.startswith(pref) and len(low.rstrip("/")) > len(pref):
+            return True
+    return False
 
 # Common pages worth fetching beyond a brand's homepage, for real feature/pricing facts
 # and on-site testimonials / case studies (curated, first-party — citable customer quotes).
@@ -2194,6 +2222,114 @@ Return JSON only:
             "meta": meta,
         }
 
+    def _discover_site_posts(self, domain_url):
+        """FU115 — discover the brand site's EXISTING live blog posts as internal-link
+        candidates: sitemap.xml (sitemapindex followed, post/blog children preferred) →
+        the /blog index page's anchors as the fallback. Uses `_fetch_homepage` (which
+        carries the FU111 residential + FU113 bot-wall ladder). Cached 1h per domain.
+        Returns [{url, label}] (label = de-dashed slug, or the anchor text on the
+        fallback path); cap 10; NEVER raises — [] on any failure."""
+        dom = _norm_site_domain(domain_url)
+        if not dom:
+            return []
+        now = time.time()
+        hit = _site_posts_cache.get(dom)
+        if hit and (now - hit[0]) < _SITE_POSTS_TTL:
+            return list(hit[1])
+        posts, seen = [], set()
+
+        def _collect(loc):
+            loc = (loc or "").strip()
+            m = re.match(r"^https?://([^/]+)(/.*)?$", loc)
+            if not m:
+                return False
+            host = m.group(1).lower()
+            host = host[4:] if host.startswith("www.") else host
+            path = m.group(2) or "/"
+            if host != dom or not _looks_like_site_post(path):
+                return False
+            key = loc.rstrip("/").lower()
+            if key in seen:
+                return False
+            seen.add(key)
+            slug = path.rstrip("/").rsplit("/", 1)[-1]
+            label = re.sub(r"[-_]+", " ", slug).strip() or "site post"
+            posts.append({"url": loc, "label": label})
+            return True
+
+        try:
+            xml = _fetch_homepage(f"https://{dom}/sitemap.xml")
+            if xml and "<" in xml:
+                locs = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml)
+                if "<sitemapindex" in xml:
+                    # follow up to 3 child sitemaps, preferring post/blog/page ones
+                    kids = sorted(locs, key=lambda u: (not any(k in u.lower() for k in
+                                                              ("post", "blog", "page")), u))[:3]
+                    for kid in kids:
+                        kx = _fetch_homepage(kid)
+                        for loc in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", kx or ""):
+                            _collect(loc)
+                            if len(posts) >= 10:
+                                break
+                        if len(posts) >= 10:
+                            break
+                else:
+                    for loc in locs:
+                        _collect(loc)
+                        if len(posts) >= 10:
+                            break
+            if not posts:
+                # fallback: the /blog index page's anchors (anchor text = the real title)
+                html = _fetch_homepage(f"https://{dom}/blog")
+                for am in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                                      html or "", re.S | re.I):
+                    href = am.group(1).strip()
+                    if href.startswith("/"):
+                        href = f"https://{dom}{href}"
+                    if _collect(href):
+                        t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", am.group(2))).strip()
+                        if len(t) > 3:
+                            posts[-1]["label"] = t[:80]
+                    if len(posts) >= 10:
+                        break
+            posts = posts[:10]
+            if posts:
+                print(f"[blog_gen] site-post discovery: {len(posts)} live post(s) from {dom}",
+                      flush=True)
+            _site_posts_cache[dom] = (now, list(posts))
+            return posts
+        except Exception as e:
+            print(f"[blog_gen] site-post discovery skipped: {e}", flush=True)
+            return []
+
+    def _build_link_targets(self, brand, sibling_links=None):
+        """FU114/115 — the verified internal-link candidate list, in priority order:
+        (1) the subject's OWN fetched evidence pages; (2) tool-published sibling blogs
+        (real titles — they win URL dedupes); (3) the site's EXISTING live posts via
+        sitemap//blog discovery. Deduped by URL, cap 15. Only real, verified-or-published
+        URLs — never invented."""
+        _seen_u, targets = set(), []
+
+        def _add(url, label):
+            u = (url or "").strip()
+            key = u.rstrip("/").lower()
+            if not u or key in _seen_u:
+                return
+            _seen_u.add(key)
+            targets.append({"url": u, "label": (label or "").strip() or "site page"})
+
+        _bname = (brand.get("name") or "").strip()
+        for blk in (getattr(self, "_evidence_blocks", None) or []):
+            if (blk.get("label") or "").strip() == _bname and (blk.get("url") or "").strip():
+                _add(blk["url"], "own site page")
+        for _t, _u in (sibling_links or []):
+            _add(_u, _t or "related article")
+        for p in self._discover_site_posts(brand.get("domain_url") or ""):
+            _add(p.get("url"), p.get("label"))
+        targets = targets[:15]
+        print(f"[blog_gen] internal-links: {len(targets)} verified target(s)", flush=True)
+        return targets
+
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
@@ -2223,26 +2359,9 @@ Return JSON only:
                                          use_web_search=use_web_search,
                                          reddit_thread=reddit_thread)
         self.claude.set_cost_ceiling(_BLOG_COST_CEILING)   # raise to the full budget for the priority stage
-        # FU114 — verified internal-link targets (opt-in): the subject's OWN fetched pages
-        # (label == brand name in the evidence blocks — fetch-verified, never invented) plus the
-        # brand's PUBLISHED sibling-blog URLs (the cluster). Cap ~10.
-        link_targets = None
-        if internal_links:
-            _seen_u, link_targets = set(), []
-            _bname = (brand.get("name") or "").strip()
-            for blk in (getattr(self, "_evidence_blocks", None) or []):
-                if (blk.get("label") or "").strip() == _bname and (blk.get("url") or "").strip():
-                    u = blk["url"].strip()
-                    if u.lower() not in _seen_u:
-                        _seen_u.add(u.lower())
-                        link_targets.append({"url": u, "label": "own site page"})
-            for _t, _u in (sibling_links or []):
-                uu = (_u or "").strip()
-                if uu and uu.lower() not in _seen_u:
-                    _seen_u.add(uu.lower())
-                    link_targets.append({"url": uu, "label": (_t or "related article").strip()})
-            link_targets = link_targets[:10]
-            print(f"[blog_gen] internal-links: {len(link_targets)} verified target(s)", flush=True)
+        # FU114/115 — verified internal-link targets (opt-in), built by the shared helper:
+        # own fetched pages + tool-published siblings + the site's existing live posts.
+        link_targets = self._build_link_targets(brand, sibling_links) if internal_links else None
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence, geo=geo, sibling_titles=sibling_titles,
                                         qualifier=qualifier,   # FU93

@@ -2100,20 +2100,9 @@ def api_blog_regenerate(blog_id):
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
             elif part == "article":
-                _lt = None
-                if stored_il:   # FU114: rebuild verified targets from the evidence just gathered
-                    _bn = (brand.get("name") or "").strip()
-                    _seen_u, _lt = set(), []
-                    for blk in (getattr(gen, "_evidence_blocks", None) or []):
-                        if (blk.get("label") or "").strip() == _bn and (blk.get("url") or "").strip():
-                            u = blk["url"].strip()
-                            if u.lower() not in _seen_u:
-                                _seen_u.add(u.lower()); _lt.append({"url": u, "label": "own site page"})
-                    for _t, _u in sib_links:
-                        uu = (_u or "").strip()
-                        if uu and uu.lower() not in _seen_u:
-                            _seen_u.add(uu.lower()); _lt.append({"url": uu, "label": _t or "related article"})
-                    _lt = _lt[:10]
+                # FU114/115: rebuild verified targets via the shared builder (own evidence pages +
+                # published siblings + the site's existing live posts discovered from the sitemap).
+                _lt = gen._build_link_targets(brand, sib_links) if stored_il else None
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence,
                                          geo=stored_geo, sibling_titles=sib_titles,   # FU90
                                          qualifier=stored_qual,                       # FU93

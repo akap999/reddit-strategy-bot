@@ -1896,6 +1896,7 @@ def api_blog_generate():
     reddit_url = (data.get("reddit_url") or "").strip()
     geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
+    internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
     # Optional per-blog byline override (falls back to the brand byline when blank).
     byline = {k: (data.get(k) or "").strip() for k in
               ("author_name", "author_title", "reviewer_name", "reviewer_title",
@@ -1922,17 +1923,23 @@ def api_blog_generate():
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
             # FU90: sibling titles so geo variants differentiate instead of converging.
             try:
-                sibling_titles = [b.get("title") for b in bg.get_all_blogs(brand_id=brand_id)
+                _sibs = bg.get_all_blogs(brand_id=brand_id)
+                sibling_titles = [b.get("title") for b in _sibs
                                   if (b.get("title") or "").strip()][:10]
+                # FU114: PUBLISHED sibling-blog URLs — the cluster half of the internal-link targets.
+                sibling_links = [(b.get("title") or "", pl.get("published_url") or "")
+                                 for b in _sibs for pl in (b.get("platforms") or [])
+                                 if pl.get("platform") == "website" and (pl.get("published_url") or "").strip()][:8]
             except Exception:
-                sibling_titles = []
+                sibling_titles, sibling_links = [], []
             blog = BlogGenerator(claude, bg).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
                 deep_verify=deep_verify, allow_pause=True,   # FU79: pause if a tool can't be sourced
                 geo=geo, sibling_titles=sibling_titles,      # FU90
-                qualifier=qualifier)                         # FU93
+                qualifier=qualifier,                         # FU93
+                internal_links=internal_links, sibling_links=sibling_links)  # FU114
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -1963,6 +1970,9 @@ def api_blog_generate():
                     bg.update_blog(blog_id, geo=geo)   # FU90: reused by resume/regenerate
                 if qualifier:
                     bg.update_blog(blog_id, qualifier=qualifier)   # FU93
+                if internal_links:
+                    bg.update_blog(blog_id, internal_links=1,      # FU114
+                                   meta_title=(cart.get("meta_title") or ""))
                 return {"blog_id": blog_id, "needs_sources": True,
                         "missing": pending.get("missing") or [],
                         "reddit_status": reddit_status,
@@ -1992,6 +2002,9 @@ def api_blog_generate():
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
             if qualifier:
                 bg.update_blog(blog_id, qualifier=qualifier)   # FU93: same
+            if internal_links:
+                bg.update_blog(blog_id, internal_links=1,      # FU114: regenerate re-reads the row
+                               meta_title=(blog.get("meta_title") or ""))
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
@@ -2042,9 +2055,17 @@ def api_blog_regenerate(blog_id):
             stored_reddit = (blog.get("reddit_url") or "").strip()
             stored_geo = (blog.get("geo") or "").strip()   # FU90: reuse the blog's geography
             stored_qual = (blog.get("qualifier") or "").strip()   # FU93: reuse the qualifier
+            stored_il = bool(blog.get("internal_links"))   # FU114: reuse the linking choice
+            sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
-                sib_titles = [b.get("title") for b in bg.get_all_blogs(brand_id=blog.get("brand_id"))
+                _sibs = bg.get_all_blogs(brand_id=blog.get("brand_id"))
+                sib_titles = [b.get("title") for b in _sibs
                               if b.get("id") != blog_id and (b.get("title") or "").strip()][:10]
+                # FU114: published sibling URLs (excluding this blog) — cluster link targets.
+                sib_links = [(b.get("title") or "", pl.get("published_url") or "")
+                             for b in _sibs if b.get("id") != blog_id
+                             for pl in (b.get("platforms") or [])
+                             if pl.get("platform") == "website" and (pl.get("published_url") or "").strip()][:8]
             except Exception:
                 sib_titles = []
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, stored_reddit)
@@ -2061,12 +2082,15 @@ def api_blog_regenerate(blog_id):
                                           use_web_search=stored_web, reddit_thread=reddit_thread,
                                           deep_verify=stored_deep,
                                           geo=stored_geo, sibling_titles=sib_titles,   # FU90
-                                          qualifier=stored_qual)                       # FU93
+                                          qualifier=stored_qual,                       # FU93
+                                          internal_links=stored_il, sibling_links=sib_links)  # FU114
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
                     blog_id, title=fresh.get("title", ""),
                     meta_description=fresh.get("meta_description", ""),
+                    meta_title=fresh.get("meta_title", ""),   # FU114
+
                     keywords=fresh.get("keywords") or [],
                     body_markdown=fresh.get("body_markdown", ""),
                     linkedin_text=_sub_link(fresh.get("linkedin_text", ""),
@@ -2076,9 +2100,24 @@ def api_blog_regenerate(blog_id):
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
             elif part == "article":
+                _lt = None
+                if stored_il:   # FU114: rebuild verified targets from the evidence just gathered
+                    _bn = (brand.get("name") or "").strip()
+                    _seen_u, _lt = set(), []
+                    for blk in (getattr(gen, "_evidence_blocks", None) or []):
+                        if (blk.get("label") or "").strip() == _bn and (blk.get("url") or "").strip():
+                            u = blk["url"].strip()
+                            if u.lower() not in _seen_u:
+                                _seen_u.add(u.lower()); _lt.append({"url": u, "label": "own site page"})
+                    for _t, _u in sib_links:
+                        uu = (_u or "").strip()
+                        if uu and uu.lower() not in _seen_u:
+                            _seen_u.add(uu.lower()); _lt.append({"url": uu, "label": _t or "related article"})
+                    _lt = _lt[:10]
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence,
                                          geo=stored_geo, sibling_titles=sib_titles,   # FU90
-                                         qualifier=stored_qual)                       # FU93
+                                         qualifier=stored_qual,                       # FU93
+                                         internal_links=stored_il, link_targets=_lt)  # FU114
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 v = gen.verify_claims(brand, a, evidence=evidence)
@@ -2095,6 +2134,7 @@ def api_blog_regenerate(blog_id):
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
+                    meta_title=a.get("meta_title", ""),   # FU114
                     keywords=a.get("keywords") or [],
                     body_markdown=body,
                     claims_flagged=flagged)
@@ -2307,7 +2347,8 @@ def api_blog_patch(blog_id):
                "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
                "youtube_persona",   # FU80
                "geo",               # FU90
-               "qualifier")         # FU93
+               "qualifier",         # FU93
+               "meta_title")        # FU114
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -2618,6 +2659,9 @@ def api_blog_export(blog_id):
 
     body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
+    # FU114: the exported <title> tag prefers the SEO meta_title (when generated); the H1
+    # and the download slug stay seed-based (stable, FU88).
+    page_title = (blog.get("meta_title") or "").strip() or title
     desc = blog.get("meta_description") or ""
     published = (blog.get("created_at") or "")[:10]
     updated = (blog.get("updated_at") or "")[:10]
@@ -2704,7 +2748,7 @@ def api_blog_export(blog_id):
                ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
         head = (f'<meta charset="utf-8">\n'
                 f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-                f'<title>{_html.escape(title)}</title>\n'
+                f'<title>{_html.escape(page_title)}</title>\n'
                 + (f'<meta name="description" content="{_html.escape(desc)}">\n' if desc else "")
                 + (f'<meta name="author" content="{_html.escape(meta_byline)}">\n' if meta_byline else "")
                 + f'<style>{css}</style>\n'

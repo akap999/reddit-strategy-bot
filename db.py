@@ -1139,7 +1139,8 @@ class Database:
                    "youtube_title", "youtube_script", "youtube_description", "youtube_captions",
                    "youtube_persona", "youtube_meta",   # FU80
                    "geo",   # FU90
-                   "qualifier"}   # FU93
+                   "qualifier",   # FU93
+                   "meta_title", "internal_links"}   # FU114
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2297,7 +2298,9 @@ class Database:
                     # FU90: the blog's target geography (explicit operator input; wins over auto-detect).
                     "geo",
                     # FU93: the blog's variant qualifier ("financing", "free shipping"; explicit wins).
-                    "qualifier"):
+                    "qualifier",
+                    # FU114: SEO <title> tag (distinct from the H1, which is the seed verbatim).
+                    "meta_title"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
@@ -2306,6 +2309,9 @@ class Database:
             self.conn.commit()
         if "deep_verify" not in blog_cols:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN deep_verify INTEGER DEFAULT 0")
+            self.conn.commit()
+        if "internal_links" not in blog_cols:   # FU114: opt-in internal linking + meta title
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN internal_links INTEGER DEFAULT 0")
             self.conn.commit()
         if "reddit_url" not in blog_cols:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN reddit_url TEXT")

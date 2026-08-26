@@ -901,7 +901,8 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
 
     # ------------------------------------------------------------------- article
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
-                         sibling_titles=None, qualifier=""):
+                         sibling_titles=None, qualifier="", internal_links=False,
+                         link_targets=None):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
@@ -923,6 +924,40 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
                         + "\n".join(f"- {k}" for k in kws) + "\n")
         evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
         link = f" Link to {url} where it reads naturally." if url else ""
+        # FU114 — opt-in internal linking + meta title. OFF → both strings empty → the
+        # prompt is BYTE-IDENTICAL to today (the user's hard requirement).
+        il_block, il_schema = "", ""
+        if internal_links:
+            _targets = [t for t in (link_targets or []) if (t.get("url") or "").strip()]
+            _tlist = "\n".join(
+                f'  - {t["url"].strip()}' + (f'   ({t["label"]})' if (t.get("label") or "").strip() else "")
+                for t in _targets[:10])
+            il_block = f"""
+INTERNAL LINKS + META TITLE (opt-in for this article):
+Weave 3-6 Markdown links into the body, ONLY from this VERIFIED list of {name}'s own pages:
+{_tlist or "  (none available — include NO internal links)"}
+LINKING RULES (quality/extractability must stay intact):
+  1. NEVER in the FIRST SENTENCE under ANY heading — not the Quick answer, not any H2/H3's
+     answer sentence, not an FAQ answer's first sentence. The liftable answer-chunks stay
+     clean and self-contained.
+  2. Anchor = the natural DESCRIPTIVE words already in the sentence ("US-specific HRIS
+     compliance criteria"), never "click here" / "read more", and never a bare brand name
+     as the anchor — the anchor text is the routing signal.
+  3. 3-6 links total, each placed where that page GENUINELY serves the reader — use fewer
+     if nothing fits naturally; never stack links in one paragraph.
+  4. Link only genuinely RELATED pages: the sibling article covering a subtopic you touch,
+     the case-studies page a result claim comes from, the pricing page a price claim cites.
+     A link that doesn't serve the reader hurts.
+  5. CLAIM ATTRIBUTION: when the body states a first-party claim sourced from one of these
+     pages (a price, a case-study result, a feature), make THAT claim's descriptive words
+     the anchor — internal link and attribution in one.
+  6. Links must NEVER alter, strengthen, or reword a claim to justify their placement.
+ALSO return "meta_title": an SEO <title> tag under 60 characters that carries the target
+query's core phrasing (add {name} only where natural), never clickbait, and never diverging
+in meaning from the H1. Make "meta_description" LEAD with the direct-answer phrasing (the
+extractable answer), still under 160 chars.
+"""
+            il_schema = '\n  "meta_title": "SEO title tag, under 60 chars",'
         # FU90 — resolved geography: explicit operator input WINS; else deterministic seed detection.
         rgeo = (geo or "").strip() or _seed_geo(seed)
         geo_line = (f"  - GEOGRAPHY FOR THIS PAGE: {rgeo} (operator-specified or detected from the "
@@ -1126,9 +1161,9 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
     services discussed."; otherwise adapt the clause to what {name} actually does. NEVER a claim that
     isn't true of {name}.
 
-Return JSON only:
+{il_block}Return JSON only:
 {{"title": "the seed, verbatim",
-  "meta_description": "under 160 chars",
+  "meta_description": "under 160 chars",{il_schema}
   "keywords": ["target queries + key terms this page should be cited for"],
   "body_markdown": "the full article in Markdown",
   "disclosure": "one factually-accurate transparency sentence"}}"""
@@ -1152,6 +1187,7 @@ Return JSON only:
             # the FU83 locked headline); the model's version is discarded if it drifted.
             "title": (seed or "").strip() or (res.get("title") or "").strip(),
             "meta_description": (res.get("meta_description") or "").strip(),
+            "meta_title": (res.get("meta_title") or "").strip(),   # FU114: "" unless internal_links
             "keywords": merged,
             "body_markdown": body,
             "disclosure": (res.get("disclosure") or "").strip(),   # FU84: adaptive, factually-accurate
@@ -2161,7 +2197,7 @@ Return JSON only:
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
-                      qualifier=""):
+                      qualifier="", internal_links=False, sibling_links=None):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -2187,9 +2223,30 @@ Return JSON only:
                                          use_web_search=use_web_search,
                                          reddit_thread=reddit_thread)
         self.claude.set_cost_ceiling(_BLOG_COST_CEILING)   # raise to the full budget for the priority stage
+        # FU114 — verified internal-link targets (opt-in): the subject's OWN fetched pages
+        # (label == brand name in the evidence blocks — fetch-verified, never invented) plus the
+        # brand's PUBLISHED sibling-blog URLs (the cluster). Cap ~10.
+        link_targets = None
+        if internal_links:
+            _seen_u, link_targets = set(), []
+            _bname = (brand.get("name") or "").strip()
+            for blk in (getattr(self, "_evidence_blocks", None) or []):
+                if (blk.get("label") or "").strip() == _bname and (blk.get("url") or "").strip():
+                    u = blk["url"].strip()
+                    if u.lower() not in _seen_u:
+                        _seen_u.add(u.lower())
+                        link_targets.append({"url": u, "label": "own site page"})
+            for _t, _u in (sibling_links or []):
+                uu = (_u or "").strip()
+                if uu and uu.lower() not in _seen_u:
+                    _seen_u.add(uu.lower())
+                    link_targets.append({"url": uu, "label": (_t or "related article").strip()})
+            link_targets = link_targets[:10]
+            print(f"[blog_gen] internal-links: {len(link_targets)} verified target(s)", flush=True)
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence, geo=geo, sibling_titles=sibling_titles,
-                                        qualifier=qualifier)   # FU93
+                                        qualifier=qualifier,   # FU93
+                                        internal_links=internal_links, link_targets=link_targets)
         if not article:
             return None
         draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
@@ -2214,7 +2271,7 @@ Return JSON only:
                     "sourcing": sourcing,
                     "evidence_blocks": list(getattr(self, "_evidence_blocks", None) or []),
                     "article": {k: article.get(k) for k in
-                                ("title", "meta_description", "keywords", "body_markdown", "claims_flagged")},
+                                ("title", "meta_description", "meta_title", "keywords", "body_markdown", "claims_flagged")},
                     "draft_body": draft_body,
                 },
                 "gen_cost": round(self.claude.usage_cost(), 4),

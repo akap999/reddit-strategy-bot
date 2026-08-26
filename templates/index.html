@@ -7502,6 +7502,7 @@ async function renderLiveSubreddits(el) {
             <div class="tab ${_lsubsTab==='posts'?'active':''}" onclick="lsubsSwitchTab('posts')">📝 Posts</div>
             <div class="tab ${_lsubsTab==='comments'?'active':''}" onclick="lsubsSwitchTab('comments')">💬 Comments</div>
             <div class="tab ${_lsubsTab==='clusters'?'active':''}" onclick="lsubsSwitchTab('clusters')">🎯 Clusters</div>
+            <div class="tab ${_lsubsTab==='blogs'?'active':''}" onclick="lsubsSwitchTab('blogs')">📄 Blogs</div>
         </div>
         <div id="lsubs-tab-content"></div>
     `;
@@ -7512,17 +7513,52 @@ function renderLsubsTabContent() {
     const c = document.getElementById('lsubs-tab-content');
     if (!c) return;
     c.parentElement.querySelectorAll('.tab').forEach((t, i) => {
-        const tabs = ['generate', 'posts', 'comments', 'clusters'];
+        const tabs = ['generate', 'posts', 'comments', 'clusters', 'blogs'];   // FU114: appended LAST (positional)
         t.className = `tab ${_lsubsTab === tabs[i] ? 'active' : ''}`;
     });
     if (_lsubsTab === 'generate') renderLsubsGenerate(c);
     else if (_lsubsTab === 'posts') renderLsubsPosts(c);
     else if (_lsubsTab === 'comments') renderLsubsComments(c);
     else if (_lsubsTab === 'clusters') renderLsubsClusters(c);
+    else if (_lsubsTab === 'blogs') renderLsubsBlogs(c);   // FU114
 }
 
 // ---- Live Subs "Clusters" tab: root prompt → rewrites (covered/gap) → posts ----
 let _lsubsClustersCache = [];
+
+// FU114 — Blogs tab inside Live Subreddits: a brand-scoped window onto the SAME blogs the
+// Blogs sidebar view manages. Reuses _blogRow + openBlog; creation stays in the Blogs view.
+async function renderLsubsBlogs(c) {
+    c.innerHTML = `
+        <div class="card">
+            <div class="flex items-center gap-3 mb-3 flex-wrap">
+                <label class="text-xs text-gray-400">Brand</label>
+                <select id="lsubs-blogs-brand" onchange="_lsubsSetBrand(this.value);lsubsLoadBlogs()">${_lsubsBrandOptions(true)}</select>
+                <button class="btn btn-secondary" style="padding:2px 10px;font-size:12px" onclick="navigate('blogs')" title="Create new blogs from the Blogs view">➕ New blog (Blogs view)</button>
+                <span class="text-xs text-gray-500">Open a blog for the full editor (regen, LinkedIn, YouTube, publish).</span>
+            </div>
+            <table>
+                <thead><tr><th>Title</th><th>Brand</th><th>Status</th><th>Platforms</th><th>Updated</th><th>Actions</th></tr></thead>
+                <tbody id="lsubs-blog-rows"><tr><td colspan="6" class="text-gray-500">Loading…</td></tr></tbody>
+            </table>
+        </div>`;
+    // the blog modal's persona dropdown reads _blogBrands — fill it if the Blogs view hasn't yet
+    if (!(_blogBrands && _blogBrands.length)) {
+        try { _blogBrands = await api('/api/brands/all'); } catch(e) {}
+    }
+    lsubsLoadBlogs();
+}
+async function lsubsLoadBlogs() {
+    const el = document.getElementById('lsubs-blog-rows');
+    if (!el) return;
+    const bid = document.getElementById('lsubs-blogs-brand')?.value;
+    try {
+        const rows = await api('/api/blogs' + (bid ? `?brand_id=${bid}` : ''));
+        el.innerHTML = (rows && rows.length)
+            ? rows.map(_blogRow).join('')
+            : '<tr><td colspan="6" class="text-gray-500">No blogs yet for this brand.</td></tr>';
+    } catch(e) { el.innerHTML = '<tr><td colspan="6" class="text-red-400">Failed to load blogs</td></tr>'; }
+}
 
 function renderLsubsClusters(c) {
     c.innerHTML = `
@@ -12613,6 +12649,11 @@ async function renderBlogs(c) {
                 🔍 Deep verify — extra independent corroboration of the brand's own claims
                 <span class="text-gray-600">— deepens the third-party cross-check of the brand's self-claims (extra web searches, +~$0.15–0.30 &amp; ~20–50s)</span>
             </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-internal-links">
+                🔗 Internal links + meta title
+                <span class="text-gray-600">— weave 3-6 links to the brand's own (verified) pages + published sibling blogs into the body, and generate an SEO meta title. Quality/extractability preserved; off = today's output exactly.</span>
+            </label>
             <details class="mt-2">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default for this article)</summary>
                 <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
@@ -12783,6 +12824,7 @@ function blogGenerate() {
     const research_notes = (document.getElementById('blog-gen-notes')?.value || '').trim();
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
+    const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
     const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
@@ -12792,7 +12834,7 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -12875,6 +12917,7 @@ async function openBlog(id) {
         ${pendBanner}
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
+            <div><label class="text-xs text-gray-400">Meta title <span class="text-gray-600">(SEO &lt;title&gt; tag — blank = the H1/seed is used)</span></label><input id="blog-e-metatitle" value="${_blogEsc(b.meta_title || '')}" placeholder="generated when 'Internal links + meta title' is on"></div>
             <div><label class="text-xs text-gray-400">Meta description</label><input id="blog-e-meta" value="${_blogEsc(b.meta_description || '')}"></div>
             <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label><input id="blog-e-kw" value="${_blogEsc((b.keywords || []).join(', '))}"></div>
             <div><label class="text-xs text-gray-400">Website body (Markdown)</label><textarea id="blog-e-body" rows="12">${_blogEsc(b.body_markdown || '')}</textarea></div>
@@ -12961,6 +13004,7 @@ async function openBlog(id) {
                 <div class="mt-2"><label class="text-xs text-gray-400">Focus / qualifier <span class="text-gray-600">(the page's variant angle — drives qualifier-specific sourcing + substance on regenerate; blank = auto-detect from a trailing "with …")</span></label><input id="blog-e-qualifier" value="${_blogEsc(b.qualifier || '')}" placeholder="e.g. financing · free shipping"></div>
             </details>
             <div class="card p-2" style="background:#1a1030"><div class="text-xs text-gray-400 mb-1">Publish (paste the live URL after you post it)</div>${platRows}</div>
+            <div id="blog-backlinks-note"></div>
         </div>
         <div class="flex flex-wrap gap-2 mt-3">
             <button class="btn btn-sm btn-primary" onclick="blogSave(${id})">Save edits</button>
@@ -12975,6 +13019,26 @@ async function openBlog(id) {
             <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'verify')">Re-verify</button>
             <button class="btn btn-sm" style="background:#3b0764;color:#e9d5ff" onclick="blogRegen(${id},'all')">Regen all</button>
         </div>`);
+    // FU114: bidirectional-linking checklist — the forward links are woven into the article;
+    // this surfaces the BACKWARD half (existing published posts should link to this new page —
+    // the part that passes authority and always gets skipped). Computed live, zero storage.
+    if (b.internal_links) {
+        (async () => {
+            try {
+                const sibs = await api('/api/blogs?brand_id=' + b.brand_id);
+                const pub = (sibs || []).filter(s => s.id !== b.id)
+                    .map(s => ({ t: s.title, u: ((s.platforms || []).find(pl => pl.platform === 'website' && pl.published_url) || {}).published_url }))
+                    .filter(s => s.u);
+                const bx = document.getElementById('blog-backlinks-note');
+                if (bx && pub.length) {
+                    bx.innerHTML = `<div class="text-xs mt-2 p-2" style="background:#101a12;border:1px solid #234d2a;border-radius:6px">
+                        <strong style="color:#4ade80">🔁 Backlinks to add</strong> <span class="text-gray-400">— in your CMS, add a link TO this page FROM each of these published posts (the half that passes authority):</span>
+                        ${pub.map(s => `<div class="mt-1"><a href="${s.u}" target="_blank" class="hover:underline" style="color:#0079D3">${_blogEsc(s.t || s.u)}</a></div>`).join('')}
+                    </div>`;
+                }
+            } catch(e) {}
+        })();
+    }
 }
 
 async function blogSave(id) {
@@ -12984,6 +13048,7 @@ async function blogSave(id) {
         await api('/api/blogs/' + id, { method: 'PATCH', body: {
             title: document.getElementById('blog-e-title').value,
             meta_description: document.getElementById('blog-e-meta').value,
+            meta_title: document.getElementById('blog-e-metatitle')?.value ?? undefined,   // FU114
             keywords: kw,
             body_markdown: document.getElementById('blog-e-body').value,
             linkedin_text: document.getElementById('blog-e-li').value,
@@ -13145,6 +13210,7 @@ async function deleteBlog(id) {
         await api('/api/blogs/' + id, { method: 'DELETE' });
         toast('Deleted', 'info');
         blogReload();
+        if (document.getElementById('lsubs-blog-rows')) lsubsLoadBlogs();   // FU114: Live Subs tab
     } catch (e) {}
 }
 

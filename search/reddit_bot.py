@@ -1340,7 +1340,16 @@ class RedditSearchBot:
 
         # Hard wall-clock budget (hoisted above discovery so it counts inside it). Shared
         # across the reddit_wide recursion via _deadline.
-        search_deadline = _deadline or (time.time() + self._SEARCH_TIME_BUDGET)
+        # FU116: the base budget (REDDIT_SEARCH_BUDGET, default 40s) was tuned for limit≈50 —
+        # at limit 120+ the reddit-wide top-up was systematically starved. SCALE the budget
+        # with the requested limit (0.75s per requested post, capped at 150s), and RESERVE a
+        # slice for the top-up: the named-sub legs may spend at most 60% of the budget when a
+        # reddit-wide top-up is coming, so it always gets a real window instead of leftovers.
+        _budget = max(self._SEARCH_TIME_BUDGET, min(limit * 0.75, 150.0))
+        search_deadline = _deadline or (time.time() + _budget)
+        leg_deadline = search_deadline
+        if (_deadline is None and reddit_wide and subreddit_path and api == "auto"):
+            leg_deadline = time.time() + _budget * 0.6
 
         # FU109 — Reddit-wide two-stage: a GLOBAL search (no subs given) first DISCOVERS
         # the relevant subreddits (Reddit's own subreddit-search + optional LLM leg), then
@@ -1430,8 +1439,8 @@ class RedditSearchBot:
             # Stop early if we already have enough results
             if len(filtered) >= limit:
                 break
-            if time.time() > search_deadline:
-                print(f"    ⏱ search time budget ({self._SEARCH_TIME_BUDGET:.0f}s) reached — "
+            if time.time() > leg_deadline:
+                print(f"    ⏱ leg time budget reached — "
                       f"returning {len(filtered)} result(s) gathered so far", flush=True)
                 break
 
@@ -1506,7 +1515,7 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-sub fetch error (reddit rss): {e}")
-                                if time.time() > search_deadline:
+                                if time.time() > leg_deadline:
                                     for _fut in futures:
                                         _fut.cancel()
                                     break
@@ -1535,7 +1544,7 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-term fetch error (reddit rss): {e}")
-                                if time.time() > search_deadline:
+                                if time.time() > leg_deadline:
                                     for _fut in futures:
                                         _fut.cancel()
                                     break
@@ -1568,7 +1577,7 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-sub fetch error (pullpush): {e}")
-                                if time.time() > search_deadline:
+                                if time.time() > leg_deadline:
                                     for _fut in futures:
                                         _fut.cancel()
                                     break
@@ -1648,7 +1657,7 @@ class RedditSearchBot:
                                     batch.extend(f.result() or [])
                                 except Exception as e:
                                     print(f"    per-pair fetch error (arctic): {e}")
-                                if time.time() > search_deadline:
+                                if time.time() > leg_deadline:
                                     for _fut in futures:
                                         _fut.cancel()
                                     break
@@ -1893,7 +1902,10 @@ class RedditSearchBot:
                     excluded_subreddits=excluded_subreddits,
                     min_comments=min_comments, min_score=min_score,
                     max_days_old=max_days_old, sort_by=sort_by, sort_order=sort_order,
-                    limit=min(needed * 2, 200), api="auto", nsfw=nsfw,
+                    # FU116: with a per-sub cap, much of the global yield lands in already-
+                    # capped subs and gets skipped — over-fetch x3 so enough NEW-sub posts survive.
+                    limit=min(needed * (3 if max_per_sub is not None else 2),
+                              300 if max_per_sub is not None else 200), api="auto", nsfw=nsfw,
                     min_upvote_ratio=min_upvote_ratio, max_subscribers=max_subscribers,
                     min_subscribers=min_subscribers, max_scrutiny=max_scrutiny,
                     db=db, db_path=db_path, force_refresh=force_refresh,

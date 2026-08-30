@@ -434,7 +434,26 @@ function _pollTask(taskId, label, onComplete) {
             retries = 0;
             if (t.progress && _bgTasks.has(taskId)) {
                 const p = t.progress;
-                const progressLabel = `${label} (${p.generated || 0}/${p.total || '?'} generated${p.skipped ? `, ${p.skipped} skipped` : ''}${p.errors ? `, ${p.errors} failed` : ''})`;
+                // FU121: tasks emit different progress shapes — generation
+                // ({generated,total,skipped,errors}), batch gen ({current,total,
+                // generated,skipped}), live/report checks ({checked,total,live,
+                // dead,restored,...}), backfills ({checked,total,filled,promoted}).
+                // Pick the right "done" counter + verb and append whatever
+                // counters are present, instead of assuming the generation shape.
+                let done, verb;
+                if (p.checked != null) { done = p.checked; verb = 'checked'; }
+                else if (p.current != null) { done = p.current; verb = 'done'; }
+                else { done = p.generated || 0; verb = 'generated'; }
+                const extras = [];
+                if (verb !== 'generated' && p.generated != null) extras.push(`${p.generated} generated`);
+                if (p.live != null) extras.push(`${p.live} live`);
+                if (p.dead) extras.push(`${p.dead} dead`);
+                if (p.restored) extras.push(`${p.restored} restored`);
+                if (p.filled != null) extras.push(`${p.filled} filled`);
+                if (p.promoted) extras.push(`${p.promoted} promoted`);
+                if (p.skipped) extras.push(`${p.skipped} skipped`);
+                if (p.errors) extras.push(`${p.errors} failed`);
+                const progressLabel = `${label} (${done}/${p.total || '?'} ${verb}${extras.length ? ', ' + extras.join(', ') : ''})`;
                 _bgTasks.get(taskId).label = progressLabel;
                 _renderTaskBar();
             }
@@ -13840,6 +13859,26 @@ async function reclassifyReport(cid, source, to) {
 // "Mark Reported All" — bulk action mirrored on Mark Paid All.
 // Currently applied from the Live Search Comments header — pushes
 // the current filter's deployed/paid rows to report state.
+function _lsCommentFilterSnapshot() {
+    // FU121: snapshot the Comments-tab filters (the same reads checkLiveLs does)
+    // so Mark Reported All can honor them server-side.
+    const brandName = document.getElementById('ls-cf-brand')?.value || null;
+    const postSel = document.getElementById('ls-cf-post');
+    const postId = postSel?.value || null;
+    const postLabel = postId ? ((postSel.selectedOptions?.[0]?.textContent || '').trim() || `post #${postId}`) : null;
+    const month = document.getElementById('ls-cf-month')?.value || null;
+    // Subreddit multi-select: only constrain when a strict subset is selected (null = all).
+    let subreddits = null;
+    try {
+        const allSubs = (typeof lsAllSubsInComments === 'function') ? lsAllSubsInComments() : [];
+        if (_lsSelectedSubs && allSubs.length && _lsSelectedSubs.size < allSubs.length) {
+            subreddits = Array.from(_lsSelectedSubs);
+        }
+    } catch (_) {}
+    return { brand_name: brandName, search_post_id: postId ? parseInt(postId) : null,
+             report_month: month, subreddits, _postLabel: postLabel };
+}
+
 async function showMarkReportedAllModal(scope) {
     // scope: 'livesearch' (uses ls-cf-* filters) or 'livesubs' (uses lsubs-cmt-* filters)
     const filterContext = scope === 'livesubs' ? {
@@ -13869,9 +13908,23 @@ async function showMarkReportedAllModal(scope) {
     const brandOpts = (brands || []).map(b =>
         `<option value="${b.id}" ${preselectBrandId == b.id ? 'selected' : ''}>${b.name}</option>`
     ).join('');
+    // FU121 (Live Search): snapshot + show the active Comments-tab filters — the batch
+    // will be scoped to exactly these server-side.
+    let scopeLine = '';
+    if (scope === 'livesearch') {
+        const snap = _lsCommentFilterSnapshot();
+        window._repLsFilter = snap;
+        const bits = [];
+        if (snap.brand_name) bits.push(`brand: <strong>${snap.brand_name}</strong>`);
+        if (snap.search_post_id) bits.push(`post: <strong>${snap._postLabel}</strong>`);
+        if (snap.report_month) bits.push(`month filter: <strong>${snap.report_month}</strong>`);
+        if (snap.subreddits) bits.push(`<strong>${snap.subreddits.length}</strong> subreddit(s)`);
+        scopeLine = `<p class="text-xs text-emerald-400 mb-3">Scope — follows the Comments-tab filters: ${bits.length ? bits.join(' · ') : 'all comments'}, plus the status filter below.</p>`;
+    }
     showModal(`
         <h3 class="text-xl font-bold mb-3">Mark Reported All</h3>
         <p class="text-xs text-gray-400 mb-3">Push every currently-filtered <strong>deployed</strong> or <strong>paid</strong> comment into the chosen month's report. Dashboard visibility is determined by each comment's brand (and which clients are linked to it).</p>
+        ${scopeLine}
         <label class="text-xs text-gray-400">Brand override <span class="text-gray-500">(optional)</span></label>
         <select id="rep-brand" class="w-full mb-1">
             <option value="">— leave existing brands as-is —</option>
@@ -13923,6 +13976,14 @@ async function submitMarkReportedAll(scope) {
         body.source = 'comment';
     } else if (scope === 'livesearch') {
         body.source = 'search_comment';
+        // FU121: forward the Comments-tab filters (brand/post/month/subreddits)
+        // so the batch matches exactly what's on screen; the modal's status
+        // selector rides inside the same filter. Server still applies the
+        // deployed/paid eligibility gate on top.
+        const snap = window._repLsFilter || _lsCommentFilterSnapshot();
+        body.filter = { status: status || null, brand_name: snap.brand_name,
+                        search_post_id: snap.search_post_id,
+                        report_month: snap.report_month, subreddits: snap.subreddits };
     }
     try {
         const res = await api('/api/comments/bulk-to-report-filtered', { method: 'POST', body });
@@ -14338,12 +14399,21 @@ async function lsDeleteSelectedPostComments() {
     if (!checks.length) { toast('Select at least one post group', 'error'); return; }
     const postIds = [...checks].map(cb => parseInt(cb.dataset.postId));
     const toDelete = _lsComments.filter(c => postIds.includes(c.search_post_id) && c.status !== 'deleted');
-    if (!confirm(`Delete all ${toDelete.length} comments from ${postIds.length} selected post(s)?`)) return;
-    let done = 0;
-    for (const c of toDelete) {
-        try { await api(`/api/search/comments/${c.id}`, { method: 'DELETE' }); done++; } catch(e) {}
-    }
-    toast(`Deleted ${done} comment(s)`, 'success');
+    if (!toDelete.length) { toast('Nothing to delete in the selection', 'info'); return; }
+    const n = toDelete.length;
+    // FU120 — mass-delete guard (the Aug-27 incident: one confirm click soft-deleted 12,960
+    // comments via a silent hour-long HTTP loop). Large deletions now require TYPING the
+    // exact count, and run as ONE logged, transactional server call.
+    if (n > 25) {
+        const typed = prompt(`⚠ MASS DELETION\n\nYou are about to delete ${n} comments across ${postIds.length} post(s).\nEvery deletion is written to the Activity Log.\n\nType the number ${n} to confirm:`);
+        if (typed !== String(n)) { toast('Mass delete cancelled', 'info'); return; }
+    } else if (!confirm(`Delete all ${n} comments from ${postIds.length} selected post(s)?`)) return;
+    try {
+        const res = await api('/api/search/comments/bulk-delete', {
+            method: 'POST', body: { comment_ids: toDelete.map(c => c.id) }
+        });
+        toast(`Deleted ${res.deleted} comment(s) (logged in the Activity Log)`, 'success');
+    } catch(e) { toast('Bulk delete failed', 'error'); }
     renderLsTabContent();
 }
 

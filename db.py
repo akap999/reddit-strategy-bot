@@ -8251,6 +8251,48 @@ class Database:
             (comment_id,))
         self.conn.commit()
 
+    def bulk_delete_search_comments(self, ids):
+        """FU120 — soft-delete many search_comments in ONE transaction, LOGGING every row to
+        check_live_log (action='deleted'). Born from the Aug-27 incident: the UI looped 13k
+        single HTTP deletes for over an hour with ZERO log entries — a mass deletion must be
+        fast, atomic, and visible in the Activity Log. Already-deleted rows are skipped.
+        Returns the number actually deleted."""
+        ids = [int(i) for i in (ids or []) if i]
+        if not ids:
+            return 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        deleted = 0
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT sc.id, sc.status, sc.account_id, sc.reddit_comment_url,
+                           sp.subreddit AS sub, COALESCE(b.name, spb.name) AS brand_name
+                    FROM search_comments sc
+                    JOIN search_posts sp ON sc.search_post_id = sp.id
+                    LEFT JOIN brands b ON sc.brand_id = b.id
+                    LEFT JOIN brands spb ON sp.brand_id = spb.id
+                    WHERE sc.id IN ({ph}) AND sc.status != 'deleted'""", chunk).fetchall()
+            for r in rows:
+                if r["account_id"]:
+                    self._decrement_lifetime(r["account_id"])
+                try:
+                    self.log_live_check(r["id"], "search_comment",
+                                        r["reddit_comment_url"] or "", "deleted",
+                                        r["status"], "deleted", r["account_id"],
+                                        r["sub"], r["brand_name"])
+                except Exception:
+                    pass
+            live_ids = [r["id"] for r in rows]
+            if live_ids:
+                ph2 = ",".join("?" * len(live_ids))
+                self.conn.execute(
+                    f"UPDATE search_comments SET status='deleted', deleted_at=?, paid_at=NULL "
+                    f"WHERE id IN ({ph2})", [now] + live_ids)
+                deleted += len(live_ids)
+        self.conn.commit()
+        return deleted
+
     def delete_search_comment(self, comment_id):
         deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # If the comment still has an owner, free its rotation slot.

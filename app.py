@@ -344,10 +344,48 @@ def _maybe_start_cron_scheduler():
                     print(f"[cron-check-live] claimed — started tracked run task {tid}", flush=True)
             except Exception as e:
                 print(f"[cron-check-live] loop error: {e}", flush=True)
+            # FU118 — daily DB backup (DB-claimed so multi-worker/gunicorn runs it once/day).
+            try:
+                dbb = Database(DB_PATH); dbb.connect()
+                try:
+                    if dbb.claim_periodic("db_backup_last_run", 24):
+                        dest = _backup_db_now("daily")
+                        print(f"[db-backup] daily backup written: {dest}", flush=True)
+                finally:
+                    dbb.close()
+            except Exception as e:
+                print(f"[db-backup] failed: {e}", flush=True)
             _t.sleep(3600)  # re-check hourly; the DB claim enforces the real interval
 
     threading.Thread(target=loop, daemon=True).start()
     print("[cron-check-live] scheduler thread started", flush=True)
+
+
+def _backup_db_now(tag="daily"):
+    """FU118 — copy the live SQLite DB (safe against a live WAL via the sqlite backup API)
+    to <db-dir>/backups/strategy_bot-<tag>-<ts>.db. Prunes: keep newest 7 daily, 2 manual.
+    Returns the written path. Raises on failure (callers log)."""
+    import sqlite3 as _sq
+    import glob as _glob
+    bdir = os.path.join(os.path.dirname(DB_PATH), "backups")
+    os.makedirs(bdir, exist_ok=True)
+    name = f"strategy_bot-{tag}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S-%f')}.db"
+    dest = os.path.join(bdir, name)
+    srcc = _sq.connect(DB_PATH)
+    dstc = _sq.connect(dest)
+    try:
+        with dstc:
+            srcc.backup(dstc)
+    finally:
+        srcc.close(); dstc.close()
+    for tagx, keep in (("daily", 7), ("manual", 2)):
+        files = sorted(_glob.glob(os.path.join(bdir, f"strategy_bot-{tagx}-*.db")))
+        for f in files[:-keep]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    return dest
 
 # ---------------------------------------------------------------------------
 # Reddit proxy helper
@@ -5029,6 +5067,52 @@ def api_check_live(sid):
     tid = start_task("check-live", task)
     return jsonify({"task_id": tid})
 
+def _ls_filtered_search_comments(db, flt):
+    """Authoritative server-side re-query of Live Search comments matching the
+    client's Comments-tab filter (a server mirror of lsFilterComments, so the
+    result covers EVERY matching comment — not just the client's loaded page).
+
+    flt: {mode?, status?, brand_name?, search_post_id?, report_month?, subreddits?[]}
+    Returns the matching rows from list_search_comments (full row dicts).
+    Shared by check-live (FU?) and Mark Reported All (FU121).
+    """
+    status = (flt.get("status") or "").strip() or None
+    mode = (flt.get("mode") or "").strip()
+    brand_name = (flt.get("brand_name") or "").strip() or None
+    search_post_id = flt.get("search_post_id") or None
+    report_month = (flt.get("report_month") or "").strip() or None
+    subs = flt.get("subreddits")
+    sub_set = set(subs) if isinstance(subs, list) and subs else None
+    try:
+        search_post_id = int(search_post_id) if search_post_id else None
+    except (TypeError, ValueError):
+        search_post_id = None
+    rows = db.list_search_comments(search_post_id=search_post_id, status=status)
+    matched = []
+    for r in rows:
+        st = r.get("status")
+        # Mirror lsFilterComments: hide deleted/archived unless explicitly asked.
+        if status != "archived" and st in ("deleted", "archived"):
+            continue
+        if brand_name and (r.get("brand_name") or "") != brand_name:
+            continue
+        if sub_set is not None and (r.get("post_subreddit") or "") not in sub_set:
+            continue
+        if report_month and (r.get("report_month") or "") != report_month:
+            continue
+        # Mode refinement (server mirror of checkLiveLs).
+        if mode == "removed" and st != "removed":
+            continue
+        if mode == "deployed" and st != "deployed":
+            continue
+        if mode == "paid" and not (r.get("paid_at") or st == "paid"):
+            continue
+        if mode == "fresh" and (r.get("last_live_check") or st not in ("deployed", "paid")):
+            continue
+        matched.append(r)
+    return matched
+
+
 @app.route("/api/search/comments/check-live", methods=["POST"])
 def api_check_live_search_comments():
     """Check search comments against Reddit to find removed/deleted (or restored) ones.
@@ -5055,41 +5139,8 @@ def api_check_live_search_comments():
         try:
             if flt is not None:
                 # Authoritative re-query from the DB (no LIMIT) — mirrors the client's
-                # lsFilterComments so the set is complete.
-                status = (flt.get("status") or "").strip() or None
-                mode = (flt.get("mode") or "").strip()
-                brand_name = (flt.get("brand_name") or "").strip() or None
-                search_post_id = flt.get("search_post_id") or None
-                report_month = (flt.get("report_month") or "").strip() or None
-                subs = flt.get("subreddits")
-                sub_set = set(subs) if isinstance(subs, list) and subs else None
-                try:
-                    search_post_id = int(search_post_id) if search_post_id else None
-                except (TypeError, ValueError):
-                    search_post_id = None
-                rows = db.list_search_comments(search_post_id=search_post_id, status=status)
-                matched = []
-                for r in rows:
-                    st = r.get("status")
-                    # Mirror lsFilterComments: hide deleted/archived unless explicitly asked.
-                    if status != "archived" and st in ("deleted", "archived"):
-                        continue
-                    if brand_name and (r.get("brand_name") or "") != brand_name:
-                        continue
-                    if sub_set is not None and (r.get("post_subreddit") or "") not in sub_set:
-                        continue
-                    if report_month and (r.get("report_month") or "") != report_month:
-                        continue
-                    # Mode refinement (server mirror of checkLiveLs).
-                    if mode == "removed" and st != "removed":
-                        continue
-                    if mode == "deployed" and st != "deployed":
-                        continue
-                    if mode == "paid" and not (r.get("paid_at") or st == "paid"):
-                        continue
-                    if mode == "fresh" and (r.get("last_live_check") or st not in ("deployed", "paid")):
-                        continue
-                    matched.append(r)
+                # lsFilterComments so the set is complete (shared helper, FU121).
+                matched = _ls_filtered_search_comments(db, flt)
                 to_check = [r for r in matched if (r.get("reddit_comment_url") or "").strip()]
                 no_link = len(matched) - len(to_check)
                 items = []
@@ -5266,6 +5317,18 @@ def api_debug_comment_dates():
         return jsonify({"match": rid or url, "results": out})
     finally:
         db.close()
+
+@app.route("/api/admin/db-backup")
+def api_admin_db_backup():
+    """FU118 — stream a FRESH backup copy of the live DB as a download, so an off-Railway
+    copy is one click away. Also kept on the volume (manual tag, newest 2 retained)."""
+    try:
+        path = _backup_db_now("manual")
+    except Exception as e:
+        return jsonify({"error": f"backup failed: {e}"}), 500
+    from flask import send_file
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
 
 @app.route("/api/admin/backfill-posted-at", methods=["POST"])
 def api_backfill_posted_at_scoped():
@@ -10130,8 +10193,28 @@ def api_update_search_comment_body(cid):
 def api_delete_search_comment(cid):
     db = get_db()
     try:
-        db.delete_search_comment(cid)
+        # FU120: route through the LOGGED bulk path so every deletion — single included —
+        # writes an Activity Log entry (the Aug-27 mass deletion was completely invisible).
+        db.bulk_delete_search_comments([cid])
         return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/search/comments/bulk-delete", methods=["POST"])
+def api_bulk_delete_search_comments():
+    """FU120 — mass deletion done right: ONE request, transactional, every row logged to
+    the Activity Log. Replaces the UI's old one-HTTP-call-per-comment loop (13k silent
+    calls over an hour in the Aug-27 incident)."""
+    data = request.json or {}
+    ids = data.get("comment_ids") or []
+    if not ids:
+        return jsonify({"error": "comment_ids required"}), 400
+    db = get_db()
+    try:
+        deleted = db.bulk_delete_search_comments(ids)
+        print(f"[bulk-delete] soft-deleted {deleted} search_comment(s) via UI bulk action", flush=True)
+        return jsonify({"deleted": deleted})
     finally:
         db.close()
 
@@ -11803,12 +11886,21 @@ def api_bulk_to_report_filtered():
     /api/all-comments/mark-paid-all's shape) into report state.
 
     Body: {report_month, brand_id?, subreddit_id?,
-           account_id?, source?, date?, status?}
+           account_id?, source?, date?, status?, filter?}
 
-    `brand_id` is treated as a filter on candidate rows AND as an
-    override for any unbranded rows in the resulting batch. The two
-    use cases are the same value in practice — when the admin picks
-    a brand, they want exactly those rows.
+    `filter` (FU121, Live Search only — source='search_comment'):
+      {status?, brand_name?, search_post_id?, report_month?, subreddits?[]}
+      — the SAME authoritative Comments-tab filter shape check-live uses.
+      When present, candidates come from _ls_filtered_search_comments
+      (so Mark Reported All honors every active filter: brand, post,
+      month, subreddits, status); the deployed/paid eligibility gate
+      still applies on top. In this mode `brand_id` is ONLY the
+      unbranded-rows override (candidate brand scoping comes from
+      filter.brand_name), matching what the modal has always said.
+
+    Without `filter` (legacy / Live Subs): `brand_id` is treated as a
+    filter on candidate rows AND as an override for any unbranded rows
+    in the resulting batch, as before.
     """
     data = request.get_json() or {}
     month = (data.get('report_month') or '').strip()
@@ -11836,6 +11928,10 @@ def api_bulk_to_report_filtered():
     account_id = data.get('account_id') or None
     source = data.get('source') or None
     date = data.get('date') or None
+    # FU121: the Comments-tab filter (only meaningful for search_comment candidates).
+    flt = data.get('filter') if isinstance(data.get('filter'), dict) else None
+    if flt is not None and source != 'search_comment':
+        flt = None
 
     # The candidate set can be large (up to 10k). For the REPORT outcome each row needs a
     # Reddit liveness fetch, so it runs as a background task; only LIVE comments are moved
@@ -11844,14 +11940,22 @@ def api_bulk_to_report_filtered():
     def task(_task_id=None):
         db = get_db()
         try:
-            candidates = db.get_all_comments_global(
-                status=status_filter, brand_id=brand_id, subreddit_id=sub_id,
-                account_id=account_id, source=source, date=date,
-                limit=10000, offset=0, live=None,
-            )
-            items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
-            ids = [{"id": r['id'], "source": r.get('source', 'comment')}
-                   for r in items if r.get('status') in eligible]
+            if flt is not None:
+                # FU121: authoritative Live Search filter path — the same helper
+                # check-live uses, so Mark Reported All matches exactly what the
+                # Comments tab shows (brand/post/month/subreddits/status).
+                items = _ls_filtered_search_comments(db, flt)
+                ids = [{"id": r['id'], "source": "search_comment"}
+                       for r in items if r.get('status') in eligible]
+            else:
+                candidates = db.get_all_comments_global(
+                    status=status_filter, brand_id=brand_id, subreddit_id=sub_id,
+                    account_id=account_id, source=source, date=date,
+                    limit=10000, offset=0, live=None,
+                )
+                items = (candidates.get('items') if isinstance(candidates, dict) else candidates) or []
+                ids = [{"id": r['id'], "source": r.get('source', 'comment')}
+                       for r in items if r.get('status') in eligible]
             # Live gate BOTH outcomes — only comments actually live on Reddit are moved;
             # non-live ones are left at their current status (never moved to removed).
             gate = _report_live_gate(db, ids, task_id=_task_id)
@@ -11861,7 +11965,8 @@ def api_bulk_to_report_filtered():
             removed_cnt = sum(1 for x in gate["not_live"] if x.get("liveness") == "removed")
             unverified_cnt = skipped_not_live - removed_cnt
             try:
-                print(f"[bulk-to-report-filtered] outcome={outcome} considered={len(items)} "
+                print(f"[bulk-to-report-filtered] outcome={outcome} filtered={flt is not None} "
+                      f"considered={len(items)} "
                       f"eligible={len(ids)} live={len(move_ids)} skipped={skipped_not_live} "
                       f"(removed={removed_cnt} unverified={unverified_cnt}) | not_live="
                       + ", ".join(f"{x['id']}:{x.get('liveness')}" for x in gate["not_live"][:50]),

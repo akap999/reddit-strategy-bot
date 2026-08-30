@@ -9152,18 +9152,26 @@ def api_search_reddit():
 
 @app.route("/api/search/posts", methods=["GET"])
 def api_list_search_posts():
+    """FU119 — the table grew past 21k rows and this endpoint (a) returned ALL of them and
+    (b) ran ONE EXTRA COUNT QUERY PER POST on top of the count the SQL already computes —
+    ~21,000 queries per page load, which blew past the gateway timeout and made the whole
+    Live Search section render empty. Now: the redundant loop is GONE (list_search_posts's
+    SELECT already returns comment_count), and the unfiltered listing is bounded to the
+    newest `limit` rows (default 500; a brand_id-scoped request stays UNbounded so a brand's
+    full history is always reachable). Read-only — no data is ever modified here."""
     db = get_db()
     try:
         brand_id = request.args.get("brand_id", type=int)
         status = request.args.get("status")
-        posts = db.list_search_posts(brand_id=brand_id, status=status)
-        # Add comment counts
-        for p in posts:
-            row = db.conn.execute(
-                "SELECT COUNT(*) as cnt FROM search_comments WHERE search_post_id = ? AND status != 'deleted'",
-                (p["id"],)
-            ).fetchone()
-            p["comment_count"] = row["cnt"] if row else 0
+        try:
+            limit = int(request.args.get("limit", 500))
+        except (TypeError, ValueError):
+            limit = 500
+        limit = max(1, min(limit, 5000))
+        offset = request.args.get("offset", type=int) or 0
+        posts = db.list_search_posts(brand_id=brand_id, status=status,
+                                     limit=(None if brand_id else limit),
+                                     offset=offset)
         return jsonify(posts)
     finally:
         db.close()
@@ -10015,7 +10023,16 @@ def api_list_search_comments():
     try:
         search_post_id = request.args.get("search_post_id", type=int)
         status = request.args.get("status")
-        comments = db.list_search_comments(search_post_id=search_post_id, status=status)
+        try:
+            limit = int(request.args.get("limit", 2000))
+        except (TypeError, ValueError):
+            limit = 2000
+        limit = max(1, min(limit, 10000))
+        # FU119: the ALL-comments listing (no post filter) is bounded to the newest `limit`
+        # rows (default 2000) — 13k unpaginated rows was part of the Live Search collapse.
+        # A per-post request stays unbounded (always small). Read-only.
+        comments = db.list_search_comments(search_post_id=search_post_id, status=status,
+                                           limit=(None if search_post_id else limit))
         return jsonify(comments)
     finally:
         db.close()

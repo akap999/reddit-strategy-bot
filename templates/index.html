@@ -10597,16 +10597,23 @@ let _lsSavedFilter = { keyword: '', brand: '', status: '' };
 
 async function renderLsSaved(c) {
     c.innerHTML = '<div class="spinner mx-auto my-8"></div>';
+    // FU119: the unfiltered listing is SERVER-bounded to the newest 500 (the table grew past
+    // 21k rows and the unbounded fetch was timing out — the whole section rendered empty).
+    // Picking a brand re-fetches server-side and loads that brand's FULL history.
+    const _selB = (_lsSavedFilter.brand && _lsSavedFilter.brand !== 'none')
+        ? ((_lsBrands.find(b => b.name === _lsSavedFilter.brand) || {}).id || null) : null;
     try {
-        _lsSavedPosts = await api('/api/search/posts');
+        _lsSavedPosts = await api('/api/search/posts' + (_selB ? `?brand_id=${_selB}` : ''));
     } catch(e) { _lsSavedPosts = []; }
-    if (!_lsSavedPosts.length) { c.innerHTML = '<p class="text-gray-500 py-4">No saved posts yet. Use Search tab to find and save posts.</p>'; return; }
+    if (!_lsSavedPosts.length && !_lsSavedFilter.brand) { c.innerHTML = '<p class="text-gray-500 py-4">No saved posts yet. Use Search tab to find and save posts.</p>'; return; }
 
-    const brands = [...new Set(_lsSavedPosts.map(p => p.brand_name).filter(Boolean))];
+    // FU119: the brand filter lists ALL brands (from /api/search/brands), not just the brands
+    // present in the currently loaded page — so no brand can ever "disappear" from the filter.
+    const brands = [...new Set([..._lsBrands.map(b => b.name), ..._lsSavedPosts.map(p => p.brand_name)].filter(Boolean))].sort();
     c.innerHTML = `
         <div class="flex gap-3 mb-3 items-center flex-wrap">
             <input id="ls-sp-keyword" placeholder="Filter by keyword..." value="${_lsSavedFilter.keyword}" oninput="_lsSavedFilter.keyword=this.value;lsDebouncedSavedRender()" class="w-48">
-            <select id="ls-sp-brand" onchange="_lsSavedFilter.brand=this.value;lsRenderSavedTable()" class="w-40">
+            <select id="ls-sp-brand" onchange="_lsSavedFilter.brand=this.value;renderLsTabContent()" class="w-40" title="picking a brand loads its FULL history from the server">
                 <option value="">All Brands</option>
                 <option value="none" ${_lsSavedFilter.brand==='none'?'selected':''}>No Brand</option>
                 ${brands.map(b => `<option value="${b}" ${_lsSavedFilter.brand===b?'selected':''}>${b}</option>`).join('')}
@@ -10618,6 +10625,7 @@ async function renderLsSaved(c) {
                 <option value="generating" ${_lsSavedFilter.status==='generating'?'selected':''}>Generating</option>
             </select>
             <label class="text-xs text-gray-400"><input type="checkbox" id="ls-sp-selectall" onchange="lsToggleSavedAll(this.checked)" class="mr-1"> Select All</label>
+            <span class="text-xs text-gray-600">${_selB ? 'full history for this brand' : 'showing the latest 500 — pick a brand for its full history'}</span>
             <div class="ml-auto flex gap-2 items-center">
                 <label class="text-xs text-gray-400 flex items-center gap-1" title="Comment-thread style for generation">
                     Mode:

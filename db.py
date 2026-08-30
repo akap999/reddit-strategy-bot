@@ -2470,6 +2470,11 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_comments_status_deployed ON comments(status, deployed_at)",
             "CREATE INDEX IF NOT EXISTS idx_comments_status_paid ON comments(status, paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_account ON search_comments(account_id)",
+            # FU119: the Saved-posts comment_count subquery + per-post lookups need this —
+            # without it a 21k-post x 13k-comment listing does ~278M row visits and times out.
+            "CREATE INDEX IF NOT EXISTS idx_search_comments_post ON search_comments(search_post_id)",
+            "CREATE INDEX IF NOT EXISTS idx_search_posts_created ON search_posts(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_search_posts_brand ON search_posts(brand_id)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_status ON search_comments(status)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_deployed_at ON search_comments(deployed_at)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_paid_at ON search_comments(paid_at)",
@@ -7978,7 +7983,7 @@ class Database:
                 self.conn.commit()
             return (row["id"], False)
 
-    def list_search_posts(self, brand_id=None, status=None):
+    def list_search_posts(self, brand_id=None, status=None, limit=None, offset=0):
         q = """SELECT sp.*, b.name as brand_name,
                       (SELECT COUNT(*) FROM search_comments sc WHERE sc.search_post_id = sp.id AND sc.status != 'deleted') as comment_count
                FROM search_posts sp
@@ -7992,6 +7997,9 @@ class Database:
             q += " AND sp.status = ?"
             params.append(status)
         q += " ORDER BY sp.created_at DESC"
+        if limit is not None:   # FU119: bound the unpaginated listing (21k rows -> gateway timeout)
+            q += " LIMIT ? OFFSET ?"
+            params.extend([int(limit), int(offset or 0)])
         rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 
@@ -8124,7 +8132,7 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
-    def list_search_comments(self, search_post_id=None, status=None):
+    def list_search_comments(self, search_post_id=None, status=None, limit=None):
         # Resolve the brand via the comment's own brand_id, falling back to the search_post's
         # brand_id (COALESCE) — mirrors the client dashboard's resolution. Without the fallback a
         # reported/replaced comment whose brand sits on sp.brand_id (NULL sc.brand_id) shows a blank
@@ -8146,6 +8154,9 @@ class Database:
             q += " AND sc.status = ?"
             params.append(status)
         q += " ORDER BY sc.created_at DESC"
+        if limit is not None:   # FU119: bound the all-comments listing (13k rows unpaginated)
+            q += " LIMIT ?"
+            params.append(int(limit))
         rows = self.conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 

@@ -3734,7 +3734,8 @@ class Database:
             w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN "
                       "(SELECT post_id FROM post_brands WHERE brand_id = ?)))")
             p1 += [brand_id, brand_id]
-            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+            # FU122: resolve like the dashboard — the brand often lives on the search_post.
+            w2.append("COALESCE(sc.brand_id, sp.brand_id) = ?"); p2.append(brand_id)
         if subreddit_id:
             w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
             row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
@@ -3820,7 +3821,8 @@ class Database:
             w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN "
                       "(SELECT post_id FROM post_brands WHERE brand_id = ?)))")
             p1 += [brand_id, brand_id]
-            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+            # FU122: resolve like the dashboard — the brand often lives on the search_post.
+            w2.append("COALESCE(sc.brand_id, sp.brand_id) = ?"); p2.append(brand_id)
         if subreddit_id:
             w1.append("p.subreddit_id = ?"); p1.append(subreddit_id)
             row = self.conn.execute("SELECT name FROM subreddits WHERE id = ?", (subreddit_id,)).fetchone()
@@ -3883,7 +3885,8 @@ class Database:
             # belong to the brand's post.
             w1.append("(c.brand_id = ? OR (c.brand_id IS NULL AND p.id IN (SELECT post_id FROM post_brands WHERE brand_id = ?)))")
             p1.append(brand_id); p1.append(brand_id)
-            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+            # FU122: resolve like the dashboard — the brand often lives on the search_post.
+            w2.append("COALESCE(sc.brand_id, sp.brand_id) = ?"); p2.append(brand_id)
         if account_id:
             w1.append("c.account_id = ?"); p1.append(account_id)
             w2.append("sc.account_id = ?"); p2.append(account_id)
@@ -5745,7 +5748,8 @@ class Database:
                 w2.append("sc.status IN ('deployed','paid')")
         if brand_id:
             w1.append("c.brand_id = ?"); p1.append(brand_id)
-            w2.append("sc.brand_id = ?"); p2.append(brand_id)
+            # FU122: resolve like the dashboard — the brand often lives on the search_post.
+            w2.append("COALESCE(sc.brand_id, sp.brand_id) = ?"); p2.append(brand_id)
         if account_id:
             w1.append("c.account_id = ?"); p1.append(account_id)
             w2.append("sc.account_id = ?"); p2.append(account_id)

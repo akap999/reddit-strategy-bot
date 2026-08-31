@@ -128,6 +128,12 @@ def set_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    # FU122: the SPA page must be revalidated on every load — a cached copy keeps
+    # running the PREVIOUS deploy's JS against the new server (the stale-page class
+    # of bug: unscoped report sweeps, "fixed but still broken until hard-refresh").
+    # no-cache = the browser may keep a copy but must revalidate before using it.
+    if (response.mimetype or '').startswith('text/html'):
+        response.headers['Cache-Control'] = 'no-cache'
     return response
 
 # ---------------------------------------------------------------------------
@@ -11932,6 +11938,13 @@ def api_bulk_to_report_filtered():
     flt = data.get('filter') if isinstance(data.get('filter'), dict) else None
     if flt is not None and source != 'search_comment':
         flt = None
+    # FU122: a Live Search report sweep MUST carry the Comments-tab filter. A request
+    # without one comes from a stale cached page (pre-FU121 JS) — the exact shape that
+    # once swept EVERY brand's deployed comments into a report month. Reject it before
+    # any task starts. Live Subs (source='comment') keeps its legacy body untouched.
+    if source == 'search_comment' and flt is None:
+        return jsonify({"error": "This page is outdated — hard-refresh (Cmd+Shift+R) "
+                                 "and run again."}), 400
 
     # The candidate set can be large (up to 10k). For the REPORT outcome each row needs a
     # Reddit liveness fetch, so it runs as a background task; only LIVE comments are moved

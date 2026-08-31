@@ -122,6 +122,20 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# FU128: identifies THIS deployed build. The SPA polls /api/version and prompts a reload
+# when it changes — a long-open tab otherwise keeps running old JS against a new server
+# (the stale-tab class of bug behind the FU122 sweep and days of "it's still broken").
+import time as _fu128_time
+_APP_BUILD_ID = (os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+                 or os.environ.get("RAILWAY_DEPLOYMENT_ID")
+                 or _fu128_time.strftime("boot-%Y%m%d%H%M%S", _fu128_time.gmtime()))
+
+
+@app.route("/api/version")
+def api_version():
+    return jsonify({"build": _APP_BUILD_ID})
+
+
 @app.after_request
 def set_security_headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -11312,6 +11326,26 @@ def _spawn_report_engagement_fetch(items):
         return None
 
 
+# FU126: tiny TTL cache for post-feed scans so a liveness batch touching several comments
+# under one post fetches that post's feed once, not per comment.
+_POST_FEED_CACHE = {}
+_POST_FEED_CACHE_TTL = 120
+
+
+def _post_feed_scan_cached(post_url, timeout=15):
+    import time as _t
+    now = _t.time()
+    hit = _POST_FEED_CACHE.get(post_url)
+    if hit and now - hit[0] < _POST_FEED_CACHE_TTL:
+        return hit[1], hit[2]
+    present, post_removed = _post_feed_scan(post_url, timeout=timeout)
+    _POST_FEED_CACHE[post_url] = (now, present, post_removed)
+    if len(_POST_FEED_CACHE) > 300:
+        for k in sorted(_POST_FEED_CACHE, key=lambda k: _POST_FEED_CACHE[k][0])[:150]:
+            _POST_FEED_CACHE.pop(k, None)
+    return present, post_removed
+
+
 def _classify_url_liveness(url):
     """Shared single-URL liveness probe — the SAME RSS-first signal the Check Live flow
     uses (see the check-live task's `_probe`). Reddit's JSON API is auth-gated (403) for
@@ -11345,14 +11379,31 @@ def _classify_url_liveness(url):
         if classified.get("kind") == "comment":
             rss_v = _comment_liveness_via_rss(resolved)
             if rss_v == "live":
+                # FU126: a permalink-RSS "live" can be a SHADOW-REMOVED comment — visible at
+                # its own permalink but gone from the thread everyone actually sees. Cross-check
+                # the POST's comment feed when it's cleanly readable and NOT capped: absence
+                # there downgrades to inconclusive (never reported), presence confirms.
+                # A capped (~100-entry) or unreadable feed proves nothing — accept the
+                # permalink verdict rather than compounding flakiness. (FU99: the parent
+                # post's own liveness is deliberately NOT consulted for mentions.)
+                try:
+                    p_url, pcid = _parse_comment_url(resolved)
+                    if p_url and pcid:
+                        present, _post_removed = _post_feed_scan_cached(p_url)
+                        if present is not None and len(present) < 90 and pcid not in present:
+                            return ("missing",
+                                    "live at its permalink but absent from the post's feed "
+                                    "(possible shadow removal) — unverified")
+                except Exception:
+                    pass
                 return ("live", "via comment-permalink RSS")
             if rss_v == "removed":
-                return ("removed", "comment id absent from its permalink RSS feed")
-            # RSS couldn't fetch → PullPush archive fallback (separate host, not rate-limited
-            # with Reddit). Confirms a live/removed comment when the proxy is flaky.
+                return ("removed", "comment's own entry is a [removed]/[deleted] shell")
+            # rss_v is 'absent' (weak) or None → consult PullPush, which may only ever
+            # CONFIRM A REMOVAL. FU126: its 'live' is a stale archive snapshot — a comment
+            # removed any time AFTER archival still reads 'live' there forever, which was
+            # falsely confirming dead comments into reports. Removed-at-archival is sound.
             pp = _comment_liveness_via_pullpush(resolved)
-            if pp == "live":
-                return ("live", "via PullPush archive (RSS unreachable)")
             if pp == "removed":
                 return ("removed", "PullPush archive body is [removed]/[deleted]")
             # Still inconclusive → Reddit JSON (only works on residential IPs). Call it cheaply
@@ -11599,41 +11650,55 @@ def api_comment_to_report(cid):
     # the operator deployed, then categorizes as 'replaced' rather than 'report'.)
     target_status = 'replaced' if outcome == 'replaced' else 'report'
     allowed_from = ('deployed', 'paid')
-    db = get_db()
-    try:
-        # Live gate (both outcomes): only accept a comment that's actually live on Reddit.
-        # A non-live one is left at its current status (never moved to removed). For
-        # 'replaced' this verifies the replacement at the comment's link is live.
-        gate = _report_live_gate(db, [{"id": cid, "source": source}],
-                                 allow_missing=False, fast=False)  # FU43: report ONLY on confirmed live
-        if not gate["live"]:
-            nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
-            return jsonify({"ok": False, "skipped": True, "liveness": nl.get("liveness"),
-                            "message": "left unchanged — not live on Reddit"}), 200
-        result = db.move_comment_to_report(
-            cid, source, month,
-            actor_email=_admin_email(), brand_id=brand_id,
-            target_status=target_status, allowed_from=allowed_from,
-        )
-        if result is db.BRAND_REQUIRED:
-            # Tell the UI which brands to offer. Empty list →
-            # client falls back to /api/brands/all.
-            candidates = db.report_brand_candidates(cid, source)
-            return jsonify({"error": "brand_required",
-                            "candidates": candidates,
-                            "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}), 422
-        if result is None:
-            return jsonify({"error": "row not found or not in deployed/paid status"}), 422
-        # Kick off a background fetch so the client dashboard picks
-        # up upvotes/replies without the admin needing to click
-        # anything else. Fire-and-forget — the report move is already
-        # committed.
-        items = _fetch_report_items(db, [{"id": cid, "source": source}])
-        _spawn_report_engagement_fetch(items)
-        return jsonify({"ok": True, "prev_status": result,
-                        "report_month": month, "brand_id": brand_id})
-    finally:
-        db.close()
+    # FU127: the operator can EXPLICITLY skip the live gate when the checker can't reach
+    # Reddit (proxy/worker down) — the UI offers this only after an 'unverified' verdict,
+    # so it's an operator confirmation, never a silent bypass of FU43's confirmed-live rule.
+    force_live = bool(data.get('force_live'))
+    actor = _admin_email()
+
+    # FU127: run as a background task — the thorough per-comment probe (RSS → PullPush →
+    # JSON with retry backoff) can take 30-60s on a flaky proxy; blocking the request
+    # thread froze the UI. The task-bar chip shows the check progress.
+    def task(_task_id=None):
+        db = get_db()
+        try:
+            if not force_live:
+                # Live gate (both outcomes): only accept a comment that's actually live on
+                # Reddit. A non-live one is left at its current status (never moved to
+                # removed). For 'replaced' this verifies the replacement's link is up.
+                gate = _report_live_gate(db, [{"id": cid, "source": source}],
+                                         task_id=_task_id,
+                                         allow_missing=False, fast=False)  # FU43: confirmed-live only
+                if not gate["live"]:
+                    nl = gate["not_live"][0] if gate["not_live"] else {"liveness": "missing"}
+                    return {"ok": False, "skipped": True, "liveness": nl.get("liveness"),
+                            "message": "left unchanged — not live on Reddit"}
+            result = db.move_comment_to_report(
+                cid, source, month,
+                actor_email=actor, brand_id=brand_id,
+                target_status=target_status, allowed_from=allowed_from,
+            )
+            if result is db.BRAND_REQUIRED:
+                # Tell the UI which brands to offer. Empty list →
+                # client falls back to /api/brands/all.
+                candidates = db.report_brand_candidates(cid, source)
+                return {"ok": False, "brand_required": True, "candidates": candidates,
+                        "message": "We couldn't infer this comment's brand. Pick one to attribute it to a client."}
+            if result is None:
+                return {"ok": False, "error": "row not found or not in deployed/paid status"}
+            # Kick off a background fetch so the client dashboard picks
+            # up upvotes/replies without the admin needing to click
+            # anything else. Fire-and-forget — the report move is already
+            # committed.
+            items = _fetch_report_items(db, [{"id": cid, "source": source}])
+            _spawn_report_engagement_fetch(items)
+            return {"ok": True, "prev_status": result, "forced": force_live,
+                    "report_month": month, "brand_id": brand_id}
+        finally:
+            db.close()
+
+    tid = start_task("comment-to-report", task, pass_task_id=True)
+    return jsonify({"task_id": tid})
 
 
 @app.route('/api/comments/<int:cid>/reclassify-report', methods=['POST'])
@@ -12009,6 +12074,9 @@ def api_bulk_to_report_filtered():
     if source == 'search_comment' and flt is None:
         return jsonify({"error": "This page is outdated — hard-refresh (Cmd+Shift+R) "
                                  "and run again."}), 400
+    # FU129: explicit operator opt-out of the per-comment live gate (checker unreachable).
+    # The UI double-confirms before sending this.
+    force_live = bool(data.get('force_live'))
 
     # The candidate set can be large (up to 10k). For the REPORT outcome each row needs a
     # Reddit liveness fetch, so it runs as a background task; only LIVE comments are moved
@@ -12035,14 +12103,19 @@ def api_bulk_to_report_filtered():
                        for r in items if r.get('status') in eligible]
             # Live gate BOTH outcomes — only comments actually live on Reddit are moved;
             # non-live ones are left at their current status (never moved to removed).
-            gate = _report_live_gate(db, ids, task_id=_task_id)
+            # FU129: force_live (explicit, double-confirmed in the UI) skips the gate and
+            # moves every eligible candidate — for when the checker can't reach Reddit.
+            if force_live:
+                gate = {"live": ids, "not_live": []}
+            else:
+                gate = _report_live_gate(db, ids, task_id=_task_id)
             move_ids = gate["live"]; skipped_not_live = len(gate["not_live"])
             # Breakdown of WHY rows were skipped, so a "nothing happened" run is legible:
             # confirmed removed vs couldn't-verify (missing/error after RSS+PullPush+JSON).
             removed_cnt = sum(1 for x in gate["not_live"] if x.get("liveness") == "removed")
             unverified_cnt = skipped_not_live - removed_cnt
             try:
-                print(f"[bulk-to-report-filtered] outcome={outcome} filtered={flt is not None} "
+                print(f"[bulk-to-report-filtered] outcome={outcome} filtered={flt is not None} forced={force_live} "
                       f"considered={len(items)} "
                       f"eligible={len(ids)} live={len(move_ids)} skipped={skipped_not_live} "
                       f"(removed={removed_cnt} unverified={unverified_cnt}) | not_live="
@@ -12054,6 +12127,7 @@ def api_bulk_to_report_filtered():
                 ids=move_ids, report_month=month, actor_email=actor, brand_id_override=brand_id,
                 target_status=target_status, allowed_from=eligible)
             out["candidates_considered"] = len(items)
+            out["forced"] = force_live
             out["skipped_not_live"] = skipped_not_live
             out["skipped_removed"] = removed_cnt
             out["skipped_unverified"] = unverified_cnt

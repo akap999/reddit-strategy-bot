@@ -13792,6 +13792,10 @@ async function showSendToReportModal(cid, source) {
         </select>
         <label class="text-xs text-gray-400">Month <span class="text-red-400">*</span></label>
         <select id="rep-month" class="w-full mb-3">${_monthOptionsHtml()}</select>
+        <label class="flex items-center gap-2 text-xs mb-2" style="color:#f2c94c;cursor:pointer" title="FU129: use when the liveness checker can't reach Reddit (proxy/worker down) but you can see the comment live in your browser">
+            <input type="checkbox" id="rep-skip-live">
+            ⏭ Skip the live check — report without verifying
+        </label>
         <div id="rep-brand-section"></div>
         <div class="flex gap-2 mt-3">
             <button id="rep-send-btn" class="btn btn-primary btn-sm" onclick="submitSendToReport(${cid}, '${source}')">Send</button>
@@ -13837,50 +13841,80 @@ async function submitSendToReport(cid, source) {
 
     const body = { report_month: month, source, outcome };
     if (brandId) body.brand_id = brandId;
+    // FU129: the operator can skip the live check upfront (checker unreachable but the
+    // comment is visibly live in their browser). Same force_live the retry prompt uses.
+    if (document.getElementById('rep-skip-live')?.checked) body.force_live = true;
 
-    // Re-entrancy guard + immediate feedback — the gate does a quick liveness fetch,
-    // so block double-submits and tell the user something is happening right away.
+    // Re-entrancy guard — block double-submits while the task is being created.
     if (window._sendingReport) return;
     window._sendingReport = true;
-    toast('Checking…', 'info');
 
+    // FU127: runs as a BACKGROUND task — the thorough liveness probe can take 30-60s on a
+    // flaky proxy, which used to freeze this modal. The task-bar chip shows the check.
+    const refresh = async () => {
+        if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
+        else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
+            try { await lsFetchComments(); lsFilterComments(); } catch(_) {}
+        }
+    };
+    const submit = async (extra) => {
+        const res = await api(`/api/comments/${cid}/to-report`, { method: 'POST', body: { ...body, ...(extra || {}) } });
+        if (!res || !res.task_id) { toast('Failed to start the report task', 'error'); return; }
+        _addBgTask(res.task_id, 'Reporting (live-checking)');
+        _pollTask(res.task_id, 'Report', (result) => {
+            const r = result || {};
+            if (r.ok) {
+                toast(`${outcome === 'replaced' ? 'Marked replaced' : 'Sent to report'} · ${month}${r.forced ? ' (unverified — reported on your confirmation)' : ''}`, 'success');
+                refresh();
+                return;
+            }
+            if (r.brand_required) {
+                // The report modal is closed by now (bg task) — open a small dedicated
+                // brand picker and resubmit with the chosen brand.
+                (async () => {
+                    let brands = r.candidates || [];
+                    if (!brands.length) { try { brands = await api('/api/brands/all'); } catch (_) { brands = []; } }
+                    showModal(`
+                        <h3 class="text-lg font-bold mb-2">Pick a brand</h3>
+                        <p class="text-xs text-gray-400 mb-2">We couldn't infer this comment's brand from its post. Pick one to attribute it to a client.</p>
+                        <select id="rep-force-brand" class="w-full mb-3">${(brands || []).map(b => `<option value="${b.id}">${b.name}</option>`).join('')}</select>
+                        <div class="flex gap-2">
+                            <button class="btn btn-primary btn-sm" onclick="window._repBrandRetry()">Report</button>
+                            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+                        </div>`);
+                    window._repBrandRetry = () => {
+                        const bid = parseInt(document.getElementById('rep-force-brand')?.value) || null;
+                        if (!bid) { toast('Pick a brand', 'error'); return; }
+                        closeModal();
+                        submit({ brand_id: bid });
+                    };
+                })();
+                return;
+            }
+            if (r.skipped) {
+                if (r.liveness === 'removed') {
+                    toast('Left unchanged — CONFIRMED removed on Reddit', 'error');
+                    return;
+                }
+                // Unverified (missing/error): the checker couldn't reach Reddit — offer an
+                // EXPLICIT operator override instead of a dead end (FU127).
+                if (confirm(`Couldn't VERIFY this comment on Reddit (${r.liveness || 'unreachable'} — proxy/worker may be down).\n\nIf you can see it live in your browser, report it anyway?`)) {
+                    submit({ force_live: true });
+                } else {
+                    toast('Left unchanged — not verified', 'info');
+                }
+                return;
+            }
+            toast('Failed: ' + (r.error || r.message || 'unknown'), 'error');
+        });
+    };
     try {
-        // Use raw fetch so we can inspect the 422 body (api() drops it).
-        let resp;
-        try {
-            resp = await fetch(`/api/comments/${cid}/to-report`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-        } catch (e) {
-            toast('Network error: ' + (e.message || e), 'error');
-            return;
-        }
-        const payload = await resp.json().catch(() => ({}));
-
-        if (resp.ok) {
-            if (payload && payload.skipped) {
-                // Live gate: comment wasn't live on Reddit → left at its current status.
-                toast(`Left unchanged — not live on Reddit${payload.liveness ? ` (${payload.liveness})` : ''}`, 'info');
-            } else {
-                toast(`${outcome === 'replaced' ? 'Marked replaced' : 'Sent to report'} · ${month}`, 'success');
-            }
-            closeModal();
-            if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
-            else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-                try { await lsFetchComments(); lsFilterComments(); } catch(_) {}
-            }
-            return;
-        }
-
-        if (resp.status === 422 && payload.error === 'brand_required') {
-            // Lazy picker: server told us it couldn't infer a brand.
-            await _renderBrandPickerStage(payload.candidates || []);
-            return;
-        }
-
-        toast('Failed: ' + (payload.error || payload.message || resp.statusText), 'error');
+        await submit();
+        toast(body.force_live ? 'Reporting WITHOUT live check (as requested)…'
+                              : 'Live-checking in the background — you can keep working…', 'info');
+        closeModal();
+    } catch (e) {
+        toast('Failed: ' + (e.message || e), 'error');
     } finally {
         window._sendingReport = false;
     }
@@ -14009,6 +14043,10 @@ async function showMarkReportedAllModal(scope) {
             <option value="paid" ${filterContext.status === 'paid' ? 'selected' : ''}>Only paid</option>
         </select>
         </div>
+        <label class="flex items-center gap-2 text-xs mt-2 mb-1" style="color:#f2c94c;cursor:pointer" title="FU129: use when the liveness checker can't reach Reddit — reports every filtered deployed/paid comment WITHOUT verifying each one">
+            <input type="checkbox" id="rep-skip-live">
+            ⏭ Skip the live check — report all filtered deployed/paid without verifying
+        </label>
         <div class="flex gap-2 mt-3">
             <button class="btn btn-primary btn-sm" onclick="submitMarkReportedAll('${scope}')">Run</button>
             <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
@@ -14024,6 +14062,12 @@ async function submitMarkReportedAll(scope) {
     if (!month) { toast('Pick a month', 'error'); return; }
     const body = { report_month: month, outcome };
     if (brandOverride) body.brand_id = brandOverride;
+    // FU129: explicit operator opt-out of the per-comment live check.
+    if (document.getElementById('rep-skip-live')?.checked) {
+        const n = 'ALL filtered deployed/paid comments will be reported WITHOUT verifying they are live on Reddit.';
+        if (!confirm(`⚠ Skip live check\n\n${n}\n\nContinue?`)) return;
+        body.force_live = true;
+    }
     // Both outcomes (report + replaced) are eligible from deployed/paid, so the status
     // filter applies equally. Always honor it when set (else all deployed/paid match).
     if (status) body.status = status;
@@ -15470,6 +15514,28 @@ function updateCalMonthLabel() {
 // Initialize
 // =========================================================================
 _restoreBgTasks();
+
+// FU128: stale-tab watcher. A tab left open across a deploy keeps running OLD JavaScript
+// against the new server (the class of bug behind the accidental report sweep and several
+// "the fix didn't work" episodes — no-cache only helps on a reload, which a long-lived SPA
+// tab never does by itself). Poll the build id + check on focus; prompt a reload on change.
+let _appBuildId = null;
+async function _checkAppVersion() {
+    try {
+        const r = await fetch('/api/version');
+        if (!r.ok) return;
+        const v = await r.json();
+        if (!v || !v.build) return;
+        if (_appBuildId === null) { _appBuildId = v.build; return; }
+        if (v.build !== _appBuildId && !window._staleToastShown) {
+            window._staleToastShown = true;
+            persistentToast('🔄 A new version was deployed — reload this tab (⌘R) to pick it up. Until then this tab runs the OLD code.', 'error');
+        }
+    } catch (_) {}
+}
+_checkAppVersion();
+setInterval(_checkAppVersion, 240000);
+window.addEventListener('focus', _checkAppVersion);
 const _hashState = _restoreFromHash();
 if (_hashState) {
     navigate(_hashState.view);

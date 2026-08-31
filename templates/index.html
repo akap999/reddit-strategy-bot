@@ -11106,7 +11106,7 @@ async function renderLsComments(c) {
             </div>
             <select id="ls-cf-status" onchange="lsRefetchAndFilter()" class="w-36">
                 <option value="">All Status</option>
-                <option value="draft">Draft</option>
+                <option value="draft">Draft / unworked</option>
                 <option value="assigned">Assigned</option>
                 <option value="informed">Informed</option>
                 <option value="deployed">Deployed</option>
@@ -11229,7 +11229,9 @@ function _lsPreFilteredSubsInComments() {
         // the filter matches no rows).
         const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8 };
         const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace']);
-        if (DIRECT_STATUSES.has(status)) {
+        if (status === 'draft') {   // FU124: draft = draft + complete (unworked)
+            pool = pool.filter(c => c.status === 'draft' || c.status === 'complete');
+        } else if (DIRECT_STATUSES.has(status)) {
             pool = pool.filter(c => c.status === status);
         } else {
             const postMaxStatus = {};
@@ -11342,7 +11344,8 @@ function lsRenderCommentCounts(filtered) {
     const counts = { draft:0, assigned:0, informed:0, deployed:0, paid:0, report:0, replaced:0, removed:0, replace:0, archived:0 };
     let live = 0, brandMentions = 0, posts = new Set();
     filtered.forEach(c => {
-        if (counts[c.status] !== undefined) counts[c.status]++;
+        const st = c.status === 'complete' ? 'draft' : c.status;  // FU124: complete counts as draft/unworked
+        if (counts[st] !== undefined) counts[st]++;
         if (c.status === 'deployed' && c.last_live_check) live++;
         if (c.mentions_brand) brandMentions++;
         if (c.search_post_id != null) posts.add(c.search_post_id);
@@ -11405,7 +11408,13 @@ function lsFilterComments() {
     // branch and hid every replaced comment that shared a post with a higher-ranked sibling.
     const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace', 'replaced']);
     if (status && status !== 'archived') {
-        if (DIRECT_STATUSES.has(status)) {
+        if (status === 'draft') {
+            // FU124: "Draft" = generated-but-never-worked, which is BOTH 'draft' (the
+            // column default) and 'complete' (what the restore mapped untouched rows to).
+            // A direct match — the post-max-rank logic hid drafts on any post with a
+            // higher-status sibling and never matched 'complete' at all.
+            filtered = filtered.filter(c => c.status === 'draft' || c.status === 'complete');
+        } else if (DIRECT_STATUSES.has(status)) {
             filtered = filtered.filter(c => c.status === status);
         } else {
             const postMaxStatus = {};

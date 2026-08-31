@@ -5100,10 +5100,16 @@ def _ls_filtered_search_comments(db, flt):
         search_post_id = int(search_post_id) if search_post_id else None
     except (TypeError, ValueError):
         search_post_id = None
-    rows = db.list_search_comments(search_post_id=search_post_id, status=status)
+    # FU124: 'draft' means "generated, never worked" — which covers BOTH the column-default
+    # 'draft' AND 'complete' (the state the mass-deletion restore mapped signal-less rows
+    # to). Filtering on the literal 'draft' alone made ~10.7k restored comments invisible.
+    query_status = None if status == "draft" else status
+    rows = db.list_search_comments(search_post_id=search_post_id, status=query_status)
     matched = []
     for r in rows:
         st = r.get("status")
+        if status == "draft" and st not in ("draft", "complete"):
+            continue
         # Mirror lsFilterComments: hide deleted/archived unless explicitly asked.
         if status != "archived" and st in ("deleted", "archived"):
             continue

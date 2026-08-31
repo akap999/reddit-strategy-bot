@@ -5080,6 +5080,14 @@ def api_check_live(sid):
     tid = start_task("check-live", task)
     return jsonify({"task_id": tid})
 
+# FU125: server mirror of the client's LS_STATUS_RANK — a post's derived status is the max
+# rank across its comments, and the pipeline-STAGE filters select WHOLE post groups at that
+# stage ("post and all its comments move together"). Terminal statuses stay exact row matches.
+_LS_RANK = {"draft": 0, "complete": 1, "assigned": 2, "informed": 3, "deployed": 4,
+            "paid": 5, "report": 6, "replace": 7, "removed": 8, "replaced": 9}
+_LS_STAGE_STATUSES = {"draft", "assigned", "informed", "deployed"}
+
+
 def _ls_filtered_search_comments(db, flt):
     """Authoritative server-side re-query of Live Search comments matching the
     client's Comments-tab filter (a server mirror of lsFilterComments, so the
@@ -5087,7 +5095,14 @@ def _ls_filtered_search_comments(db, flt):
 
     flt: {mode?, status?, brand_name?, search_post_id?, report_month?, subreddits?[]}
     Returns the matching rows from list_search_comments (full row dicts).
-    Shared by check-live (FU?) and Mark Reported All (FU121).
+    Shared by the Comments-tab listing (FU123), check-live, and Mark Reported All (FU121).
+
+    Status semantics (mirrors the tab's historical behavior):
+      - STAGE statuses (draft/assigned/informed/deployed): select POSTS whose max-ranked
+        comment is at that stage and return ALL of their comments (whole groups). 'draft'
+        covers ranks {draft, complete} — FU124: 'complete' is what the restore mapped
+        untouched rows to, and an all-complete group must still show under Draft.
+      - Terminal statuses (paid/report/removed/replace/replaced) + 'archived': exact match.
     """
     status = (flt.get("status") or "").strip() or None
     mode = (flt.get("mode") or "").strip()
@@ -5100,16 +5115,12 @@ def _ls_filtered_search_comments(db, flt):
         search_post_id = int(search_post_id) if search_post_id else None
     except (TypeError, ValueError):
         search_post_id = None
-    # FU124: 'draft' means "generated, never worked" — which covers BOTH the column-default
-    # 'draft' AND 'complete' (the state the mass-deletion restore mapped signal-less rows
-    # to). Filtering on the literal 'draft' alone made ~10.7k restored comments invisible.
-    query_status = None if status == "draft" else status
+    stage = status in _LS_STAGE_STATUSES
+    query_status = None if stage else status
     rows = db.list_search_comments(search_post_id=search_post_id, status=query_status)
-    matched = []
+    pool = []
     for r in rows:
         st = r.get("status")
-        if status == "draft" and st not in ("draft", "complete"):
-            continue
         # Mirror lsFilterComments: hide deleted/archived unless explicitly asked.
         if status != "archived" and st in ("deleted", "archived"):
             continue
@@ -5119,6 +5130,21 @@ def _ls_filtered_search_comments(db, flt):
             continue
         if report_month and (r.get("report_month") or "") != report_month:
             continue
+        pool.append(r)
+    if stage:
+        # Whole-group selection: per-post max rank over the scoped pool, then keep every
+        # comment of the posts whose max lands on the target stage.
+        post_max = {}
+        for r in pool:
+            pid = r.get("search_post_id")
+            rank = _LS_RANK.get(r.get("status"), -1)
+            if pid not in post_max or rank > post_max[pid]:
+                post_max[pid] = rank
+        targets = {0, 1} if status == "draft" else {_LS_RANK[status]}
+        pool = [r for r in pool if post_max.get(r.get("search_post_id")) in targets]
+    matched = []
+    for r in pool:
+        st = r.get("status")
         # Mode refinement (server mirror of checkLiveLs).
         if mode == "removed" and st != "removed":
             continue

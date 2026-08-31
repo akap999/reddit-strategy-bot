@@ -11229,9 +11229,7 @@ function _lsPreFilteredSubsInComments() {
         // the filter matches no rows).
         const LS_STATUS_RANK = { draft: 0, complete: 1, assigned: 2, informed: 3, deployed: 4, paid: 5, report: 6, replace: 7, removed: 8 };
         const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace']);
-        if (status === 'draft') {   // FU124: draft = draft + complete (unworked)
-            pool = pool.filter(c => c.status === 'draft' || c.status === 'complete');
-        } else if (DIRECT_STATUSES.has(status)) {
+        if (DIRECT_STATUSES.has(status)) {
             pool = pool.filter(c => c.status === status);
         } else {
             const postMaxStatus = {};
@@ -11240,8 +11238,9 @@ function _lsPreFilteredSubsInComments() {
                 const rank = LS_STATUS_RANK[c.status] ?? -1;
                 if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
             });
-            const targetRank = LS_STATUS_RANK[status] ?? -1;
-            pool = pool.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+            // FU125: same stage-group semantics as lsFilterComments — draft = ranks {0,1}.
+            const targets = status === 'draft' ? new Set([0, 1]) : new Set([LS_STATUS_RANK[status] ?? -1]);
+            pool = pool.filter(c => targets.has(postMaxStatus[c.search_post_id]));
         }
     }
     return [...new Set(pool.map(c => c.post_subreddit).filter(Boolean))].sort();
@@ -11408,23 +11407,21 @@ function lsFilterComments() {
     // branch and hid every replaced comment that shared a post with a higher-ranked sibling.
     const DIRECT_STATUSES = new Set(['paid', 'report', 'removed', 'replace', 'replaced']);
     if (status && status !== 'archived') {
-        if (status === 'draft') {
-            // FU124: "Draft" = generated-but-never-worked, which is BOTH 'draft' (the
-            // column default) and 'complete' (what the restore mapped untouched rows to).
-            // A direct match — the post-max-rank logic hid drafts on any post with a
-            // higher-status sibling and never matched 'complete' at all.
-            filtered = filtered.filter(c => c.status === 'draft' || c.status === 'complete');
-        } else if (DIRECT_STATUSES.has(status)) {
+        if (DIRECT_STATUSES.has(status)) {
             filtered = filtered.filter(c => c.status === status);
         } else {
+            // FU125: pipeline-stage filter = WHOLE post groups at that stage — a post's
+            // status is its max-ranked comment, and all its comments move together.
+            // 'draft' targets ranks {draft, complete} (FU124: 'complete' = the restore's
+            // mapping for untouched rows; an all-complete group must show under Draft).
             const postMaxStatus = {};
             filtered.forEach(c => {
                 const pid = c.search_post_id;
                 const rank = LS_STATUS_RANK[c.status] ?? -1;
                 if (!(pid in postMaxStatus) || rank > postMaxStatus[pid]) postMaxStatus[pid] = rank;
             });
-            const targetRank = LS_STATUS_RANK[status] ?? -1;
-            filtered = filtered.filter(c => postMaxStatus[c.search_post_id] === targetRank);
+            const targets = status === 'draft' ? new Set([0, 1]) : new Set([LS_STATUS_RANK[status] ?? -1]);
+            filtered = filtered.filter(c => targets.has(postMaxStatus[c.search_post_id]));
         }
     }
     // Subreddit multi-select filter

@@ -456,9 +456,15 @@ def _reddit_http_proxies():
     return {"http": p, "https": p}
 
 
-def _reddit_rss_fetch(rel_path, params=None, timeout=15):
+def _reddit_rss_fetch(rel_path, params=None, timeout=15, resi_fallback=False):
     """FU58: fetch a Reddit RSS/Atom path and return the requests Response (caller inspects
     .status_code / .text), or None if every attempt raised.
+
+    FU130: the residential retry now DEFAULTS OFF — old.reddit ignores the .rss suffix on
+    permalink/post paths and serves the full ~320KB HTML page, so for these reads the
+    fallback could never yield XML and only burned metered GB (every current caller is a
+    permalink/post reader). The dedicated old-HTML leg (`_fetch_old_reddit_html`) is the
+    residential door now; pass resi_fallback=True only for a path known to serve XML.
 
     PRIMARY = worker/direct (REDDIT_PROXY_URL or www.reddit.com), forward-proxy OFF, BROWSER UA, up
     to 3 tries honoring a capped Retry-After. A CONCLUSIVE result — 200 XML, or 404 (gone) — is
@@ -505,7 +511,7 @@ def _reddit_rss_fetch(rel_path, params=None, timeout=15):
             _t.sleep(wait)
 
     # Blocked on the normal path → retry DIRECT at old.reddit.com through the residential proxy.
-    hp = _reddit_http_proxies()
+    hp = _reddit_http_proxies() if resi_fallback else None
     if hp and hp.get("http"):
         try:
             pr = _rq.get(f"https://old.reddit.com{rel_path}", params=params, headers=headers,
@@ -547,6 +553,72 @@ def _rss_entry_is_removed(entry, ns):
     author_el = entry.find("atom:author/atom:name", ns)
     author = (author_el.text or "").strip().lower() if author_el is not None else ""
     return author in ("[deleted]", "/u/[deleted]", "u/[deleted]")
+
+
+def _fetch_old_reddit_html(rel_path, timeout=20):
+    """FU130: fetch an old.reddit.com page THROUGH THE RESIDENTIAL PROXY and return the
+    Response (or None). This is now the ONE door Reddit still serves for comment reads:
+    www RSS is 403 even from residential IPs, and the worker (datacenter) is 404-walled —
+    but old.reddit serves the full HTML page to residential traffic (probe-verified).
+    Residential-only: without REDDIT_HTTP_PROXY this returns None (never a wrong verdict)."""
+    import requests as _rq
+    hp = _reddit_http_proxies()
+    if not (hp and hp.get("http")):
+        return None
+    try:
+        return _rq.get(f"https://old.reddit.com{rel_path}",
+                       headers={"User-Agent": _BROWSER_UA,
+                                "Accept-Language": "en-US,en;q=0.9"},
+                       timeout=timeout, proxies=hp)
+    except Exception:
+        return None
+
+
+def _comment_liveness_via_old_html(comment_url, timeout=20):
+    """FU130: PRIMARY comment-liveness signal — parse the comment's own block out of its
+    old.reddit permalink HTML page (fetched via the residential proxy).
+
+    Reddit shut off anonymous comment-permalink RSS globally (www = 403 even residential;
+    worker/datacenter = 404 wall), so the old RSS signal is dead. The old.reddit HTML page
+    still renders the comment: its <div class="thing …"> carries data-fullname="t1_<cid>",
+    and a removed/deleted comment's body div reads [removed]/[deleted].
+
+    Returns 'live' / 'removed' / 'absent' (page rendered but the comment's block is not in
+    it — weak, caller treats as unverified) / None (couldn't fetch — no proxy / block)."""
+    if not comment_url:
+        return None
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)(?:/[^/]*)*?/([a-z0-9]{4,12})/?(?:\?|$)",
+                  comment_url, re.IGNORECASE)
+    if not m:
+        return None
+    sub, post_id, cid = m.group(1), m.group(2), m.group(3).lower()
+    if cid == post_id.lower():
+        return None   # a post URL, not a comment URL
+    r = _fetch_old_reddit_html(f"/r/{sub}/comments/{post_id}/comment/{cid}/", timeout=timeout)
+    if r is None:
+        return None
+    if r.status_code == 404:
+        return "absent"
+    body = (r.text or "")
+    if r.status_code != 200 or "<html" not in body[:2000].lower():
+        return None
+    low = body.lower()
+    idx = low.find(f'data-fullname="t1_{cid}"')
+    if idx < 0:
+        return "absent"
+    # The comment's own body is the FIRST <div class="md"> after its thing marker (children
+    # come later). A removed/deleted comment renders exactly "<p>[removed]</p>" there — so
+    # compare ONLY the body's own first paragraph text (exact match), never a windowed
+    # substring search that could bleed into a CHILD comment's removed body.
+    md = low.find('class="md"', idx)
+    if 0 <= md - idx < 6000:
+        p = low.find("<p>", md)
+        if 0 <= p - md < 200:
+            p_end = low.find("</p>", p)
+            ptext = low[p + 3:p_end].strip() if p_end > 0 else ""
+            if ptext in ("[removed]", "[deleted]"):
+                return "removed"
+    return "live"
 
 
 def _comment_liveness_via_rss(comment_url, timeout=15):
@@ -742,7 +814,16 @@ def _post_liveness_via_rss(post_url, timeout=15):
         # ONE re-read before trusting it — only a repeated 404 counts as gone.
         r2 = _reddit_rss_fetch(f"{post_path}/.rss", params={"limit": 25}, timeout=timeout)
         if r2 is not None and r2.status_code == 404:
-            return "removed"                               # post gone entirely (confirmed)
+            # FU130: Reddit now 404-WALLS datacenter traffic on these paths, so even a
+            # DOUBLE 404 through the worker is not proof the post is gone — trusting it
+            # would mass-flip live posts (and their comment groups) to removed. Confirm
+            # via the one door that still works: the old.reddit HTML page (residential).
+            pr = _fetch_old_reddit_html(f"{post_path}/")
+            if pr is not None and pr.status_code == 200 and f"t3_{pid}" in (pr.text or "").lower():
+                return None            # post demonstrably renders — the 404 was the wall
+            if pr is not None and pr.status_code == 404:
+                return "removed"       # residential ALSO 404s → genuinely gone
+            return None                # can't confirm either way → never flip on a wall
         if r2 is None:
             return None                                    # re-read couldn't fetch → inconclusive
         r = r2                                             # fall through with the fresh result
@@ -872,7 +953,15 @@ def _post_feed_scan(post_url, timeout=15):
     if resp is None:
         return (None, False)
     if resp.status_code == 404:
-        return (None, True)   # post gone entirely
+        # FU130: Reddit 404-WALLS datacenter traffic on these paths now — a worker 404 is
+        # NOT proof the post is gone. Trusting it made this pre-pass mark WHOLE comment
+        # groups dead (fresh reports flipped to 'replace' en masse). Only a residential
+        # confirmation may kill a group: old.reddit HTML 404 = genuinely gone; a rendered
+        # page (or no residential read) = never flip on a wall.
+        pr = _fetch_old_reddit_html(f"{m.group(1)}/")
+        if pr is not None and pr.status_code == 404:
+            return (None, True)   # post gone entirely (confirmed via residential)
+        return (None, False)
     if resp.status_code != 200 or not (resp.text or "").lstrip().startswith("<?xml"):
         return (None, False)
     try:
@@ -11399,10 +11488,19 @@ def _classify_url_liveness(url):
                 return ("live", "via comment-permalink RSS")
             if rss_v == "removed":
                 return ("removed", "comment's own entry is a [removed]/[deleted] shell")
-            # rss_v is 'absent' (weak) or None → consult PullPush, which may only ever
-            # CONFIRM A REMOVAL. FU126: its 'live' is a stale archive snapshot — a comment
-            # removed any time AFTER archival still reads 'live' there forever, which was
-            # falsely confirming dead comments into reports. Removed-at-archival is sound.
+            # FU130: the RSS signal is effectively dead — Reddit 403s anonymous permalink
+            # RSS even from residential IPs and 404-walls the worker/datacenter path. The
+            # PRIMARY working signal is the comment's old.reddit HTML page fetched through
+            # the residential proxy: parse the comment's own block out of the page.
+            html_v = _comment_liveness_via_old_html(resolved)
+            if html_v == "live":
+                return ("live", "via old.reddit HTML (residential)")
+            if html_v == "removed":
+                return ("removed", "old.reddit HTML shows a [removed]/[deleted] body")
+            # 'absent'/None → consult PullPush, which may only ever CONFIRM A REMOVAL.
+            # FU126: its 'live' is a stale archive snapshot — a comment removed any time
+            # AFTER archival still reads 'live' there forever, which was falsely confirming
+            # dead comments into reports. Removed-at-archival is sound.
             pp = _comment_liveness_via_pullpush(resolved)
             if pp == "removed":
                 return ("removed", "PullPush archive body is [removed]/[deleted]")

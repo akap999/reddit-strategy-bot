@@ -10782,7 +10782,7 @@ async function lsGenerateSelected() {
 async function lsGenerateAll() {
     const excludeSubs = lsGetExcludedSubs();
     // Refresh comments cache so hasCommentsForBrand is accurate
-    try { _lsComments = await api('/api/search/comments'); } catch(e) {}
+    try { await lsFetchComments(); } catch(e) {}
     // Brand-aware eligibility: a post is eligible if it has no non-deleted
     // comments yet for its currently-assigned brand. Mode-aware: HQ mode
     // checks for HQ comments; regular mode checks for non-HQ comments —
@@ -11047,7 +11047,12 @@ async function lsDeleteSelected() {
     const checks = document.querySelectorAll('.ls-sp-check:checked');
     if (!checks.length) { toast('Select at least one post', 'error'); return; }
     const ids = [...checks].map(cb => parseInt(cb.dataset.id));
-    if (!confirm(`Delete ${ids.length} post(s) and all their generated comments?`)) return;
+    // FU123: post deletion is PERMANENT (posts + their comments are hard-deleted, not
+    // soft-deleted) — large batches require typing the exact count, like Delete Selected.
+    if (ids.length > 25) {
+        const typed = prompt(`⚠ PERMANENT MASS DELETION\n\nYou are about to PERMANENTLY delete ${ids.length} post(s) and every comment under them.\nThis cannot be undone from the app.\n\nType the number ${ids.length} to confirm:`);
+        if (typed !== String(ids.length)) { toast('Mass delete cancelled', 'info'); return; }
+    } else if (!confirm(`Delete ${ids.length} post(s) and all their generated comments? This is permanent.`)) return;
     let done = 0;
     for (const id of ids) {
         try { await api(`/api/search/posts/${id}`, { method: 'DELETE' }); done++; } catch(e) {}
@@ -11066,10 +11071,22 @@ async function renderLsComments(c) {
     const active = _lsComments.filter(c => c.status !== 'deleted');
     if (!active.length) { c.innerHTML = '<p class="text-gray-500 py-4">No generated comments yet. Generate comments from the Saved Posts tab.</p>'; return; }
 
-    const brands = [...new Set(active.map(c => c.brand_name).filter(Boolean))];
+    let brands = [...new Set(active.map(c => c.brand_name).filter(Boolean))];
+    // FU123: the bare load is capped at the newest 2000 rows, so a brand whose comments
+    // are all OLDER would vanish from a comment-derived dropdown — union with brands/all
+    // so every brand stays selectable (picking one fetches its COMPLETE set server-side).
+    try {
+        const allB = await api('/api/brands/all');
+        brands = [...new Set([...brands, ...(allB || []).map(b => b.name).filter(Boolean)])];
+    } catch (_) {}
+    brands.sort((a, b) => String(a).localeCompare(String(b)));
+    // Same for report months: derived months ∪ the last 12 calendar months.
+    const _mSet = new Set(active.map(c => c.report_month).filter(Boolean));
+    { const d = new Date(); for (let i = 0; i < 12; i++) { _mSet.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); d.setMonth(d.getMonth() - 1); } }
+    const _months = [..._mSet].sort().reverse();
     c.innerHTML = `
         <div class="flex gap-3 mb-3 items-center flex-wrap">
-            <select id="ls-cf-post" onchange="lsBuildSubList();lsFilterComments()" class="w-64">
+            <select id="ls-cf-post" onchange="lsRefetchAndFilter()" class="w-64">
                 <option value="">All Posts</option>
                 ${[...new Set(active.map(c=>JSON.stringify({id:c.search_post_id,title:c.post_title})))].map(s=>{const p=JSON.parse(s);return `<option value="${p.id}">${(p.title||'').substring(0,50)}</option>`;}).join('')}
             </select>
@@ -11087,7 +11104,7 @@ async function renderLsComments(c) {
                     <div id="ls-cf-sub-list"></div>
                 </div>
             </div>
-            <select id="ls-cf-status" onchange="lsBuildSubList();lsFilterComments()" class="w-36">
+            <select id="ls-cf-status" onchange="lsRefetchAndFilter()" class="w-36">
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
                 <option value="assigned">Assigned</option>
@@ -11099,10 +11116,10 @@ async function renderLsComments(c) {
                 <option value="replace">Replace</option><option value="replaced">Replaced</option>
                 <option value="archived">Archived</option>
             </select>
-            <select id="ls-cf-month" onchange="lsFilterComments()" class="w-40"
+            <select id="ls-cf-month" onchange="lsRefetchAndFilter()" class="w-40"
                     title="Filter to comments reported in a specific month (Reported / Removed only)">
                 <option value="">All months</option>
-                ${[...new Set(active.map(c => c.report_month).filter(Boolean))].sort().reverse().map(m => `<option value="${m}">${m}</option>`).join('')}
+                ${_months.map(m => `<option value="${m}">${m}</option>`).join('')}
             </select>
             <select id="ls-cf-sort" onchange="lsFilterComments()" class="w-44">
                 <option value="">Newest Comment</option>
@@ -11141,9 +11158,48 @@ async function renderLsComments(c) {
                 <button class="btn btn-sm" style="background:#2a2a3a;color:#ccc" onclick="lsExportCsv()" title="Export filtered comments to CSV (date range above limits to deployed_at within range)">Export CSV</button>
             </span>
         </div>
+        <div id="ls-cf-truncnote" class="text-xs mb-2" style="color:#f2c94c"></div>
         <div id="ls-comments-counts" class="flex flex-wrap gap-2 mb-3 text-xs"></div>
         <div id="ls-comments-list"></div>
     `;
+    lsBuildSubList();
+    lsFilterComments();
+    _lsUpdateTruncNote(true);
+}
+
+// FU123: the bare listing is capped at the newest 2000 rows (FU119), so old comments never
+// reach the client — the whole "restored comments look missing" bug. When any Comments-tab
+// filter is active, fetch the COMPLETE matching set from the server instead (the same
+// authoritative filter helper check-live and Mark Reported All use). Subreddit + sort stay
+// client-side refinements of the fetched set. Safe anywhere: when the filter controls
+// aren't in the DOM this degrades to the plain bare fetch.
+async function lsFetchComments() {
+    const p = new URLSearchParams();
+    const brandName = document.getElementById('ls-cf-brand')?.value || '';
+    const status = document.getElementById('ls-cf-status')?.value || '';
+    const postId = document.getElementById('ls-cf-post')?.value || '';
+    const month = document.getElementById('ls-cf-month')?.value || '';
+    if (brandName) p.set('brand_name', brandName);
+    if (status) p.set('status', status);
+    if (postId) p.set('search_post_id', postId);
+    if (month) p.set('report_month', month);
+    if (status || postId) p.set('filtered', '1');
+    const qs = p.toString();
+    _lsComments = await api('/api/search/comments' + (qs ? '?' + qs : ''));
+    _lsUpdateTruncNote(!qs);
+    return _lsComments;
+}
+
+function _lsUpdateTruncNote(unfiltered) {
+    const el = document.getElementById('ls-cf-truncnote');
+    if (!el) return;
+    el.textContent = (unfiltered && (_lsComments || []).length >= 2000)
+        ? '⚠ Showing the latest 2000 comments — pick a brand / status / month filter to load everything that matches (the filtered view is complete).'
+        : '';
+}
+
+async function lsRefetchAndFilter() {
+    try { await lsFetchComments(); } catch (_) {}
     lsBuildSubList();
     lsFilterComments();
 }
@@ -11230,9 +11286,10 @@ function lsBuildSubList() {
     }
     lsUpdateSubCountBadge();
 }
-function lsOnBrandFilterChange() {
+async function lsOnBrandFilterChange() {
     _lsSelectedSubs = null; // reset sub selection when brand changes
     _lsSubNoneExplicit = false;
+    try { await lsFetchComments(); } catch (_) {}  // FU123: complete server-side set for the brand
     lsBuildSubList();
     lsFilterComments();
 }
@@ -11742,7 +11799,7 @@ function _bulkDeployRefreshActiveView() {
             (async () => {
                 try {
                     if (typeof api === 'function' && typeof _lsComments !== 'undefined') {
-                        _lsComments = await api('/api/search/comments');
+                        await lsFetchComments();
                         if (typeof lsFilterComments === 'function') lsFilterComments();
                     }
                 } catch (e) { console.warn('ls refetch failed', e); }
@@ -13806,7 +13863,7 @@ async function submitSendToReport(cid, source) {
             closeModal();
             if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
             else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-                try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+                try { await lsFetchComments(); lsFilterComments(); } catch(_) {}
             }
             return;
         }
@@ -13830,7 +13887,7 @@ async function undoReport(cid, source) {
         toast('Removed from report', 'success');
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
         else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+            try { await lsFetchComments(); lsFilterComments(); } catch(_) {}
         }
     } catch (e) {
         toast('Failed: ' + (e.message || e), 'error');
@@ -13848,7 +13905,7 @@ async function reclassifyReport(cid, source, to) {
         toast(`Marked as ${verb}`, 'success');
         if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
         else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-            try { _lsComments = await api('/api/search/comments'); lsFilterComments(); } catch(_) {}
+            try { await lsFetchComments(); lsFilterComments(); } catch(_) {}
         }
         if (typeof _acRefreshIfActive === 'function') _acRefreshIfActive();
     } catch (e) {
@@ -13992,7 +14049,7 @@ async function submitMarkReportedAll(scope) {
         const refresh = () => {
             if (typeof lsubsLoadComments === 'function' && currentView === 'livesubs') lsubsLoadComments(true);
             else if (typeof lsFilterComments === 'function' && currentView === 'livesearch') {
-                api('/api/search/comments').then(r => { _lsComments = r; lsFilterComments(); }).catch(() => {});
+                lsFetchComments().then(() => lsFilterComments()).catch(() => {});
             }
         };
         const isReplaced = outcome === 'replaced';
@@ -14446,12 +14503,19 @@ async function checkLiveLs(mode) {
 async function lsDeleteAllComments() {
     const active = _lsComments.filter(c => c.status !== 'deleted');
     if (!active.length) { toast('No comments to delete', 'info'); return; }
-    if (!confirm(`Delete ALL ${active.length} generated comments? This cannot be undone.`)) return;
-    let done = 0;
-    for (const c of active) {
-        try { await api(`/api/search/comments/${c.id}`, { method: 'DELETE' }); done++; } catch(e) {}
-    }
-    toast(`Deleted ${done} comment(s)`, 'success');
+    const n = active.length;
+    // FU123 — same mass-delete guard as Delete Selected (FU120): typing the exact count
+    // for large batches + ONE logged transactional server call, not a silent HTTP loop.
+    if (n > 25) {
+        const typed = prompt(`⚠ MASS DELETION\n\nYou are about to delete ALL ${n} loaded comments.\nEvery deletion is written to the Activity Log.\n\nType the number ${n} to confirm:`);
+        if (typed !== String(n)) { toast('Mass delete cancelled', 'info'); return; }
+    } else if (!confirm(`Delete ALL ${n} generated comments? This cannot be undone.`)) return;
+    try {
+        const res = await api('/api/search/comments/bulk-delete', {
+            method: 'POST', body: { comment_ids: active.map(c => c.id) }
+        });
+        toast(`Deleted ${res.deleted} comment(s) (logged in the Activity Log)`, 'success');
+    } catch(e) { toast('Bulk delete failed', 'error'); }
     renderLsTabContent();
 }
 

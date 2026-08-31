@@ -384,7 +384,7 @@ def _backup_db_now(tag="daily"):
             srcc.backup(dstc)
     finally:
         srcc.close(); dstc.close()
-    for tagx, keep in (("daily", 7), ("manual", 2)):
+    for tagx, keep in (("daily", 7), ("manual", 2), ("pre-purge", 3)):
         files = sorted(_glob.glob(os.path.join(bdir, f"strategy_bot-{tagx}-*.db")))
         for f in files[:-keep]:
             try:
@@ -4729,6 +4729,13 @@ def api_ls_purge():
         return jsonify({"error": "month must be YYYY-MM"}), 400
     if data.get("confirm") is not True:
         return jsonify({"error": "confirm:true required"}), 400
+    # FU123: the purge HARD-deletes posts + comments — snapshot the DB first so a
+    # mistaken run is always recoverable. A failed backup ABORTS the purge.
+    try:
+        bpath = _backup_db_now("pre-purge")
+        print(f"[ls-purge] pre-purge backup written: {bpath}", flush=True)
+    except Exception as e:
+        return jsonify({"error": f"pre-purge backup failed — purge aborted: {e}"}), 500
     db = get_db()
     try:
         return jsonify(db.purge_untouched_search_posts(month, dry_run=False))
@@ -9402,6 +9409,13 @@ def api_cleanup_recent_search_posts():
         matched = len(rows)
         deleted = 0
         if not dry_run:
+            # FU123: hard delete ahead — snapshot the DB first; a failed backup aborts.
+            if rows:
+                try:
+                    bpath = _backup_db_now("pre-purge")
+                    print(f"[cleanup-recent] pre-purge backup written: {bpath}", flush=True)
+                except Exception as e:
+                    return jsonify({"error": f"pre-purge backup failed — cleanup aborted: {e}"}), 500
             for r in rows:
                 try:
                     db.delete_search_post(r["id"])
@@ -10092,6 +10106,24 @@ def api_list_search_comments():
     try:
         search_post_id = request.args.get("search_post_id", type=int)
         status = request.args.get("status")
+        # FU123: the Comments-tab filters, server-side. When ANY of these is present the
+        # response is the COMPLETE authoritative match (the FU121 helper — same logic
+        # check-live and Mark Reported All use), not the newest-2000 page. This is what
+        # lets the tab see the ~11k comments older than the FU119 bound: the client sends
+        # its active filters and gets everything that matches (capped at 10k for safety).
+        brand_name = (request.args.get("brand_name") or "").strip()
+        report_month = (request.args.get("report_month") or "").strip()
+        subs_raw = (request.args.get("subreddits") or "").strip()
+        filtered = (request.args.get("filtered") or "").strip()  # status-only filter opts in via filtered=1
+        if brand_name or report_month or subs_raw or (filtered and (status or search_post_id)):
+            flt = {
+                "status": status,
+                "brand_name": brand_name,
+                "report_month": report_month,
+                "search_post_id": search_post_id,
+                "subreddits": [s for s in subs_raw.split(",") if s] or None,
+            }
+            return jsonify(_ls_filtered_search_comments(db, flt)[:10000])
         try:
             limit = int(request.args.get("limit", 2000))
         except (TypeError, ValueError):

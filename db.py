@@ -8029,6 +8029,9 @@ class Database:
         return bool(row)
 
     def delete_search_post(self, post_id):
+        # FU123: this is a HARD delete (post + all its comments) — audit-log the
+        # comments first so the removal leaves a reconstructable trail.
+        self._log_search_comments_for_posts([post_id])
         # Decrement the global rotation counter once for each child search_comment
         # that still has an account attached. The UPDATE below does this in a
         # single round-trip: (count of affected rows) per distinct account_id.
@@ -8048,6 +8051,33 @@ class Database:
     # Statuses that count as "untouched / original" — safe to purge.
     _LS_PURGE_POST_STATUSES = ('saved', 'complete')
     _LS_PURGE_SAFE_COMMENT_STATUSES = ('draft', 'complete')
+
+    def _log_search_comments_for_posts(self, post_ids):
+        """FU123: write the same per-row check_live_log 'deleted' entries
+        bulk_delete_search_comments writes, for every non-deleted comment under `post_ids` —
+        called BEFORE a HARD delete (purge / post delete) so a permanent removal leaves a
+        reconstructable audit trail (id, url, prev status, account, sub, brand)."""
+        ids = [int(i) for i in (post_ids or []) if i]
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT sc.id, sc.status, sc.account_id, sc.reddit_comment_url,
+                           sp.subreddit AS sub, COALESCE(b.name, spb.name) AS brand_name
+                    FROM search_comments sc
+                    JOIN search_posts sp ON sc.search_post_id = sp.id
+                    LEFT JOIN brands b ON sc.brand_id = b.id
+                    LEFT JOIN brands spb ON sp.brand_id = spb.id
+                    WHERE sc.search_post_id IN ({ph}) AND sc.status != 'deleted'""",
+                chunk).fetchall()
+            for r in rows:
+                try:
+                    self.log_live_check(r["id"], "search_comment",
+                                        r["reddit_comment_url"] or "", "deleted",
+                                        r["status"], "deleted", r["account_id"],
+                                        r["sub"], r["brand_name"])
+                except Exception:
+                    pass
 
     def purge_untouched_search_posts(self, month, dry_run=False):
         """Delete Live Search posts (and their comments) that are still in their ORIGINAL
@@ -8098,6 +8128,8 @@ class Database:
 
         for chunk in _chunks(ids):
             ph = ",".join("?" * len(chunk))
+            # FU123: audit-log every comment about to be HARD-deleted.
+            self._log_search_comments_for_posts(chunk)
             # Free rotation slots for any child comment that still had an account.
             for r in self.conn.execute(
                 f"""SELECT account_id, COUNT(*) AS cnt FROM search_comments

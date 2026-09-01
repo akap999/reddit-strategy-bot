@@ -2075,7 +2075,7 @@ def api_blog_generate():
             # FU90: sibling titles so geo variants differentiate instead of converging.
             try:
                 _sibs = bg.get_all_blogs(brand_id=brand_id)
-                sibling_titles = [b.get("title") for b in _sibs
+                sibling_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description")} for b in _sibs
                                   if (b.get("title") or "").strip()][:10]
                 # FU114: PUBLISHED sibling-blog URLs — the cluster half of the internal-link targets.
                 sibling_links = [(b.get("title") or "", pl.get("published_url") or "")
@@ -2217,7 +2217,7 @@ def api_blog_regenerate(blog_id):
             sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
                 _sibs = bg.get_all_blogs(brand_id=blog.get("brand_id"))
-                sib_titles = [b.get("title") for b in _sibs
+                sib_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description")} for b in _sibs
                               if b.get("id") != blog_id and (b.get("title") or "").strip()][:10]
                 # FU114: published sibling URLs (excluding this blog) — cluster link targets.
                 sib_links = [(b.get("title") or "", pl.get("published_url") or "")

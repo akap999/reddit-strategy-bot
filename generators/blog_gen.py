@@ -229,6 +229,16 @@ def _seed_qualifier(seed):
     m = re.search(r"\b((?:under|over|below|above)\s+\$?\d[\d,.]*[km]?)\b", s, re.IGNORECASE)
     if m:
         return m.group(1)
+    # FU135 — AUDIENCE qualifiers, small demographic lexicon only (high precision): "for men",
+    # "where can men …", "should seniors …". An audience page with a swapped noun cannibalizes
+    # the generic page — detection routes it through the FU93 substance machinery.
+    _AUD = r"(?:men|women|seniors|teens|teenagers|athletes|veterans|kids|children)"
+    m = re.search(rf"\bfor\s+({_AUD})\b", s, re.IGNORECASE)
+    if m:
+        return f"for {m.group(1).lower()}"
+    m = re.search(rf"^(?:where\s+|how\s+)?(?:can|do|does|should|will)\s+({_AUD})\b", s, re.IGNORECASE)
+    if m:
+        return f"for {m.group(1).lower()}"
     return ""
 
 
@@ -1047,14 +1057,32 @@ extractable answer), still under 160 chars.
                 "never a clinical fact. Aim for at least 2 DISTINCT official citations. If a "
                 "clinical specific has NO official source in the EVIDENCE, state it generally and "
                 "attribute it (\"per the drug's prescribing information\") — never invent the "
-                "specific and never cite a marketing page for it.\n")
-        # FU90 — sibling variants: tell the model what already exists so this page differentiates.
-        sibs = [str(t).strip() for t in (sibling_titles or []) if str(t).strip()][:10]
+                "specific and never cite a marketing page for it. EXTRACT ZONE = CLINICAL "
+                "SUBSTANCE: logistics perks (free/discreet shipping, discounts, bundles) must NOT "
+                "appear in the Quick answer, the opening paragraph, or the meta_description — on a "
+                "prescription-product page they read as gray-market signals there; keep them in a "
+                "logistics/pricing section.\n")
+        # FU90/FU135 — sibling context: differentiation AND cluster-consistent positioning.
+        # Accepts bare title strings (legacy) or {title, meta_description} digests.
+        sibs = []
+        for t in (sibling_titles or [])[:10]:
+            if isinstance(t, dict):
+                _ttl = str(t.get("title") or "").strip()
+                _md = str(t.get("meta_description") or "").strip()[:160]
+                if _ttl:
+                    sibs.append(f"{_ttl}" + (f" — {_md}" if _md else ""))
+            else:
+                _ttl = str(t or "").strip()
+                if _ttl:
+                    sibs.append(_ttl)
         sibling_block = ""
         if sibs:
-            sibling_block = ("\nOTHER PAGES ALREADY PUBLISHED FOR THIS BRAND (do NOT duplicate their "
-                             "content — THIS page's geography/qualifier substance is what distinguishes "
-                             "it from them):\n" + "\n".join(f"  - {t}" for t in sibs) + "\n")
+            sibling_block = ("\nOTHER PAGES ALREADY PUBLISHED FOR THIS BRAND — keep the brand's "
+                             "POSITIONING, claims and pricing CONSISTENT with them (never contradict "
+                             "them), and do NOT duplicate their content: THIS page must add its own "
+                             "geography/qualifier/audience substance. Where a listed page covers a "
+                             "related sub-topic in depth, summarize briefly and defer the depth to it:\n"
+                             + "\n".join(f"  - {t}" for t in sibs) + "\n")
         prompt = f"""You are writing a FIRST-PARTY article published on {name}'s own site. The ONLY
 goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
 and CITE this page when someone asks about the seed topic, AND for that answer to name {name}.
@@ -1078,6 +1106,12 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
   - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
     hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
     positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
+  - DESCRIBE SOURCES HONESTLY (no authority laundering): NEVER describe a "third-party ·" source
+    with authority-inflating framing — "an independent audit found", "an independent pricing
+    audit/analysis/report", "independently verified" — reviews and affiliate write-ups are NOT
+    audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
+    or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
+    be framed as authoritative/official.
   - NEVER PUNT TO THE READER. Do NOT write "verify on X's site", "check their site", "consult the
     terms", "varies by plan — always verify", "always verify … before publishing", "not publicly
     documented", or ANY go-check-it-yourself instruction — that is a cop-out, not content, and it
@@ -1163,6 +1197,13 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
         financial/legal-grade specifics. The qualifier must anchor MAJORITY-substance sections —
         NEVER one sentence restating {name}'s own terms; the last words of the title are the page's
         reason to exist, and they must earn real word count.
+      • when the variant qualifier is an AUDIENCE ("for men", "for seniors", …), the core substance
+        must cover what is genuinely DIFFERENT for that audience: their typical presenting
+        comorbidities and risk profile, interactions with treatments/products common in that group
+        (e.g. TRT for men on a men's-health page), audience-specific outcome considerations
+        (e.g. lean-mass preservation), and audience-specific eligibility/monitoring points —
+        MAJORITY-substance sections, never the generic page with a swapped noun (that cannibalizes
+        the generic page instead of complementing it).
   - The FAQ must include geography/qualifier-specific questions, and the meta_description carries the
     geography. General (non-brand) regulatory facts are allowed as domain knowledge; any
     medical/financial/legal-grade claim still follows the cite-a-primary-source rule above.
@@ -1327,6 +1368,12 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     monitoring standards) cited to a VENDOR/AFFILIATE/REVIEW source — re-cite to an "official ·" source
     in the EVIDENCE, or generalize + attribute ("per the prescribing information"); never leave a
     clinical fact resting on a marketing page.
+  - A "third-party ·" (review/affiliate) source DESCRIBED with authority-inflating framing
+    ("independent audit/analysis/report", "independently verified") — rewrite to plain attribution
+    by name, or re-cite the figure to the vendor's own page.
+  - TWO CITED FACTS IN TENSION (a rule that appears to prohibit X + a claim that X is offered) with
+    no explained pathway/exception — reconcile them from the evidence, or surface the tension
+    plainly with both attributions.
   - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
     remove them, or balance with {name}'s SAME metric cited alongside (FU93).
   - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
@@ -1840,6 +1887,20 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     {name}'s own terms — each must keep multiple concrete named facts with their implications, never a
     one-line nod. {rqual}-specific FAQ entries MUST survive this rewrite."""
 
+        # FU135 — source honesty + internal consistency (all blogs).
+        honesty_rules = """
+  - SOURCE HONESTY: never describe a "third-party ·" source as an "independent audit / analysis /
+    report" or "independently verified" — attribute reviews/affiliate write-ups plainly by name, or
+    re-cite the figure to the vendor's own page. Only "official ·" sources may be framed as
+    authoritative.
+  - INTERNAL CONSISTENCY: when the article states BOTH a cited restriction/regulation AND that a
+    covered provider still offers the restricted thing, it MUST spell out the specific legal
+    pathway/exception that reconciles the two (from the EVIDENCE); if the evidence does not contain
+    the reconciliation, state the tension plainly and attribute both sides — never leave the two
+    facts silently side-by-side.
+  - CLUSTER CONSISTENCY: never introduce a claim that contradicts the brand's other published pages
+    listed in the article's context (positioning, pricing, program facts stay consistent)."""
+
         # FU133 — YMYL reconcile rules (inert for non-YMYL blogs).
         rymyl = (sourcing.get("ymyl") or "").strip()
         ymyl_rules = ""
@@ -1851,7 +1912,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     on a vendor/affiliate/review source to the official one (or generalize + attribute it).
   - An affiliate review OF {name} duplicates {name}'s own site — it is NEVER independent support
     for a clinical claim; a "best of" listicle may support the comparison's PROGRAM facts only
-    (pricing, what's bundled). Neither may back a clinical fact."""
+    (pricing, what's bundled). Neither may back a clinical fact.
+  - EXTRACT ZONE: move logistics perks (free/discreet shipping, discounts) OUT of the Quick answer,
+    opening paragraph and meta description — clinical/eligibility substance belongs there."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -1935,7 +1998,7 @@ COMPLETE and every stated fact is sourced:
     unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
     offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
     from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
-    value to hold the floor.{geo_rules}{qual_rules}{ymyl_rules}
+    value to hold the floor.{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -2653,6 +2716,25 @@ Return JSON only:
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pn] if x)
+        # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
+        # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
+        _bf = article.get("body_markdown") or ""
+        _lm = re.search(r"independent(?:ly)?\s+(?:pricing\s+)?(?:audit|review|analysis|report|verified)",
+                        _bf, re.I)
+        if _lm:
+            _seg = _bf[max(0, _lm.start() - 200):_lm.end() + 200]
+            _cited = re.findall(r"\[S(\d+)\]", _seg)
+            _tp = False
+            for _n in _cited:
+                for _srcline in re.finditer(r"- \[S" + _n + r"\] (third-party ·)", _bf):
+                    _tp = True
+            if _tp or not _cited:
+                _lnote = ("source-authority check: a review/affiliate source may be framed as an "
+                          "'independent audit/analysis' — attribute it plainly or re-cite the "
+                          "vendor's own page")
+                print(f"[blog_gen] {_lnote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _lnote] if x)
         # FU133 — YMYL checks (same toast channel): (a) the body must actually CITE ≥2 official
         # sources; (b) a clinical page without a named human reviewer is skippable to AI engines —
         # loud warning, never an invented person.
@@ -2676,6 +2758,15 @@ Return JSON only:
                 print(f"[blog_gen] {_rnote}", flush=True)
                 article["geo_warning"] = "; ".join(
                     x for x in [article.get("geo_warning", ""), _rnote] if x)
+            if ymyl == "medical":
+                # FU135: perks in the extract zone (quick answer / meta) = gray-market signal.
+                _zone = ((article.get("meta_description") or "") + "\n" + _prose[:900])
+                if re.search(r"discreet|free\s+(?:shipping|delivery)", _zone, re.I):
+                    _pnote = ("YMYL (medical): logistics perk language ('free/discreet delivery') "
+                              "sits in the Quick answer/meta — move it to a logistics section")
+                    print(f"[blog_gen] {_pnote}", flush=True)
+                    article["geo_warning"] = "; ".join(
+                        x for x in [article.get("geo_warning", ""), _pnote] if x)
         article["ymyl"] = ymyl or ""
         # FU105 — competitor-count check (warning only): the FINAL body's comparison table must carry
         # ≥3 non-{name} competitor rows. Reads the final body directly, so it catches reconcile

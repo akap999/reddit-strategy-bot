@@ -153,6 +153,111 @@ def _is_hit_piece(src):
     return bool(_HIT_PIECE_RE.search((src or {}).get("title") or ""))
 
 
+# FU140 — NON-EVIDENCE sources: pages that say nothing about a company's service capabilities —
+# job listings / recruitment ads (a Coface credit-analyst posting is not proof of anything),
+# careers pages, salary pages. Filtered at every evidence accept-point alongside hit-pieces.
+_NON_EVIDENCE_RE = re.compile(
+    r"job\s+(?:listing|posting|opening|description)|(?:jobs?|careers?)\s+(?:at|in|with)\b|"
+    r"\bhiring\b|we'?re\s+hiring|apply\s+(?:now|today)|\bvacanc(?:y|ies)\b|"
+    r"\bsalar(?:y|ies)\s+(?:at|for)\b|\brecruit(?:ing|ment)\b|\binternship\b",
+    re.IGNORECASE)
+_JOB_BOARD_DOMAINS = {
+    "simplyhired.com", "indeed.com", "glassdoor.com", "ziprecruiter.com", "monster.com",
+    "lever.co", "greenhouse.io", "workable.com", "jobvite.com", "wellfound.com",
+}
+
+
+def _is_non_evidence(src):
+    """FU140: True when a search result can never serve as evidence — a hit-piece (FU93) OR a
+    job listing / recruitment ad / careers page (by title pattern, job-board domain, or a
+    linkedin.com/*/jobs URL)."""
+    if _is_hit_piece(src):
+        return True
+    title = (src or {}).get("title") or ""
+    url = ((src or {}).get("url") or "").lower()
+    if _NON_EVIDENCE_RE.search(title):
+        return True
+    d = _norm_domain(url)
+    if d in _JOB_BOARD_DOMAINS:
+        return True
+    if "linkedin.com" in url and "/jobs" in url:
+        return True
+    return False
+
+
+# FU141 — review-shaped titles ("PeterMD Review… Worth It?", "Is It Safe/Legit", "X vs Y",
+# "Top 7 …"). NOTE the best-(?!practice) exemption: official bodies publish "Best Practice
+# Statements" — only listicle-best is review-shaped.
+_REVIEWISH_RE = re.compile(
+    r"\breview(?:s|ed)?\b|worth\s+it|is\s+it\s+(?:safe|legit|worth)|\bvs\.?\b|"
+    r"\btop\s+\d|\bbest\s+(?!practice)|\bpromo\b|coupon|discount\s+code",
+    re.IGNORECASE)
+
+
+def _is_subject_review(src_or_title, brand_name):
+    """FU141: True when a source is a REVIEW OF THE SUBJECT BRAND (title names the brand AND is
+    review-shaped). Such sources are tagged `review ·` and capped — they may add program-facts
+    color but are never authoritative and never clinical support."""
+    title = src_or_title.get("title") if isinstance(src_or_title, dict) else src_or_title
+    title = (title or "")
+    bn = re.sub(r"\s+", "", (brand_name or "")).lower()
+    if not bn or bn not in re.sub(r"\s+", "", title).lower():
+        return False
+    return bool(_REVIEWISH_RE.search(title))
+
+
+def _official_source_ok(url, title, brand_name, own_domain, pins):
+    """FU141: THE one validator for granting the `official ·` badge, everywhere. Generic —
+    brand name, own domain and vertical pins are all parameters; every rule is shape-based.
+    A page about the CLIENT is never official; a review-shaped title is never official;
+    .org alone is NOT a credential (affiliates squat .org TLDs) — it passes only after
+    surviving every rejection."""
+    d = _norm_domain(url or "")
+    if not d:
+        return False
+    if own_domain and (d == own_domain or d.endswith("." + own_domain)):
+        return False
+    if d in _THIRD_PARTY_DOMAINS or d in _STALE_AGGREGATORS or d in _JOB_BOARD_DOMAINS:
+        return False
+    if _is_non_evidence({"title": title, "url": url}):
+        return False
+    # STRONG domain credentials — the domain IS the authority; a title shape can't demote a
+    # .gov / NIH / vertical-pinned page (real rules are titled "Regulation Best Interest",
+    # "Best Practice Statement", …).
+    if d.endswith(".gov") or "nlm.nih" in d or "ncbi.nlm" in d:
+        return True
+    for p in (pins or []):
+        if d == p or d.endswith("." + p):
+            return True
+    # WEAK tier (.org / .int — affiliates squat these TLDs): shape checks decide.
+    bn = re.sub(r"\s+", "", (brand_name or "")).lower()
+    if bn and bn in re.sub(r"\s+", "", title or "").lower():
+        return False              # regulators don't title pages with the client's brand
+    if _REVIEWISH_RE.search(title or ""):
+        return False
+    return d.endswith(".org") or d.endswith(".int")
+
+
+def _evidence_tier(block, brand_name, own_domain):
+    """FU141: authority tier for evidence ordering — official → provided → subject-own →
+    competitor/vendor → community/third-party → review."""
+    lab = str((block or {}).get("label") or "")
+    low = lab.lower()
+    d = _norm_domain((block or {}).get("url") or "")
+    if low.startswith("official ·"):
+        return 0
+    if low.startswith("provided"):
+        return 1
+    if (brand_name and lab.strip().lower() == brand_name.strip().lower()) or \
+       (own_domain and d and (d == own_domain or d.endswith("." + own_domain))):
+        return 2
+    if low.startswith("review ·"):
+        return 5
+    if low.startswith("community") or low.startswith("third-party") or "reddit.com" in (d or ""):
+        return 4
+    return 3   # competitor/vendor own-page blocks (labeled with the tool's name)
+
+
 def _as_list(raw):
     """Best-effort list of non-empty strings from a JSON string / delimited string /
     list / dict / None. Used for both stored enrichment fields and LLM outputs."""
@@ -378,7 +483,7 @@ class BlogGenerator:
 
         def _take(srcs):
             for s in (srcs or []):
-                if _is_hit_piece(s):   # FU93 P2: never ingest a negative roundup as evidence
+                if _is_non_evidence(s):   # FU93/FU140: hit-pieces + job listings never become evidence
                     print(f"[blog_gen] source-hygiene: dropped hit-piece "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
                     continue
@@ -667,8 +772,8 @@ class BlogGenerator:
                 continue
             txt = _fetch(u)
             if txt:
-                blocks.append({"label": "provided source", "url": u,
-                               "text": txt[:_EVIDENCE_TEXT_CAP]})
+                blocks.append({"label": f"provided · {_norm_domain(u) or u[:50]}", "url": u,
+                               "text": txt[:_EVIDENCE_TEXT_CAP]})   # FU141: named, never a bare "provided source"
 
         notes = (research_notes or "").strip()
         if notes:
@@ -703,13 +808,41 @@ class BlogGenerator:
             blocks.extend(self._gather_independent_sources(
                 subject, comp_names, seed, b.get("category") or "", own))
 
+        # FU141 — tag reviews OF the subject (`review ·`, machine-readable so the rules can key
+        # on them) and CAP them at 2 per generation: review pileup (5 affiliate reviews of one
+        # brand on a single page) was the recurring reviewer complaint. Generic — the brand name
+        # is this generation's subject, the shape check is brand-agnostic.
+        _subj_name = subject
+        _own_dom = _norm_domain(b.get("domain_url") or "")
+        _review_kept = 0
+        _tagged = []
+        for bl in blocks:
+            lab = str(bl.get("label") or "")
+            ttl = lab.split("·", 1)[-1].strip() if "·" in lab else lab
+            if lab.lower().startswith(("third-party", "review")) and _is_subject_review(ttl, _subj_name):
+                if _review_kept >= 2:
+                    print(f"[blog_gen] review-cap: dropped excess subject review '{ttl[:60]}'", flush=True)
+                    continue
+                _review_kept += 1
+                bl = dict(bl, label=f"review · {ttl}")
+            _tagged.append(bl)
+        blocks = _tagged
+        # FU141 — AUTHORITY ORDER: number the evidence best-source-first (official → provided →
+        # subject's own site → vendor pages → community/third-party → reviews) so the writer's
+        # habit of citing the earliest support lands on the strongest source. Stable sort keeps
+        # each tier's internal order.
+        blocks.sort(key=lambda _bl: _evidence_tier(_bl, _subj_name, _own_dom))
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
         # from a prior call on this instance can't leak in.
         self._evidence_blocks = list(blocks)
         if not blocks:
             return ""
-        parts = ["EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] and URL):"]
+        parts = ["EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] and URL. "
+                 "AUTHORITY-ORDERED: earlier sources are more authoritative — for any claim, cite the "
+                 "EARLIEST source that supports it. Sources labeled 'review ·' are third-party reviews "
+                 "OF the subject brand: never authoritative, never clinical/safety support, at most "
+                 "color for program facts):"]
         for i, bl in enumerate(blocks, 1):
             src = f"{bl['label']}" + (f" — {bl['url']}" if bl["url"] else "")
             parts.append(f"[S{i}] {src}\n{bl['text']}")
@@ -1115,6 +1248,9 @@ LINKING RULES (quality/extractability must stay intact):
      pages (a price, a case-study result, a feature), make THAT claim's descriptive words
      the anchor — internal link and attribution in one.
   6. Links must NEVER alter, strengthen, or reword a claim to justify their placement.
+  7. LINK HONESTY: never substitute the homepage or an /about page for a promised SPECIFIC
+     page ("our muscle-preservation guide" must link that guide, not the homepage). If the
+     exact page is not in the VERIFIED list, do not link that phrase at all.
 ALSO return "meta_title": an SEO <title> tag under 60 characters that carries the target
 query's core phrasing (add {name} only where natural), never clickbait, and never diverging
 in meaning from the H1. Make "meta_description" LEAD with the direct-answer phrasing (the
@@ -1149,7 +1285,17 @@ extractable answer), still under 160 chars.
                 "SUBSTANCE: logistics perks (free/discreet shipping, discounts, bundles) must NOT "
                 "appear in the Quick answer, the opening paragraph, or the meta_description — on a "
                 "prescription-product page they read as gray-market signals there; keep them in a "
-                "logistics/pricing section.\n")
+                "logistics/pricing section. QUICK-ANSWER CITATIONS: every [S#] cited in the "
+                "Quick answer must be an \"official ·\" source or " + name + "'s own page — never "
+                "a review/affiliate/third-party source for the lead claim.\n")
+        # FU140 — the model's training prior lags the calendar: pages shipped titled "(2025)"
+        # in 2026. State the current year explicitly; the deterministic bump in
+        # _finalize_article backstops the meta fields.
+        import datetime as _dt140
+        year_line = (f"  - CURRENT YEAR: {_dt140.datetime.utcnow().year}. Any year in the meta "
+                     f"title, headings, or forward-looking copy MUST be the current year — never "
+                     f"date the page with an earlier year unless the sentence is explicitly about "
+                     f"a past event (a founding date, a past ruling).\n")
         # FU90/FU135 — sibling context: differentiation AND cluster-consistent positioning.
         # Accepts bare title strings (legacy) or {title, meta_description} digests.
         sibs = []
@@ -1194,6 +1340,9 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
   - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
     hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
     positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
+  - JOB LISTINGS ARE NOT EVIDENCE: never cite a job posting, recruitment ad, careers page or
+    salary listing as support for ANY claim — a company hiring a credit analyst proves nothing
+    about its services. If such a page is in the EVIDENCE, ignore it entirely.
   - DESCRIBE SOURCES HONESTLY (no authority laundering): NEVER describe a "third-party ·" source
     with authority-inflating framing — "an independent audit found", "an independent pricing
     audit/analysis/report", "independently verified" — reviews and affiliate write-ups are NOT
@@ -1255,7 +1404,7 @@ Pick exactly ONE dominant block. The dominant block MUST itself be extractable �
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
 
 GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
-{geo_line}{qual_line}{ymyl_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+{geo_line}{qual_line}{ymyl_line}{year_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
     "Australia", a state or city) or another strong qualifier (a purchasing mechanism like "with
     financing", a company size, an industry). If it does NOT (and no geography or qualifier is stated
     above), SKIP this whole section — it is inert for a generic seed.
@@ -1502,7 +1651,7 @@ Return JSON only:
             return None
         return self._reconcile_and_finish(brand, seed, article, sr)
 
-    def _gather_authoritative_sources(self, brand, seed, core_topic, vertical):
+    def _gather_authoritative_sources(self, brand, seed, core_topic, vertical, products=None):
         """FU133: retrieve the OFFICIAL sources a YMYL page's clinical/regulatory claims must
         cite — regulator documentation/labels + the governing professional-association guideline.
 
@@ -1514,20 +1663,23 @@ Return JSON only:
         skips; a YMYL page can never silently ship with zero official sources."""
         pins = _YMYL_OFFICIAL_DOMAINS.get(vertical) or []
         own = _norm_domain((brand or {}).get("domain_url") or "")
+        bn = (brand or {}).get("name") or ""
         topic = (core_topic or "").strip() or (seed or "").strip()
 
         def _ok(url, title=""):
+            # FU141: the strict module validator decides — .org alone is no longer a credential,
+            # review-shaped titles and pages ABOUT THE CLIENT never earn "official ·" (that hole
+            # let affiliate .org reviews defeat every YMYL rule AND suppress the retry ladder).
+            if _official_source_ok(url, title, bn, own, pins):
+                return True
+            # One extra acceptance kept: a manufacturer's prescribing-information / package-insert
+            # page is an official label source even on a .com domain — still subject to the
+            # own-site / review-shape / non-evidence rejections.
             d = _norm_domain(url)
-            if not d:
+            if not d or (own and (d == own or d.endswith("." + own))):
                 return False
-            if d == own or d in _THIRD_PARTY_DOMAINS or d in _STALE_AGGREGATORS:
+            if _is_non_evidence({"title": title, "url": url}) or _REVIEWISH_RE.search(title or ""):
                 return False
-            if d.endswith(".gov") or d in pins or any(d == p or d.endswith("." + p) for p in pins):
-                return True
-            if d.endswith(".org") or d.endswith(".int"):
-                return True
-            # A manufacturer's prescribing-information / package-insert page is an official
-            # label source even on a .com domain.
             blob = (url + " " + (title or "")).lower()
             return ("prescribing information" in blob or "prescribing-information" in blob
                     or "package insert" in blob or "package-insert" in blob)
@@ -1544,10 +1696,12 @@ Return JSON only:
             for s in (res or []):
                 u = (s.get("url") or "").strip()
                 ttl = (s.get("title") or "").strip()
-                d = _norm_domain(u)
-                if not u or d in seen or not _ok(u, ttl):
+                # FU141: dedupe by URL, not domain — two products' labels legitimately live on
+                # the same registry (dailymed/accessdata); the 6-block cap bounds volume.
+                uk = u.rstrip("/").lower()
+                if not u or uk in seen or not _ok(u, ttl):
                     continue
-                seen.add(d)
+                seen.add(uk)
                 blocks.append({"label": f"official · {ttl or u}", "url": u,
                                "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
                 kept += 1
@@ -1556,18 +1710,33 @@ Return JSON only:
             return kept
 
         # Leg A — regulator documentation / label (domain-pinned first; reformulate on a miss).
-        brief_a = (f"the OFFICIAL regulator documentation for {topic}: prescribing information, "
-                   f"label, or official safety/standards page — the regulator's or manufacturer's "
-                   f"OWN page, never a blog, review, or news article")
-        if _run("legA/pinned", brief_a, allowed=(pins or None)) == 0:
-            _run("legA/retry", brief_a + f" — topic context: {seed}")
+        # FU141: one pinned label search PER product central to the article (a combination page
+        # needs BOTH drug classes' prescribing information, not just the fused topic's). Generic —
+        # the product list is extracted per-article; cap 3 subjects total.
+        subjects = [topic]
+        for p in (products or []):
+            p = str(p).strip()
+            if p and p.lower() not in topic.lower() and all(p.lower() != s.lower() for s in subjects):
+                subjects.append(p)
+        subjects = subjects[:3]
+        kept_a = 0
+        for sub in subjects:
+            brief_a = (f"the OFFICIAL regulator documentation for {sub}: prescribing information, "
+                       f"label, or official safety/standards page — the regulator's or manufacturer's "
+                       f"OWN page, never a blog, review, or news article")
+            kept_a += _run(f"legA/pinned[{sub[:40]}]", brief_a, allowed=(pins or None))
+        if kept_a == 0:
+            brief_a0 = (f"the OFFICIAL regulator documentation for {topic}: prescribing information, "
+                        f"label, or official safety/standards page — the regulator's or manufacturer's "
+                        f"OWN page, never a blog, review, or news article")
+            _run("legA/retry", brief_a0 + f" — topic context: {seed}")
         # Leg B — the governing clinical/professional guideline (the association's own page).
         brief_b = (f"the current OFFICIAL professional-association guideline or standards document "
                    f"governing {topic} — the association's or standards body's OWN page (e.g. a "
                    f"specialty society's standards of care), NOT a blog or article summarizing it")
         if _run("legB/guideline", brief_b) == 0:
             _run("legB/retry", brief_b + f" — topic context: {seed}")
-        return blocks[:4]
+        return blocks[:6]
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
                                ymyl=None):
@@ -1603,6 +1772,9 @@ Return JSON only:
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
     plan / license term, superlatives) — each with the brand it's about, the dimension, and the value.
+  - PRODUCTS: the specific drugs / products / therapies / instruments CENTRAL to the article (the things
+    an official label, standard or specification document would exist FOR — e.g. the two drug classes a
+    combination-therapy page discusses). Generic product names, not brand offerings; empty if none.
   - CORE_TOPIC: the article's CENTRAL subject AND the authority that officially documents it — a short
     phrase naming the platform / regulator / standard whose OWN page is the highest-authority source
     (e.g. "TikTok — synthetic-media / AI-content labeling / monetization policy", "FDA guidance on <X>",
@@ -1616,11 +1788,12 @@ Return JSON only:
 ARTICLE:
 {body[:6000]}
 
-Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["..."], "core_topic": "",
+Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["..."], "products": ["..."], "core_topic": "",
   "claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
         cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
         cres = cres if isinstance(cres, dict) else {}
         core_topic = str(cres.get("core_topic") or "").strip()
+        products = [str(p).strip() for p in (cres.get("products") or []) if str(p).strip()]
         # FU98 — peer-field check (warning only, rides the geo_warning toast): a "best/top <type>"
         # title where the comparison has <2 same-type competitors is the self-crowning pattern.
         self._peer_note = ""
@@ -1670,19 +1843,46 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 max_searches=2)
         except Exception:
             prim = []
+        # FU141: this legacy search used to grant "official ·" to ANYTHING it returned — that is
+        # how the client's own site and affiliate reviews got the badge. Validate before labeling:
+        # pass → official; the authority NAMED in core_topic hosting the page on its own domain
+        # (a platform's policy page on its .com) also counts; anything else → third-party ·
+        # demotion (still usable), or dropped entirely on YMYL pages (clinical pages must not
+        # carry affiliate noise under any label).
+        _own_d = _norm_domain((brand or {}).get("domain_url") or "")
+        _pins_c2 = (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if ymyl else []
         for c in (prim or [])[:2]:
             u = (c.get("url") or "").strip()
-            fct = (c.get("fact") or c.get("title") or "").strip()
-            if u and fct:
-                fresh.append({"label": f"official · {c.get('title') or u}", "url": u,
+            ttl = (c.get("title") or "").strip()
+            fct = (c.get("fact") or ttl or "").strip()
+            if not (u and fct):
+                continue
+            ok_off = _official_source_ok(u, ttl, name, _own_d, _pins_c2)
+            if not ok_off:
+                d = _norm_domain(u)
+                stem = d.split(".")[0] if d else ""
+                if (len(stem) >= 4 and stem in (core_q or "").lower()
+                        and not (_own_d and (d == _own_d or d.endswith("." + _own_d)))
+                        and not _is_non_evidence({"title": ttl, "url": u})
+                        and not _REVIEWISH_RE.search(ttl or "")):
+                    ok_off = True
+            if ok_off:
+                fresh.append({"label": f"official · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
+            elif not ymyl:
+                fresh.append({"label": f"third-party · {ttl or u}", "url": u,
+                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+            else:
+                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' failed official validation — "
+                      f"dropped (ymyl page)", flush=True)
 
         # FU133 (c2b): YMYL pages need REAL authoritative grounding — regulator labels +
         # professional guidelines — retrieved with validation + retries. If nothing validated
         # comes back, add a PAUSE item so the operator supplies the official URL (or skips)
         # rather than shipping a clinical page cited to marketing sources.
         if ymyl:
-            auth = self._gather_authoritative_sources(brand, seed, core_topic, ymyl)
+            auth = self._gather_authoritative_sources(brand, seed, core_topic, ymyl,
+                                                        products=products)
             fresh.extend(auth)
             if not any((b.get("label") or "").startswith("official ·") for b in fresh):
                 unsourced.append({
@@ -1739,7 +1939,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 Uses each result's ACTUAL url so citations deep-link. Deduped by url."""
                 out_, seen_ = [], set()
                 for s in (srcs or []):
-                    if _is_hit_piece(s):   # FU93 P2: never cite a "steer clear of"-style roundup
+                    if _is_non_evidence(s):   # FU93/FU140: hit-pieces + job listings never get cited
                         print(f"[blog_gen] source-hygiene: dropped hit-piece "
                               f"'{(s.get('title') or '')[:70]}'", flush=True)
                         continue
@@ -1924,7 +2124,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "")).lower()
-                if u and fct and t.lower().split()[0] in blob and not _is_hit_piece(s):
+                if u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s):
                     fresh.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
                     tool_texts[t] = tool_texts.get(t, "") + " " + fct.lower()
                     kept += 1
@@ -1971,16 +2171,32 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             except Exception:
                 qsc = []
             corr = (corr or []) + (qsc or [])
+        # FU141 — a review OF the subject entering here is tagged `review ·` (machine-readable,
+        # so the honesty/YMYL rules can key on it) and capped at 2 across the WHOLE generation
+        # (write-time evidence included) — review pileup is the recurring reviewer complaint.
+        _rev_kept = sum(1 for _f in (list(fresh) + list(getattr(self, "_evidence_blocks", None) or []))
+                        if str(_f.get("label") or "").lower().startswith("review ·"))
         for c in (corr or []):
-            if _is_hit_piece(c):   # FU93 P2: opposition research never becomes evidence
+            if _is_non_evidence(c):   # FU93/FU140: opposition research + job ads never become evidence
                 print(f"[blog_gen] source-hygiene: dropped hit-piece "
                       f"'{(c.get('title') or '')[:70]}'", flush=True)
                 continue
             u = (c.get("url") or "").strip()
-            fct = (c.get("fact") or c.get("title") or "").strip()
-            if u and fct:
-                fresh.append({"label": f"third-party · {c.get('title') or u}", "url": u,
+            ttl = (c.get("title") or "").strip()
+            fct = (c.get("fact") or ttl or "").strip()
+            if not (u and fct):
+                continue
+            if _is_subject_review(ttl, name):
+                if _rev_kept >= 2:
+                    print(f"[blog_gen] review-cap: dropped excess subject review "
+                          f"'{ttl[:60]}'", flush=True)
+                    continue
+                _rev_kept += 1
+                fresh.append({"label": f"review · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
+                continue
+            fresh.append({"label": f"third-party · {ttl or u}", "url": u,
+                          "text": fct[:_EVIDENCE_TEXT_CAP]})
 
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
@@ -2033,11 +2249,13 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     one-line nod. {rqual}-specific FAQ entries MUST survive this rewrite."""
 
         # FU135 — source honesty + internal consistency (all blogs).
-        honesty_rules = """
+        honesty_rules = f"""
   - SOURCE HONESTY: never describe a "third-party ·" source as an "independent audit / analysis /
     report" or "independently verified" — attribute reviews/affiliate write-ups plainly by name, or
     re-cite the figure to the vendor's own page. Only "official ·" sources may be framed as
-    authoritative.
+    authoritative. Sources labeled "review ·" are third-party reviews OF {name} — never
+    authoritative, never clinical/safety support; at most color for program facts, attributed
+    plainly by name.
   - INTERNAL CONSISTENCY: when the article states BOTH a cited restriction/regulation AND that a
     covered provider still offers the restricted thing, it MUST spell out the specific legal
     pathway/exception that reconciles the two (from the EVIDENCE); if the evidence does not contain
@@ -2059,7 +2277,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     for a clinical claim; a "best of" listicle may support the comparison's PROGRAM facts only
     (pricing, what's bundled). Neither may back a clinical fact.
   - EXTRACT ZONE: move logistics perks (free/discreet shipping, discounts) OUT of the Quick answer,
-    opening paragraph and meta description — clinical/eligibility substance belongs there."""
+    opening paragraph and meta description — clinical/eligibility substance belongs there.
+  - QUICK-ANSWER CITATIONS: every [S#] the Quick answer cites must be an "official ·" source or
+    {name}'s own page — never a "review ·" / "third-party ·" source for the lead claim."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -2919,6 +3139,63 @@ Return JSON only:
                     print(f"[blog_gen] {_pnote}", flush=True)
                     article["geo_warning"] = "; ".join(
                         x for x in [article.get("geo_warning", ""), _pnote] if x)
+        # FU141 — quick-answer citation guard (YMYL, warning only): the most-extracted position
+        # keeps getting the worst citations. Every [S#] the Quick answer cites must map to an
+        # "official ·" or first-party source — a review/affiliate citation there means the page
+        # answers a clinical question on affiliate authority.
+        if ymyl:
+            _bqa = article.get("body_markdown") or ""
+            _labels141 = {m.group(1): m.group(2).strip()
+                          for m in re.finditer(r"- \[S(\d+)\] ([^\u2014\n]+)", _bqa)}
+            _qm = re.search(r"(^|\n)[^\n]*quick answer[^\n]*(\n(?!\n)[^\n]*)*", _bqa, re.I)
+            _qzone = _qm.group(0) if _qm else _bqa[:600]
+            _badqa = sorted({f"S{n}" for n in re.findall(r"\[S(\d+)\]", _qzone)
+                             if (_labels141.get(n) or "").lower().startswith(("review ·",
+                                                                              "third-party ·"))})
+            if _badqa:
+                _qanote = (f"YMYL quick-answer check: the Quick answer cites {', '.join(_badqa)} "
+                           f"(review/affiliate) for its lead claim — re-cite to an "
+                           f"official/first-party source or regenerate")
+                print(f"[blog_gen] {_qanote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _qanote] if x)
+        # FU141 — sources integrity (all blogs, warning only): every listed ## Sources entry must
+        # carry a URL — a citation pointing at nothing (the nameless/URL-less "provided source"
+        # class) must never ship silently.
+        _bsrc = article.get("body_markdown") or ""
+        _si141 = _bsrc.find("\n## Sources")
+        if _si141 > 0:
+            _broken = []
+            for _ln in _bsrc[_si141:].splitlines():
+                _mm = re.match(r"- \[S(\d+)\]", _ln.strip())
+                if _mm and "http" not in _ln:
+                    _broken.append(f"S{_mm.group(1)}")
+            if _broken:
+                _snote = (f"sources-integrity: {', '.join(_broken)} in ## Sources "
+                          f"carr{'ies' if len(_broken) == 1 else 'y'} no URL — fix the source "
+                          f"entry or regenerate")
+                print(f"[blog_gen] {_snote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _snote] if x)
+        # FU140 — stale-year bump: the model dates titles with its training-era year. Any
+        # 20XX strictly before the current year in the SEO title/description is bumped to the
+        # current year — unless that year appears in the SEED (an operator-chosen retrospective)
+        # — silent auto-fix, logged.
+        import datetime as _dt140
+        _cy = _dt140.datetime.utcnow().year
+        def _bump_years(txt):
+            def _r(m):
+                y = int(m.group(0))
+                if 2015 <= y < _cy and m.group(0) not in (seed or ""):
+                    return str(_cy)
+                return m.group(0)
+            return re.sub(r"\b20\d\d\b", _r, txt or "")
+        for _k in ("meta_title", "meta_description"):
+            _oldv = article.get(_k) or ""
+            _newv = _bump_years(_oldv)
+            if _newv != _oldv:
+                article[_k] = _newv
+                print(f"[blog_gen] year-bump: {_k} → '{_newv}'", flush=True)
         article["ymyl"] = ymyl or ""
         # FU105 — competitor-count check (warning only): the FINAL body's comparison table must carry
         # ≥3 non-{name} competitor rows. Reads the final body directly, so it catches reconcile

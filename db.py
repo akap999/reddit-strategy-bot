@@ -3285,6 +3285,10 @@ class Database:
     # `get_report_months_for_client` / `get_report_aggregate_for_client`).
 
     REPLACE_WINDOW_DAYS = 14
+    # FU132 (user decision 2026-09-01): Live Search MENTIONS get a SHORTER redeploy window —
+    # a mention removed within 7 days of publish → 'replace' (redeploy queue), after → 'removed'.
+    # HQ comments (the `comments` table) keep the original 14-day window.
+    REPLACE_WINDOW_DAYS_SEARCH = 7
 
     def _choose_removed_status(self, comment_id, days=None):
         """Pick 'replace' vs 'removed' for an auto-detected removal.
@@ -3337,7 +3341,9 @@ class Database:
         of the rule). `table` ∈ {'comments','search_comments'}.
         """
         if days is None:
-            days = self.REPLACE_WINDOW_DAYS
+            # FU132: per-pipeline window — mentions 7 days, HQ 14.
+            days = (self.REPLACE_WINDOW_DAYS_SEARCH if table == "search_comments"
+                    else self.REPLACE_WINDOW_DAYS)
         row = self.conn.execute(
             f"SELECT replaced_at, deployed_at, posted_at FROM {table} WHERE id = ?",
             (comment_id,)
@@ -5644,13 +5650,16 @@ class Database:
         Returns `{"comments": <int>, "search_comments": <int>}` with
         the number of rows promoted in each table.
         """
-        if days is None:
-            days = self.REPLACE_WINDOW_DAYS
         # SQLite stores the timestamps as ISO-like strings; the
         # COALESCE picks posted_at first, then deployed_at. We
         # compute the cutoff in UTC to match how those columns are
         # written everywhere else in the codebase.
-        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        # FU132: per-pipeline windows — an explicit `days` overrides BOTH; otherwise
+        # HQ comments use 14 days and Live Search mentions use 7.
+        hq_days = days if days is not None else self.REPLACE_WINDOW_DAYS
+        sc_days = days if days is not None else self.REPLACE_WINDOW_DAYS_SEARCH
+        cutoff = (datetime.utcnow() - timedelta(days=hq_days)).strftime("%Y-%m-%d %H:%M:%S")
+        sc_cutoff = (datetime.utcnow() - timedelta(days=sc_days)).strftime("%Y-%m-%d %H:%M:%S")
         promoted = {"comments": 0, "search_comments": 0}
 
         # comments
@@ -5679,14 +5688,14 @@ class Database:
             )
             promoted["comments"] += 1
 
-        # search_comments
+        # search_comments (FU132: the shorter mentions window)
         rows = self.conn.execute(
             """SELECT id FROM search_comments
                 WHERE status = 'removed'
                   AND (prev_status IS NULL OR prev_status != 'replaced')
                   AND COALESCE(posted_at, deployed_at) IS NOT NULL
                   AND COALESCE(posted_at, deployed_at) >= ?""",
-            (cutoff,)
+            (sc_cutoff,)
         ).fetchall()
         for r in rows:
             self.conn.execute(
@@ -8368,10 +8377,11 @@ class Database:
         """Search-comments variant of `_choose_removed_status`. Same
         posted_at → deployed_at fallback chain as the comments-table
         variant: if Reddit can't give us a timestamp, deployed_at is
-        a fine proxy for the 14-day rule.
+        a fine proxy. FU132: mentions use the SHORTER 7-day window
+        (REPLACE_WINDOW_DAYS_SEARCH); HQ keeps 14.
         """
         if days is None:
-            days = self.REPLACE_WINDOW_DAYS
+            days = self.REPLACE_WINDOW_DAYS_SEARCH
         row = self.conn.execute(
             "SELECT posted_at, deployed_at FROM search_comments WHERE id = ?",
             (comment_id,)

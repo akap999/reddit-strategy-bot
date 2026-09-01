@@ -2816,7 +2816,11 @@ def api_blog_export(blog_id):
         return Response(jsonld_str, mimetype="application/ld+json")
 
     slug = (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "blog")[:60]
-    if fmt == "html":
+    # FU131: format=gdoc — the SAME rendered document served as a Word-compatible .doc.
+    # Google Drive converts it into a real Google Doc on upload/open (headings, comparison
+    # tables and source links survive); Word opens it directly too. Differences from html:
+    # no JSON-LD script (schema markup is meaningless inside a document) + Word content type.
+    if fmt in ("html", "gdoc"):
         try:
             import markdown as _md
             inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(body))),
@@ -2888,9 +2892,13 @@ def api_blog_export(blog_id):
                 + (f'<meta name="description" content="{_html.escape(desc)}">\n' if desc else "")
                 + (f'<meta name="author" content="{_html.escape(meta_byline)}">\n' if meta_byline else "")
                 + f'<style>{css}</style>\n'
-                + f'<script type="application/ld+json">\n{jsonld_str}\n</script>')
+                + (f'<script type="application/ld+json">\n{jsonld_str}\n</script>' if fmt == "html" else ""))
         page = (f'<!doctype html>\n<html lang="en"><head>\n{head}\n</head>\n<body>\n'
                 f'{header}{inner}\n</body></html>\n')
+        if fmt == "gdoc":
+            resp = Response(page, mimetype="application/vnd.ms-word")
+            resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.doc"'
+            return resp
         resp = Response(page, mimetype="text/html")
         resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.html"'
         return resp

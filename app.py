@@ -1586,7 +1586,8 @@ def _extract_brand_enrichment_fields(data):
         out["enriched_at"] = data.get("enriched_at")
     # EEAT byline (brand-supplied, never fabricated) + logo URL (publisher schema) — string fields.
     for sf in ("author_name", "author_title", "reviewer_name", "reviewer_title", "disclosure",
-               "logo_url"):
+               "logo_url",
+               "known_sources"):   # FU134: JSON list of operator-supplied source URLs
         if sf in data:
             v = data.get(sf)
             out[sf] = v.strip() if isinstance(v, str) else v
@@ -2044,6 +2045,9 @@ def api_blog_generate():
     geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
+    # FU133: YMYL authoritative sourcing — checkbox True/False; absent = auto-detect from the brand.
+    ymyl_in = data.get("ymyl")
+    ymyl_arg = (True if ymyl_in is True else (False if ymyl_in is False else None))
     # Optional per-blog byline override (falls back to the brand byline when blank).
     byline = {k: (data.get(k) or "").strip() for k in
               ("author_name", "author_title", "reviewer_name", "reviewer_title",
@@ -2086,7 +2090,8 @@ def api_blog_generate():
                 deep_verify=deep_verify, allow_pause=True,   # FU79: pause if a tool can't be sourced
                 geo=geo, sibling_titles=sibling_titles,      # FU90
                 qualifier=qualifier,                         # FU93
-                internal_links=internal_links, sibling_links=sibling_links)  # FU114
+                internal_links=internal_links, sibling_links=sibling_links,  # FU114
+                ymyl=ymyl_arg)                               # FU133
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -2113,6 +2118,8 @@ def api_blog_generate():
                     gen_cost=gcost, **byline,
                 )
                 bg.update_blog(blog_id, pending_state=json.dumps(pending))
+                bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else   # FU133
+                                              (pending.get("checkpoint", {}).get("sourcing", {}).get("ymyl") or "")))
                 if geo:
                     bg.update_blog(blog_id, geo=geo)   # FU90: reused by resume/regenerate
                 if qualifier:
@@ -2147,6 +2154,8 @@ def api_blog_generate():
             )
             if geo:
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
+            # FU133: persist the RESOLVED vertical ('off' when the user explicitly unticked).
+            bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else (blog.get("ymyl") or "")))
             if qualifier:
                 bg.update_blog(blog_id, qualifier=qualifier)   # FU93: same
             if internal_links:
@@ -2202,6 +2211,8 @@ def api_blog_regenerate(blog_id):
             stored_reddit = (blog.get("reddit_url") or "").strip()
             stored_geo = (blog.get("geo") or "").strip()   # FU90: reuse the blog's geography
             stored_qual = (blog.get("qualifier") or "").strip()   # FU93: reuse the qualifier
+            _sy = (blog.get("ymyl") or "").strip()   # FU133: reuse the YMYL choice
+            stored_ymyl = (False if _sy == "off" else (_sy or None))
             stored_il = bool(blog.get("internal_links"))   # FU114: reuse the linking choice
             sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
@@ -2230,7 +2241,8 @@ def api_blog_regenerate(blog_id):
                                           deep_verify=stored_deep,
                                           geo=stored_geo, sibling_titles=sib_titles,   # FU90
                                           qualifier=stored_qual,                       # FU93
-                                          internal_links=stored_il, sibling_links=sib_links)  # FU114
+                                          internal_links=stored_il, sibling_links=sib_links,  # FU114
+                                          ymyl=stored_ymyl)                            # FU133
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -2350,6 +2362,26 @@ def api_blog_provide_sources(blog_id):
                 raise ValueError(claude.last_error or "Finishing the blog failed")
             resume_cost = round(claude.usage_cost(), 4)
             total_cost = round(float(blog.get("gen_cost") or 0) + resume_cost, 4)
+            # FU134: operator-provided links are KEPT — merged into this blog's source_urls (so a
+            # regenerate re-fetches them) AND into the brand's known_sources (so every FUTURE blog
+            # for this brand starts with them; capped, deduped).
+            _prov_urls = [str(s.get("url") or "").strip() for s in sources
+                          if isinstance(s, dict) and not s.get("skip") and str(s.get("url") or "").strip()]
+            if _prov_urls:
+                try:
+                    _merged_blog = list(dict.fromkeys((blog.get("source_urls") or []) + _prov_urls))
+                    bg.update_blog(blog_id, source_urls=_merged_blog)
+                    _known = []
+                    try:
+                        _known = json.loads(brand.get("known_sources") or "[]")
+                    except Exception:
+                        _known = []
+                    _merged_brand = list(dict.fromkeys(_known + _prov_urls))[-15:]
+                    bg.update_brand(brand["id"], known_sources=json.dumps(_merged_brand))
+                    print(f"[provide-sources] kept {len(_prov_urls)} operator link(s): blog source_urls "
+                          f"+ brand known_sources ({len(_merged_brand)} total)", flush=True)
+                except Exception as e:
+                    print(f"[provide-sources] persist links failed: {e}", flush=True)
             bg.update_blog(
                 blog_id,
                 title=art.get("title", ""),
@@ -2850,7 +2882,11 @@ def api_blog_export(blog_id):
         rv = _bp("reviewer_name")
         if rv:
             rt = _bp("reviewer_title")
-            byline_bits.append("Reviewed by " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
+            # FU133: on a medical YMYL page a named clinical reviewer is the E-E-A-T signal —
+            # label it the way readers and engines expect.
+            _rvverb = ("Medically reviewed by" if (blog.get("ymyl") or "") == "medical"
+                       else "Reviewed by")
+            byline_bits.append(f"{_rvverb} " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
         meta_byline = " · ".join(byline_bits)
         # Disclosure: the supplied one (per-blog — now generated adaptively at gen time, FU84 — else
         # the brand's), else a FACTUALLY-SAFE fallback: "sells the products discussed" was wrong for

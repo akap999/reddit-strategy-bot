@@ -279,7 +279,8 @@ class Database:
                      search_subreddits=None, focus=None, learned_context=None,
                      personas=None, competitor_domains=None, author_name=None,
                      author_title=None, reviewer_name=None, reviewer_title=None,
-                     disclosure=None, logo_url=None, meta_autofetched_at=None,
+                     disclosure=None, logo_url=None, known_sources=None,
+                     meta_autofetched_at=None,
                      name=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
@@ -297,6 +298,7 @@ class Database:
             "author_name": author_name, "author_title": author_title,
             "reviewer_name": reviewer_name, "reviewer_title": reviewer_title,
             "disclosure": disclosure, "logo_url": logo_url,
+            "known_sources": known_sources,
             "meta_autofetched_at": meta_autofetched_at,
         }
         for col, val in field_map.items():
@@ -1140,7 +1142,8 @@ class Database:
                    "youtube_persona", "youtube_meta",   # FU80
                    "geo",   # FU90
                    "qualifier",   # FU93
-                   "meta_title", "internal_links"}   # FU114
+                   "meta_title", "internal_links",   # FU114
+                   "ymyl"}   # FU133
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2271,6 +2274,7 @@ class Database:
             "disclosure":        "ALTER TABLE brands ADD COLUMN disclosure TEXT",
             # Brand logo URL — feeds publisher.logo (+ an Article image fallback) in blog JSON-LD.
             "logo_url":          "ALTER TABLE brands ADD COLUMN logo_url TEXT",
+            "known_sources":     "ALTER TABLE brands ADD COLUMN known_sources TEXT",
             # Negative-cache marker: set once the byline/logo auto-fetch has been attempted, so
             # the lazy fill (at blog-gen) never re-attempts a not-found brand. Distinct from
             # enriched_at (a brand can be enriched but predate the byline/logo auto-fetch).
@@ -2300,7 +2304,10 @@ class Database:
                     # FU93: the blog's variant qualifier ("financing", "free shipping"; explicit wins).
                     "qualifier",
                     # FU114: SEO <title> tag (distinct from the H1, which is the seed verbatim).
-                    "meta_title"):
+                    "meta_title",
+                    # FU133: YMYL vertical ('medical'/'finance'/'legal', 'off' = explicit opt-out,
+                    # ''/NULL = auto-detect at generation).
+                    "ymyl"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

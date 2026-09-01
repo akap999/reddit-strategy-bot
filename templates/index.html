@@ -2074,6 +2074,7 @@ async function editBrandContext(brandName) {
                     <div><label class="text-xs text-gray-400">Disclosure line <span class="text-gray-600">(shown on first-party comparisons)</span></label><input id="edit-brand-disclosure" value="${_ev(first.disclosure)}" placeholder="e.g. This comparison is published by ${_ev(brandName)}."></div>
                     <div><label class="text-xs text-gray-400">Logo URL <span class="text-gray-600">(for publisher schema / blog image fallback)</span></label><input id="edit-brand-logo" value="${_ev(first.logo_url)}" placeholder="https://…/logo.png"></div>
                     <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
+                    <div><label class="text-xs text-gray-400">Known sources <span class="text-gray-600">(one URL per line — links you supplied during past generations; auto-fetched as evidence on EVERY future blog for this brand)</span></label><textarea id="edit-brand-knownsources" rows="3" placeholder="https://www.accessdata.fda.gov/…/label.pdf&#10;https://diabetesjournals.org/care/…" style="font-family:inherit">${(() => { try { return (JSON.parse(first.known_sources || '[]') || []).join('\n'); } catch (_) { return ''; } })()}</textarea></div>
                 </div>
             </details>
         </div>
@@ -2172,6 +2173,7 @@ async function saveBrandContext(brandName) {
             reviewer_title: _val('edit-brand-reviewer-title'),
             disclosure: _val('edit-brand-disclosure'),
             logo_url: _val('edit-brand-logo'),
+            known_sources: JSON.stringify(_val('edit-brand-knownsources').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 15)),
             competitors: competitor_names,
             competitor_domains,
         }});
@@ -12694,6 +12696,22 @@ async function _checkLiveDeleteRun(runId, name) {
 let _blogBrands = [];
 let _blogSuggested = [];
 
+// FU133: pre-check the YMYL box for medical/finance brands (mirror of the server lexicon).
+// The user's manual toggle always wins (_blogYmylTouched); the server re-detects anyway when
+// the key is absent, so this is purely a UX default.
+function _blogYmylAutoDefault() {
+    if (window._blogYmylTouched) return;
+    const el = document.getElementById('blog-gen-ymyl');
+    const bid = document.getElementById('blog-gen-brand')?.value;
+    if (!el) return;
+    const b = ((typeof _blogBrands !== 'undefined' && _blogBrands) || []).find(x => x.id == bid) || {};
+    const text = [b.category, b.context, b.use_cases, b.pain_points].map(v => v || '').join(' ').toLowerCase();
+    const terms = ['medical','health','telehealth','clinic','treatment','therapy','hormone','trt',
+                   'testosterone','glp','medication','pharma','prescription','weight loss',
+                   'mental health','rehab','detox','peptide','semaglutide','tirzepatide','physician',
+                   'patient','loan','credit','lending','insurance','invest','mortgage','banking','fintech'];
+    el.checked = terms.some(t => text.includes(t));
+}
 function _blogEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 async function renderBlogs(c) {
@@ -12716,7 +12734,7 @@ async function renderBlogs(c) {
         <div class="card p-4 mb-5" style="border:1px solid #3b0764">
             <h3 class="font-bold mb-2" style="color:#c084fc">Generate a blog</h3>
             <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand">${brandOpts || '<option value="">No brands</option>'}</select></div>
+                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault()">${brandOpts || '<option value="">No brands</option>'}</select></div>
                 <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
@@ -12738,6 +12756,11 @@ async function renderBlogs(c) {
                 <input type="checkbox" id="blog-gen-deepverify">
                 🔍 Deep verify — extra independent corroboration of the brand's own claims
                 <span class="text-gray-600">— deepens the third-party cross-check of the brand's self-claims (extra web searches, +~$0.15–0.30 &amp; ~20–50s)</span>
+            </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer" title="FU133: clinical/regulatory claims must cite regulator labels + professional guidelines; the generation PAUSES and asks for a URL if none can be retrieved. Auto-checked for medical/finance brands.">
+                <input type="checkbox" id="blog-gen-ymyl" onchange="window._blogYmylTouched=true">
+                🏥 Authoritative sourcing (YMYL) — cite official medical/regulatory sources
+                <span class="text-gray-600">— FDA labels / clinical guidelines fetched + required on clinical claims (auto-detected for medical &amp; finance brands; ~4 extra searches)</span>
             </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
                 <input type="checkbox" id="blog-gen-internal-links">
@@ -12769,6 +12792,8 @@ async function renderBlogs(c) {
             <thead><tr><th>Title</th><th>Brand</th><th>Status</th><th>Platforms</th><th>Updated</th><th>Actions</th></tr></thead>
             <tbody id="blog-rows">${blogs.map(_blogRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No blogs yet — generate one above.</td></tr>'}</tbody>
         </table>`;
+    window._blogYmylTouched = false;   // FU133: fresh form → auto-default follows the brand again
+    _blogYmylAutoDefault();
 }
 
 function _blogRow(b) {
@@ -12915,6 +12940,7 @@ function blogGenerate() {
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
+    const ymyl = !!document.getElementById('blog-gen-ymyl')?.checked;   // FU133
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
     const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
@@ -12924,7 +12950,7 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);

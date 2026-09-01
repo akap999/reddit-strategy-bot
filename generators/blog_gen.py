@@ -100,6 +100,43 @@ _STALE_AGGREGATORS = {
     "goodfirms.co", "sourceforge.net", "slashdot.org", "toolify.ai", "futurepedia.io",
 }
 
+# FU133 — YMYL (Your Money / Your Life) verticals: pages whose value is CLINICAL / regulatory
+# authority must cite OFFICIAL sources (regulator labels, professional-association guidelines),
+# never rest on vendor/affiliate/review pages. Detection is a deterministic lexicon over the
+# brand's own enrichment text; the operator can override via the generate-form checkbox.
+_YMYL_LEXICON = {
+    "medical": ("medical", "health", "telehealth", "clinic", "treatment", "therapy", "hormone",
+                "trt", "testosterone", "glp-1", "glp1", "medication", "pharma", "prescription",
+                "weight loss", "mental health", "rehab", "detox", "peptide", "semaglutide",
+                "tirzepatide", "physician", "doctor", "patient", "wellness"),
+    "finance": ("loan", "credit", "lending", "insurance", "invest", "mortgage", "banking",
+                "fintech", "financial services", "tax "),
+    "legal": ("law firm", "attorney", "legal services", "lawyer"),
+}
+_YMYL_OFFICIAL_DOMAINS = {
+    "medical": ["fda.gov", "accessdata.fda.gov", "dailymed.nlm.nih.gov", "nih.gov", "cdc.gov"],
+    "finance": ["sec.gov", "irs.gov", "consumerfinance.gov", "ftc.gov"],
+    "legal": [],
+}
+
+
+def _is_ymyl_brand(brand):
+    """FU133: deterministic YMYL vertical ('medical'|'finance'|'legal'|None) from the brand's
+    own enrichment text. Word-boundary matched for short tokens so 'trt' can't hit 'attrition'."""
+    text = " ".join(str((brand or {}).get(k) or "") for k in
+                    ("category", "context", "use_cases", "pain_points", "audience")).lower()
+    if not text.strip():
+        return None
+    for vertical, terms in _YMYL_LEXICON.items():
+        for t in terms:
+            if len(t) <= 4:
+                if re.search(r"\b" + re.escape(t.strip()) + r"\b", text):
+                    return vertical
+            elif t in text:
+                return vertical
+    return None
+
+
 # FU93 (P2) — source-selection hygiene: a hit-piece/"products to avoid" roundup is opposition
 # research, not comparison sourcing — citing one turns the page into a takedown. Matched on the
 # source TITLE at every evidence accept-point; a drop is logged, never silent.
@@ -930,7 +967,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
     # ------------------------------------------------------------------- article
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
                          sibling_titles=None, qualifier="", internal_links=False,
-                         link_targets=None):
+                         link_targets=None, ymyl=None):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
@@ -995,6 +1032,22 @@ extractable answer), still under 160 chars.
         qual_line = (f"  - QUALIFIER FOR THIS PAGE: {rqual} (operator-specified or detected from the "
                      f"seed) — this is the page's reason to exist; apply everything in this section "
                      f"to it.\n" if rqual else "")
+        # FU133 — YMYL AUTHORITY: a clinical/regulatory page's value IS its authority; claims of
+        # that class must cite the official sources in the EVIDENCE (labeled "official ·"), never
+        # vendor/affiliate/review pages. Inert ("") for non-YMYL blogs.
+        ymyl_line = ""
+        if ymyl:
+            ymyl_line = (
+                "  - YMYL AUTHORITY (this is a " + str(ymyl) + " page — non-negotiable): every "
+                "CLINICAL/REGULATORY claim — contraindications, boxed warnings, diagnostic "
+                "thresholds, dosing or monitoring standards, eligibility/coverage rules — MUST "
+                "cite an \"official ·\" EVIDENCE source [S#] (regulator label / prescribing "
+                "information / professional-association guideline). Vendor, affiliate, and review "
+                "sources may ONLY support program logistics (pricing, what's bundled, delivery) — "
+                "never a clinical fact. Aim for at least 2 DISTINCT official citations. If a "
+                "clinical specific has NO official source in the EVIDENCE, state it generally and "
+                "attribute it (\"per the drug's prescribing information\") — never invent the "
+                "specific and never cite a marketing page for it.\n")
         # FU90 — sibling variants: tell the model what already exists so this page differentiates.
         sibs = [str(t).strip() for t in (sibling_titles or []) if str(t).strip()][:10]
         sibling_block = ""
@@ -1075,7 +1128,7 @@ Pick exactly ONE dominant block. The dominant block MUST itself be extractable �
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
 
 GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
-{geo_line}{qual_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+{geo_line}{qual_line}{ymyl_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
     "Australia", a state or city) or another strong qualifier (a purchasing mechanism like "with
     financing", a company size, an industry). If it does NOT (and no geography or qualifier is stated
     above), SKIP this whole section — it is inert for a generic seed.
@@ -1270,6 +1323,10 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - COMPETITOR-NEGATIVE claims (asserting a NAMED competitor lacks a feature) — never assert a
     bald negative about a named third party; soften to a {name}-strength framing or
     date/attribute it ("as of publication").
+  - CLINICAL/REGULATORY CLAIMS (contraindications, boxed warnings, diagnostic thresholds, dosing or
+    monitoring standards) cited to a VENDOR/AFFILIATE/REVIEW source — re-cite to an "official ·" source
+    in the EVIDENCE, or generalize + attribute ("per the prescribing information"); never leave a
+    clinical fact resting on a marketing page.
   - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
     remove them, or balance with {name}'s SAME metric cited alongside (FU93).
   - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
@@ -1305,7 +1362,75 @@ Return JSON only:
             return None
         return self._reconcile_and_finish(brand, seed, article, sr)
 
-    def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier=""):
+    def _gather_authoritative_sources(self, brand, seed, core_topic, vertical):
+        """FU133: retrieve the OFFICIAL sources a YMYL page's clinical/regulatory claims must
+        cite — regulator documentation/labels + the governing professional-association guideline.
+
+        RELIABILITY CONTRACT (no silent failed tries): every returned URL is domain-VALIDATED
+        before acceptance (a blog claiming to be a guideline is rejected); each leg RETRIES with a
+        reformulated brief when an attempt keeps nothing; every attempt is logged. Returns
+        validated blocks [{label:'official · …', url, text}] (cap 4). The caller PAUSES the
+        generation when this comes back empty — the operator supplies the URL or explicitly
+        skips; a YMYL page can never silently ship with zero official sources."""
+        pins = _YMYL_OFFICIAL_DOMAINS.get(vertical) or []
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+        topic = (core_topic or "").strip() or (seed or "").strip()
+
+        def _ok(url, title=""):
+            d = _norm_domain(url)
+            if not d:
+                return False
+            if d == own or d in _THIRD_PARTY_DOMAINS or d in _STALE_AGGREGATORS:
+                return False
+            if d.endswith(".gov") or d in pins or any(d == p or d.endswith("." + p) for p in pins):
+                return True
+            if d.endswith(".org") or d.endswith(".int"):
+                return True
+            # A manufacturer's prescribing-information / package-insert page is an official
+            # label source even on a .com domain.
+            blob = (url + " " + (title or "")).lower()
+            return ("prescribing information" in blob or "prescribing-information" in blob
+                    or "package insert" in blob or "package-insert" in blob)
+
+        blocks, seen = [], set()
+
+        def _run(tag, brief, allowed=None):
+            try:
+                res = self.claude.search_sources(brief, max_searches=2,
+                                                 allowed_domains=(allowed or None))
+            except Exception:
+                res = []
+            kept = 0
+            for s in (res or []):
+                u = (s.get("url") or "").strip()
+                ttl = (s.get("title") or "").strip()
+                d = _norm_domain(u)
+                if not u or d in seen or not _ok(u, ttl):
+                    continue
+                seen.add(d)
+                blocks.append({"label": f"official · {ttl or u}", "url": u,
+                               "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
+                kept += 1
+            print(f"[blog_gen] ymyl-sources {tag} → {len(res or [])} returned, {kept} validated",
+                  flush=True)
+            return kept
+
+        # Leg A — regulator documentation / label (domain-pinned first; reformulate on a miss).
+        brief_a = (f"the OFFICIAL regulator documentation for {topic}: prescribing information, "
+                   f"label, or official safety/standards page — the regulator's or manufacturer's "
+                   f"OWN page, never a blog, review, or news article")
+        if _run("legA/pinned", brief_a, allowed=(pins or None)) == 0:
+            _run("legA/retry", brief_a + f" — topic context: {seed}")
+        # Leg B — the governing clinical/professional guideline (the association's own page).
+        brief_b = (f"the current OFFICIAL professional-association guideline or standards document "
+                   f"governing {topic} — the association's or standards body's OWN page (e.g. a "
+                   f"specialty society's standards of care), NOT a blog or article summarizing it")
+        if _run("legB/guideline", brief_b) == 0:
+            _run("legB/retry", brief_b + f" — topic context: {seed}")
+        return blocks[:4]
+
+    def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
+                               ymyl=None):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -1411,6 +1536,23 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if u and fct:
                 fresh.append({"label": f"official · {c.get('title') or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
+
+        # FU133 (c2b): YMYL pages need REAL authoritative grounding — regulator labels +
+        # professional guidelines — retrieved with validation + retries. If nothing validated
+        # comes back, add a PAUSE item so the operator supplies the official URL (or skips)
+        # rather than shipping a clinical page cited to marketing sources.
+        if ymyl:
+            auth = self._gather_authoritative_sources(brand, seed, core_topic, ymyl)
+            fresh.extend(auth)
+            if not any((b.get("label") or "").startswith("official ·") for b in fresh):
+                unsourced.append({
+                    "tool": f"official · {core_topic or seed}",
+                    "facts": ["regulator prescribing information / official documentation",
+                              "governing clinical or professional guideline"],
+                    "ymyl_official": True,
+                })
+                print(f"[blog_gen] ymyl-sources: ZERO validated official sources after all "
+                      f"retries — pause item added", flush=True)
 
         # (b) SOURCE each named competitor tool from its OWN public pages (vendor domains ALLOWED)
         ctx = f"{cat} {seed}".strip()
@@ -1652,7 +1794,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
-                "qualifier": rqual}  # FU93: same for the qualifier
+                "qualifier": rqual,  # FU93: same for the qualifier
+                "ymyl": ymyl or ""}  # FU133: vertical — reconcile rules + FU79 resume stay YMYL-aware
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
         """FU79 — phase (d) of verify+complete: reconcile the draft against the sourced FRESH FACTS,
@@ -1696,6 +1839,19 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     what is evaluated, the governing tax/regulatory angle); never dilute them into a restatement of
     {name}'s own terms — each must keep multiple concrete named facts with their implications, never a
     one-line nod. {rqual}-specific FAQ entries MUST survive this rewrite."""
+
+        # FU133 — YMYL reconcile rules (inert for non-YMYL blogs).
+        rymyl = (sourcing.get("ymyl") or "").strip()
+        ymyl_rules = ""
+        if rymyl:
+            ymyl_rules = f"""
+  - YMYL AUTHORITY ({rymyl} page): every CLINICAL/REGULATORY claim (contraindications, boxed
+    warnings, diagnostic thresholds, dosing/monitoring standards, eligibility rules) must cite an
+    "official ·" source [S#] — keep those citations, and RE-CITE any such claim currently resting
+    on a vendor/affiliate/review source to the official one (or generalize + attribute it).
+  - An affiliate review OF {name} duplicates {name}'s own site — it is NEVER independent support
+    for a clinical claim; a "best of" listicle may support the comparison's PROGRAM facts only
+    (pricing, what's bundled). Neither may back a clinical fact."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -1779,7 +1935,7 @@ COMPLETE and every stated fact is sourced:
     unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
     offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
     from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
-    value to hold the floor.{geo_rules}{qual_rules}
+    value to hold the floor.{geo_rules}{qual_rules}{ymyl_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -2333,7 +2489,7 @@ Return JSON only:
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
-                      qualifier="", internal_links=False, sibling_links=None):
+                      qualifier="", internal_links=False, sibling_links=None, ymyl=None):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -2349,11 +2505,35 @@ Return JSON only:
         block, sourcing briefs, reconcile protection, geo-check). `sibling_titles` (FU90): the brand's
         other blog titles so geo variants differentiate. Defaults keep all existing callers unchanged."""
         self.claude.reset_usage()   # FU54: cost this generation from real API usage
+        # FU133 — resolve the YMYL vertical: explicit string wins; True = detect (default 'medical'
+        # when the lexicon is silent, since the operator asked); False/'off' = off; None = auto.
+        if ymyl in (False, "off", "none"):
+            rymyl = None
+        elif isinstance(ymyl, str) and ymyl.strip():
+            rymyl = ymyl.strip()
+        elif ymyl is True:
+            rymyl = _is_ymyl_brand(brand) or "medical"
+        else:
+            rymyl = _is_ymyl_brand(brand)
+        if rymyl:
+            print(f"[blog_gen] ymyl: '{rymyl}' vertical resolved — authoritative sourcing ON", flush=True)
         # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
         # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
         # official/vendor sourcing in verify_and_complete. Keeps a full gen under ~$2 WITHOUT a blunt cutoff
         # that would starve the most valuable searches.
         self.claude.set_cost_ceiling(_CEIL_EVIDENCE)
+        # FU134: the brand's KNOWN SOURCES (links the operator supplied on past generations —
+        # e.g. an FDA label pasted into the pause modal) join every future generation's pasted
+        # sources automatically. Deduped; capped so a long memory can't balloon fetch cost.
+        try:
+            _known = json.loads((brand or {}).get("known_sources") or "[]")
+        except Exception:
+            _known = []
+        if _known:
+            source_urls = list(dict.fromkeys((source_urls or []) + [str(u).strip() for u in _known
+                                                                    if str(u).strip()][:8]))
+            print(f"[blog_gen] known-sources: +{len(_known[:8])} brand link(s) joined the evidence fetch",
+                  flush=True)
         evidence = self._gather_evidence(brand, seed, source_urls=source_urls,
                                          research_notes=research_notes,
                                          use_web_search=use_web_search,
@@ -2365,7 +2545,8 @@ Return JSON only:
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence, geo=geo, sibling_titles=sibling_titles,
                                         qualifier=qualifier,   # FU93
-                                        internal_links=internal_links, link_targets=link_targets)
+                                        internal_links=internal_links, link_targets=link_targets,
+                                        ymyl=rymyl)   # FU133
         if not article:
             return None
         draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
@@ -2380,7 +2561,8 @@ Return JSON only:
         # partial generation and return a `_pending` sentinel so the caller can ask the user for a manual
         # link/fact, instead of silently dropping the tool's row. `deep` deepens corroboration (FU48).
         sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo,
-                                               qualifier=qualifier)   # FU93
+                                               qualifier=qualifier,   # FU93
+                                               ymyl=rymyl)   # FU133
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
@@ -2402,9 +2584,11 @@ Return JSON only:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
         return self._finalize_article(brand, seed, article, draft_body, geo=geo,
-                                      qualifier=qualifier)   # FU93
+                                      qualifier=qualifier,   # FU93
+                                      ymyl=rymyl)   # FU133
 
-    def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier=""):
+    def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
+                          ymyl=None):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
         geo-check — a WARNING (never a block) when a geo page barely mentions its geography. Mutates +
@@ -2469,6 +2653,30 @@ Return JSON only:
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pn] if x)
+        # FU133 — YMYL checks (same toast channel): (a) the body must actually CITE ≥2 official
+        # sources; (b) a clinical page without a named human reviewer is skippable to AI engines —
+        # loud warning, never an invented person.
+        if ymyl:
+            _body_final = article.get("body_markdown") or ""
+            _sat = _body_final.find("\n## Sources")
+            _prose = _body_final[:_sat] if _sat > 0 else _body_final
+            _off_cited = 0
+            for _m in re.finditer(r"- \[S(\d+)\] official ·", _body_final):
+                if f"[S{_m.group(1)}]" in _prose:
+                    _off_cited += 1
+            if _off_cited < 2:
+                _ynote = (f"YMYL ({ymyl}): only {_off_cited} official citation(s) in the body — "
+                          f"clinical claims lack authoritative grounding")
+                print(f"[blog_gen] {_ynote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _ynote] if x)
+            if not ((brand or {}).get("reviewer_name") or "").strip():
+                _rnote = (f"YMYL ({ymyl}): no named medical reviewer — set a REAL reviewer in "
+                          f"Edit Brand (never invented) so the page carries a professional byline")
+                print(f"[blog_gen] {_rnote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _rnote] if x)
+        article["ymyl"] = ymyl or ""
         # FU105 — competitor-count check (warning only): the FINAL body's comparison table must carry
         # ≥3 non-{name} competitor rows. Reads the final body directly, so it catches reconcile
         # row-drops (the FU98 check reads the pre-reconcile draft) and fires on the FU79 resume path
@@ -2547,7 +2755,8 @@ Return JSON only:
         # FU90: the checkpoint's sourcing carries the resolved geo — the resume stays geo-aware.
         return self._finalize_article(brand, seed, article, draft_body,
                                       geo=(sourcing.get("geo") or ""),
-                                      qualifier=(sourcing.get("qualifier") or ""))   # FU93
+                                      qualifier=(sourcing.get("qualifier") or ""),   # FU93
+                                      ymyl=(sourcing.get("ymyl") or None))   # FU133
 
 
 # ----------------------------------------------------------------------------- JSON-LD

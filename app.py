@@ -4932,6 +4932,17 @@ def api_gdoc_upload_get():
         db.close()
 
 
+def _normalize_drive_folder_id(v):
+    """FU137: accept whatever the operator pastes — a bare ID, the full
+    drive.google.com/drive/folders/<id> URL (with or without ?usp=… query), or an ID with
+    stray whitespace — and return just the folder ID."""
+    v = (v or "").strip()
+    m = re.search(r"/folders/([A-Za-z0-9_-]+)", v)
+    if m:
+        return m.group(1)
+    return v.split("?")[0].split("/")[-1].strip()
+
+
 @app.route("/api/settings/gdoc-upload", methods=["POST"])
 def api_gdoc_upload_set():
     data = request.get_json() or {}
@@ -4940,7 +4951,7 @@ def api_gdoc_upload_set():
         if "script_url" in data:
             db.meta_set("gdoc_script_url", (data.get("script_url") or "").strip())
         if "folder_id" in data:
-            db.meta_set("gdoc_folder_id", (data.get("folder_id") or "").strip())
+            db.meta_set("gdoc_folder_id", _normalize_drive_folder_id(data.get("folder_id")))
         if (data.get("secret") or "").strip():
             db.meta_set("gdoc_secret", data["secret"].strip())
         return jsonify({"ok": True})
@@ -4960,7 +4971,8 @@ def api_blog_upload_gdoc(blog_id):
     try:
         script_url = (db.meta_get("gdoc_script_url") or "").strip()
         secret = (db.meta_get("gdoc_secret") or "").strip()
-        folder_id = (data.get("folder_id") or "").strip() or (db.meta_get("gdoc_folder_id") or "").strip()
+        folder_id = _normalize_drive_folder_id(
+            (data.get("folder_id") or "").strip() or (db.meta_get("gdoc_folder_id") or ""))
         if not script_url or not secret:
             return jsonify({"error": "not_configured",
                             "message": "Set the Apps Script URL + secret in Settings → Google Drive upload first."}), 400

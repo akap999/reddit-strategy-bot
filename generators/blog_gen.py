@@ -67,7 +67,9 @@ _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources fol
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
-_FACT_RESCUE_TRIES = 3          # FU78: broad-search retries to fetch a vendor's MISSING key facts (pricing,
+_FACT_RESCUE_TRIES = 3
+_DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
+                                # "try harder" before the FU138 resolver may drop a starved column          # FU78: broad-search retries to fetch a vendor's MISSING key facts (pricing,
                                 # commercial-use/license) when its own (often JS-rendered) pages don't yield
                                 # them, BEFORE dropping the cell/row
 # FU78: signals that a given KEY comparison fact is actually PRESENT in the fetched text. A vendor page found
@@ -713,6 +715,21 @@ class BlogGenerator:
             parts.append(f"[S{i}] {src}\n{bl['text']}")
         return "\n\n".join(parts)
 
+    # FU138 — the punt ban is on MEANING, not wording: after the literal bans, the model
+    # evaded with fresh phrasing ("Not specified in sourced facts", "data not present"). This
+    # clause-level detector catches the data-unavailable FAMILY; _resolve_table_punts resolves
+    # matches STRUCTURALLY (strip the clause, drop mostly-unsourced columns) instead of playing
+    # phrase whack-a-mole.
+    _PUNT_MEANING_RE = re.compile(
+        r"\bnot\s+(?:specified|disclosed|stated|provided|listed|available|published|detailed|"
+        r"mentioned|documented|confirmed|found)\b|"
+        r"\bno\s+(?:data|information|details?|figures?)\b|"
+        r"\bdata\s+not\s+(?:present|available|found)\b|"
+        r"\binformation\s+not\s+(?:found|available)\b|"
+        r"\bunclear\s+from\b|\bunknown\b|\bn/?a\b|\btbd\b|"
+        r"\bnot\s+publicly\s+documented\b|\bvaries?\s+by\s+plan\b",
+        re.IGNORECASE)
+
     _PUNT_CELL_RE = re.compile(
         r"^\s*(?:verify\b|check\b|consult\b|confirm\b|refer\s+to\b|visit\b|"
         # FU78: "See <site>/pricing/terms/license …" punt (covers pricing AND commercial-use/license cells)
@@ -723,6 +740,10 @@ class BlogGenerator:
         r"[^.\n]*\b(?:(?:always\s+|be\s+sure\s+to\s+|please\s+)?(?:verify|confirm|check)\b[^.\n]*"
         r"\bbefore\s+(?:publishing|monetiz|you\s+publish)|always\s+verify|varies?\s+by\s+plan|"
         r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented|"
+        # FU138: the "not specified/disclosed in (the) sourced/available facts/sources" prose family
+        r"not\s+(?:specified|disclosed|stated|provided|confirmed)\s+in\s+(?:the\s+)?"
+        r"(?:sourced|available|cited|provided)\s+(?:facts|sources|evidence|information|data)|"
+        r"data\s+not\s+(?:present|available)|"
         # FU78: "See/refer to/visit/check <site> for (current) pricing / plans / terms / license / commercial"
         r"(?:see|refer\s+to|visit|check)\s+[^.\n]*?\bfor\b[^.\n]*?(?:pricing|prices?|plans?|current\s+plan|terms|licen[sc]e|commercial\s+use)|"
         r"(?:see|visit|check)\s+(?:the\s+)?[^.\n]*?(?:pricing|plans?|terms|licen[sc]e)\s+page)\b[^.\n]*\.",
@@ -746,6 +767,72 @@ class BlogGenerator:
         r"row(?:'?s)?\s+(?:is|are)\s+removed|removed\s+per\s+sourcing|not\s+a\s+direct\s+comparison\s+row|"
         r"addressed\s+in\s+the\s+.{0,40}?section\b.{0,30}?rather\s+than",
         re.IGNORECASE)
+
+    def _resolve_table_punts(self, body):
+        """FU138 — STRUCTURAL resolution of data-unavailable table cells, in any phrasing:
+        1. per cell, strip punt CLAUSES (";"/" — " separated) and keep any real remainder
+           ("Not specified in sourced facts; billed separately [S7]" → "billed separately [S7]");
+        2. DROP a whole column (never the first/name column, never a Source column) when the
+           punt leaves >50% of its data cells empty — a dimension nobody documents doesn't
+           belong in the comparison (the FU49 rule, now enforced in code);
+        3. any isolated leftover empty cell → "—", counted into self._table_punt_note so the
+           operator sees a toast warning instead of a silently thin table."""
+        if not body:
+            return body
+        self._table_punt_note = ""
+        lines = body.split("\n")
+        # locate contiguous table blocks
+        out, i, dropped_cols, leftover = [], 0, 0, 0
+        while i < len(lines):
+            if not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
+                out.append(lines[i]); i += 1
+                continue
+            tbl = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].count("|") >= 2:
+                tbl.append(lines[i]); i += 1
+            rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in tbl]
+            if len(rows) < 3:
+                out.extend(tbl); continue
+            header, sep, data = rows[0], rows[1], rows[2:]
+            ncols = len(header)
+            # 1. strip punt clauses per data cell
+            for r in data:
+                for ci in range(1, min(len(r), ncols)):
+                    parts = re.split(r"\s*(?:;|—|--)\s*", r[ci])
+                    kept = [p for p in parts if p and not self._PUNT_MEANING_RE.search(p)
+                            and not self._PUNT_CELL_RE.match(p)]
+                    r[ci] = "; ".join(kept).strip(" ;")
+            # 2. drop mostly-empty columns (skip col 0 and any Source column)
+            drop = set()
+            for ci in range(1, ncols):
+                if re.search(r"source", header[ci], re.I):
+                    continue
+                vals = [r[ci] if ci < len(r) else "" for r in data]
+                empty = sum(1 for v in vals if not v.strip() or v.strip() in ("—", "-"))
+                if data and empty > len(data) / 2:
+                    drop.add(ci)
+            if drop:
+                dropped_cols += len(drop)
+                header = [c for ci, c in enumerate(header) if ci not in drop]
+                sep = [c for ci, c in enumerate(sep) if ci not in drop]
+                data = [[c for ci, c in enumerate(r) if ci not in drop] for r in data]
+            # 3. leftover empties → "—" + count
+            for r in data:
+                for ci in range(1, len(r)):
+                    if not r[ci].strip():
+                        r[ci] = "—"; leftover += 1
+            for row in [header, sep] + data:
+                out.append("| " + " | ".join(row) + " |")
+        if dropped_cols or leftover:
+            bits = []
+            if dropped_cols:
+                bits.append(f"dropped {dropped_cols} unsourced column(s)")
+            if leftover:
+                bits.append(f"{leftover} cell(s) still unsourced")
+            self._table_punt_note = ("comparison table: " + ", ".join(bits)
+                                     + " — provide sources or regenerate")
+            print(f"[blog_gen] table-punts: {self._table_punt_note}", flush=True)
+        return "\n".join(out)
 
     def _scrub_punts(self, body):
         """FU47 guarantee: never SHIP a reader-directed 'go verify it yourself' cop-out (the fallback
@@ -852,7 +939,8 @@ class BlogGenerator:
         what guarantees every cited source — brand site, competitor site, Reddit, third-party —
         appears with the right URL and no numbering gaps. No-op when there's no evidence or
         nothing was cited."""
-        body = self._scrub_punts(body or "")   # FU47: kill reader-directed punts on every path
+        body = self._resolve_table_punts(body or "")   # FU138: structural table punt resolution
+        body = self._scrub_punts(body)         # FU47: kill reader-directed punts on every path
         body = self._scrub_meta(body)          # FU55: drop leaked edit-narration (broken table rows/notes)
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not body or not blocks:
@@ -1112,6 +1200,11 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
     or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
     be framed as authoritative/official.
+  - THE PUNT BAN IS ON MEANING, NOT WORDING: any cell, clause or sentence whose meaning is "this
+    data is not available/specified/disclosed/found" is a punt IN ANY PHRASING ("Not specified in
+    sourced facts", "data not present", "no data", …). The resolution is STRUCTURAL, never verbal:
+    state the sourced value, or drop the COLUMN (most options lack the data) or the ROW (one option
+    lacks everything). Re-wording a data-unavailable phrase is still a violation.
   - NEVER PUNT TO THE READER. Do NOT write "verify on X's site", "check their site", "consult the
     terms", "varies by plan — always verify", "always verify … before publishing", "not publicly
     documented", or ANY go-check-it-yourself instruction — that is a cop-out, not content, and it
@@ -1785,6 +1878,58 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
+        # FU139 — DIMENSION RESCUE ("try harder", user directive): the FU78 rescue covers only
+        # price/license; every OTHER extracted comparison dimension (eligibility, delivery,
+        # audience focus, …) had no targeted retry, so its cells starved and FU138's resolver
+        # dropped the column. Before accepting any gap: for each (tool × dimension) pair with NO
+        # signal in the gathered facts, run ONE targeted search — bounded by _DIM_RESCUE_BUDGET,
+        # prioritized by the dimensions closest to a column-drop (most tools missing), every
+        # attempt logged. Only results that actually NAME the tool are kept (anti-drift).
+        def _dim_words(d):
+            return [w for w in re.findall(r"[a-z0-9]{3,}", (d or "").lower())
+                    if w not in ("the", "and", "for", "with", "per", "key")]
+
+        tool_texts = {}
+        for f in fresh:
+            lbl = str(f.get("label") or "")
+            for t in tools:
+                if t.lower() in lbl.lower():
+                    tool_texts[t] = tool_texts.get(t, "") + " " + str(f.get("text") or "").lower()
+
+        _pairs = []
+        for d in dims:
+            ws = _dim_words(d)
+            if not ws:
+                continue
+            miss = [t for t in tools if not any(w in tool_texts.get(t, "") for w in ws)]
+            for t in miss:
+                _pairs.append((len(miss), d, t))
+        _pairs.sort(key=lambda x: -x[0])
+        _budget = _DIM_RESCUE_BUDGET
+        for _mcount, d, t in _pairs:
+            if _budget <= 0:
+                print(f"[blog_gen] dim-rescue: budget exhausted with "
+                      f"{len(_pairs) - _DIM_RESCUE_BUDGET} pair(s) left", flush=True)
+                break
+            _budget -= 1
+            try:
+                rs = self.claude.search_sources(
+                    f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
+                    f"reputable source (not a hit-piece or 'brands to avoid' roundup)",
+                    max_searches=1)
+            except Exception:
+                rs = []
+            kept = 0
+            for s in (rs or []):
+                u = (s.get("url") or "").strip()
+                fct = (s.get("fact") or s.get("title") or "").strip()
+                blob = (fct + " " + str(s.get("title") or "")).lower()
+                if u and fct and t.lower().split()[0] in blob and not _is_hit_piece(s):
+                    fresh.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                    tool_texts[t] = tool_texts.get(t, "") + " " + fct.lower()
+                    kept += 1
+            print(f"[blog_gen] dim-rescue: {t} × '{d}' → {kept} kept", flush=True)
+
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
         blocked = set()
@@ -1954,6 +2099,9 @@ COMPLETE and every stated fact is sourced:
   - Do NOT reduce the number of comparison dimensions/columns — KEEP them all, and add a dimension if the
     facts support a useful one.
   - CORRECT any value the fresh facts contradict; CONFIRM supported ones (add the [S#]).
+  - THE PUNT BAN IS ON MEANING, NOT WORDING: any phrasing meaning "this data is not available /
+    specified / disclosed" ("Not specified in sourced facts", "data not present", …) is a punt.
+    Resolve STRUCTURALLY — sourced value, or drop the column/row — never with a filler phrase.
   - NEVER leave "—", "N/A", blank, or ANY punt in a cell OR in prose — no "verify / confirm / check … before
     publishing", no "depends on the plan / varies by plan" hedge, no "verify on their site" pointer. State
     the ACTUAL value(s), including plan-by-plan where they differ (from the FRESH FACTS). If a specific
@@ -2716,6 +2864,10 @@ Return JSON only:
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pn] if x)
+        _tpn = getattr(self, "_table_punt_note", "")
+        if _tpn:  # FU138: unsourced-table resolution outcome
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _tpn] if x)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""

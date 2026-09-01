@@ -2650,6 +2650,100 @@ def _inline_image_data_uri(url, timeout=6, max_bytes=1_200_000):
         return ""
 
 
+def _render_blog_doc_page(blog, brand, body, page_title, desc, published, updated,
+                          jsonld_str, slug, fmt):
+    """FU131/FU137 — the shared html/gdoc page renderer: full byline + dates + content.
+    fmt='html' embeds JSON-LD and downloads as .html; fmt='gdoc' omits the schema and
+    serves a Word-compatible .doc (Drive converts it to a Google Doc). Returns a Response;
+    the Drive-upload endpoint (FU137) reads .data off it."""
+    import html as _html
+    try:
+        import markdown as _md
+        inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(body))),
+                             extensions=["tables", "fenced_code"])
+    except Exception:
+        inner = "<pre>" + _html.escape(body) + "</pre>"
+    # Open source/citation links in a new tab (the only <a> tags are the linkified URLs).
+    inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
+    # Visible byline — a per-blog value overrides the brand byline; falls back to the brand's.
+    def _bp(field):
+        return ((blog.get(field) or (brand.get(field) if brand else "")) or "").strip()
+    brand_name = (brand.get("name") if brand else "") or ""
+    # Logo (per-blog image_url else brand logo_url), upgraded to https to avoid mixed content.
+    logo = (blog.get("image_url") or "").strip() or ((brand.get("logo_url") or "").strip() if brand else "")
+    if logo.startswith("http://"):
+        logo = "https://" + logo[len("http://"):]
+    byline_bits = []
+    au = _bp("author_name")
+    if au:
+        at = _bp("author_title")
+        byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
+    else:
+        # ALWAYS show a complete byline. When no real author was found/set (e.g. the site
+        # names no person), fall back to a truthful, role-bearing team attribution — the brand
+        # published it — rather than fabricating a fake human. Override per-brand/per-blog.
+        byline_bits.append("By the " + _html.escape(brand_name or "Editorial") + " Editorial Team")
+    rv = _bp("reviewer_name")
+    if rv:
+        rt = _bp("reviewer_title")
+        # FU133: on a medical YMYL page a named clinical reviewer is the E-E-A-T signal —
+        # label it the way readers and engines expect.
+        _rvverb = ("Medically reviewed by" if (blog.get("ymyl") or "") == "medical"
+                   else "Reviewed by")
+        byline_bits.append(f"{_rvverb} " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
+    meta_byline = " · ".join(byline_bits)
+    # Disclosure: the supplied one (per-blog — now generated adaptively at gen time, FU84 — else
+    # the brand's), else a FACTUALLY-SAFE fallback: "sells the products discussed" was wrong for
+    # broker/comparison brands (e.g. Outsail IS one of the platforms compared), so the fallback is
+    # comparison-aware and never claims a business model.
+    disclosure = _bp("disclosure")
+    if not disclosure and brand_name:
+        from generators.blog_gen import _brand_in_comparison
+        disclosure = (f"This guide is published by {brand_name}, which is one of the options "
+                      f"compared in this guide." if _brand_in_comparison(body, brand_name)
+                      else f"This guide is published by {brand_name}.")
+    dline = []
+    if published:
+        dline.append("Published: " + published)
+    if updated and updated != published:
+        dline.append("Updated: " + updated)
+    header = ""
+    if logo:
+        # Inline the logo (base64) so it renders in mobile file/email viewers that block remote
+        # images; fall back to the remote URL if the fetch fails or it's too large.
+        logo_src = _inline_image_data_uri(logo) or logo
+        header += (f'<p class="logo"><img src="{_html.escape(logo_src)}" '
+                   f'alt="{_html.escape(brand_name)} logo"></p>\n')
+    if meta_byline:
+        header += f'<p class="byline">{meta_byline}</p>\n'
+    if disclosure:
+        header += f'<p class="byline"><em>{_html.escape(disclosure)}</em></p>\n'
+    if dline:
+        header += f'<p class="dates">{" · ".join(dline)}</p>\n'
+    css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+           "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+           "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
+           "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
+           ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}"
+           ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
+    head = (f'<meta charset="utf-8">\n'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+            f'<title>{_html.escape(page_title)}</title>\n'
+            + (f'<meta name="description" content="{_html.escape(desc)}">\n' if desc else "")
+            + (f'<meta name="author" content="{_html.escape(meta_byline)}">\n' if meta_byline else "")
+            + f'<style>{css}</style>\n'
+            + (f'<script type="application/ld+json">\n{jsonld_str}\n</script>' if fmt == "html" else ""))
+    page = (f'<!doctype html>\n<html lang="en"><head>\n{head}\n</head>\n<body>\n'
+            f'{header}{inner}\n</body></html>\n')
+    if fmt == "gdoc":
+        resp = Response(page, mimetype="application/vnd.ms-word")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.doc"'
+        return resp
+    resp = Response(page, mimetype="text/html")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.html"'
+    return resp
+
+
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
     """Export the website article:
@@ -2853,91 +2947,8 @@ def api_blog_export(blog_id):
     # tables and source links survive); Word opens it directly too. Differences from html:
     # no JSON-LD script (schema markup is meaningless inside a document) + Word content type.
     if fmt in ("html", "gdoc"):
-        try:
-            import markdown as _md
-            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(body))),
-                                 extensions=["tables", "fenced_code"])
-        except Exception:
-            inner = "<pre>" + _html.escape(body) + "</pre>"
-        # Open source/citation links in a new tab (the only <a> tags are the linkified URLs).
-        inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
-        # Visible byline — a per-blog value overrides the brand byline; falls back to the brand's.
-        def _bp(field):
-            return ((blog.get(field) or (brand.get(field) if brand else "")) or "").strip()
-        brand_name = (brand.get("name") if brand else "") or ""
-        # Logo (per-blog image_url else brand logo_url), upgraded to https to avoid mixed content.
-        logo = (blog.get("image_url") or "").strip() or ((brand.get("logo_url") or "").strip() if brand else "")
-        if logo.startswith("http://"):
-            logo = "https://" + logo[len("http://"):]
-        byline_bits = []
-        au = _bp("author_name")
-        if au:
-            at = _bp("author_title")
-            byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
-        else:
-            # ALWAYS show a complete byline. When no real author was found/set (e.g. the site
-            # names no person), fall back to a truthful, role-bearing team attribution — the brand
-            # published it — rather than fabricating a fake human. Override per-brand/per-blog.
-            byline_bits.append("By the " + _html.escape(brand_name or "Editorial") + " Editorial Team")
-        rv = _bp("reviewer_name")
-        if rv:
-            rt = _bp("reviewer_title")
-            # FU133: on a medical YMYL page a named clinical reviewer is the E-E-A-T signal —
-            # label it the way readers and engines expect.
-            _rvverb = ("Medically reviewed by" if (blog.get("ymyl") or "") == "medical"
-                       else "Reviewed by")
-            byline_bits.append(f"{_rvverb} " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
-        meta_byline = " · ".join(byline_bits)
-        # Disclosure: the supplied one (per-blog — now generated adaptively at gen time, FU84 — else
-        # the brand's), else a FACTUALLY-SAFE fallback: "sells the products discussed" was wrong for
-        # broker/comparison brands (e.g. Outsail IS one of the platforms compared), so the fallback is
-        # comparison-aware and never claims a business model.
-        disclosure = _bp("disclosure")
-        if not disclosure and brand_name:
-            from generators.blog_gen import _brand_in_comparison
-            disclosure = (f"This guide is published by {brand_name}, which is one of the options "
-                          f"compared in this guide." if _brand_in_comparison(body, brand_name)
-                          else f"This guide is published by {brand_name}.")
-        dline = []
-        if published:
-            dline.append("Published: " + published)
-        if updated and updated != published:
-            dline.append("Updated: " + updated)
-        header = ""
-        if logo:
-            # Inline the logo (base64) so it renders in mobile file/email viewers that block remote
-            # images; fall back to the remote URL if the fetch fails or it's too large.
-            logo_src = _inline_image_data_uri(logo) or logo
-            header += (f'<p class="logo"><img src="{_html.escape(logo_src)}" '
-                       f'alt="{_html.escape(brand_name)} logo"></p>\n')
-        if meta_byline:
-            header += f'<p class="byline">{meta_byline}</p>\n'
-        if disclosure:
-            header += f'<p class="byline"><em>{_html.escape(disclosure)}</em></p>\n'
-        if dline:
-            header += f'<p class="dates">{" · ".join(dline)}</p>\n'
-        css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
-               "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
-               "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
-               "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
-               ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}"
-               ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
-        head = (f'<meta charset="utf-8">\n'
-                f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-                f'<title>{_html.escape(page_title)}</title>\n'
-                + (f'<meta name="description" content="{_html.escape(desc)}">\n' if desc else "")
-                + (f'<meta name="author" content="{_html.escape(meta_byline)}">\n' if meta_byline else "")
-                + f'<style>{css}</style>\n'
-                + (f'<script type="application/ld+json">\n{jsonld_str}\n</script>' if fmt == "html" else ""))
-        page = (f'<!doctype html>\n<html lang="en"><head>\n{head}\n</head>\n<body>\n'
-                f'{header}{inner}\n</body></html>\n')
-        if fmt == "gdoc":
-            resp = Response(page, mimetype="application/vnd.ms-word")
-            resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.doc"'
-            return resp
-        resp = Response(page, mimetype="text/html")
-        resp.headers["Content-Disposition"] = f'attachment; filename="{slug}.html"'
-        return resp
+        return _render_blog_doc_page(blog, brand, body, page_title, desc, published,
+                                     updated, jsonld_str, slug, fmt)
 
     md_out = (f"*Last updated: {updated}*\n\n{body}") if updated else body
     return Response(md_out, mimetype="text/markdown")
@@ -4074,7 +4085,7 @@ def api_global_all_comments():
         db.close()
 
 
-def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
+def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detect_dead=True):
     """Shared live-check logic for a batch of comments.
     Each item must have: id, reddit_comment_url, source ('comment' or 'search_comment').
 
@@ -4152,6 +4163,13 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
                   f"#{item['id']} ({src}): {e}", flush=True)
 
     def _mark_dead(item, posted_at_hint=None):
+        # FU136: stats-only runs (the post-report auto-stats fetch) may NEVER dead-mark —
+        # the operator just deployed/reported these while looking at them live, and fresh
+        # comments lag out of Reddit's feeds. Restores/stat updates still run.
+        if not detect_dead:
+            print(f"[{log_prefix}] detect_dead OFF — #{item['id']} left unchanged (stats-only run)",
+                  flush=True)
+            return False
         """Flip a comment to 'removed' or 'replace' via the 14-day
         chooser. `posted_at_hint` is the Reddit-side publish timestamp
         ("YYYY-MM-DD HH:MM:SS" UTC) extracted from the JSON we already
@@ -4482,14 +4500,23 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None):
             _time.sleep(1)
             continue
         elif rss_verdict == "absent":
-            # FU75 (Option A): 'absent' = the comment's OWN permalink feed WORKED (>=1 entry) but omits the
-            # comment → a confirmed removal, for reported/replaced deliverables too. A throttled proxy → None
-            # (block) and an empty/broken feed → None (FU75), so this only fires on a genuine FRESH omission
-            # (fresh because the worker no longer caches liveness reads — FU75 Change 5). Supersedes the FU43
-            # weak-absent guard, which left genuinely-dead deliverables stuck when the JSON fallback 403'd.
-            print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — id absent from working feed)", flush=True)
-            if _mark_dead(item):
-                dead += 1
+            # FU136 (supersedes FU75 Option A — user rule: NO status change without POSITIVE
+            # confirmation): 'absent' is a WEAK signal after all — a freshly-posted comment can
+            # lag out of its own permalink feed for a while, and Reddit's wall degrades feeds.
+            # Confirm via the residential old.reddit HTML page: a rendered [removed]/[deleted]
+            # body flips it dead, a rendered live block restores/keeps it live, and anything
+            # unverifiable leaves the status UNCHANGED.
+            html_v = _comment_liveness_via_old_html(clean_url)
+            if html_v == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (absent from feed + "
+                      f"old.reddit HTML shows [removed]/[deleted])", flush=True)
+                if _mark_dead(item):
+                    dead += 1
+            elif html_v == "live":
+                _resolve_live_or_orphaned(item, clean_url, "old.reddit HTML (feed lagged)")
+            else:
+                print(f"[{log_prefix}] #{item['id']} ({src}) absent from feed but UNVERIFIED "
+                      f"via old.reddit HTML — left unchanged", flush=True)
             handled_ids.add(item["id"])
             _emit_progress()
             _time.sleep(1)
@@ -4886,6 +4913,87 @@ def api_ls_purge():
     db = get_db()
     try:
         return jsonify(db.purge_untouched_search_posts(month, dry_run=False))
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/gdoc-upload", methods=["GET"])
+def api_gdoc_upload_get():
+    """FU137 — config for one-click blog uploads to Google Drive via the operator's own
+    Apps Script bridge (no OAuth changes; the script runs under the operator's account)."""
+    db = get_db()
+    try:
+        return jsonify({
+            "script_url": db.meta_get("gdoc_script_url") or "",
+            "folder_id": db.meta_get("gdoc_folder_id") or "",
+            "secret_set": bool(db.meta_get("gdoc_secret")),
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/gdoc-upload", methods=["POST"])
+def api_gdoc_upload_set():
+    data = request.get_json() or {}
+    db = get_db()
+    try:
+        if "script_url" in data:
+            db.meta_set("gdoc_script_url", (data.get("script_url") or "").strip())
+        if "folder_id" in data:
+            db.meta_set("gdoc_folder_id", (data.get("folder_id") or "").strip())
+        if (data.get("secret") or "").strip():
+            db.meta_set("gdoc_secret", data["secret"].strip())
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/blogs/<int:blog_id>/upload-gdoc", methods=["POST"])
+def api_blog_upload_gdoc(blog_id):
+    """FU137 — one-click: render the blog's document HTML and POST it to the operator's
+    Apps Script web app, which creates a real, editable GOOGLE DOC in the configured Drive
+    folder (Drive converts the HTML) and returns its URL. The script authenticates with a
+    shared secret. Optional body {folder_id} overrides the default folder per upload."""
+    import html as _html
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    try:
+        script_url = (db.meta_get("gdoc_script_url") or "").strip()
+        secret = (db.meta_get("gdoc_secret") or "").strip()
+        folder_id = (data.get("folder_id") or "").strip() or (db.meta_get("gdoc_folder_id") or "").strip()
+        if not script_url or not secret:
+            return jsonify({"error": "not_configured",
+                            "message": "Set the Apps Script URL + secret in Settings → Google Drive upload first."}), 400
+        blog = db.get_blog(blog_id)
+        brand = db.get_brand(blog.get("brand_id")) if blog else None
+        if not blog:
+            return jsonify({"error": "blog not found"}), 404
+        body = blog.get("body_markdown") or ""
+        title = blog.get("title") or "blog"
+        page_title = (blog.get("meta_title") or "").strip() or title
+        desc = blog.get("meta_description") or ""
+        published = (blog.get("created_at") or "")[:10]
+        updated = (blog.get("updated_at") or "")[:10]
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:80] or "blog"
+        resp = _render_blog_doc_page(blog, brand, body, page_title, desc, published, updated,
+                                     jsonld_str="", slug=slug, fmt="gdoc")
+        page_html = resp.get_data(as_text=True)
+        import requests as _rq
+        try:
+            r = _rq.post(script_url, json={"secret": secret, "title": title,
+                                           "folder_id": folder_id, "html": page_html},
+                         timeout=90)
+        except Exception as e:
+            return jsonify({"error": f"upload failed: {e}"}), 502
+        try:
+            out = r.json()
+        except Exception:
+            return jsonify({"error": f"script returned non-JSON (HTTP {r.status_code}): "
+                                     f"{(r.text or '')[:200]}"}), 502
+        if not out.get("ok") or not out.get("url"):
+            return jsonify({"error": out.get("error") or "script did not return a doc URL"}), 502
+        print(f"[gdoc-upload] blog {blog_id} → {out['url']}", flush=True)
+        return jsonify({"ok": True, "doc_url": out["url"]})
     finally:
         db.close()
 
@@ -11430,10 +11538,13 @@ def _fetch_report_items(db, ids):
 
 def _spawn_report_engagement_fetch(items):
     """Fire-and-forget background fetch of Reddit engagement (upvotes,
-    num_replies) for newly-reported comments. Reuses `_check_live_batch`
-    so we also benefit from its dead-comment detection — a comment that
-    was paid yesterday and is gone today will land in 'removed' status
-    instead of staying 'live' on the dashboard with stale numbers.
+    num_replies) for newly-reported comments.
+
+    FU136: STATS-ONLY — dead-detection is OFF here. It used to reuse the batch's
+    dead-marking, which flipped freshly-reported comments to 'replace' seconds after the
+    operator reported them (fresh comments lag out of their own permalink feeds, and the
+    Reddit wall degrades reads). A report action must never undo itself; removals are
+    detected by the real Check Live runs, with positive confirmation only.
 
     Empty `items` is a no-op. We start the task lazily so the parent
     request returns immediately.
@@ -11445,7 +11556,8 @@ def _spawn_report_engagement_fetch(items):
         bg = Database(DB_PATH)
         bg.connect(); bg.initialize()
         try:
-            return _check_live_batch(items, bg, log_prefix="REPORT-AUTO-STATS")
+            return _check_live_batch(items, bg, log_prefix="REPORT-AUTO-STATS",
+                                     detect_dead=False)   # FU136: stats only — never dead-mark
         finally:
             try: bg.close()
             except Exception: pass

@@ -12126,9 +12126,69 @@ function renderSettings(c) {
                 <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="targetedCheckRun()">▶ Run</button>
             </div>
             <div id="tlc-status-line" class="text-sm text-gray-400"></div>
+        </div>
+        <div class="card p-4 mb-4">
+            <h3 class="font-bold mb-1" style="color:#8ab4ff">Google Drive upload (blogs)</h3>
+            <p class="text-xs text-gray-500 mb-2">One-click "⬆ Drive" on every blog: creates an editable Google Doc directly in your Drive folder via a tiny Apps Script running under YOUR Google account (no OAuth changes here).</p>
+            <details class="mb-3">
+                <summary class="text-xs text-gray-400 cursor-pointer select-none">Setup instructions (one-time, ~15 min)</summary>
+                <ol class="text-xs text-gray-400 mt-2 pl-4" style="list-style:decimal">
+                    <li>Open <a href="https://script.new" target="_blank" class="underline">script.new</a> (signed into the Google account that owns the Drive folder).</li>
+                    <li>Paste the script below, replacing PASTE_THE_SAME_SECRET_HERE with a secret of your choice.</li>
+                    <li>In the left sidebar: <b>Services (+)</b> → add <b>Drive API</b> (v3).</li>
+                    <li><b>Deploy → New deployment → Web app</b> — Execute as: <b>Me</b>; Who has access: <b>Anyone</b>. Authorize when asked, copy the web-app URL.</li>
+                    <li>Paste that URL, your Drive <b>folder ID</b> (the part after /folders/ in the folder's URL), and the same secret below → Save.</li>
+                </ol>
+                <textarea readonly rows="8" class="w-full text-xs mt-2" style="font-family:monospace;background:#1a1a1b;color:#9db2ce;border:1px solid #343536;border-radius:4px;padding:6px" onclick="this.select()">const SECRET = 'PASTE_THE_SAME_SECRET_HERE';
+function doPost(e) {
+  try {
+    const req = JSON.parse(e.postData.contents);
+    if (req.secret !== SECRET) return _json({error: 'bad secret'});
+    const blob = Utilities.newBlob(req.html, 'text/html', (req.title || 'blog') + '.html');
+    const meta = {name: req.title || 'blog', mimeType: 'application/vnd.google-apps.document'};
+    if (req.folder_id) meta.parents = [req.folder_id];
+    const file = Drive.Files.create(meta, blob);
+    return _json({ok: true, url: 'https://docs.google.com/document/d/' + file.id + '/edit'});
+  } catch (err) { return _json({error: String(err)}); }
+}
+function _json(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }</textarea>
+            </details>
+            <div class="grid gap-2 mb-2" style="grid-template-columns:2fr 1fr 1fr">
+                <label class="text-xs text-gray-400">Apps Script web-app URL
+                    <br><input id="gdu-url" placeholder="https://script.google.com/macros/s/…/exec" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <label class="text-xs text-gray-400">Drive folder ID
+                    <br><input id="gdu-folder" placeholder="1AbC…xyz" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <label class="text-xs text-gray-400">Secret <span id="gdu-secret-state" class="text-gray-600"></span>
+                    <br><input id="gdu-secret" type="password" placeholder="leave blank to keep" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="gdocUploadSave()">Save</button>
         </div>`;
     checkLiveCronLoad();
     targetedCheckLoad();
+    gdocUploadLoad();
+}
+
+async function gdocUploadLoad() {
+    try {
+        const c = await api('/api/settings/gdoc-upload');
+        const u = document.getElementById('gdu-url'); if (u) u.value = c.script_url || '';
+        const f = document.getElementById('gdu-folder'); if (f) f.value = c.folder_id || '';
+        const st = document.getElementById('gdu-secret-state');
+        if (st) st.textContent = c.secret_set ? '(set)' : '(not set)';
+    } catch (_) {}
+}
+async function gdocUploadSave() {
+    const body = {
+        script_url: document.getElementById('gdu-url')?.value || '',
+        folder_id: document.getElementById('gdu-folder')?.value || '',
+    };
+    const sec = document.getElementById('gdu-secret')?.value || '';
+    if (sec.trim()) body.secret = sec.trim();
+    try {
+        await api('/api/settings/gdoc-upload', { method: 'POST', body });
+        toast('Drive upload settings saved', 'success');
+        gdocUploadLoad();
+    } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); }
 }
 
 async function targetedCheckLoad() {
@@ -12960,6 +13020,28 @@ function blogGenerate() {
     }, 'Generating blog');
 }
 
+// FU137 — one-click upload: server renders the doc HTML and posts it to the operator's
+// Apps Script bridge, which creates an editable Google Doc in the configured Drive folder.
+async function blogUploadGdoc(id) {
+    toast('Uploading to Google Drive…', 'info');
+    try {
+        const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body: {} });
+        if (res && res.ok && res.doc_url) {
+            persistentToast('✓ Uploaded to Drive — opening the Google Doc…', 'success');
+            window.open(res.doc_url, '_blank');
+        } else {
+            toast('Upload failed: ' + ((res && res.error) || 'unknown'), 'error');
+        }
+    } catch (e) {
+        const msg = (e && e.message) || String(e);
+        if (msg.includes('not_configured') || msg.includes('Settings')) {
+            persistentToast('Drive upload is not configured yet — open Settings → "Google Drive upload" and follow the 3-step setup.', 'error');
+        } else {
+            toast('Upload failed: ' + msg, 'error');
+        }
+    }
+}
+
 async function openBlog(id) {
     let b;
     try { b = await api('/api/blogs/' + id); } catch (e) { return; }
@@ -13128,6 +13210,7 @@ async function openBlog(id) {
             <button class="btn btn-sm btn-secondary" onclick="blogCopy('blog-e-li')">Copy LinkedIn</button>
             <a class="btn btn-sm btn-accent" href="/api/blogs/${id}/export?format=html" target="_blank" title="Publish-ready HTML with Article + FAQPage JSON-LD embedded">⬇ HTML + schema</a>
             <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc" title="Word-compatible .doc — drag it into Google Drive and it opens as an editable Google Doc (headings, tables and links intact)">⬇ Google Doc</a>
+            <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id})" title="FU137: creates an editable Google Doc directly in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
             <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md" target="_blank">Download MD</a>
             <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=jsonld" target="_blank" title="View the Article + FAQPage JSON-LD">JSON-LD</a>
             <span class="flex-1"></span>

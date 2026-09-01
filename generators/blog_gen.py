@@ -69,6 +69,9 @@ _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per art
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
 _FACT_RESCUE_TRIES = 3
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
+_SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
+                                # (its own row previously had no rescue path at all) — separate pool so
+                                # publisher-gap filling never starves the FU139 tool rescues
                                 # "try harder" before the FU138 resolver may drop a starved column          # FU78: broad-search retries to fetch a vendor's MISSING key facts (pricing,
                                 # commercial-use/license) when its own (often JS-rendered) pages don't yield
                                 # them, BEFORE dropping the cell/row
@@ -1287,7 +1290,10 @@ extractable answer), still under 160 chars.
                 "prescription-product page they read as gray-market signals there; keep them in a "
                 "logistics/pricing section. QUICK-ANSWER CITATIONS: every [S#] cited in the "
                 "Quick answer must be an \"official ·\" source or " + name + "'s own page — never "
-                "a review/affiliate/third-party source for the lead claim.\n")
+                "a review/affiliate/third-party source for the lead claim. PRODUCT MATCH: a "
+                "clinical claim about a specific product/drug must cite a source documenting THAT "
+                "product — never a different molecule's/product's label, however closely related; "
+                "in a comparison sentence, cite each side's own source.\n")
         # FU140 — the model's training prior lags the calendar: pages shipped titled "(2025)"
         # in 2026. State the current year explicitly; the deterministic bump in
         # _finalize_article backstops the meta fields.
@@ -1686,14 +1692,30 @@ Return JSON only:
 
         blocks, seen = [], set()
 
-        def _run(tag, brief, allowed=None):
+        def _subj_tokens(s2):
+            # FU142: a subject's distinctive tokens for topical matching (generic filler dropped
+            # so "semaglutide therapy" doesn't match every label via "therapy").
+            return [w for w in re.findall(r"[a-z0-9]{3,}", (s2 or "").lower())
+                    if w not in ("the", "and", "for", "with", "its", "their", "together",
+                                 "combined", "use", "therapy", "treatment", "medication",
+                                 "drug", "drugs", "injection", "tablets", "oral", "weekly")]
+
+        def _names_blk(blk, toks):
+            blob = (str(blk.get("label") or "") + " " + str(blk.get("url") or "") + " "
+                    + str(blk.get("text") or "")).lower()
+            return any(t in blob for t in toks)
+
+        def _run(tag, brief, allowed=None, must_name=None, keep_cap=None):
             try:
                 res = self.claude.search_sources(brief, max_searches=2,
                                                  allowed_domains=(allowed or None))
             except Exception:
                 res = []
+            toks = _subj_tokens(must_name) if must_name else []
             kept = 0
             for s in (res or []):
+                if keep_cap is not None and kept >= keep_cap:
+                    break
                 u = (s.get("url") or "").strip()
                 ttl = (s.get("title") or "").strip()
                 # FU141: dedupe by URL, not domain — two products' labels legitimately live on
@@ -1701,6 +1723,16 @@ Return JSON only:
                 uk = u.rstrip("/").lower()
                 if not u or uk in seen or not _ok(u, ttl):
                     continue
+                # FU142: TOPICAL validation — an official page kept for a specific PRODUCT must
+                # actually NAME that product (title/url/fact). Domain+shape alone let a
+                # semaglutide label pass a tirzepatide search: six wrong-molecule sources once
+                # shipped as "sourced". A rejection counts as a miss so the retry fires.
+                if toks:
+                    blob = (u + " " + ttl + " " + str(s.get("fact") or "")).lower()
+                    if not any(t in blob for t in toks):
+                        print(f"[blog_gen] ymyl-sources {tag}: rejected off-subject "
+                              f"'{(ttl or u)[:60]}'", flush=True)
+                        continue
                 seen.add(uk)
                 blocks.append({"label": f"official · {ttl or u}", "url": u,
                                "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
@@ -1709,33 +1741,56 @@ Return JSON only:
                   flush=True)
             return kept
 
-        # Leg A — regulator documentation / label (domain-pinned first; reformulate on a miss).
-        # FU141: one pinned label search PER product central to the article (a combination page
-        # needs BOTH drug classes' prescribing information, not just the fused topic's). Generic —
-        # the product list is extracted per-article; cap 3 subjects total.
-        subjects = [topic]
+        # Leg A — regulator documentation / label. FU142: leg A searches the PRODUCTS, not the
+        # fused topic — labels exist per molecule/product (the fused-topic search invited
+        # adjacent-product labels in), and each product's results MUST name it (must_name).
+        # Per-subject retry + cap 2: one product's flood can neither suppress another's retry
+        # nor eat every block slot. Falls back to the topic (no must_name — topics are often
+        # abbreviations the label won't contain) only when the extraction found no products.
+        subjects = []
         for p in (products or []):
             p = str(p).strip()
-            if p and p.lower() not in topic.lower() and all(p.lower() != s.lower() for s in subjects):
+            if p and all(p.lower() != s2.lower() for s2 in subjects):
                 subjects.append(p)
-        subjects = subjects[:3]
-        kept_a = 0
+        strict = bool(subjects)
+        subjects = subjects[:3] or [topic]
+        primary = subjects[0]
+        subj_named = {}
         for sub in subjects:
             brief_a = (f"the OFFICIAL regulator documentation for {sub}: prescribing information, "
                        f"label, or official safety/standards page — the regulator's or manufacturer's "
                        f"OWN page, never a blog, review, or news article")
-            kept_a += _run(f"legA/pinned[{sub[:40]}]", brief_a, allowed=(pins or None))
-        if kept_a == 0:
-            brief_a0 = (f"the OFFICIAL regulator documentation for {topic}: prescribing information, "
-                        f"label, or official safety/standards page — the regulator's or manufacturer's "
-                        f"OWN page, never a blog, review, or news article")
-            _run("legA/retry", brief_a0 + f" — topic context: {seed}")
-        # Leg B — the governing clinical/professional guideline (the association's own page).
+            mn = sub if strict else None
+            kept = _run(f"legA/pinned[{sub[:40]}]", brief_a, allowed=(pins or None),
+                        must_name=mn, keep_cap=2)
+            if kept == 0:
+                kept = _run(f"legA/retry[{sub[:40]}]", brief_a + f" — topic context: {seed}",
+                            must_name=mn, keep_cap=2)
+            subj_named[sub] = kept
+        # Leg B — the governing clinical/professional guideline (condition-level, so it may
+        # legitimately not name the molecule → no must_name, but capped at 2).
         brief_b = (f"the current OFFICIAL professional-association guideline or standards document "
                    f"governing {topic} — the association's or standards body's OWN page (e.g. a "
                    f"specialty society's standards of care), NOT a blog or article summarizing it")
-        if _run("legB/guideline", brief_b) == 0:
-            _run("legB/retry", brief_b + f" — topic context: {seed}")
+        if _run("legB/guideline", brief_b, keep_cap=2) == 0:
+            _run("legB/retry", brief_b + f" — topic context: {seed}", keep_cap=2)
+        # FU142 — PRIMARY-product guarantee + non-primary gap note, read by the caller:
+        # officials that never NAME the page's primary product are not sourcing.
+        ptoks = _subj_tokens(primary) if strict else []
+        self._auth_primary_tokens = ptoks
+        self._auth_primary_name = primary if strict else ""
+        self._auth_note = ""
+        if strict:
+            gaps = [s2 for s2 in subjects[1:] if subj_named.get(s2, 0) == 0
+                    and not any(_names_blk(b2, _subj_tokens(s2)) for b2 in blocks)]
+            if gaps:
+                self._auth_note = ("official-source gap: no official source names "
+                                   + ", ".join(f"'{g}'" for g in gaps)
+                                   + " — claims about it lack a matching document")
+                print(f"[blog_gen] ymyl-sources {self._auth_note}", flush=True)
+        # trim to 6, primary-naming blocks first (stable sort keeps each group's order)
+        if ptoks:
+            blocks.sort(key=lambda b2: 0 if _names_blk(b2, ptoks) else 1)
         return blocks[:6]
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
@@ -1750,6 +1805,11 @@ Return JSON only:
         where `unsourced` lists the tools that produced ZERO evidence after ALL tiers+rescue (the FU79
         pause trigger) — or None when there is nothing to source/verify. Never raises."""
         name, _url, _block = self._brand_block(brand)
+        # FU142: reset the authoritative-sourcing stashes so a prior generation on this
+        # instance can't leak a stale gap note / primary check into this one.
+        self._auth_note = ""
+        self._auth_primary_tokens = []
+        self._auth_primary_name = ""
         rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
         rqual = (qualifier or "").strip() or _seed_qualifier(seed)   # FU93: same rule for the qualifier
         body = (article or {}).get("body_markdown") or ""
@@ -1774,7 +1834,8 @@ Return JSON only:
     plan / license term, superlatives) — each with the brand it's about, the dimension, and the value.
   - PRODUCTS: the specific drugs / products / therapies / instruments CENTRAL to the article (the things
     an official label, standard or specification document would exist FOR — e.g. the two drug classes a
-    combination-therapy page discusses). Generic product names, not brand offerings; empty if none.
+    combination-therapy page discusses), ORDERED MOST-CENTRAL FIRST (the product the title/seed is
+    about leads the list). Generic product names, not brand offerings; empty if none.
   - CORE_TOPIC: the article's CENTRAL subject AND the authority that officially documents it — a short
     phrase naming the platform / regulator / standard whose OWN page is the highest-authority source
     (e.g. "TikTok — synthetic-media / AI-content labeling / monetization policy", "FDA guidance on <X>",
@@ -1884,15 +1945,28 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             auth = self._gather_authoritative_sources(brand, seed, core_topic, ymyl,
                                                         products=products)
             fresh.extend(auth)
-            if not any((b.get("label") or "").startswith("official ·") for b in fresh):
+            # FU142: the pause now also fires when officials exist but NONE names the PRIMARY
+            # product — six adjacent-molecule labels must never again count as "sourced".
+            # Checked across ALL official blocks in fresh (the legacy c2 result included).
+            _offs = [b for b in fresh if (b.get("label") or "").startswith("official ·")]
+            _ptoks = getattr(self, "_auth_primary_tokens", None) or []
+            _prim_ok = (not _ptoks) or any(
+                any(t in ((b.get("label") or "") + " " + (b.get("url") or "") + " "
+                          + (b.get("text") or "")).lower() for t in _ptoks)
+                for b in _offs)
+            if not _offs or not _prim_ok:
+                _pname = getattr(self, "_auth_primary_name", "") or core_topic or seed
                 unsourced.append({
-                    "tool": f"official · {core_topic or seed}",
-                    "facts": ["regulator prescribing information / official documentation",
+                    "tool": f"official · {_pname}",
+                    "facts": [f"regulator prescribing information / official documentation "
+                              f"naming {_pname}",
                               "governing clinical or professional guideline"],
                     "ymyl_official": True,
                 })
-                print(f"[blog_gen] ymyl-sources: ZERO validated official sources after all "
-                      f"retries — pause item added", flush=True)
+                _why = ("ZERO validated official sources" if not _offs else
+                        f"no official source NAMES the primary product '{_pname}'")
+                print(f"[blog_gen] ymyl-sources: {_why} after all retries — pause item added",
+                      flush=True)
 
         # (b) SOURCE each named competitor tool from its OWN public pages (vendor domains ALLOWED)
         ctx = f"{cat} {seed}".strip()
@@ -2089,10 +2163,23 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             return [w for w in re.findall(r"[a-z0-9]{3,}", (d or "").lower())
                     if w not in ("the", "and", "for", "with", "per", "key")]
 
+        # FU142 — the SUBJECT joins the rescue: its cells previously had NO rescue path at all
+        # (the FU78/FU139 rescues iterate `tools`, which excludes {name} by design), so the
+        # publisher's own pricing shipped as "—" beside competitors' real numbers — the worst
+        # kind of blank. Subject pairs sort FIRST and its searches prefer its own site.
+        own_dom_s = _dom(brand.get("domain_url") or "")
         tool_texts = {}
+        subj_txt = ""
+        for blk in (getattr(self, "_evidence_blocks", None) or []):
+            lbl0 = str(blk.get("label") or "")
+            bd0 = _dom(blk.get("url"))
+            if lbl0.strip().lower() == name.strip().lower() or (
+                    own_dom_s and bd0 and (bd0 == own_dom_s or bd0.endswith("." + own_dom_s))):
+                subj_txt += " " + str(blk.get("text") or "").lower()
+        tool_texts[name] = subj_txt
         for f in fresh:
             lbl = str(f.get("label") or "")
-            for t in tools:
+            for t in [name] + tools:
                 if t.lower() in lbl.lower():
                     tool_texts[t] = tool_texts.get(t, "") + " " + str(f.get("text") or "").lower()
 
@@ -2101,34 +2188,60 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             ws = _dim_words(d)
             if not ws:
                 continue
-            miss = [t for t in tools if not any(w in tool_texts.get(t, "") for w in ws)]
+            miss = [t for t in [name] + tools
+                    if not any(w in tool_texts.get(t, "") for w in ws)]
             for t in miss:
-                _pairs.append((len(miss), d, t))
-        _pairs.sort(key=lambda x: -x[0])
+                _pairs.append((1 if t == name else 0, len(miss), d, t))
+        _pairs.sort(key=lambda x: (-x[0], -x[1]))
         _budget = _DIM_RESCUE_BUDGET
-        for _mcount, d, t in _pairs:
-            if _budget <= 0:
-                print(f"[blog_gen] dim-rescue: budget exhausted with "
-                      f"{len(_pairs) - _DIM_RESCUE_BUDGET} pair(s) left", flush=True)
-                break
-            _budget -= 1
-            try:
-                rs = self.claude.search_sources(
-                    f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
-                    f"reputable source (not a hit-piece or 'brands to avoid' roundup)",
-                    max_searches=1)
-            except Exception:
-                rs = []
+        _sbudget = _SUBJ_RESCUE_BUDGET
+        _skipped = 0
+        for _is_subj, _mcount, d, t in _pairs:
+            if _is_subj:
+                if _sbudget <= 0:
+                    _skipped += 1
+                    continue
+                _sbudget -= 1
+            else:
+                if _budget <= 0:
+                    _skipped += 1
+                    continue
+                _budget -= 1
+            rs = []
+            _used_fp = False
+            if _is_subj and own_dom_s:
+                # first-party-preferred: the subject's own site is the authoritative place
+                # for its own pricing/terms (broad fallback below if its site yields nothing).
+                _used_fp = True
+                try:
+                    rs = self.claude.search_sources(
+                        f"{t}: {d} — the specific, current value/details from {t}'s own site",
+                        max_searches=1, allowed_domains=[own_dom_s], first_party=True)
+                except Exception:
+                    rs = []
+            if not rs and (not _used_fp or _sbudget > 0):
+                if _used_fp:
+                    _sbudget -= 1   # the broad fallback is a SECOND search — stays ≤ the reserve
+                try:
+                    rs = self.claude.search_sources(
+                        f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
+                        f"reputable source (not a hit-piece or 'brands to avoid' roundup)",
+                        max_searches=1)
+                except Exception:
+                    rs = []
             kept = 0
             for s in (rs or []):
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
-                blob = (fct + " " + str(s.get("title") or "")).lower()
+                blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
                 if u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s):
                     fresh.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
                     tool_texts[t] = tool_texts.get(t, "") + " " + fct.lower()
                     kept += 1
             print(f"[blog_gen] dim-rescue: {t} × '{d}' → {kept} kept", flush=True)
+        if _skipped:
+            print(f"[blog_gen] dim-rescue: budget exhausted with {_skipped} pair(s) left",
+                  flush=True)
 
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
@@ -2279,7 +2392,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
   - EXTRACT ZONE: move logistics perks (free/discreet shipping, discounts) OUT of the Quick answer,
     opening paragraph and meta description — clinical/eligibility substance belongs there.
   - QUICK-ANSWER CITATIONS: every [S#] the Quick answer cites must be an "official ·" source or
-    {name}'s own page — never a "review ·" / "third-party ·" source for the lead claim."""
+    {name}'s own page — never a "review ·" / "third-party ·" source for the lead claim.
+  - PRODUCT MATCH: a clinical claim about a specific product/drug must cite a source documenting
+    THAT product — never a different molecule's/product's label, however closely related. A
+    comparison sentence cites each side's own source; re-cite or generalize any claim currently
+    resting on the wrong product's document."""
 
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
@@ -2366,7 +2483,11 @@ COMPLETE and every stated fact is sourced:
     unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
     offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
     from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
-    value to hold the floor.{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
+    value to hold the floor.
+  - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
+    rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
+    ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
+    invent.{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -3088,6 +3209,10 @@ Return JSON only:
         if _tpn:  # FU138: unsourced-table resolution outcome
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _tpn] if x)
+        _an142 = getattr(self, "_auth_note", "")
+        if _an142:  # FU142: a NON-primary product with no official source naming it
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _an142] if x)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""
@@ -3219,6 +3344,31 @@ Return JSON only:
                 print(f"[blog_gen] {_ccnote}", flush=True)
                 article["geo_warning"] = "; ".join(
                     x for x in [article.get("geo_warning", ""), _ccnote] if x)
+            # FU142 — publisher-blank check: a SUBJECT-row cell that is empty/"—" while the SAME
+            # column carries a real value in ≥1 competitor row is the inverted lopsided column —
+            # the publisher looks like the only party not disclosing. Warn with the column name(s).
+            _subj_rows = [r for r in _data if _nm_re and _nm_re.search(r)]
+            if _subj_rows and _comp_rows:
+                def _cells142(r):
+                    return [re.sub(r"\*+", "", c).strip() for c in r.strip().strip("|").split("|")]
+                _hdr = _cells142(_rows[0])
+                _isblank = lambda v: v in ("", "—", "-", "–")
+                _bad_cols = []
+                for _ci in range(1, len(_hdr)):
+                    _s_blank = any(_ci < len(_cells142(_sr)) and _isblank(_cells142(_sr)[_ci])
+                                   for _sr in _subj_rows)
+                    _c_filled = any(_ci < len(_cells142(_cr)) and not _isblank(_cells142(_cr)[_ci])
+                                    for _cr in _comp_rows)
+                    if _s_blank and _c_filled:
+                        _bad_cols.append(_hdr[_ci] or f"column {_ci + 1}")
+                if _bad_cols:
+                    _pbnote = (f"publisher-blank: {_bname}'s "
+                               + ", ".join(sorted(set(_bad_cols)))
+                               + " cell(s) are empty while competitors show values — provide the "
+                                 "fact or regenerate (a publisher-only blank reads evasive)")
+                    print(f"[blog_gen] {_pbnote}", flush=True)
+                    article["geo_warning"] = "; ".join(
+                        x for x in [article.get("geo_warning", ""), _pbnote] if x)
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.

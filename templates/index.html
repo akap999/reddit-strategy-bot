@@ -12129,7 +12129,7 @@ function renderSettings(c) {
         </div>
         <div class="card p-4 mb-4">
             <h3 class="font-bold mb-1" style="color:#8ab4ff">Google Drive upload (blogs)</h3>
-            <p class="text-xs text-gray-500 mb-2">One-click "⬆ Drive" on every blog: creates an editable Google Doc directly in your Drive folder via a tiny Apps Script running under YOUR Google account (no OAuth changes here).</p>
+            <p class="text-xs text-gray-500 mb-2">One-click "⬆ Drive" on every blog, LinkedIn post &amp; LinkedIn article: creates an editable Google Doc directly in your Drive folder via a tiny Apps Script running under YOUR Google account (no OAuth changes here).</p>
             <details class="mb-3">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Setup instructions (one-time, ~15 min)</summary>
                 <ol class="text-xs text-gray-400 mt-2 pl-4" style="list-style:decimal">
@@ -13022,10 +13022,10 @@ function blogGenerate() {
 
 // FU137 — one-click upload: server renders the doc HTML and posts it to the operator's
 // Apps Script bridge, which creates an editable Google Doc in the configured Drive folder.
-async function blogUploadGdoc(id) {
+async function blogUploadGdoc(id, variant) {
     toast('Uploading to Google Drive…', 'info');
     try {
-        const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body: {} });
+        const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body: { variant: variant || 'blog' } });
         if (res && res.ok && res.doc_url) {
             persistentToast('✓ Uploaded to Drive — opening the Google Doc…', 'success');
             window.open(res.doc_url, '_blank');
@@ -13129,6 +13129,7 @@ async function openBlog(id) {
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li')" title="Copy the post as clean plain text">Copy (plain text)</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post" target="_blank" title="Open the post as plain text ({link} resolved)">Open</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;dl=1" title="Download the post as a .txt file ({link} resolved)">⬇ Download .txt</a>
+                    <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_post')" title="FU143: creates a Google Doc of this LinkedIn post in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
                 </div>
             </div>
             <div class="card p-2" style="background:#141026;border:1px solid #3b0764">
@@ -13147,6 +13148,7 @@ async function openBlog(id) {
                     <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article')" title="Copy as clean plain text — LinkedIn's editor ignores raw Markdown">Copy (plain text)</button>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;dl=1" title="Download the formatted article as an .html file">⬇ Download HTML</a>
+                    <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_article')" title="FU143: creates a Google Doc of this LinkedIn article in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
                 </div>
             </div>
             <div class="card p-2" style="background:#0f1a12;border:1px solid #14532d">

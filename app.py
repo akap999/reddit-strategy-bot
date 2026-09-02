@@ -2744,6 +2744,25 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
     return resp
 
 
+def _simple_doc_html(page_title, md_src):
+    """FU143 — minimal doc page (title + rendered markdown, no byline/schema) for the Drive
+    upload of the LinkedIn surfaces; same render chain as the linkedin export."""
+    import html as _html
+    try:
+        import markdown as _md
+        inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
+                             extensions=["tables", "fenced_code"])
+    except Exception:
+        inner = "<pre>" + _html.escape(md_src) + "</pre>"
+    inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
+    css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+           "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+           "h1,h2,h3{line-height:1.25}")
+    return (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
+            f'<title>{_html.escape(page_title)}</title>\n<style>{css}</style>\n</head>\n'
+            f'<body>\n{inner}\n</body></html>\n')
+
+
 @app.route("/api/blogs/<int:blog_id>/export")
 def api_blog_export(blog_id):
     """Export the website article:
@@ -4980,19 +4999,46 @@ def api_blog_upload_gdoc(blog_id):
         brand = db.get_brand(blog.get("brand_id")) if blog else None
         if not blog:
             return jsonify({"error": "blog not found"}), 404
-        body = blog.get("body_markdown") or ""
         title = blog.get("title") or "blog"
-        page_title = (blog.get("meta_title") or "").strip() or title
-        desc = blog.get("meta_description") or ""
-        published = (blog.get("created_at") or "")[:10]
-        updated = (blog.get("updated_at") or "")[:10]
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:80] or "blog"
-        resp = _render_blog_doc_page(blog, brand, body, page_title, desc, published, updated,
-                                     jsonld_str="", slug=slug, fmt="gdoc")
-        page_html = resp.get_data(as_text=True)
+        # FU143 — the LinkedIn surfaces upload through the same bridge (the Apps Script is
+        # content-agnostic): variant = 'blog' (default) | 'linkedin_article' | 'linkedin_post'.
+        variant = (data.get("variant") or "blog").strip()
+        if variant == "linkedin_article":
+            art_title = (blog.get("linkedin_article_title") or "").strip()
+            art_body = (blog.get("linkedin_article") or "").strip()
+            if not art_body:
+                return jsonify({"error": "no LinkedIn article generated yet — generate it first"}), 400
+            art_body = _sub_link(art_body, _blog_link_target(blog, brand))
+            doc_title = art_title or f"{title} — LinkedIn article"
+            page_html = _simple_doc_html(doc_title,
+                                         (f"# {art_title}\n\n{art_body}") if art_title else art_body)
+        elif variant == "linkedin_post":
+            post_txt = (blog.get("linkedin_text") or "").strip()
+            if not post_txt:
+                return jsonify({"error": "no LinkedIn post generated yet — generate it first"}), 400
+            post_txt = _sub_link(post_txt, _blog_link_target(blog, brand))
+            doc_title = f"{title} — LinkedIn post"
+            # a post is deliberate short plain-text lines — one <p> per line preserves them
+            # exactly (markdown would re-flow the paragraphs and eat the line breaks)
+            paras = "\n".join(f"<p>{_html.escape(l) if l.strip() else '&nbsp;'}</p>"
+                               for l in post_txt.split("\n"))
+            page_html = (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
+                         f'<title>{_html.escape(doc_title)}</title>\n</head>\n<body>\n'
+                         f'{paras}\n</body></html>\n')
+        else:
+            body = blog.get("body_markdown") or ""
+            page_title = (blog.get("meta_title") or "").strip() or title
+            desc = blog.get("meta_description") or ""
+            published = (blog.get("created_at") or "")[:10]
+            updated = (blog.get("updated_at") or "")[:10]
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:80] or "blog"
+            resp = _render_blog_doc_page(blog, brand, body, page_title, desc, published, updated,
+                                         jsonld_str="", slug=slug, fmt="gdoc")
+            page_html = resp.get_data(as_text=True)
+            doc_title = title
         import requests as _rq
         try:
-            r = _rq.post(script_url, json={"secret": secret, "title": title,
+            r = _rq.post(script_url, json={"secret": secret, "title": doc_title,
                                            "folder_id": folder_id, "html": page_html},
                          timeout=90)
         except Exception as e:
@@ -5004,7 +5050,7 @@ def api_blog_upload_gdoc(blog_id):
                                      f"{(r.text or '')[:200]}"}), 502
         if not out.get("ok") or not out.get("url"):
             return jsonify({"error": out.get("error") or "script did not return a doc URL"}), 502
-        print(f"[gdoc-upload] blog {blog_id} → {out['url']}", flush=True)
+        print(f"[gdoc-upload] blog {blog_id} ({variant}) → {out['url']}", flush=True)
         return jsonify({"ok": True, "doc_url": out["url"]})
     finally:
         db.close()

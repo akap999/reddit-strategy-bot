@@ -555,23 +555,39 @@ def _rss_entry_is_removed(entry, ns):
     return author in ("[deleted]", "/u/[deleted]", "u/[deleted]")
 
 
+_OLDHTML_WALL = {"until": 0.0}   # FU144: old.reddit login-wall latch (see below)
+
+
 def _fetch_old_reddit_html(rel_path, timeout=20):
     """FU130: fetch an old.reddit.com page THROUGH THE RESIDENTIAL PROXY and return the
-    Response (or None). This is now the ONE door Reddit still serves for comment reads:
-    www RSS is 403 even from residential IPs, and the worker (datacenter) is 404-walled —
-    but old.reddit serves the full HTML page to residential traffic (probe-verified).
+    Response (or None).
+
+    FU144: Reddit closed this door too — old.reddit now 302s ALL logged-out traffic to
+    /login/?reason=lor2 (probe-verified from both a home IP and the IPRoyal egress), so a
+    "successful" fetch is a 344KB login page that burns metered GB and yields nothing.
+    Detect the login redirect, latch a 6h cooldown (at most one wasted fetch per window,
+    self-healing if Reddit ever reopens), and return None so the caller falls through.
     Residential-only: without REDDIT_HTTP_PROXY this returns None (never a wrong verdict)."""
+    import time as _t
     import requests as _rq
     hp = _reddit_http_proxies()
     if not (hp and hp.get("http")):
         return None
+    if _t.time() < _OLDHTML_WALL["until"]:
+        return None
     try:
-        return _rq.get(f"https://old.reddit.com{rel_path}",
-                       headers={"User-Agent": _BROWSER_UA,
-                                "Accept-Language": "en-US,en;q=0.9"},
-                       timeout=timeout, proxies=hp)
+        r = _rq.get(f"https://old.reddit.com{rel_path}",
+                    headers={"User-Agent": _BROWSER_UA,
+                             "Accept-Language": "en-US,en;q=0.9"},
+                    timeout=timeout, proxies=hp)
     except Exception:
         return None
+    if "/login" in (getattr(r, "url", "") or ""):
+        _OLDHTML_WALL["until"] = _t.time() + 6 * 3600
+        print("[liveness] old.reddit is login-walled (reason=lor2) — leg disabled for 6h",
+              flush=True)
+        return None
+    return r
 
 
 def _comment_liveness_via_old_html(comment_url, timeout=20):
@@ -619,6 +635,112 @@ def _comment_liveness_via_old_html(comment_url, timeout=20):
             if ptext in ("[removed]", "[deleted]"):
                 return "removed"
     return "live"
+
+
+# ---------------------------------------------------------------------------
+# FU144 — Reddit completed the anonymous lockout (staged closure: .json 403 → permalink
+# .rss 403/404 → old.reddit login-wall reason=lor2; www is a JS-only shell; embed and
+# search.rss 403 even from residential — probe-verified from a home IP AND the IPRoyal
+# egress). The ONE working source left is the Arctic-Shift archive: IP-independent,
+# ingests comments within SECONDS of posting, and re-crawls state ~1.5 days later
+# (_meta.retrieved_2nd_on), so removals/edits are captured. Liveness is therefore
+# "state as of the archive's last retrieval": an intact record = live, a captured
+# [removed]/[deleted] shell (or removed_by_category) = STRONG removal, a missing id =
+# weak 'absent' (never a status change).
+# ---------------------------------------------------------------------------
+_ARCTIC_API = "https://arctic-shift.photon-reddit.com/api"
+_ARCTIC_LIVE_COOL = {"until": 0.0}   # short politeness backoff on 429/5xx
+
+
+def _arctic_ids_fetch(kind, ids, timeout=25):
+    """Batch-fetch full records for up to ~75 base36 ids from the Arctic-Shift by-id API.
+    kind ∈ {'comments','posts'}. Returns {id_lower: record} (missing ids simply absent
+    from the map), or None on transport failure / rate-limit. Never raises. NO proxy —
+    the API is IP-independent, so this must never burn metered residential GB."""
+    import time as _t
+    import requests as _rq
+    ids = sorted({str(i).strip().lower() for i in (ids or []) if str(i).strip()})
+    if not ids:
+        return {}
+    if _t.time() < _ARCTIC_LIVE_COOL["until"]:
+        return None
+    try:
+        r = _rq.get(f"{_ARCTIC_API}/{kind}/ids", params={"ids": ",".join(ids)},
+                    timeout=timeout, proxies={"http": None, "https": None},
+                    headers={"User-Agent": _BROWSER_UA})
+        if r.status_code in (429, 503):
+            _ARCTIC_LIVE_COOL["until"] = _t.time() + 60
+            return None
+        if r.status_code != 200:
+            return None
+        data = (r.json() or {}).get("data") or []
+        return {str(rec.get("id") or "").lower(): rec for rec in data if isinstance(rec, dict)}
+    except Exception:
+        return None
+
+
+def _arctic_comment_verdict(rec):
+    """'removed' (STRONG — the archive captured the removal) / 'live' (record intact as of
+    its last retrieval) / None for a missing record (caller decides 'absent')."""
+    if not rec:
+        return None
+    body = (rec.get("body") or "").strip().lower()
+    if body in ("[removed]", "[deleted]") or rec.get("removed_by_category") \
+            or rec.get("mod_removed"):
+        return "removed"
+    if (rec.get("author") or "") in ("[deleted]", "[removed]") and not body:
+        return "removed"
+    return "live"
+
+
+def _arctic_post_verdict(rec):
+    """Post-level analog. A LINK post has an empty selftext — empty is NOT removed;
+    only the explicit shells / removed_by_category count."""
+    if not rec:
+        return None
+    st = (rec.get("selftext") or "").strip().lower()
+    ttl = (rec.get("title") or "").strip().lower()
+    if st in ("[removed]", "[deleted]") or rec.get("removed_by_category") \
+            or ttl == "[removed by reddit]":
+        return "removed"
+    return "live"
+
+
+def _comment_liveness_via_arctic(comment_url, prefetched=None):
+    """FU144 PRIMARY comment-liveness signal. Returns 'live' / 'removed' / 'absent'
+    (id not in the archive — weak, never a status change) / None (API unreachable —
+    with prefetched maps this means the id wasn't prefetched either)."""
+    _purl, cid = _parse_comment_url(comment_url or "")
+    if not cid:
+        return None
+    if prefetched is not None:
+        rec = prefetched.get(cid)
+        return _arctic_comment_verdict(rec) if rec else "absent"
+    m = _arctic_ids_fetch("comments", [cid])
+    if m is None:
+        return None
+    rec = m.get(cid)
+    return _arctic_comment_verdict(rec) if rec else "absent"
+
+
+def _post_id_from_url(u):
+    m = re.search(r"/comments/([a-z0-9]+)", (u or ""), re.IGNORECASE)
+    return m.group(1).lower() if m else ""
+
+
+def _post_liveness_via_arctic(post_url, prefetched=None):
+    """FU144 post-liveness via the archive. Same verdict semantics as the comment fn."""
+    pid = _post_id_from_url(post_url)
+    if not pid:
+        return None
+    if prefetched is not None:
+        rec = prefetched.get(pid)
+        return _arctic_post_verdict(rec) if rec else "absent"
+    m = _arctic_ids_fetch("posts", [pid])
+    if m is None:
+        return None
+    rec = m.get(pid)
+    return _arctic_post_verdict(rec) if rec else "absent"
 
 
 def _comment_liveness_via_rss(comment_url, timeout=15):
@@ -767,6 +889,18 @@ def _fetch_comment_posted_at(comment_url):
     info = classify_reddit_url(url) if url else None
     if not info or not info.get("comment_id"):
         return None, "bad_url"
+    # FU144: the Arctic archive's created_utc is the comment's EXACT publish time — and the
+    # only reliable source now that every anonymous Reddit door is login-walled.
+    _cid144 = (info.get("comment_id") or "").lower()
+    _m144 = _arctic_ids_fetch("comments", [_cid144]) if _cid144 else None
+    _cu = ((_m144 or {}).get(_cid144) or {}).get("created_utc")
+    if _cu:
+        import datetime as _dt144
+        try:
+            return (_dt144.datetime.utcfromtimestamp(int(_cu)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "filled")
+        except (ValueError, TypeError, OSError):
+            pass
     pa = _comment_posted_at_via_rss(url)
     if pa:
         return pa, "filled"
@@ -4284,17 +4418,29 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             else:
                 db.set_search_comment_live_check(item["id"])
 
+    # FU144 — populated by the Arctic prefetch just before the per-item loop; the closures
+    # below read them at call time.
+    _arctic_cmap, _arctic_pmap = {}, {}
+    _arc = {"ok": False}
+
     def _resolve_live_or_orphaned(item, clean_url, via):
         """HQ ('comment' source) ONLY: a comment can be 'live' on its own permalink
         yet sit under a REMOVED post (mod-removed posts keep their comment tree, so
         the comment shell survives) — confirm the parent post before accepting a
         'live' verdict. FU99 (user decision): Live Search MENTIONS ('search_comment')
-        are judged on the COMMENT's own liveness ONLY — no parent-post consideration
-        (also saves one RSS fetch per live mention)."""
+        are judged on the COMMENT's own liveness ONLY — no parent-post consideration.
+        FU144: the parent check reads the Arctic post map first (RSS is login-walled)."""
         nonlocal live, dead
         src = item.get("source", "comment")
         parent = _parse_comment_url(clean_url)[0] if src == "comment" else None
-        if src == "comment" and parent and _post_liveness_via_rss(parent) == "removed":
+        parent_removed = False
+        if src == "comment" and parent:
+            pav = _post_liveness_via_arctic(parent, prefetched=_arctic_pmap) if _arc["ok"] else None
+            if pav == "removed":
+                parent_removed = True
+            elif pav != "live":   # absent/None → legacy RSS fallback (harmless no-op when walled)
+                parent_removed = (_post_liveness_via_rss(parent) == "removed")
+        if parent_removed:
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (parent post gone; comment was {via}-live)", flush=True)
             if _mark_dead(item): dead += 1
         else:
@@ -4373,7 +4519,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 checked += 1
                 if _mark_dead(item):
                     dead += 1
-                handled_ids.add(item["id"])
+                handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
             _time.sleep(0.5)
             continue
@@ -4390,12 +4536,49 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 checked += 1
                 _mark_live(item)
                 live += 1
-                handled_ids.add(item["id"])
+                handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
             # else: not in top-100 feed — could be removed OR just
             # nested/low-ranked. Leave for the per-item permalink check.
 
         _time.sleep(0.5)
+
+    # =====================================================================
+    # FU144 — Arctic prefetch: batch the archive lookups for every unhandled item's
+    # comment id + post id (and each HQ comment's PARENT post id, for the orphan gate)
+    # into a handful of by-id calls, so the per-item loop reads a local map instead of
+    # hammering Reddit's (now fully login-walled) endpoints one URL at a time.
+    # =====================================================================
+    _arc_cids, _arc_pids = [], []
+    for _it in deployed:
+        if (_it.get("source", "comment"), _it["id"]) in handled_ids:
+            continue
+        _u = (_it.get("reddit_comment_url") or "").strip().split("?")[0].rstrip("/")
+        if not _u or "/s/" in _u:
+            continue
+        _pu, _cid0 = _parse_comment_url(_u)
+        if _cid0:
+            _arc_cids.append(_cid0)
+            if _it.get("source", "comment") == "comment" and _pu:
+                _arc_pids.append(_post_id_from_url(_pu))
+        else:
+            _pid0 = _post_id_from_url(_u)
+            if _pid0:
+                _arc_pids.append(_pid0)
+    _arc["ok"] = True
+    for _kind, _idlist, _target in (("comments", _arc_cids, _arctic_cmap),
+                                    ("posts", _arc_pids, _arctic_pmap)):
+        _idlist = sorted({i for i in _idlist if i})
+        for _i in range(0, len(_idlist), 75):
+            _m = _arctic_ids_fetch(_kind, _idlist[_i:_i + 75])
+            if _m is None:
+                _arc["ok"] = False
+                break
+            _target.update(_m)
+        if not _arc["ok"]:
+            break
+    print(f"[{log_prefix}] arctic prefetch: {len(_arctic_cmap)} comment + "
+          f"{len(_arctic_pmap)} post record(s) (ok={_arc['ok']})", flush=True)
 
     # =====================================================================
     # Per-item loop: handles search_comments, /s/ short URLs, singleton
@@ -4404,7 +4587,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     # comment URLs are more likely to trip Reddit's anti-bot defenses.
     # =====================================================================
     for item in deployed:
-        if item["id"] in handled_ids:
+        if (item.get("source", "comment"), item["id"]) in handled_ids:
             continue
         checked += 1
         raw_url = item["reddit_comment_url"]
@@ -4477,6 +4660,21 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         # tree, so this must NOT fall through to the comment path.
         _post_url_only, _cmt_id = _parse_comment_url(clean_url)
         if not _cmt_id:
+            # FU144: the archive first — IP-independent and already prefetched.
+            _apv = _post_liveness_via_arctic(clean_url, prefetched=_arctic_pmap) if _arc["ok"] else None
+            if _apv == "live":
+                print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (post via Arctic archive)", flush=True)
+                _mark_live(item); live += 1
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
+            if _apv == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (post via Arctic archive — "
+                      f"removal captured)", flush=True)
+                if _mark_dead(item): dead += 1
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
             post_verdict = _post_liveness_via_rss(clean_url)
             if post_verdict == "live":
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (post RSS)", flush=True)
@@ -4488,24 +4686,42 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 print(f"[{log_prefix}] #{item['id']} ({src}) post liveness inconclusive", flush=True)
                 errors += 1
                 error_details["http_other"] += 1
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
 
-        # PRIMARY liveness check: comment-permalink RSS. Reddit's JSON
-        # API is auth-gated for cloud IPs (always 403), but the RSS
-        # feed is served — and a comment's permalink RSS includes the
-        # comment when LIVE and omits it when REMOVED. This is the only
-        # working anonymous removal signal. If it's conclusive we act
-        # on it and skip the (doomed) JSON fetch entirely. If it's
-        # inconclusive (None), fall through to the legacy JSON path.
+        # FU144 — PRIMARY liveness check: the Arctic archive (prefetched map, zero Reddit
+        # calls). A captured [removed]/[deleted] shell / removed_by_category is a STRONG
+        # removal; an intact record is live as of the archive's last retrieval (ingest is
+        # seconds after posting, state re-crawled ~1.5 days later); an id missing from the
+        # archive is WEAK — fall through to the legacy chain, which leaves it unchanged
+        # unless something confirms.
+        if _arc["ok"]:
+            _acv = _comment_liveness_via_arctic(clean_url, prefetched=_arctic_cmap)
+            if _acv == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (Arctic archive — "
+                      f"[removed]/[deleted] captured)", flush=True)
+                if _mark_dead(item):
+                    dead += 1
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
+            if _acv == "live":
+                _resolve_live_or_orphaned(item, clean_url, "Arctic archive")
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
+
+        # LEGACY chain (all of Reddit's anonymous doors are login-walled as of FU144 —
+        # these fall through fast and leave the item unchanged unless one confirms):
+        # comment-permalink RSS → old.reddit HTML (cooldown-gated) → PullPush → JSON.
         rss_verdict = _comment_liveness_via_rss(clean_url)
         if rss_verdict == "live":
             # Live on its own permalink — but confirm the parent post isn't removed
             # (a comment under a removed post is dead even though its shell lingers).
             _resolve_live_or_orphaned(item, clean_url, "comment RSS")
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
@@ -4514,7 +4730,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (comment RSS — [removed]/[deleted] shell)", flush=True)
             if _mark_dead(item):
                 dead += 1
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
@@ -4536,7 +4752,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             else:
                 print(f"[{log_prefix}] #{item['id']} ({src}) absent from feed but UNVERIFIED "
                       f"via old.reddit HTML — left unchanged", flush=True)
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
@@ -4545,7 +4761,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         pp_verdict = _comment_liveness_via_pullpush(clean_url)
         if pp_verdict == "live":
             _resolve_live_or_orphaned(item, clean_url, "PullPush archive — RSS unreachable")
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
@@ -4553,7 +4769,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (PullPush archive body [removed]/[deleted])", flush=True)
             if _mark_dead(item):
                 dead += 1
-            handled_ids.add(item["id"])
+            handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)
             continue
@@ -5298,7 +5514,12 @@ def api_check_live_start():
                     if not classified:
                         return 'missing', 'URL did not match Reddit comment/post pattern'
                     if classified.get('kind') == 'comment':
-                        # RSS first — the working anonymous signal.
+                        # FU144: Arctic archive first — the working, IP-independent signal.
+                        a_v = _comment_liveness_via_arctic(resolved)
+                        if a_v == 'live':
+                            return 'live', 'via Arctic archive (record intact)'
+                        if a_v == 'removed':
+                            return 'removed', 'Arctic archive captured a [removed]/[deleted] shell'
                         rss_v = _comment_liveness_via_rss(resolved)
                         if rss_v == 'live':
                             return 'live', 'via comment-permalink RSS'
@@ -8670,6 +8891,7 @@ def api_check_live_debug_comment():
                 }
             except Exception as e:
                 out["methods"][label] = {"url": _redact(rss), "error": f"{type(e).__name__}: {e}"}
+    out["arctic_verdict"] = _comment_liveness_via_arctic(resolved)   # FU144: the working signal
     out["live_verdict"] = _comment_liveness_via_rss(resolved)
     return jsonify(out)
 
@@ -11680,6 +11902,14 @@ def _classify_url_liveness(url):
         if not classified:
             return ("missing", "URL did not match Reddit comment/post pattern")
         if classified.get("kind") == "comment":
+            # FU144 — the Arctic archive is the PRIMARY signal (Reddit's anonymous doors
+            # are all login-walled): intact record = live as of its last retrieval,
+            # captured shell = strong removal, missing id = fall through (weak).
+            a_v = _comment_liveness_via_arctic(resolved)
+            if a_v == "live":
+                return ("live", "via Arctic archive (record intact at last retrieval)")
+            if a_v == "removed":
+                return ("removed", "Arctic archive captured a [removed]/[deleted] shell")
             rss_v = _comment_liveness_via_rss(resolved)
             if rss_v == "live":
                 # FU126: a permalink-RSS "live" can be a SHADOW-REMOVED comment — visible at
@@ -11726,7 +11956,10 @@ def _classify_url_liveness(url):
                 return (classify_liveness(meta), None)
             except Exception as e:
                 return ("error", str(e))
-        # POST url: post RSS first, then post JSON.
+        # POST url: Arctic archive first (FU144), then post RSS, then post JSON.
+        pa_v = _post_liveness_via_arctic(resolved)
+        if pa_v in ("live", "removed"):
+            return (pa_v, f"post via Arctic archive ({pa_v})")
         post_rss = _post_liveness_via_rss(resolved)
         if post_rss in ("live", "removed"):
             return (post_rss, f"post via RSS ({post_rss})")

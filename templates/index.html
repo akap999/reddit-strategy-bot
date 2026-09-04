@@ -12244,17 +12244,32 @@ async function checkLiveCronLoad() {
                 ? ` · ${s.month ? s.month + ' · ' : ''}${s.clients ?? '?'} clients · ${s.checked ?? 0} checked · ${s.live ?? 0} live · ${s.dead ?? 0} dead · ${s.restored ?? 0} restored${s.errors ? ' · ' + s.errors + ' errors' + _errBreakdown : ''}`
                 : '')
             : 'Has not run yet.';
+        // FU149 — OAuth liveness-source health banner: when the userless-OAuth leg is down,
+        // removal detection has silently degraded to Arctic (which misses late removals).
+        const oh = (r.oauth_health || {}).state || (s && s.oauth_state) || '';
+        let ohBanner = '';
+        if (oh && oh !== 'ok' && oh !== 'unknown' && oh !== 'disabled') {
+            const msg = ({
+                token_failed: 'Reddit OAuth client-id was blocked — swap REDDIT_OAUTH_CLIENT_IDS (removal detection degraded to Arctic).',
+                ip_blocked: 'Reddit flagged the server IP for OAuth — removal detection degraded to Arctic; usually self-clears.',
+                unauthorized: 'Reddit OAuth token rejected (401) — swap REDDIT_OAUTH_CLIENT_IDS.',
+                rate_limited: 'Reddit OAuth rate-limited this run — it will resume next window.',
+                error: 'Reddit OAuth /api/info errored — check logs.',
+            })[oh] || ('Reddit OAuth liveness source: ' + oh);
+            const sev = (oh === 'rate_limited') ? '#d9a406' : '#e0245e';
+            ohBanner = `<div style="margin:.3rem 0;padding:.35rem .5rem;border-radius:6px;background:${sev}22;color:${sev};font-size:.8rem">⚠ ${msg}${(r.oauth_health||{}).detail ? ' — ' + (r.oauth_health.detail) : ''}</div>`;
+        }
         if (r.running) {
             const p = r.progress || {};
             const prog = p.total ? ` (${p.checked || 0}/${p.total})` : '';
-            el.innerHTML = `<span style="color:#46d160">● Running now${prog}…</span><br><span class="text-xs text-gray-500">${lastLine}</span>`;
+            el.innerHTML = ohBanner + `<span style="color:#46d160">● Running now${prog}…</span><br><span class="text-xs text-gray-500">${lastLine}</span>`;
             // Attach one poller so the card flips to the final summary on completion.
             if (r.task_id && _clcPollingTask !== r.task_id && typeof _pollTask === 'function') {
                 _clcPollingTask = r.task_id;
                 _pollTask(r.task_id, 'Auto status refresh', () => { _clcPollingTask = null; checkLiveCronLoad(); });
             }
         } else {
-            el.innerHTML = lastLine;
+            el.innerHTML = ohBanner + lastLine;
         }
     } catch (e) { /* surfaced by api() */ }
 }

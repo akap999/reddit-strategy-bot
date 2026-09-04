@@ -314,11 +314,68 @@ def _cron_check_live_task(_task_id=None):
             # Per-category breakdown (forbidden/rate_limited/timeout/...) so the
             # Settings card can show WHY checks errored, not just the total.
             "error_details": res.get("error_details") or {},
+            # FU149: OAuth liveness-source health, so the Settings card can flag when the
+            # userless OAuth leg is down (and we've silently fallen back to Arctic).
+            "oauth_state": _OAUTH_HEALTH["state"], "oauth_detail": _OAUTH_HEALTH["detail"],
         }))
+        _maybe_alert_oauth_health(bg)   # FU149: edge-triggered email on down/recovery
         bg.close()
     except Exception:
         pass
     return res
+
+
+def _maybe_alert_oauth_health(db):
+    """FU149 — notify the operator when the OAuth liveness source changes health, so a blocked
+    client_id / flagged IP doesn't silently degrade removal detection to Arctic-only. Edge-
+    triggered (emails only on a state CHANGE, tracked in meta) so it never spams. Recipient =
+    OAUTH_ALERT_EMAIL, else the first ALLOWED_EMAILS entry; if SMTP isn't configured, _send_email
+    logs it. Never raises."""
+    try:
+        cur = _OAUTH_HEALTH.get("state") or "unknown"
+        if cur in ("unknown", "disabled"):
+            return
+        prev = (db.meta_get("oauth_alert_state") or "").strip()
+        if cur == prev:
+            return
+        db.meta_set("oauth_alert_state", cur)
+        bad = cur in ("token_failed", "ip_blocked", "unauthorized")
+        was_bad = prev in ("token_failed", "ip_blocked", "unauthorized")
+        # Only email on a meaningful transition: healthy→down, or down→recovered.
+        if not (bad or (was_bad and cur == "ok")):
+            return
+        to = (os.environ.get("OAUTH_ALERT_EMAIL") or "").strip()
+        if not to:
+            allowed = (os.environ.get("ALLOWED_EMAILS") or "").strip()
+            to = allowed.split(",")[0].strip() if allowed else ""
+        if bad:
+            subject = "⚠ Reddit liveness (OAuth) is DOWN — action needed"
+            body = (f"The Reddit OAuth liveness source went unhealthy: {cur}\n"
+                    f"Detail: {_OAUTH_HEALTH.get('detail')}\n\n"
+                    f"Removal detection has fallen back to the Arctic archive, which CANNOT see "
+                    f"removals that happen long after a comment is posted — so removed comments "
+                    f"may show as live until this is fixed.\n\n"
+                    f"Fix:\n"
+                    f"  • token_failed → the public app client_id was blocked by Reddit. Set a "
+                    f"fresh one in the REDDIT_OAUTH_CLIENT_IDS env var (comma-separated list; "
+                    f"the app rotates through them). A real Reddit 'script' app "
+                    f"(REDDIT_OAUTH_CLIENT_ID + REDDIT_OAUTH_CLIENT_SECRET) is the durable option.\n"
+                    f"  • ip_blocked → the server IP was flagged. It often clears on its own; if "
+                    f"not, redeploy / change egress, or route OAuth through the residential "
+                    f"proxy.\n")
+        else:
+            subject = "✓ Reddit liveness (OAuth) recovered"
+            body = ("The Reddit OAuth liveness source is healthy again — real-time removal "
+                    "detection is back. No action needed.")
+        if to:
+            _send_email(to, subject, body)
+            print(f"[liveness] oauth-health alert emailed ({prev or 'unknown'} → {cur}) to {to}",
+                  flush=True)
+        else:
+            print(f"[liveness] oauth-health changed {prev or 'unknown'} → {cur} "
+                  f"(no OAUTH_ALERT_EMAIL/ALLOWED_EMAILS to notify): {subject}", flush=True)
+    except Exception as e:
+        print(f"[liveness] oauth-health alert skipped: {e}", flush=True)
 
 
 def _maybe_start_cron_scheduler():
@@ -618,6 +675,22 @@ def _fetch_old_reddit_html(rel_path, timeout=20):
             print("[liveness] old.reddit is login-walled (reason=lor2) — leg disabled for 6h "
                   "(set REDDIT_SESSION_COOKIE to re-enable current-state liveness)", flush=True)
         return None
+    # FU147b: an authenticated request replayed from a server IP that isn't the session's origin
+    # gets Reddit's hard "Blocked" 403 (proven: anon via the same proxy = 200 login page, but
+    # cookie = 403 Blocked — session/IP-mismatch protection). That's not fixable from here, so
+    # latch the leg OFF (don't burn residential GB on doomed fetches) and flag it honestly so the
+    # operator knows the cookie is being IP-blocked, not expired.
+    _blocked = (r.status_code == 403) or ("<title>blocked</title>" in (r.text or "")[:400].lower())
+    if _blocked:
+        if cookie:
+            _COOKIE_STATE["state"] = "blocked"
+            _OLDHTML_WALL["until"] = _t.time() + 60 * 60   # 1h — cookie-from-server is a dead end
+            print("[liveness] REDDIT_SESSION_COOKIE is IP-BLOCKED by Reddit (session/IP mismatch — "
+                  "a cookie can't be replayed from the server). Cookie leg OFF 1h; using Arctic. "
+                  "Real-time removal detection needs Reddit OAuth.", flush=True)
+        return None
+    if r.status_code != 200:
+        return None
     if cookie:
         _COOKIE_STATE["state"] = "ok"
     return r
@@ -668,6 +741,200 @@ def _comment_liveness_via_old_html(comment_url, timeout=20):
             if ptext in ("[removed]", "[deleted]"):
                 return "removed"
     return "live"
+
+
+# ---------------------------------------------------------------------------
+# FU148 — REAL current-state liveness via a "userless" Reddit OAuth token (installed_client
+# grant, impersonating Reddit's own app — no account, no app registration, empty secret; the
+# technique Redlib uses). oauth.reddit.com/api/info?id=t1_… returns each comment's CURRENT
+# state (body=[removed]/[deleted], removed_by_category, banned_by, author=[deleted]), batches
+# 100 ids/call, and works DIRECT from the datacenter IP (no residential proxy → no metered GB).
+# This is the ONLY signal that catches removals happening long after posting — which Arctic (a
+# one-time ~1.5-day-post snapshot) cannot. Live-verified. Rate limit ~100 req/window (headers).
+# Reddit periodically rotates/blocks reverse-engineered app client_ids → the id list is an env
+# var (REDDIT_OAUTH_CLIENT_IDS) so a swap needs no deploy; an optional real script-app secret
+# (REDDIT_OAUTH_CLIENT_SECRET) maximises durability.
+# ---------------------------------------------------------------------------
+_OAUTH = {"token": "", "exp": 0.0, "cid_idx": 0, "device": ""}   # module-cached userless token
+_OAUTH_COOL = {"until": 0.0}   # short backoff on 429/total failure
+# FU149 — OAuth health, for the notifier: 'ok' | 'token_failed' (all client_ids rejected — swap
+# REDDIT_OAUTH_CLIENT_IDS) | 'ip_blocked' (token OK but /api/info 403 — datacenter IP flagged) |
+# 'unauthorized' (persistent 401) | 'rate_limited' (429) | 'disabled' | 'unknown'.
+_OAUTH_HEALTH = {"state": "unknown", "detail": "", "at": 0.0}
+
+
+def _set_oauth_health(state, detail=""):
+    import time as _t
+    _OAUTH_HEALTH.update(state=state, detail=detail, at=_t.time())
+
+
+def _reddit_oauth_client_ids():
+    raw = (os.environ.get("REDDIT_OAUTH_CLIENT_IDS") or "ohXpoqrZYub1kg").strip()
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _reddit_oauth_ua():
+    return (os.environ.get("REDDIT_OAUTH_USER_AGENT")
+            or "android:com.reddit.strategybot.livecheck:v1.0 (by /u/strategybot)").strip()
+
+
+def _reddit_oauth_enabled():
+    return not (os.environ.get("REDDIT_OAUTH_DISABLE") or "").strip()
+
+
+def _reddit_oauth_token(force_refresh=False):
+    """FU148: a cached userless OAuth bearer token (installed_client grant). Refreshes on
+    expiry or when forced (401). Rotates through REDDIT_OAUTH_CLIENT_IDS on failure. Direct
+    (no proxy). Returns "" on total failure — callers then fall back to Arctic."""
+    import time as _t
+    import uuid as _uuid
+    import requests as _rq
+    if not _reddit_oauth_enabled():
+        _set_oauth_health("disabled")
+        return ""
+    if not force_refresh and _OAUTH["token"] and _t.time() < _OAUTH["exp"]:
+        return _OAUTH["token"]
+    if _t.time() < _OAUTH_COOL["until"]:
+        return _OAUTH["token"] or ""   # cooling down after a recent total failure
+    if not _OAUTH["device"]:
+        _OAUTH["device"] = str(_uuid.uuid4())
+    secret = (os.environ.get("REDDIT_OAUTH_CLIENT_SECRET") or "").strip()
+    ids = _reddit_oauth_client_ids()
+    ua = _reddit_oauth_ua()
+    for _n in range(len(ids)):
+        cid = ids[(_OAUTH["cid_idx"] + _n) % len(ids)]
+        try:
+            r = _rq.post("https://www.reddit.com/api/v1/access_token",
+                         auth=(cid, secret),
+                         data={"grant_type": "https://oauth.reddit.com/grants/installed_client",
+                               "device_id": _OAUTH["device"]},
+                         headers={"User-Agent": ua}, timeout=20,
+                         proxies={"http": None, "https": None})
+            if r.status_code == 200:
+                j = r.json()
+                tok = j.get("access_token") or ""
+                if tok:
+                    _OAUTH["token"] = tok
+                    _OAUTH["exp"] = _t.time() + max(int(j.get("expires_in") or 3600) - 120, 300)
+                    _OAUTH["cid_idx"] = (_OAUTH["cid_idx"] + _n) % len(ids)   # stick with the winner
+                    return tok
+            else:
+                print(f"[liveness] oauth token client_id '{cid[:10]}…' → HTTP {r.status_code} "
+                      f"(rotating)", flush=True)
+        except Exception as e:
+            print(f"[liveness] oauth token fetch error ({cid[:10]}…): {e}", flush=True)
+    # every client_id failed → back off briefly so we don't hammer the token endpoint
+    _OAUTH_COOL["until"] = _t.time() + 5 * 60
+    _set_oauth_health("token_failed",
+                      "all client_ids rejected by Reddit — swap REDDIT_OAUTH_CLIENT_IDS")
+    print("[liveness] oauth: all client_ids failed to get a token — falling back to Arctic "
+          "(set/rotate REDDIT_OAUTH_CLIENT_IDS)", flush=True)
+    return ""
+
+
+def _reddit_info_batch(cids):
+    """FU148: batch-fetch CURRENT comment state from oauth.reddit.com/api/info (100 ids/call,
+    direct/no-proxy). Returns {cid_lower: data-dict}; ids Reddit omits (hard-removed / gone /
+    nonexistent) simply won't be in the map → caller treats as 'absent'. Never raises. Returns
+    None when OAuth is unavailable so callers can fall back to Arctic."""
+    import time as _t
+    import requests as _rq
+    cids = sorted({str(c).strip().lower() for c in (cids or []) if str(c).strip()})
+    if not cids:
+        return {}
+    tok = _reddit_oauth_token()
+    if not tok:
+        return None
+    ua = _reddit_oauth_ua()
+    out = {}
+    for i in range(0, len(cids), 100):
+        chunk = cids[i:i + 100]
+        ids_param = ",".join("t1_" + c for c in chunk)
+        tok = _reddit_oauth_token()
+        if not tok:
+            break
+        try:
+            r = _rq.get("https://oauth.reddit.com/api/info", params={"id": ids_param},
+                        headers={"Authorization": "Bearer " + tok, "User-Agent": ua},
+                        timeout=25, proxies={"http": None, "https": None})
+            if r.status_code == 401:                       # token died → refresh once, retry chunk
+                tok = _reddit_oauth_token(force_refresh=True)
+                if not tok:
+                    break
+                r = _rq.get("https://oauth.reddit.com/api/info", params={"id": ids_param},
+                            headers={"Authorization": "Bearer " + tok, "User-Agent": ua},
+                            timeout=25, proxies={"http": None, "https": None})
+            if r.status_code == 429:                       # rate-limited → stop; use what we have
+                _set_oauth_health("rate_limited",
+                                  f"429 (reset {r.headers.get('x-ratelimit-reset')}s)")
+                print(f"[liveness] oauth /api/info 429 — stopping early "
+                      f"(reset {r.headers.get('x-ratelimit-reset')}s)", flush=True)
+                break
+            if r.status_code in (401, 403):                # 401 (after refresh) / 403 = IP flagged
+                _set_oauth_health("ip_blocked" if r.status_code == 403 else "unauthorized",
+                                  f"/api/info HTTP {r.status_code} (datacenter IP flagged or token "
+                                  f"rejected)")
+                print(f"[liveness] oauth /api/info HTTP {r.status_code} — datacenter IP likely "
+                      f"flagged; falling back to Arctic", flush=True)
+                break
+            if r.status_code != 200:
+                _set_oauth_health("error", f"/api/info HTTP {r.status_code}")
+                print(f"[liveness] oauth /api/info HTTP {r.status_code} — stopping", flush=True)
+                break
+            _set_oauth_health("ok")
+            rem = r.headers.get("x-ratelimit-remaining")
+            for ch in ((r.json().get("data") or {}).get("children") or []):
+                d = ch.get("data") or {}
+                cid = str(d.get("id") or "").lower()
+                if cid:
+                    out[cid] = d
+            if rem is not None:
+                try:
+                    if float(rem) < 5:                     # nearly out → pause the rest of the run
+                        print(f"[liveness] oauth /api/info near rate limit ({rem}) — stopping "
+                              f"early", flush=True)
+                        break
+                except (TypeError, ValueError):
+                    pass
+        except Exception as e:
+            print(f"[liveness] oauth /api/info error: {e}", flush=True)
+            break
+    return out
+
+
+def _oauth_comment_verdict(d):
+    """'removed' / 'live' from a live /api/info comment record. Matches the Arctic verdict
+    shape so the same downstream logic applies."""
+    if not d:
+        return None
+    body = (d.get("body") or "").strip().lower()
+    if body in ("[removed]", "[deleted]") or d.get("removed_by_category") or d.get("banned_by"):
+        return "removed"
+    if (d.get("author") or "") in ("[deleted]", "[removed]") and not body:
+        return "removed"
+    return "live"
+
+
+def _comment_current_via_oauth(comment_url_or_cid, prefetched=None):
+    """FU148 PRIMARY: current comment liveness via OAuth /api/info. Accepts a permalink URL or
+    a bare cid. 'live' here is POSITIVE CURRENT confirmation (may restore a dead row). Returns
+    'live'/'removed'/'absent' (id not returned by Reddit — likely hard-removed) / None (OAuth
+    unavailable → caller falls back to Arctic)."""
+    s = (comment_url_or_cid or "").strip()
+    if "/" in s or "reddit.com" in s:
+        _p, cid = _parse_comment_url(s)
+    else:
+        cid = s.lower()
+    if not cid:
+        return None
+    if prefetched is not None:
+        d = prefetched.get(cid)
+        return _oauth_comment_verdict(d) if d else "absent"
+    m = _reddit_info_batch([cid])
+    if m is None:
+        return None
+    d = m.get(cid)
+    return _oauth_comment_verdict(d) if d else "absent"
 
 
 # ---------------------------------------------------------------------------
@@ -937,11 +1204,16 @@ def _fetch_comment_posted_at(comment_url):
     info = classify_reddit_url(url) if url else None
     if not info or not info.get("comment_id"):
         return None, "bad_url"
-    # FU144: the Arctic archive's created_utc is the comment's EXACT publish time — and the
-    # only reliable source now that every anonymous Reddit door is login-walled.
+    # FU148: OAuth /api/info created_utc is the comment's EXACT publish time (current, reliable);
+    # FU144 Arctic created_utc is the fallback. Every anonymous Reddit door is login-walled.
     _cid144 = (info.get("comment_id") or "").lower()
-    _m144 = _arctic_ids_fetch("comments", [_cid144]) if _cid144 else None
-    _cu = ((_m144 or {}).get(_cid144) or {}).get("created_utc")
+    _cu = None
+    if _cid144 and _reddit_oauth_enabled():
+        _om144 = _reddit_info_batch([_cid144])
+        _cu = ((_om144 or {}).get(_cid144) or {}).get("created_utc")
+    if not _cu and _cid144:
+        _m144 = _arctic_ids_fetch("comments", [_cid144])
+        _cu = ((_m144 or {}).get(_cid144) or {}).get("created_utc")
     if _cu:
         import datetime as _dt144
         try:
@@ -4480,6 +4752,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     # below read them at call time.
     _arctic_cmap, _arctic_pmap = {}, {}
     _arc = {"ok": False}
+    _oauth_cmap = {}          # FU148: current-state /api/info map (cid → data), the PRIMARY signal
+    _oauth = {"ok": False}
 
     def _resolve_live_or_orphaned(item, clean_url, via, allow_restore=True, _pmap="__keep__"):
         """HQ ('comment' source) ONLY: a comment can be 'live' on its own permalink
@@ -4605,7 +4879,31 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         _time.sleep(0.5)
 
     # =====================================================================
-    # FU144 — Arctic prefetch: batch the archive lookups for every unhandled item's
+    # FU148 — OAuth /api/info PREFETCH (the PRIMARY, current-state signal): batch every
+    # unhandled comment id (non-/s/ — /s/ links resolve per-item then live-fetch) into
+    # 100-id calls. This reflects the comment's CURRENT removal state (unlike Arctic's
+    # one-time snapshot), so it catches late removals AND can restore wrongly-removed rows.
+    # =====================================================================
+    _oa_cids = []
+    for _it in deployed:
+        if (_it.get("source", "comment"), _it["id"]) in handled_ids:
+            continue
+        _u = (_it.get("reddit_comment_url") or "").strip().split("?")[0].rstrip("/")
+        if not _u or "/s/" in _u:
+            continue
+        _pu, _cid0 = _parse_comment_url(_u)
+        if _cid0:
+            _oa_cids.append(_cid0)
+    if _reddit_oauth_enabled() and _oa_cids:
+        _om = _reddit_info_batch(sorted({c for c in _oa_cids if c}))
+        if _om is not None:
+            _oauth_cmap.update(_om)
+            _oauth["ok"] = True
+    print(f"[{log_prefix}] oauth prefetch: {len(_oauth_cmap)} current-state record(s) "
+          f"(ok={_oauth['ok']})", flush=True)
+
+    # =====================================================================
+    # FU144 — Arctic prefetch (FALLBACK): batch the archive lookups for every unhandled item's
     # comment id + post id (and each HQ comment's PARENT post id, for the orphan gate)
     # into a handful of by-id calls, so the per-item loop reads a local map instead of
     # hammering Reddit's (now fully login-walled) endpoints one URL at a time.
@@ -4661,6 +4959,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         _was_slink = "/s/" in (raw_url or "")
         _arc_cmap_use = None if _was_slink else _arctic_cmap
         _arc_pmap_use = None if _was_slink else _arctic_pmap
+        _oauth_cmap_use = None if _was_slink else _oauth_cmap   # FU148: /s/ → per-item live fetch
         if not raw_url:
             # A comment without a Reddit URL can't have been posted —
             # treat it as not-live so the dashboard's derived_status
@@ -4760,11 +5059,30 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             _time.sleep(1)
             continue
 
-        # FU144 — Arctic archive FIRST for a captured removal: it's free (batch-prefetched, zero
-        # Reddit calls) and definitive, so an early removal is caught without spending a
-        # residential-proxy old.reddit fetch. (Arctic 'live' is NOT trusted here — a removal
-        # AFTER Arctic's one-time ~1.5-day snapshot is invisible to it; the cookie leg below
-        # decides those.)
+        # FU148 — PRIMARY: OAuth /api/info = the comment's CURRENT state (catches late removals
+        # Arctic can't, and a 'live' is positive CURRENT confirmation so it may RESTORE a
+        # wrongly-removed row). Authoritative when it yields a verdict; 'absent'/None → fall
+        # through to Arctic.
+        if _oauth["ok"] or _was_slink:
+            _ov = _comment_current_via_oauth(clean_url, prefetched=_oauth_cmap_use)
+            if _ov == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (OAuth /api/info — current "
+                      f"state)", flush=True)
+                if _mark_dead(item):
+                    dead += 1
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
+            if _ov == "live":
+                _resolve_live_or_orphaned(item, clean_url, "OAuth /api/info", allow_restore=True)
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                continue
+
+        # FU144 — Arctic archive fallback for a captured removal: free (batch-prefetched, zero
+        # Reddit calls) and definitive, so an EARLY removal is caught even if OAuth is off/absent.
+        # (Arctic 'live' is NOT trusted here — a removal AFTER Arctic's one-time ~1.5-day snapshot
+        # is invisible to it; only OAuth above can confirm current liveness.)
         _acv = None
         if _arc["ok"]:
             _acv = _comment_liveness_via_arctic(clean_url, prefetched=_arc_cmap_use)
@@ -5072,7 +5390,9 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     _emit_progress()
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
             "restored": restored, "changes": changes, "error_details": error_details,
-            "cookie_state": _COOKIE_STATE["state"]}   # FU147: ok|expired|none|"" for the UI/logs
+            "cookie_state": _COOKIE_STATE["state"],   # FU147: ok|expired|none|"" for the UI/logs
+            "oauth_state": _OAUTH_HEALTH["state"],     # FU149: ok|token_failed|ip_blocked|… (notifier)
+            "oauth_detail": _OAUTH_HEALTH["detail"]}
 
 
 @app.route("/api/all-comments/check-live", methods=["POST"])
@@ -5400,6 +5720,9 @@ def api_check_live_cron_get():
             "task_id": task_id,
             "running": bool(task and task.get("status") == "running"),
             "progress": (task or {}).get("progress"),
+            # FU149: live OAuth liveness-source health for the Settings card banner.
+            "oauth_health": {"state": _OAUTH_HEALTH.get("state"),
+                             "detail": _OAUTH_HEALTH.get("detail")},
         })
     finally:
         db.close()
@@ -12001,9 +12324,15 @@ def _classify_url_liveness(url):
         if not classified:
             return ("missing", "URL did not match Reddit comment/post pattern")
         if classified.get("kind") == "comment":
-            # FU147 — PRIMARY when a session cookie is configured: cookie-authed old.reddit HTML
-            # = the comment's CURRENT state (catches removals that happen long after posting,
-            # which Arctic's one-time snapshot cannot). Authoritative when it yields a verdict.
+            # FU148 — PRIMARY: OAuth /api/info current state (real-time; catches late removals).
+            if _reddit_oauth_enabled():
+                ov = _comment_current_via_oauth(resolved)
+                if ov == "removed":
+                    return ("removed", "OAuth /api/info — current state removed")
+                if ov == "live":
+                    return ("live", "OAuth /api/info — current state live")
+                # absent/None → fall through
+            # FU147 — cookie-authed old.reddit HTML (superseded by OAuth; IP-blocked in practice).
             if _reddit_cookie_configured():
                 hv = _comment_liveness_via_old_html(resolved)
                 if hv == "removed":

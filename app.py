@@ -679,14 +679,29 @@ def _arctic_ids_fetch(kind, ids, timeout=25):
         return None
 
 
+def _arctic_meta_removed(rec):
+    """FU145 — Arctic's ~1.5-day re-crawl records a removal that happened AFTER first ingest
+    in `_meta`, NOT by overwriting `body`: a comment removed later keeps its ORIGINAL live text
+    and gets `_meta.was_deleted_later=true` + `_meta.removal_type` ('removed' | 'deleted' |
+    'removed by reddit' — all mean the content is gone from Reddit). Live-probe verified across
+    400 re-crawled comments: 11/57 dead ones were visible ONLY via these `_meta` flags, which
+    the body-only verdict missed → the "marks everything live" regression. Any removal_type
+    counts as dead (a user-deleted own-account comment is still gone for reporting)."""
+    m = (rec or {}).get("_meta") or {}
+    return bool(m.get("was_deleted_later") or m.get("removal_type"))
+
+
 def _arctic_comment_verdict(rec):
-    """'removed' (STRONG — the archive captured the removal) / 'live' (record intact as of
-    its last retrieval) / None for a missing record (caller decides 'absent')."""
+    """'removed' (STRONG — the archive captured the removal, at ingest OR on re-crawl) / 'live'
+    (record intact as of its last retrieval) / None for a missing record (caller decides
+    'absent'). NOTE 'live' here means "not confirmed removed as of the last crawl", NOT positive
+    proof of CURRENT liveness — the re-crawl lags ~1.5d, so callers must NOT resurrect a dead
+    row on this verdict (see _mark_live's allow_restore, FU43/FU126)."""
     if not rec:
         return None
     body = (rec.get("body") or "").strip().lower()
     if body in ("[removed]", "[deleted]") or rec.get("removed_by_category") \
-            or rec.get("mod_removed"):
+            or rec.get("mod_removed") or _arctic_meta_removed(rec):
         return "removed"
     if (rec.get("author") or "") in ("[deleted]", "[removed]") and not body:
         return "removed"
@@ -695,13 +710,13 @@ def _arctic_comment_verdict(rec):
 
 def _arctic_post_verdict(rec):
     """Post-level analog. A LINK post has an empty selftext — empty is NOT removed;
-    only the explicit shells / removed_by_category count."""
+    only the explicit shells / removed_by_category / re-crawl _meta flags count (FU145)."""
     if not rec:
         return None
     st = (rec.get("selftext") or "").strip().lower()
     ttl = (rec.get("title") or "").strip().lower()
     if st in ("[removed]", "[deleted]") or rec.get("removed_by_category") \
-            or ttl == "[removed by reddit]":
+            or ttl == "[removed by reddit]" or _arctic_meta_removed(rec):
         return "removed"
     return "live"
 
@@ -4389,7 +4404,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                         "action": "marked_dead", "prev_status": prev, "new_status": new_status})
         return True
 
-    def _mark_live(item):
+    def _mark_live(item, allow_restore=True):
         nonlocal restored
         src = item.get("source", "comment")
         cur_status = item.get("status", "")
@@ -4398,6 +4413,16 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         # shows the comment alive (e.g. mod approved, OP undeleted),
         # treat it identically to a restored 'removed' row.
         if cur_status in ("removed", "replace", "deleted"):
+            # FU145 (FU43/FU126 rule) — a stale ARCHIVE "live" is NOT positive confirmation of
+            # CURRENT liveness: Arctic's re-crawl lags ~1.5d, so a just-removed comment still
+            # reads live until re-crawled, and Arctic is now the ONLY live source (all real-time
+            # doors walled; PullPush is staler still). So an archive-live verdict must NOT
+            # resurrect a dead row — that mass-resurrection was the "marks everything live" bug.
+            # Keep the row in its dead state; the manual FU72 Undo handles a genuine re-approval.
+            if not allow_restore:
+                print(f"[{log_prefix}] #{item['id']} ({src}) archive-live is not positive "
+                      f"confirmation — leaving {cur_status} (not resurrected)", flush=True)
+                return
             # FU43: restore to a LIVE status that PRESERVES report membership — 'report' for a reported
             # deliverable (so it does not fall out of the monthly report), else 'deployed'. The DB decides
             # from report_month/report_added_at and returns the chosen status.
@@ -4423,7 +4448,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     _arctic_cmap, _arctic_pmap = {}, {}
     _arc = {"ok": False}
 
-    def _resolve_live_or_orphaned(item, clean_url, via):
+    def _resolve_live_or_orphaned(item, clean_url, via, allow_restore=True):
         """HQ ('comment' source) ONLY: a comment can be 'live' on its own permalink
         yet sit under a REMOVED post (mod-removed posts keep their comment tree, so
         the comment shell survives) — confirm the parent post before accepting a
@@ -4445,7 +4470,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             if _mark_dead(item): dead += 1
         else:
             print(f"[{log_prefix}] #{item['id']} ({src}) LIVE ({via})", flush=True)
-            _mark_live(item); live += 1
+            _mark_live(item, allow_restore=allow_restore); live += 1
 
     # =====================================================================
     # Bulk pre-pass for Live Subs comments. Many HQ threads have 4-8
@@ -4664,7 +4689,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             _apv = _post_liveness_via_arctic(clean_url, prefetched=_arctic_pmap) if _arc["ok"] else None
             if _apv == "live":
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (post via Arctic archive)", flush=True)
-                _mark_live(item); live += 1
+                _mark_live(item, allow_restore=False); live += 1   # FU145: archive-live can't resurrect
                 handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
                 continue
@@ -4708,7 +4733,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 _emit_progress()
                 continue
             if _acv == "live":
-                _resolve_live_or_orphaned(item, clean_url, "Arctic archive")
+                _resolve_live_or_orphaned(item, clean_url, "Arctic archive", allow_restore=False)
                 handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
                 continue
@@ -4760,7 +4785,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         # best-effort JSON path, so a live comment isn't left unverified by a flaky proxy.
         pp_verdict = _comment_liveness_via_pullpush(clean_url)
         if pp_verdict == "live":
-            _resolve_live_or_orphaned(item, clean_url, "PullPush archive — RSS unreachable")
+            _resolve_live_or_orphaned(item, clean_url, "PullPush archive — RSS unreachable",
+                                      allow_restore=False)   # FU145: stale archive, can't resurrect
             handled_ids.add((item.get("source", "comment"), item["id"]))
             _emit_progress()
             _time.sleep(1)

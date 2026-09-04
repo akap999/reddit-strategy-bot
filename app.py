@@ -556,18 +556,39 @@ def _rss_entry_is_removed(entry, ns):
 
 
 _OLDHTML_WALL = {"until": 0.0}   # FU144: old.reddit login-wall latch (see below)
+# FU147 — session-cookie state, surfaced to the operator: "" (never checked), "ok" (a
+# cookie-authed fetch rendered a real page), "expired" (a cookie was set but old.reddit still
+# login-redirected → re-paste REDDIT_SESSION_COOKIE), "none" (no cookie configured).
+_COOKIE_STATE = {"state": ""}
+
+
+def _reddit_session_cookie():
+    """FU147: the operator's pasted Reddit session Cookie header (a logged-in BURNER account),
+    from REDDIT_SESSION_COOKIE. When set, old.reddit serves the REAL page (current state)
+    instead of the lor2 login redirect, so liveness catches removals that happen long after
+    posting (which the Arctic archive — a one-time ~1.5-day-post snapshot — cannot). Empty
+    when unset. Accepts either a full Cookie header ('reddit_session=…; token_v2=…') or a bare
+    reddit_session value."""
+    v = (os.environ.get("REDDIT_SESSION_COOKIE") or "").strip()
+    if v and "=" not in v:
+        v = "reddit_session=" + v
+    return v
+
+
+def _reddit_cookie_configured():
+    return bool(_reddit_session_cookie())
 
 
 def _fetch_old_reddit_html(rel_path, timeout=20):
-    """FU130: fetch an old.reddit.com page THROUGH THE RESIDENTIAL PROXY and return the
-    Response (or None).
+    """FU130/FU147: fetch an old.reddit.com page THROUGH THE RESIDENTIAL PROXY and return the
+    Response (or None). Sends the operator's REDDIT_SESSION_COOKIE when set.
 
-    FU144: Reddit closed this door too — old.reddit now 302s ALL logged-out traffic to
-    /login/?reason=lor2 (probe-verified from both a home IP and the IPRoyal egress), so a
-    "successful" fetch is a 344KB login page that burns metered GB and yields nothing.
-    Detect the login redirect, latch a 6h cooldown (at most one wasted fetch per window,
-    self-healing if Reddit ever reopens), and return None so the caller falls through.
-    Residential-only: without REDDIT_HTTP_PROXY this returns None (never a wrong verdict)."""
+    FU144: logged-OUT traffic gets 302'd to /login/?reason=lor2 (a 344KB login page that
+    yields nothing and burns metered GB) — so without a cookie this leg is dead and we latch
+    a 6h cooldown. FU147: WITH a valid session cookie, old.reddit serves the real page (current
+    state). If a cookie IS set but old.reddit still login-redirects, the cookie is EXPIRED —
+    flag it (so the UI/logs tell the operator to re-paste) and latch only briefly so a re-paste
+    is picked up fast. Residential-only: without REDDIT_HTTP_PROXY this returns None."""
     import time as _t
     import requests as _rq
     hp = _reddit_http_proxies()
@@ -575,18 +596,30 @@ def _fetch_old_reddit_html(rel_path, timeout=20):
         return None
     if _t.time() < _OLDHTML_WALL["until"]:
         return None
+    cookie = _reddit_session_cookie()
+    headers = {"User-Agent": _BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
+    if cookie:
+        headers["Cookie"] = cookie
     try:
         r = _rq.get(f"https://old.reddit.com{rel_path}",
-                    headers={"User-Agent": _BROWSER_UA,
-                             "Accept-Language": "en-US,en;q=0.9"},
-                    timeout=timeout, proxies=hp)
+                    headers=headers, timeout=timeout, proxies=hp, allow_redirects=True)
     except Exception:
         return None
     if "/login" in (getattr(r, "url", "") or ""):
-        _OLDHTML_WALL["until"] = _t.time() + 6 * 3600
-        print("[liveness] old.reddit is login-walled (reason=lor2) — leg disabled for 6h",
-              flush=True)
+        if cookie:
+            _COOKIE_STATE["state"] = "expired"
+            _OLDHTML_WALL["until"] = _t.time() + 15 * 60   # short — re-paste picked up fast
+            print("[liveness] REDDIT_SESSION_COOKIE appears EXPIRED — old.reddit still "
+                  "login-redirected. Re-paste a fresh cookie. (falling back to Arctic for 15m)",
+                  flush=True)
+        else:
+            _COOKIE_STATE["state"] = "none"
+            _OLDHTML_WALL["until"] = _t.time() + 6 * 3600
+            print("[liveness] old.reddit is login-walled (reason=lor2) — leg disabled for 6h "
+                  "(set REDDIT_SESSION_COOKIE to re-enable current-state liveness)", flush=True)
         return None
+    if cookie:
+        _COOKIE_STATE["state"] = "ok"
     return r
 
 
@@ -4727,12 +4760,12 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             _time.sleep(1)
             continue
 
-        # FU144 — PRIMARY liveness check: the Arctic archive (prefetched map, zero Reddit
-        # calls). A captured [removed]/[deleted] shell / removed_by_category is a STRONG
-        # removal; an intact record is live as of the archive's last retrieval (ingest is
-        # seconds after posting, state re-crawled ~1.5 days later); an id missing from the
-        # archive is WEAK — fall through to the legacy chain, which leaves it unchanged
-        # unless something confirms.
+        # FU144 — Arctic archive FIRST for a captured removal: it's free (batch-prefetched, zero
+        # Reddit calls) and definitive, so an early removal is caught without spending a
+        # residential-proxy old.reddit fetch. (Arctic 'live' is NOT trusted here — a removal
+        # AFTER Arctic's one-time ~1.5-day snapshot is invisible to it; the cookie leg below
+        # decides those.)
+        _acv = None
         if _arc["ok"]:
             _acv = _comment_liveness_via_arctic(clean_url, prefetched=_arc_cmap_use)
             if _acv == "removed":
@@ -4743,12 +4776,39 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
                 continue
-            if _acv == "live":
-                _resolve_live_or_orphaned(item, clean_url, "Arctic archive", allow_restore=False,
-                                          _pmap=_arc_pmap_use)
+
+        # FU147 — PRIMARY current-state signal when a session cookie is configured: the
+        # cookie-authed old.reddit HTML page reflects the comment's CURRENT state, so it catches
+        # removals that happened long after posting (which Arctic cannot). A 'live' here is
+        # POSITIVE current confirmation → it may restore a wrongly-removed row; a 'removed' is
+        # the current shell. 'absent'/None (fetch failed / cookie expired) → fall through.
+        if _reddit_cookie_configured():
+            _hv = _comment_liveness_via_old_html(clean_url)
+            if _hv == "removed":
+                print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (old.reddit HTML, "
+                      f"cookie — current state)", flush=True)
+                if _mark_dead(item):
+                    dead += 1
                 handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
+                _time.sleep(1)
                 continue
+            if _hv == "live":
+                _resolve_live_or_orphaned(item, clean_url, "old.reddit HTML (cookie)",
+                                          allow_restore=True)
+                handled_ids.add((item.get("source", "comment"), item["id"]))
+                _emit_progress()
+                _time.sleep(1)
+                continue
+
+        # Arctic 'live' as the FALLBACK when the cookie leg is off/inconclusive (best available,
+        # but never restores a dead row — it can't see a post-snapshot removal).
+        if _acv == "live":
+            _resolve_live_or_orphaned(item, clean_url, "Arctic archive", allow_restore=False,
+                                      _pmap=_arc_pmap_use)
+            handled_ids.add((item.get("source", "comment"), item["id"]))
+            _emit_progress()
+            continue
 
         # LEGACY chain (all of Reddit's anonymous doors are login-walled as of FU144 —
         # these fall through fast and leave the item unchanged unless one confirms):
@@ -5011,7 +5071,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     # state right before the task completes.
     _emit_progress()
     return {"checked": checked, "live": live, "dead": dead, "errors": errors,
-            "restored": restored, "changes": changes, "error_details": error_details}
+            "restored": restored, "changes": changes, "error_details": error_details,
+            "cookie_state": _COOKIE_STATE["state"]}   # FU147: ok|expired|none|"" for the UI/logs
 
 
 @app.route("/api/all-comments/check-live", methods=["POST"])
@@ -11940,14 +12001,23 @@ def _classify_url_liveness(url):
         if not classified:
             return ("missing", "URL did not match Reddit comment/post pattern")
         if classified.get("kind") == "comment":
-            # FU144 — the Arctic archive is the PRIMARY signal (Reddit's anonymous doors
-            # are all login-walled): intact record = live as of its last retrieval,
-            # captured shell = strong removal, missing id = fall through (weak).
+            # FU147 — PRIMARY when a session cookie is configured: cookie-authed old.reddit HTML
+            # = the comment's CURRENT state (catches removals that happen long after posting,
+            # which Arctic's one-time snapshot cannot). Authoritative when it yields a verdict.
+            if _reddit_cookie_configured():
+                hv = _comment_liveness_via_old_html(resolved)
+                if hv == "removed":
+                    return ("removed", "old.reddit HTML (cookie) — current state removed")
+                if hv == "live":
+                    return ("live", "old.reddit HTML (cookie) — current state live")
+                # absent/None (fetch failed / cookie expired) → degrade to Arctic below
+            # FU144 — Arctic archive: 'removed' is a strong (early) removal; 'live' only means
+            # "not removed AS OF the last snapshot" — a fallback for when the cookie leg is off.
             a_v = _comment_liveness_via_arctic(resolved)
-            if a_v == "live":
-                return ("live", "via Arctic archive (record intact at last retrieval)")
             if a_v == "removed":
                 return ("removed", "Arctic archive captured a [removed]/[deleted] shell")
+            if a_v == "live":
+                return ("live", "via Arctic archive (record intact at last retrieval)")
             rss_v = _comment_liveness_via_rss(resolved)
             if rss_v == "live":
                 # FU126: a permalink-RSS "live" can be a SHADOW-REMOVED comment — visible at

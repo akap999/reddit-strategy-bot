@@ -4448,7 +4448,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
     _arctic_cmap, _arctic_pmap = {}, {}
     _arc = {"ok": False}
 
-    def _resolve_live_or_orphaned(item, clean_url, via, allow_restore=True):
+    def _resolve_live_or_orphaned(item, clean_url, via, allow_restore=True, _pmap="__keep__"):
         """HQ ('comment' source) ONLY: a comment can be 'live' on its own permalink
         yet sit under a REMOVED post (mod-removed posts keep their comment tree, so
         the comment shell survives) — confirm the parent post before accepting a
@@ -4460,7 +4460,10 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         parent = _parse_comment_url(clean_url)[0] if src == "comment" else None
         parent_removed = False
         if src == "comment" and parent:
-            pav = _post_liveness_via_arctic(parent, prefetched=_arctic_pmap) if _arc["ok"] else None
+            # FU146: a /s/-resolved parent post isn't in the prefetch map — live-fetch it. The
+            # caller passes _pmap=None (explicit) to force that; "__keep__" (default) = prefetch map.
+            _pm = _arctic_pmap if _pmap == "__keep__" else _pmap
+            pav = _post_liveness_via_arctic(parent, prefetched=_pm) if _arc["ok"] else None
             if pav == "removed":
                 parent_removed = True
             elif pav != "live":   # absent/None → legacy RSS fallback (harmless no-op when walled)
@@ -4617,6 +4620,14 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         checked += 1
         raw_url = item["reddit_comment_url"]
         src = item.get("source", "comment")
+        # FU146: /s/ share-links are SKIPPED in the Arctic prefetch (their comment id isn't in
+        # the URL until resolved), so their resolved cid is NOT in _arctic_cmap/_arctic_pmap.
+        # Consulting the prefetch map for them returns a false 'absent' → the item falls through
+        # the (walled) legacy chain and is left unchanged — so removed /s/ comments stayed
+        # live-looking ("marking all as live"). For these, force a LIVE Arctic fetch below.
+        _was_slink = "/s/" in (raw_url or "")
+        _arc_cmap_use = None if _was_slink else _arctic_cmap
+        _arc_pmap_use = None if _was_slink else _arctic_pmap
         if not raw_url:
             # A comment without a Reddit URL can't have been posted —
             # treat it as not-live so the dashboard's derived_status
@@ -4686,7 +4697,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         _post_url_only, _cmt_id = _parse_comment_url(clean_url)
         if not _cmt_id:
             # FU144: the archive first — IP-independent and already prefetched.
-            _apv = _post_liveness_via_arctic(clean_url, prefetched=_arctic_pmap) if _arc["ok"] else None
+            _apv = _post_liveness_via_arctic(clean_url, prefetched=_arc_pmap_use) if _arc["ok"] else None
             if _apv == "live":
                 print(f"[{log_prefix}] #{item['id']} ({src}) LIVE (post via Arctic archive)", flush=True)
                 _mark_live(item, allow_restore=False); live += 1   # FU145: archive-live can't resurrect
@@ -4723,7 +4734,7 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
         # archive is WEAK — fall through to the legacy chain, which leaves it unchanged
         # unless something confirms.
         if _arc["ok"]:
-            _acv = _comment_liveness_via_arctic(clean_url, prefetched=_arctic_cmap)
+            _acv = _comment_liveness_via_arctic(clean_url, prefetched=_arc_cmap_use)
             if _acv == "removed":
                 print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (Arctic archive — "
                       f"[removed]/[deleted] captured)", flush=True)
@@ -4733,7 +4744,8 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
                 _emit_progress()
                 continue
             if _acv == "live":
-                _resolve_live_or_orphaned(item, clean_url, "Arctic archive", allow_restore=False)
+                _resolve_live_or_orphaned(item, clean_url, "Arctic archive", allow_restore=False,
+                                          _pmap=_arc_pmap_use)
                 handled_ids.add((item.get("source", "comment"), item["id"]))
                 _emit_progress()
                 continue

@@ -2139,12 +2139,46 @@ def api_update_brand(bid):
     try:
         data = request.json
         enrich_fields = _extract_brand_enrichment_fields(data)
+        # FU150 (#4): operator-set CANONICAL PER-PRODUCT pricing (durable fix when the site bot-walls
+        # the fetch). Accept a full `key_facts` object, a per-product `key_facts_pricing_items` list
+        # ([{product,value}], from the UI's `Product | Price` textarea), or a single `key_facts_pricing`
+        # string. MERGE-UPSERTS by product so a routine save never drops an auto-synced product.
+        kf_update = None
+        _kf_items_in = data.get("key_facts_pricing_items")
+        if isinstance(data.get("key_facts"), dict):
+            kf_update = json.dumps(data["key_facts"])
+        elif isinstance(_kf_items_in, list) or (data.get("key_facts_pricing") or "").strip():
+            from generators.blog_gen import _kf_pricing_items, _kf_slug
+            import time as _time
+            _existing = db.get_brand(bid) or {}
+            try:
+                kf = json.loads(_existing.get("key_facts") or "{}")
+            except Exception:
+                kf = {}
+            if not isinstance(kf, dict):
+                kf = {}
+            _now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+            _dom = (_existing.get("domain_url") or "").strip()
+            by = {_kf_slug(i.get("product")): i for i in _kf_pricing_items(kf)}   # migrate + key by product
+            _incoming = _kf_items_in if isinstance(_kf_items_in, list) else \
+                [{"product": "", "value": data.get("key_facts_pricing")}]
+            for it in _incoming:
+                prod = str((it or {}).get("product") or "").strip()
+                val = str((it or {}).get("value") or "").strip()
+                if not val:
+                    continue
+                by[_kf_slug(prod)] = {"product": prod, "value": val, "source_url": _dom,
+                                      "verified_at": _now, "operator_set": True}
+            if by:
+                kf["pricing"] = {"items": list(by.values())}
+                kf_update = json.dumps(kf)
         db.update_brand(
             brand_id=bid,
             name=(data.get("name") or "").strip() or None,   # FU84: rename (exact casing followed)
             context=data.get("context"),
             domain_url=data.get("domain_url"),
             keywords=json.dumps(data["keywords"]) if "keywords" in data else None,
+            key_facts=kf_update,   # FU150
             **enrich_fields,
         )
         return jsonify({"ok": True})
@@ -2618,7 +2652,8 @@ def api_blog_generate():
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
-                    "geo_warning": blog.get("geo_warning", "")}   # FU90: doorway signal → toast
+                    "geo_warning": blog.get("geo_warning", ""),   # FU90: doorway signal → toast
+                    "key_facts_warning": blog.get("key_facts_warning", "")}   # FU150: pricing-conflict toast
         finally:
             bg.close()
 
@@ -2765,9 +2800,10 @@ def api_blog_regenerate(blog_id):
             bg.update_blog(blog_id, gen_cost=regen_cost)
             # FU90: surface the doorway signal from a full regen (part=all runs _finalize_article).
             _geo_warn = (fresh.get("geo_warning", "") if part == "all" else "")
+            _kf_warn = (fresh.get("key_facts_warning", "") if part == "all" else "")   # FU150
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost,
-                    "geo_warning": _geo_warn}
+                    "geo_warning": _geo_warn, "key_facts_warning": _kf_warn}
         finally:
             bg.close()
 

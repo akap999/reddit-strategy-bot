@@ -87,15 +87,22 @@ _LICENSE_SIGNAL_RE = re.compile(
     r"\b(commercial(?:ly|[- ]use)?|licen[sc]e[ds]?|royalty[- ]free|copyright|monetiz\w*|own\s+the\s+(?:output|rights))\b",
     re.IGNORECASE)
 _FACT_SIGNALS = {"price": _PRICE_SIGNAL_RE, "license": _LICENSE_SIGNAL_RE}
+# FU150 (Change 9): a comparison DIMENSION that is about license/commercial/terms — used to decide
+# whether the `license` key-fact rescue is relevant for THIS article's vertical (creative/SaaS) vs
+# a vertical with no such column (loans, HR software) where chasing it would just waste searches.
+_LICENSE_DIM_RE = re.compile(
+    r"licen[sc]e|commercial|royalty|copyright|usage\s+rights|monetiz|\bterms\b|ownership",
+    re.IGNORECASE)
 
 # FU56/FU78: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
 # skipped (search result tokens are ~90% of a blog's cost). Bumped 1.5→2.0 (FU78) to leave headroom for the
 # price-rescue searches so public pricing gets fetched rather than punted. Env-overridable.
-_BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "2.0"))
+_BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
 # i.e. plan + prioritize instead of a first-come cutoff. The remainder is reserved for verify_and_complete.
-_CEIL_EVIDENCE = round(_BLOG_COST_CEILING * 0.4, 2)
+_CEIL_EVIDENCE = round(_BLOG_COST_CEILING * 0.3, 2)   # FU150: 0.4→0.3 — the subject is no longer
+# web-swept in _gather_evidence, so this stage spends less; hand the reserve to competitor sourcing.
 
 # FU54: stale SaaS-listing / aggregator domains whose pricing lags the vendor. Downranked BELOW the
 # vendor's OWN site and reputable reviews for a price/license cell (a competitor sourced only from one of
@@ -186,6 +193,89 @@ def _is_non_evidence(src):
     if "linkedin.com" in url and "/jobs" in url:
         return True
     return False
+
+
+# FU150 — a blog must NEVER cite/source anything NEGATIVE about the SUBJECT brand. Beyond the
+# hit-piece TITLE filter, this catches a source whose title/fact carries a negativity marker AND
+# names the subject (a "{name} complaints / lawsuit / stay away" page). Applied at every accept
+# point that can ingest a subject-mentioning source. Heuristic — the rule is absolute, so it errs
+# toward dropping.
+_NEGATIVE_RE = re.compile(
+    r"\b(?:complaints?|lawsuits?|sued|class[- ]action|scam|rip-?off|fraud|"
+    r"disappoint(?:ed|ing|ment)|terrible|horrible|awful|worst|sucks?|"
+    r"stay\s+away|steer\s+clear|beware|red\s+flags?|not\s+worth|waste\s+of\s+money|"
+    r"regret|nightmare|warning|avoid|problems?\s+with|issues?\s+with|downsides?|"
+    r"bad\s+reviews?|negative\s+reviews?|do\s+not\s+recommend|don'?t\s+recommend)\b",
+    re.IGNORECASE)
+
+
+def _is_negative_about(src, subject_name):
+    """FU150 (#2): True when a search result speaks NEGATIVELY about the SUBJECT brand — a
+    negativity marker in its title/fact AND the subject's name present. Never cited."""
+    nm = (subject_name or "").strip().lower()
+    if not nm:
+        return False
+    blob = ((src or {}).get("title") or "") + " " + ((src or {}).get("fact") or "")
+    if nm not in blob.lower():
+        return False
+    return bool(_NEGATIVE_RE.search(blob))
+
+
+def _kf_slug(s):
+    """Lowercase hyphen-slug for matching product names / URL paths (vertical-neutral)."""
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").strip().lower()).strip("-")
+
+
+def _kf_pricing_items(key_facts):
+    """FU150 (#4): normalize key_facts['pricing'] to a PER-PRODUCT list of items
+    [{product, value, source_url, verified_at, previous?}]. Migrate-on-read: the old single
+    {value, source_url, verified_at} shape becomes one general item (product='')."""
+    kf = key_facts if isinstance(key_facts, dict) else {}
+    p = kf.get("pricing")
+    if isinstance(p, dict):
+        items = p.get("items")
+        if isinstance(items, list):
+            return [dict(it) for it in items
+                    if isinstance(it, dict) and str(it.get("value") or "").strip()]
+        if str(p.get("value") or "").strip():   # old single-value shape
+            return [{"product": "", "value": str(p.get("value")).strip(),
+                     "source_url": p.get("source_url") or "", "verified_at": p.get("verified_at") or ""}]
+    return []
+
+
+def _canonical_facts_block(name, key_facts, seed_products=None):
+    """FU150 (#4): render {name}'s CANONICAL PER-PRODUCT first-party facts (pricing) into a writer-
+    prompt block so EVERY blog states the SAME values (cluster sync). The blog's seed-product item is
+    listed FIRST (this blog's product), the rest as consistency context. Empty when nothing stored."""
+    items = _kf_pricing_items(key_facts)
+    sp = [_kf_slug(p) for p in (seed_products or []) if str(p).strip()]
+
+    def _rank(it):
+        ps = _kf_slug(it.get("product") or "")
+        if sp and ps and any(ps == s or (len(ps) >= 4 and (ps in s or s in ps)) for s in sp):
+            return 0
+        return 1
+    items = sorted(items, key=_rank)
+    lines = []
+    for it in items:
+        prod = str(it.get("product") or "").strip()
+        val = str(it.get("value") or "").strip()
+        if val:
+            lines.append(f"  - pricing ({prod}): {val}" if prod else f"  - pricing: {val}")
+    kf = key_facts if isinstance(key_facts, dict) else {}
+    for k, v in kf.items():
+        if k == "pricing":
+            continue
+        val = (v.get("value") if isinstance(v, dict) else v) or ""
+        val = str(val).strip()
+        if val:
+            lines.append(f"  - {k}: {val}")
+    if not lines:
+        return ""
+    return (f"CANONICAL {name} FACTS (first-party — {name}'s OWN authoritative values; use these EXACT "
+            f"values VERBATIM everywhere {name}'s own facts appear, and cite {name}'s own site; NEVER a "
+            f"third-party number. Each pricing line is for the named product/service):\n"
+            + "\n".join(lines) + "\n")
 
 
 # FU141 — review-shaped titles ("PeterMD Review… Worth It?", "Is It Safe/Legit", "X vs Y",
@@ -477,7 +567,9 @@ class BlogGenerator:
         Never raises (each failing brief is skipped)."""
         out, seen = [], set()
         cat = (category or "").strip()
-        brands = [n for n in ([subject] + list(competitors or [])[:1]) if (n or "").strip()]
+        # FU150 (#2/#3): the SUBJECT is NOT third-party-swept — brand info is first-party only, and a
+        # third-party subject page could be negative about the brand. Sweep only the top competitor.
+        brands = [n for n in (list(competitors or [])[:1]) if (n or "").strip()]
         angles = [   # FU56: 2 angles (was 3) — fewer searches per brand
             "independent user REVIEWS and ratings (e.g. G2, Capterra, Trustpilot, TrustRadius)",
             "NEWS / funding / analyst coverage OR third-party PRICING & commercial-license / terms references "
@@ -488,6 +580,10 @@ class BlogGenerator:
             for s in (srcs or []):
                 if _is_non_evidence(s):   # FU93/FU140: hit-pieces + job listings never become evidence
                     print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                if _is_negative_about(s, subject):   # FU150 (#2): never cite anything negative about {name}
+                    print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
                     continue
                 url = (s.get("url") or "").strip()
@@ -673,7 +769,9 @@ class BlogGenerator:
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
             target_dom[label] = dom
-            # Subject brand gets the full path set; competitors get the product-heavy set.
+            # Subject brand gets the full path set; competitors get the product-heavy set. (FU150 Case 2 —
+            # the product-page PRICE is fetched path-agnostically by the FREE own-domain web-search in
+            # _resolve_and_sync_key_facts, NOT by guessing product routes here.)
             paths = _EVIDENCE_PATHS if not validate else _comp_paths
             kept = 0
             for path in paths:
@@ -1201,7 +1299,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
     # ------------------------------------------------------------------- article
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
                          sibling_titles=None, qualifier="", internal_links=False,
-                         link_targets=None, ymyl=None):
+                         link_targets=None, ymyl=None, key_facts=None, key_facts_products=None):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
@@ -1222,6 +1320,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
                         "question-shaped H2/H3 with a concise answer, and an FAQ entry:\n"
                         + "\n".join(f"- {k}" for k in kws) + "\n")
         evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
+        kf_block = _canonical_facts_block(name, key_facts, key_facts_products)   # FU150 (#4): cluster-synced
         link = f" Link to {url} where it reads naturally." if url else ""
         # FU114 — opt-in internal linking + meta title. OFF → both strings empty → the
         # prompt is BYTE-IDENTICAL to today (the user's hard requirement).
@@ -1332,17 +1431,25 @@ SEED TOPIC (what the reader is asking): {seed}
 {kw_block}{sibling_block}
 BRAND (first-party — you MAY name and recommend {name}):
 {block}
-{evidence_block}
+{kf_block}{evidence_block}
 EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
   - You may NAME any brand freely (listing it as an option / alternative needs no source).
   - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
     NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
     above and cite it inline as [S#]. This applies to {name}'s OWN claims too.
-  - CITE {name}'s OWN SITE for {name}'s specifics. The EVIDENCE includes a source labeled "{name}"
-    (its own pages). Every specific fact you state about {name} — pricing, financing, shipping terms,
-    return/warranty policy, locations, brands/products carried, contact details — MUST cite that [S#],
-    and {name}'s site MUST appear in "## Sources". Do NOT let {name}'s own specifics ride uncited just
-    because it's a first-party article; an AI engine still wants a verifiable source for each fact.
+  - {name}'s OWN FACTS ARE FIRST-PARTY ONLY. Any fact about {name} — pricing, plans, features, terms,
+    policies, financing, shipping, return/warranty, locations, products carried, contact details, any
+    claim about what {name} does — may be sourced ONLY from {name}'s OWN website or content {name}
+    itself published (its own site/blog/docs/press releases; the EVIDENCE source labeled "{name}").
+    NEVER cite a third-party / independent / review / analyst source for a fact ABOUT {name} — even if
+    one is in the EVIDENCE. If a {name} fact isn't on {name}'s own site, OMIT it or state it only as
+    {name}'s own positioning ("on our site, we …") — never source a {name} fact to a third party. Every
+    {name} specific you DO state MUST cite {name}'s own-site [S#], and {name}'s site MUST appear in
+    "## Sources" (don't let {name}'s own specifics ride uncited just because it's a first-party article).
+  - NEVER CITE ANYTHING NEGATIVE ABOUT {name}. Do not cite, quote, link, or reference any source that
+    says anything negative or critical about {name} (complaints, lawsuits, "problems with", bad
+    reviews, "stay away", etc.). If a gathered source contains a negative statement about {name}, do
+    not use it at all — omit it entirely.
   - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
     hedge with "not publicly documented" — either omit it, or state it only as {name}'s own
     positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
@@ -1386,12 +1493,13 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     quoting — NEVER quote a vacuous or off-topic throwaway line (e.g. "so music is good sometimes") just to
     have a quote. At most ONE short quoted line, attributed; NEVER invent comments beyond what's in the
     thread. Frame it as community discussion, not a raw link.
-  - PREFER INDEPENDENT SOURCES: the EVIDENCE may include "third-party ·" sources (independent reviews,
-    news/funding, analyst/pricing — NOT the brands' own sites). When present, LEAD your key claims with
-    them and aim to cite at least 2 DISTINCT independent sources (ideally a review + a news/funding item +
-    an analyst/pricing reference). A page backed only by vendor/first-party sources reads as marketing and
-    gets cited less; independent corroboration is what makes it verifiably neutral. (Still cite ONLY what is
-    actually in the EVIDENCE — never invent a source.)
+  - PREFER INDEPENDENT SOURCES — for COMPETITOR and TOPIC facts ONLY, never for {name}: the EVIDENCE may
+    include "third-party ·" sources (independent reviews, news/funding, analyst/pricing — NOT the brands'
+    own sites). For facts about COMPETITORS or the general TOPIC/category, LEAD with them and aim to cite
+    at least 2 DISTINCT independent sources where available (a review + a news/funding item + an analyst/
+    pricing reference). This does NOT apply to facts about {name} — those stay FIRST-PARTY ONLY per the
+    rule above; never move a {name} fact onto a third-party source to look "independent". (Still cite ONLY
+    what is actually in the EVIDENCE — never invent a source.)
 
 EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
 title decision would make the page harder for an AI to extract a direct answer from, drop it and
@@ -1626,6 +1734,13 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     remove them, or balance with {name}'s SAME metric cited alongside (FU93).
   - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
     condition ("on qualifying purchases", "in most states") — restore the condition (FU93).
+  - A FACT ABOUT {name} cited to a THIRD-PARTY / review / analyst source (FU150 #3): {name}'s own facts
+    (its price, plans, features, terms) are FIRST-PARTY ONLY — re-cite to {name}'s own-site [S#], or if
+    there is none, reframe as {name}'s positioning or drop it. Never let a {name} fact rest on a third
+    party.
+  - ANY source or citation that speaks NEGATIVELY about {name} (FU150 #2) — complaints/lawsuit/"stay
+    away"/"problems with"/bad-review pages: remove it entirely from the body AND ## Sources; never cite
+    or quote a page critical of {name}.
 Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
 
 Return JSON only:
@@ -1793,6 +1908,148 @@ Return JSON only:
             blocks.sort(key=lambda b2: 0 if _names_blk(b2, ptoks) else 1)
         return blocks[:6]
 
+    def _persist_key_facts(self, brand, kf):
+        """FU150 (#4): write the canonical key-facts map back onto the brand + reflect it in the
+        in-memory brand for this run. Never raises."""
+        try:
+            payload = json.dumps(kf)
+        except Exception:
+            return
+        bid = (brand or {}).get("id")
+        if bid and getattr(self, "db", None):
+            try:
+                self.db.update_brand(bid, key_facts=payload)
+            except Exception as e:
+                print(f"[blog_gen] key-facts: persist failed: {e}", flush=True)
+        try:
+            brand["key_facts"] = payload
+        except Exception:
+            pass
+
+    def _resolve_and_sync_key_facts(self, brand, evidence, seed=""):
+        """FU150 (#4): keep {name}'s OWN pricing CONSISTENT across all its blogs, PER PRODUCT. Extract
+        {name}'s per-product pricing (verbatim) from THIS run's FIRST-PARTY evidence; for the product
+        THIS blog's SEED is about (Case 2 — price often lives on a product page, not /pricing), if it
+        isn't in evidence, do ONE first-party web-search pinned to {name}'s own domain (path-agnostic,
+        IP-independent, bypasses bot walls). Merge each fresh item into the stored map BY PRODUCT: a
+        differing same-product value is adopted + warned; a new product appended; a bot-walled/absent
+        product reuses the stored item. NEVER adopts a third-party number (#3). Returns
+        (key_facts_dict, warning_str, seed_products, extra_evidence_blocks). Never raises."""
+        name = ((brand or {}).get("name") or "").strip()
+        try:
+            stored = json.loads((brand or {}).get("key_facts") or "{}")
+        except Exception:
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        warning, extra_blocks = "", []
+        own_dom = _norm_domain((brand or {}).get("domain_url") or "")
+        stored_items = _kf_pricing_items(stored)
+        if not name or not own_dom or not (evidence or "").strip():
+            return stored, warning, [], extra_blocks   # can't first-party-verify → reuse stored
+
+        # (a) extract per-product pricing from FIRST-PARTY evidence only (one cheap call, no search).
+        # SINGLE-vs-MULTI is decided HERE from {name}'s OWN site — an explicit rule, not vibes.
+        try:
+            ex = self.claude.call(
+                f"""From the EVIDENCE below, extract {name}'s OWN product/service pricing, EXACTLY as stated
+on {name}'s OWN website ({own_dom}) — keep the FULL billing structure VERBATIM (e.g. "$149 first month,
+then $249/mo billed quarterly, 60mg"). Use ONLY sources that are {name}'s OWN site ({own_dom}); IGNORE
+every third-party / review / analyst source (never use a third-party figure). Return NOTHING for a price
+not present in {name}'s first-party sources (do NOT guess).
+
+SINGLE vs MULTI — decide from {name}'s OWN site: if {name} sells essentially ONE product/service (one
+price or one plan family), return exactly ONE item with an EMPTY "product". Use NAMED products ONLY when
+{name} sells MULTIPLE distinctly-priced products/services. Also identify which product THIS article's SEED
+is about ("seed_product"; EMPTY for a single-product brand or a generic seed).
+
+SEED (what this article is about): {seed}
+
+EVIDENCE:
+{(evidence or '')[:6000]}
+
+Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim pricing>"}}], "seed_product": "<the product the SEED is about, or ''>"}}""",
+                max_tokens=700, temperature=0)
+        except Exception:
+            ex = None
+        ex = ex if isinstance(ex, dict) else {}
+        seed_product = str(ex.get("seed_product") or "").strip()
+        fresh = []
+        for it in (ex.get("items") or []):
+            if not isinstance(it, dict):
+                continue
+            val = str(it.get("value") or "").strip()
+            if val:
+                fresh.append({"product": str(it.get("product") or "").strip(), "value": val,
+                              "source_url": f"https://{own_dom}"})
+
+        # (b) Case 2 — a FREE, PATH-AGNOSTIC own-domain web-search for the TARGET's price when it isn't in
+        # THIS run's first-party evidence (price on a product page we didn't fetch, or bot-walled). The
+        # TARGET = the seed's product (multi-product brand) ELSE the brand itself (single-product/general).
+        # It RE-VERIFIES a stored price (so a change is caught even when bot-walled), but is SKIPPED when
+        # the price is already in evidence (efficient) or the stored target item was operator-set (trust
+        # the operator). Query = the product+brand from the title (e.g. "PeterMD tirzepatide pricing");
+        # results are kept ONLY from {name}'s OWN official domain — never a third-party figure.
+        target = seed_product   # LLM's seed_product; "" ⇒ single-product / general (search "{name} pricing")
+        _t_slug = _kf_slug(target)
+        _in_evidence = any(_kf_slug(f["product"]) == _t_slug for f in fresh)
+        _stored_t = next((i for i in stored_items if _kf_slug(i.get("product")) == _t_slug), None)
+        _operator_locked = bool(_stored_t and _stored_t.get("operator_set"))
+        if not _in_evidence and not _operator_locked:
+            q = f"{name} {target} pricing" if target else f"{name} pricing"
+            try:
+                res = self.claude.search_sources(
+                    f"{q} — plan names and exact price, from {name}'s OWN official site only",
+                    max_searches=1, allowed_domains=[own_dom], first_party=True)
+            except Exception:
+                res = []
+            for s in (res or []):
+                u = (s.get("url") or "").strip()
+                fct = (s.get("fact") or s.get("title") or "").strip()
+                if u and fct and _norm_domain(u) and (
+                        _norm_domain(u) == own_dom or _norm_domain(u).endswith("." + own_dom)) \
+                        and _PRICE_SIGNAL_RE.search(fct):
+                    fresh.append({"product": target, "value": fct[:300], "source_url": u})
+                    extra_blocks.append({"label": name, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                    print(f"[blog_gen] key-facts: Case-2 free web-search found {name} "
+                          f"{target or '(general)'} pricing on {u}", flush=True)
+                    break
+
+        if not fresh:
+            return stored, warning, ([seed_product] if seed_product else []), extra_blocks
+
+        # (c) merge per-product into the stored items; warn per changed product
+        _norm = lambda v: re.sub(r"\s+", " ", (v or "").strip().lower())
+        by_slug = {_kf_slug(i.get("product")): i for i in stored_items}
+        _now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed, notes = False, []
+        for f in fresh:
+            slug = _kf_slug(f["product"])
+            old = by_slug.get(slug)
+            if old is None:
+                by_slug[slug] = {"product": f["product"], "value": f["value"],
+                                 "source_url": f["source_url"], "verified_at": _now}
+                changed = True
+                print(f"[blog_gen] key-facts: seeded {name} {f['product'] or 'pricing'} = "
+                      f"'{f['value'][:80]}'", flush=True)
+            elif _norm(old.get("value")) != _norm(f["value"]):
+                prod_lbl = f["product"] or "pricing"
+                notes.append(f"{name}'s {prod_lbl} changed: was “{old.get('value')}”, now "
+                             f"“{f['value']}” (per {name}'s own site {_norm_domain(f['source_url']) or own_dom})")
+                by_slug[slug] = {"product": f["product"], "value": f["value"],
+                                 "source_url": f["source_url"], "verified_at": _now,
+                                 "previous": old.get("value")}
+                changed = True
+            # same value → keep stored item untouched
+        if notes:
+            warning = "⚠ " + "; ".join(notes) + " — earlier blogs may show the old value; regenerate them to sync."
+        if changed:
+            stored["pricing"] = {"items": list(by_slug.values())}
+            self._persist_key_facts(brand, stored)
+            if warning:
+                print(f"[blog_gen] key-facts: {warning}", flush=True)
+        return stored, warning, ([seed_product] if seed_product else []), extra_blocks
+
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
                                ymyl=None):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
@@ -1930,6 +2187,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if ok_off:
                 fresh.append({"label": f"official · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
+            elif _is_subject_review({"title": ttl, "fact": fct}, name) \
+                    or _is_negative_about({"title": ttl, "fact": fct}, name):
+                # FU150 (#2/#3): a demoted core-topic source that is actually a REVIEW OF or a
+                # NEGATIVE page about the subject must never become a citable third-party block.
+                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name} — "
+                      f"dropped", flush=True)
             elif not ymyl:
                 fresh.append({"label": f"third-party · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
@@ -1976,97 +2239,185 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                      f"payroll/regulatory support or market presence, as applicable)" if rgeo else "")
         # FU93: a qualifier page needs per-tool facts about the qualifier's mechanism too.
         qual_brief = (f"; {rqual} — terms, options and conditions offered" if rqual else "")
-        fetch_brief = ("pricing and plans; commercial-use & license terms (is monetization/commercial use "
-                       "allowed, royalty-free or not); whether it imitates or clones real artists' voices; "
-                       "video / all-in-one capability; key features" + geo_brief + qual_brief)
-        for tool in tools:
+        # FU150 (Change 9) — VERTICAL-NEUTRAL, category-anchored (was music-specific): works for SaaS,
+        # e-commerce, finance, legal, medical … not just creative tools.
+        fetch_brief = (f"pricing and plans; commercial / license / eligibility / contract terms as "
+                       f"applicable; the key capabilities and differentiators for "
+                       f"{cat or 'this product/service'}; who it's best for" + geo_brief + qual_brief)
+        # FU150 — TWO-PASS competitor sourcing so NO competitor is starved to zero purely by loop
+        # position (the mass-pause root cause: the first 1-2 competitors used to burn the whole shared
+        # web-search budget on Tier3+rescue, leaving later competitors with `_over_budget()`=True on
+        # every call → zero blocks → the FU79 pause on facts that were actually public). Shared closures
+        # (were per-iteration), then Pass 0 (cheap batched domain resolve) → Pass A (cheap first-party
+        # baseline for EVERY tool) → Pass B (rescue, zero-block tools FIRST) → finalize in original order.
+
+        def _same_site(u, dom):
+            """True when url u is the tool's OWN site (its registrable domain or a subdomain)."""
+            dd = _dom(dom)
+            du = _dom(u)
+            return bool(dd) and du and (du == dd or du.endswith("." + dd))
+
+        def _blocks_from(srcs, tool, dom, cap=_MAX_TOOL_PAGES):
+            """Per-page blocks with HONEST labels (FU53): the tool's OWN domain → first-party (tool
+            name); any other domain → 'third-party · <title>'. Deduped by url. FU150: drops any source
+            that is NEGATIVE about the SUBJECT brand (#2)."""
+            out_, seen_ = [], set()
+            for s in (srcs or []):
+                if _is_non_evidence(s):   # FU93/FU140: hit-pieces + job listings never get cited
+                    print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                if _is_negative_about(s, name):   # FU150 (#2): never cite anything negative about {name}
+                    print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                u = (s.get("url") or "").strip()
+                fc = (s.get("fact") or s.get("title") or "").strip()
+                key = u.lower().split("?")[0].rstrip("/")
+                if not (u and fc) or key in seen_:
+                    continue
+                seen_.add(key)
+                label = tool if _same_site(u, dom) else \
+                    f"third-party · {(s.get('title') or _dom(u) or 'review')}"
+                out_.append({"label": label, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
+                if len(out_) >= cap:
+                    break
+            return out_
+
+        def _has_vendor(blocks, dom):
+            return any(_same_site(b["url"], dom) for b in (blocks or []))
+
+        # FU150 (Change 9) — the rescued KEY facts are DYNAMIC, not a fixed price+license: always
+        # `price` (near-universal), but only chase `license` when the article actually COMPARES a
+        # license/commercial/terms/royalty dimension. So a loans / HR-software blog (no license
+        # column) never burns rescue searches — or mis-flags a "missing" fact — for a fact that
+        # doesn't exist in its vertical.
+        _active_facts = {"price"}
+        if any(_LICENSE_DIM_RE.search(d or "") for d in dims):
+            _active_facts.add("license")
+
+        def _missing_facts(blocks):
+            t = " ".join(b.get("text", "") for b in (blocks or []))
+            return [k for k in _active_facts if not _FACT_SIGNALS[k].search(t)]
+
+        def _tier1(tool, dom):
+            # web search PINNED to the tool's OWN domain → SPECIFIC pages (pricing/terms) with urls.
+            if not dom:
+                return []
             try:
-                dom = self.claude.find_official_domain(tool, ctx)
+                pin = self.claude.search_sources(
+                    f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
+                    f"key capabilities"
+                    + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
+                    + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
+                    max_searches=2, allowed_domains=[_dom(dom)], first_party=True)   # FU55
             except Exception:
-                dom = ""
-            # FU54: when the resolver fails, recover the tool's OWN domain from a web search so the
-            # vendor tiers can still run. Competitors depend on this — the SUBJECT sources from its known
-            # domain_url, but a competitor with no resolved domain skips Tier 1+2 and falls to a review.
+                pin = []
+            return _blocks_from(pin, tool, dom)
+
+        def _tier2(tool, dom):
+            # fetch_site_facts — the IP-INDEPENDENT web-search-pinned vendor path.
+            if not dom:
+                return None
+            try:
+                fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=2) or ""
+            except Exception:
+                fj = ""
+            if fj.strip():
+                return {"label": tool, "url": f"https://{_dom(dom)}", "text": fj[:_EVIDENCE_TEXT_CAP]}
+            return None
+
+        def _baseline(tool, dom):
+            """Cheap first-party baseline: Tier1 pinned + Tier2 fallback. Returns (blocks, t1, t2)."""
+            blocks = _tier1(tool, dom)
+            t1 = len(blocks)
+            t2 = False
+            if dom and not _has_vendor(blocks, dom):
+                b2 = _tier2(tool, dom)
+                if b2:
+                    blocks.append(b2)
+                    t2 = True
+            return blocks, t1, t2
+
+        # ---- Pass 0: batched domain pre-resolve (ONE cheap non-search LLM call; ~free) ----
+        # Seed from the brand's FU54 web-verified competitor_domains cache first (neutralizes the
+        # same-name-domain risk without a web search), then resolve the rest in one batched call.
+        try:
+            _cached = json.loads((brand or {}).get("competitor_domains") or "{}")
+        except Exception:
+            _cached = {}
+        _cached_lc = {}
+        if isinstance(_cached, dict):
+            for k, v in _cached.items():
+                dk = _dom(v)
+                if str(k).strip() and dk:
+                    _cached_lc[str(k).strip().lower()] = dk
+        dom_map = {t: _cached_lc[t.lower()] for t in tools if t.lower() in _cached_lc}
+        _need_dom = [t for t in tools if t not in dom_map]
+        if _need_dom:
+            try:
+                _resolved = self._resolve_brand_domains(_need_dom, seed=seed, subject=name,
+                                                        subject_category=cat)
+            except Exception:
+                _resolved = {}
+            _res_lc = {str(k).strip().lower(): _dom(v) for k, v in (_resolved or {}).items() if _dom(v)}
+            for t in _need_dom:
+                if t.lower() in _res_lc:
+                    dom_map[t] = _res_lc[t.lower()]
+        print(f"[blog_gen] verify+complete: pre-resolved {len(dom_map)}/{len(tools)} competitor "
+              f"domain(s) (cache+batch)", flush=True)
+
+        # ---- Pass A: cheap first-party BASELINE for EVERY tool (Tier1+Tier2, no rescue) ----
+        # Runs before any competitor consumes the expensive rescue budget, so no tool is starved.
+        tool_state = {}
+        for tool in tools:
+            dom = dom_map.get(tool, "")
+            blocks, t1, t2 = _baseline(tool, dom)
+            tool_state[tool] = {"dom": dom, "blocks": blocks, "t1": t1, "t2": t2, "t3": 0, "rescue": 0}
+
+        # ---- Pass B: rescue what still needs it, ZERO-BLOCK tools FIRST, then missing-key-fact ----
+        def _rescue_prio(t):
+            st = tool_state[t]
+            if not st["blocks"]:
+                return 0                                   # zero-block — highest priority
+            return 1 if _missing_facts(st["blocks"]) else 2   # 2 = fully sourced, skip
+        for tool in sorted(tools, key=_rescue_prio):
+            st = tool_state[tool]
+            if _rescue_prio(tool) == 2:
+                continue                                   # nothing missing — no rescue spend
+            dom = st["dom"]
+            blocks = list(st["blocks"])
+            # (i) still no domain → resolve via web search, then retry the baseline
             if not dom:
                 try:
-                    cand = self.claude.search_sources(
-                        f"the OFFICIAL website (its own product homepage) of {tool} "
-                        f"({cat or 'the tool'}) — NOT a review site, app store, or directory",
-                        max_searches=2)
+                    dom = self.claude.find_official_domain(tool, ctx) or ""
                 except Exception:
-                    cand = []
-                for s in (cand or []):
-                    d = _norm_domain(s.get("url"))
-                    if d and d not in _THIRD_PARTY_DOMAINS and d not in _STALE_AGGREGATORS:
-                        dom = d
-                        break
-
-            def _same_site(u, dom=dom):
-                """True when url u is the tool's OWN site (its registrable domain or a subdomain)."""
-                dd = _dom(dom)
-                du = _dom(u)
-                return bool(dd) and du and (du == dd or du.endswith("." + dd))
-
-            def _blocks_from(srcs, cap=_MAX_TOOL_PAGES, tool=tool):
-                """Per-page blocks with HONEST labels (FU53): the tool's OWN domain → first-party (tool
-                name); any other domain → 'third-party · <title>' — a review is NEVER labeled as the vendor.
-                Uses each result's ACTUAL url so citations deep-link. Deduped by url."""
-                out_, seen_ = [], set()
-                for s in (srcs or []):
-                    if _is_non_evidence(s):   # FU93/FU140: hit-pieces + job listings never get cited
-                        print(f"[blog_gen] source-hygiene: dropped hit-piece "
-                              f"'{(s.get('title') or '')[:70]}'", flush=True)
-                        continue
-                    u = (s.get("url") or "").strip()
-                    fc = (s.get("fact") or s.get("title") or "").strip()
-                    key = u.lower().split("?")[0].rstrip("/")
-                    if not (u and fc) or key in seen_:
-                        continue
-                    seen_.add(key)
-                    label = tool if _same_site(u) else \
-                        f"third-party · {(s.get('title') or _dom(u) or 'review')}"
-                    out_.append({"label": label, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
-                    if len(out_) >= cap:
-                        break
-                return out_
-
-            def _has_vendor(blocks):
-                return any(_same_site(b["url"]) for b in (blocks or []))
-
-            tool_blocks = []
-            n1 = n3 = 0            # FU54: per-tier hit counts for the diagnostic log line
-            t2_added = False
-            # Tier 1 — web search PINNED to the tool's OWN registrable domain → SPECIFIC pages
-            # (pricing/terms) WITH their urls → cite the exact vendor page, not a review.
-            if dom:
-                try:
-                    pin = self.claude.search_sources(
-                        f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
-                        f"key capabilities"
-                        + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
-                        + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
-                        max_searches=2, allowed_domains=[_dom(dom)],
-                        first_party=True)   # FU55: vendor's OWN pages — don't tell it to avoid the vendor
-                except Exception:
-                    pin = []
-                tool_blocks = _blocks_from(pin)
-                n1 = len(tool_blocks)
-            # Tier 2 — fetch_site_facts (the IP-INDEPENDENT web-search-pinned vendor path — the same one
-            # the SUBJECT uses reliably) whenever Tier 1 gave NO vendor page. Together they source the
-            # vendor reliably even on a cloud IP.
-            if dom and not _has_vendor(tool_blocks):
-                try:
-                    fj = self.claude.fetch_site_facts(dom, tool, fetch_brief, max_searches=2) or ""
-                except Exception:
-                    fj = ""
-                if fj.strip():
-                    tool_blocks.append({"label": tool, "url": f"https://{_dom(dom)}",
-                                        "text": fj[:_EVIDENCE_TEXT_CAP]})
-                    t2_added = True
-            # Tier 3 — ONLY when no VENDOR block exists. Prefer the tool's own domain, then a REPUTABLE
-            # review (G2/Capterra/… — _THIRD_PARTY_DOMAINS); a stale SaaS aggregator or random blog is the
-            # last resort and is honestly labeled 'third-party ·' (never presented as the vendor).
-            if not _has_vendor(tool_blocks):
+                    dom = ""
+                if not dom:
+                    try:
+                        cand = self.claude.search_sources(
+                            f"the OFFICIAL website (its own product homepage) of {tool} "
+                            f"({cat or 'the tool'}) — NOT a review site, app store, or directory",
+                            max_searches=2)
+                    except Exception:
+                        cand = []
+                    for s in (cand or []):
+                        d = _norm_domain(s.get("url"))
+                        if d and d not in _THIRD_PARTY_DOMAINS and d not in _STALE_AGGREGATORS:
+                            dom = d
+                            break
+                st["dom"] = dom
+                if dom:
+                    nb, nt1, nt2 = _baseline(tool, dom)
+                    _seen = {b["url"].lower().split("?")[0].rstrip("/") for b in blocks}
+                    for b in nb:
+                        if b["url"].lower().split("?")[0].rstrip("/") not in _seen:
+                            blocks.append(b)
+                    st["t1"] = max(st["t1"], nt1)
+                    st["t2"] = st["t2"] or nt2
+            # (ii) Tier 3 broad — ONLY when no VENDOR block exists (prefer own site, then reputable
+            # review; a stale aggregator/random blog is last, honestly labeled 'third-party ·').
+            if not _has_vendor(blocks, dom):
                 try:
                     br = self.claude.search_sources(
                         f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
@@ -2074,36 +2425,26 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=2)
                 except Exception:
                     br = []
-                own = [s for s in (br or []) if _same_site(s.get("url"))]
+                own = [s for s in (br or []) if _same_site(s.get("url"), dom)]
                 reputable = [s for s in (br or []) if _dom(s.get("url")) in _THIRD_PARTY_DOMAINS]
                 named = [s for s in (br or [])
                          if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()
-                         and _dom(s.get("url")) not in _STALE_AGGREGATORS]   # FU54: downrank stale aggregators
-                added = _blocks_from(own or reputable or named)
-                n3 = len(added)
-                tool_blocks = tool_blocks + added
-
-            # FU78 — KEY-FACT RESCUE (generalized beyond price). The tiers above stop as soon as they have ANY
-            # vendor page, but a vendor's own pricing/terms pages are often JS-rendered, so the fetched text can
-            # lack the specific fact the comparison needs — PRICE and/or COMMERCIAL-USE/LICENSE — the recurring
-            # "See <site> for …" punt (which hits license cells as well as pricing). Those facts ARE publicly
-            # indexed, so while a KEY fact is still missing, escalate with up to _FACT_RESCUE_TRIES BROAD
-            # (un-pinned) searches TARGETING the missing fact(s), keeping only results that carry a fact signal.
-            # Only AFTER these are exhausted does the reconcile drop the cell/row — never a one-try give-up.
-            # Budget-bounded: search_sources short-circuits once the cost ceiling hits.
-            def _missing_facts(blocks):
-                t = " ".join(b.get("text", "") for b in (blocks or []))
-                return [k for k, rx in _FACT_SIGNALS.items() if not rx.search(t)]
+                         and _dom(s.get("url")) not in _STALE_AGGREGATORS]   # FU54: downrank aggregators
+                added = _blocks_from(own or reputable or named, tool, dom)
+                st["t3"] = len(added)
+                blocks = blocks + added
+            # (iii) FU78 key-fact rescue — while a KEY fact (price/license) is still missing, escalate
+            # with up to _FACT_RESCUE_TRIES BROAD searches TARGETING it, keeping only fact-carrying hits.
             rescue_tries = 0
-            while rescue_tries < _FACT_RESCUE_TRIES and _missing_facts(tool_blocks):
-                miss = _missing_facts(tool_blocks)
+            while rescue_tries < _FACT_RESCUE_TRIES and _missing_facts(blocks):
+                miss = _missing_facts(blocks)
                 wants = []
                 if "price" in miss:
                     wants.append("pricing — plan names and the exact monthly cost (e.g. $X/month), any free tier")
                 if "license" in miss:
-                    wants.append("commercial-use / license terms — is commercial use allowed, is the output "
-                                 "royalty-free, who owns the generated output")
-                brief = f"{tool}: {'; '.join(wants) or 'pricing and commercial-use license terms'} — the exact, current facts"
+                    wants.append("commercial-use / license / key terms — is commercial use allowed, "
+                                 "what's included or restricted, and the contract/usage terms")
+                brief = f"{tool}: {'; '.join(wants) or 'pricing and key terms'} — the exact, current facts"
                 rescue_tries += 1
                 try:
                     rsc = self.claude.search_sources(brief, max_searches=2)
@@ -2113,17 +2454,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         if tool.lower() in ((s.get("title") or "") + " " + (s.get("fact") or "")).lower()
                         and _dom(s.get("url")) not in _STALE_AGGREGATORS
                         and any(_FACT_SIGNALS[k].search(s.get("fact") or "") for k in miss)]
-                add = _blocks_from(cand)
+                add = _blocks_from(cand, tool, dom)
                 if add:
-                    tool_blocks = tool_blocks + add
-
-            # FU90 — GEO RESCUE: a geo blog needs per-tool LOCAL coverage facts. When the tool has
-            # sources but NONE mention the geography, try ONE targeted broad search before settling for
-            # general facts (the article then stays geo-FOCUSED via framing — never hedge language).
-            if rgeo and tool_blocks:
+                    blocks = blocks + add
+            st["rescue"] = rescue_tries
+            # (iv) FU90 geo rescue — a geo blog needs per-tool LOCAL coverage facts.
+            if rgeo and blocks:
                 _geo_key = re.sub(r"^the\s+", "", rgeo, flags=re.I)
                 _geo_rx = re.compile(r"\b" + re.escape(_geo_key) + r"\b", re.I)
-                if not any(_geo_rx.search(b.get("text") or "") for b in tool_blocks):
+                if not any(_geo_rx.search(b.get("text") or "") for b in blocks):
                     try:
                         gsc = self.claude.search_sources(
                             f"{tool}: availability, operations, local coverage and compliance support "
@@ -2135,21 +2474,28 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                                                  + (s.get("fact") or "")).lower()
                              and _geo_rx.search((s.get("fact") or "") + " " + (s.get("title") or ""))
                              and _dom(s.get("url")) not in _STALE_AGGREGATORS]
-                    gadd = _blocks_from(gcand)
+                    gadd = _blocks_from(gcand, tool, dom)
                     if gadd:
-                        tool_blocks = tool_blocks + gadd
+                        blocks = blocks + gadd
+            st["blocks"] = blocks
 
-            if tool_blocks:
-                fresh.extend(tool_blocks)
-                print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} "
-                      f"t1={n1} t2={int(t2_added)} t3={n3} rescue={rescue_tries} "
-                      f"missing={','.join(_missing_facts(tool_blocks)) or 'none'} -> "
-                      f"{'vendor' if _has_vendor(tool_blocks) else 'third-party'} <- "
-                      f"{', '.join(b['url'] for b in tool_blocks)}", flush=True)
+        # ---- Finalize: emit in ORIGINAL order (keeps each tool's [S#] blocks contiguous) ----
+        for tool in tools:
+            st = tool_state[tool]
+            blocks = st["blocks"]
+            if blocks:
+                fresh.extend(blocks)
+                print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} "
+                      f"t1={st['t1']} t2={int(st['t2'])} t3={st['t3']} rescue={st['rescue']} "
+                      f"missing={','.join(_missing_facts(blocks)) or 'none'} -> "
+                      f"{'vendor' if _has_vendor(blocks, st['dom']) else 'third-party'} <- "
+                      f"{', '.join(b['url'] for b in blocks)}", flush=True)
             else:
-                unsourced.append({"tool": tool, "dom": dom or "",
-                                  "facts": _missing_facts([])})   # FU79: which key facts were wanted
-                print(f"[blog_gen] verify+complete: {tool} dom={dom or '∅'} t1=0 t2=0 t3=0 -> none "
+                # FU150: the pause names the actual comparison COLUMNS the operator must supply — a
+                # zero-block tool is missing EVERY dimension — not the old static "price + license".
+                _mf = [d for d in dims if d.strip()] or _missing_facts([])
+                unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf})
+                print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
         # FU139 — DIMENSION RESCUE ("try harder", user directive): the FU78 rescue covers only
@@ -2219,9 +2565,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         max_searches=1, allowed_domains=[own_dom_s], first_party=True)
                 except Exception:
                     rs = []
-            if not rs and (not _used_fp or _sbudget > 0):
-                if _used_fp:
-                    _sbudget -= 1   # the broad fallback is a SECOND search — stays ≤ the reserve
+            # FU150 (#3): the broad "or a reputable source" fallback is for COMPETITORS ONLY — a
+            # SUBJECT fact must stay FIRST-PARTY (never a third-party source about {name}). So the
+            # subject gets its single first-party search above and no broad fallback.
+            if not rs and not _is_subj:
                 try:
                     rs = self.claude.search_sources(
                         f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
@@ -2234,7 +2581,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
-                if u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s):
+                if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
+                        and not _is_negative_about(s, name)):   # FU150 (#2)
                     fresh.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
                     tool_texts[t] = tool_texts.get(t, "") + " " + fct.lower()
                     kept += 1
@@ -2254,23 +2602,32 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if d:
                     blocked.add(d)
         blocked = sorted(x for x in blocked if x)
-        claim_lines = "; ".join(
-            f'{(c.get("brand") or "?")}: {(c.get("dimension") or "")} = '
-            f'{(c.get("value") or c.get("claim") or "")}'.strip() for c in claims[:20])
-        subj_cat = f" ({cat})" if cat else ""
-        corr_brief = (f"Find reputable INDEPENDENT sources (reviews, documentation, news, analyst pages) "
-                      f"that CONFIRM or REFUTE these claims about {name}{subj_cat} and its space, returning "
-                      f"the true value + a source URL for each. Do NOT return negative-review roundups or "
-                      f"'products/brands to avoid' listicles — seek factual coverage (features, pricing, "
-                      f"terms, scale). Claims: {claim_lines or seed}"
-                      + (f" Focus on {rgeo}-specific coverage where available." if rgeo else "")
-                      + (f" Focus also on {rqual}-related terms, options and mechanics." if rqual else ""))
-        try:
-            corr = self.claude.search_sources(
-                corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 3),   # FU56: was 4
-                blocked_domains=(blocked or None))
-        except Exception:
-            corr = []
+        # FU150 (#2/#3): corroboration NO LONGER "confirms/refutes claims about {name}" — the subject
+        # is first-party only and a "refute" would be a negative-about-brand source. Corroborate the
+        # COMPARED TOOLS + the TOPIC/category space only; skip the search entirely when nothing but
+        # subject claims remain (the common first-party case → frees ~3 searches for competitor sourcing).
+        _corr_claims = [c for c in claims[:20]
+                        if (c.get("brand") or "").strip().lower() != name.lower()]
+        corr = []
+        if _corr_claims or tools:
+            claim_lines = "; ".join(
+                f'{(c.get("brand") or "?")}: {(c.get("dimension") or "")} = '
+                f'{(c.get("value") or c.get("claim") or "")}'.strip() for c in _corr_claims)
+            subj_cat = f" ({cat})" if cat else ""
+            corr_brief = (f"Find reputable INDEPENDENT sources (reviews, documentation, news, analyst "
+                          f"pages) about the compared tools ({', '.join(tools[:6]) or 'the options'}) and "
+                          f"the {cat or 'topic'} space{subj_cat}, returning a factual value + a source URL "
+                          f"for each. Do NOT return negative-review roundups or 'products/brands to avoid' "
+                          f"listicles, and do NOT return pages that criticize {name} — seek factual "
+                          f"coverage (features, pricing, terms, scale). Claims: {claim_lines or seed}"
+                          + (f" Focus on {rgeo}-specific coverage where available." if rgeo else "")
+                          + (f" Focus also on {rqual}-related terms, options and mechanics." if rqual else ""))
+            try:
+                corr = self.claude.search_sources(
+                    corr_brief, max_searches=(_VERIFY_MAX_SEARCHES if deep else 3),   # FU56: was 4
+                    blocked_domains=(blocked or None))
+            except Exception:
+                corr = []
         # FU93 (P1) — ONE bounded topic-level search for the QUALIFIER'S MECHANISM itself (not
         # per-tool): the page's reason to exist needs sourced substance (options/structures, terms,
         # what's evaluated, the governing tax/regulatory provision), or the claims-gate strips it.
@@ -2292,6 +2649,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         for c in (corr or []):
             if _is_non_evidence(c):   # FU93/FU140: opposition research + job ads never become evidence
                 print(f"[blog_gen] source-hygiene: dropped hit-piece "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
+            if _is_negative_about(c, name):   # FU150 (#2): never cite anything negative about {name}
+                print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
                       f"'{(c.get('title') or '')[:70]}'", flush=True)
                 continue
             u = (c.get("url") or "").strip()
@@ -2423,6 +2784,12 @@ COMPLETE and every stated fact is sourced:
     vs annual) — NEVER present an annual price as a monthly one. NEVER cite a stale SaaS aggregator (e.g.
     SaaSworthy, SoftwareFinder) for a price when a vendor page or reputable review is available; if only an
     aggregator has it, attribute it and keep the billing basis, or drop the exact figure.
+  - {name}'s OWN facts are FIRST-PARTY ONLY (this is a hard rule): a fact about {name} (its price, plans,
+    features, terms, policies) may ONLY cite a first-party block labeled "{name}" (its own site/published
+    content) — NEVER a "third-party ·" / review / analyst block, even for {name}'s pricing. If no
+    first-party {name} block supports a {name} fact, state it as {name}'s own positioning or drop it —
+    never move it onto a third-party source. And NEVER cite, quote, or keep any source that says anything
+    negative/critical about {name} — remove it from the article and from ## Sources.
   - CORE CLAIM: for the article's central factual/policy claim, cite the "official ·" primary source (the
     platform/regulator's own policy page) when one is provided above, and resolve any two contradictory
     versions to that authoritative source. The central claim (and the section that carries it) MUST REMAIN
@@ -3094,13 +3461,33 @@ Return JSON only:
         # FU114/115 — verified internal-link targets (opt-in), built by the shared helper:
         # own fetched pages + tool-published siblings + the site's existing live posts.
         link_targets = self._build_link_targets(brand, sibling_links) if internal_links else None
+        # FU150 (#4): resolve + sync the brand's CANONICAL PER-PRODUCT first-party pricing from THIS
+        # run's first-party evidence (+ a first-party product-page web-search for the seed's product —
+        # Case 2), so every blog states the SAME values; a differing first-party value is adopted +
+        # persisted + surfaced as a warning. `extra_blocks` = a product page the web-search found —
+        # fold it into the article's evidence so the writer can cite it as a first-party [S#].
+        key_facts, kf_warning, seed_products, extra_blocks = \
+            self._resolve_and_sync_key_facts(brand, evidence, seed)
+        if extra_blocks:
+            _start = len(getattr(self, "_evidence_blocks", None) or []) + 1
+            _lines = [f"[S{_start + i}] {b['label']}" + (f" — {b['url']}" if b.get('url') else "")
+                      + f"\n{b['text']}" for i, b in enumerate(extra_blocks)]
+            if (evidence or "").strip():
+                evidence = evidence + "\n\n" + "\n\n".join(_lines)
+            else:
+                evidence = ("EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] "
+                            "and URL):\n" + "\n\n".join(_lines))
+            self._evidence_blocks = list(getattr(self, "_evidence_blocks", None) or []) + list(extra_blocks)
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence, geo=geo, sibling_titles=sibling_titles,
                                         qualifier=qualifier,   # FU93
                                         internal_links=internal_links, link_targets=link_targets,
-                                        ymyl=rymyl)   # FU133
+                                        ymyl=rymyl,   # FU133
+                                        key_facts=key_facts, key_facts_products=seed_products)   # FU150
         if not article:
             return None
+        if kf_warning:
+            article["key_facts_warning"] = kf_warning
         draft_body = article.get("body_markdown") or ""   # FU54: pre-verify draft, for the substance guard
         v = self.verify_claims(brand, article, evidence=evidence)
         if v:

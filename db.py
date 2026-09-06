@@ -280,7 +280,7 @@ class Database:
                      personas=None, competitor_domains=None, author_name=None,
                      author_title=None, reviewer_name=None, reviewer_title=None,
                      disclosure=None, logo_url=None, known_sources=None,
-                     meta_autofetched_at=None,
+                     meta_autofetched_at=None, key_facts=None,
                      name=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
@@ -300,6 +300,7 @@ class Database:
             "disclosure": disclosure, "logo_url": logo_url,
             "known_sources": known_sources,
             "meta_autofetched_at": meta_autofetched_at,
+            "key_facts": key_facts,   # FU150 (#4): canonical first-party facts JSON
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2279,6 +2280,10 @@ class Database:
             # the lazy fill (at blog-gen) never re-attempts a not-found brand. Distinct from
             # enriched_at (a brand can be enriched but predate the byline/logo auto-fetch).
             "meta_autofetched_at": "ALTER TABLE brands ADD COLUMN meta_autofetched_at TEXT",
+            # FU150 (#4): CANONICAL first-party key facts (JSON, e.g. pricing) reused across ALL the
+            # brand's blogs so its own values stay consistent; the blog generator syncs + conflict-
+            # resolves this against a fresh first-party fetch each run.
+            "key_facts":         "ALTER TABLE brands ADD COLUMN key_facts TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

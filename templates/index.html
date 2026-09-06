@@ -2075,6 +2075,7 @@ async function editBrandContext(brandName) {
                     <div><label class="text-xs text-gray-400">Logo URL <span class="text-gray-600">(for publisher schema / blog image fallback)</span></label><input id="edit-brand-logo" value="${_ev(first.logo_url)}" placeholder="https://…/logo.png"></div>
                     <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
                     <div><label class="text-xs text-gray-400">Known sources <span class="text-gray-600">(one URL per line — links you supplied during past generations; auto-fetched as evidence on EVERY future blog for this brand)</span></label><textarea id="edit-brand-knownsources" rows="3" placeholder="https://www.accessdata.fda.gov/…/label.pdf&#10;https://diabetesjournals.org/care/…" style="font-family:inherit">${(() => { try { return (JSON.parse(first.known_sources || '[]') || []).join('\n'); } catch (_) { return ''; } })()}</textarea></div>
+                    <div><label class="text-xs text-gray-400">Canonical pricing <span class="text-gray-600">(first-party — ${_ev(brandName)}'s OWN pricing per product, reused &amp; kept consistent across every blog; set this when the site blocks fetches. Auto-synced from the site. One per line as <code>Product | Price</code>; a single-price brand can enter just the price.)</span></label><textarea id="edit-brand-keyfacts-pricing" rows="3" placeholder="Tirzepatide | $149 first month, then $249/mo billed quarterly (60mg)&#10;Semaglutide | $199/mo" style="font-family:inherit">${(() => { try { const p = (JSON.parse(first.key_facts || '{}') || {}).pricing || {}; const items = Array.isArray(p.items) ? p.items : (p.value ? [{product:'',value:p.value}] : []); return items.map(it => (it.product ? (it.product + ' | ' + (it.value||'')) : (it.value||''))).filter(Boolean).join('\n'); } catch(_) { return ''; } })()}</textarea></div>
                 </div>
             </details>
         </div>
@@ -2174,6 +2175,10 @@ async function saveBrandContext(brandName) {
             disclosure: _val('edit-brand-disclosure'),
             logo_url: _val('edit-brand-logo'),
             known_sources: JSON.stringify(_val('edit-brand-knownsources').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 15)),
+            key_facts_pricing_items: _val('edit-brand-keyfacts-pricing').split('\n').map(s => s.trim()).filter(Boolean).map(line => {   // FU150: canonical per-product pricing
+                const i = line.indexOf('|');
+                return i >= 0 ? { product: line.slice(0, i).trim(), value: line.slice(i + 1).trim() } : { product: '', value: line };
+            }).filter(it => it.value),
             competitors: competitor_names,
             competitor_domains,
         }});
@@ -12956,16 +12961,20 @@ function blogProvideSourcesModal(blogId, missing) {
     if (!missing.length) { openBlog(blogId); return; }
     window._blogPendingId = blogId;
     window._blogPendingTools = missing.map(m => m.tool);
-    const rows = missing.map((m, i) => `
+    const rows = missing.map((m, i) => {
+        const dom = (m.dom || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        const hint = dom ? ` — try <a href="https://${_blogEsc(dom)}/pricing" target="_blank" class="underline">${_blogEsc(dom)}/pricing</a>` : '';
+        return `
         <div class="border border-gray-700 rounded p-2 mb-2">
             <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}</div>
-            <div class="text-xs text-gray-500 mb-2">Couldn't find: ${_blogEsc(_blogFactLabel(m.facts))}. Paste a link to its page, or the fact itself.</div>
-            <input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://… (page with the pricing / license — fetched verbatim)">
-            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="…or paste the fact directly, e.g. 'Creator plan $14/mo, commercial use allowed, royalty-free'"></textarea>
+            <div class="text-xs text-gray-400 mb-2">Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.</div>
+            <input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">
+            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"></textarea>
             <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
                 <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop it from the comparison
             </label>
-        </div>`).join('');
+        </div>`;
+    }).join('');
     showModal(`<div style="max-width:640px">
         <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">Generation paused — needs a source</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each tool below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
@@ -13030,6 +13039,7 @@ function blogGenerate() {
         _blogRedditToast(res);
         _blogCostToast(res);
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90 doorway signal
+        if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150 pricing conflict
         if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
@@ -13418,6 +13428,7 @@ function blogRegen(id, part) {
         _blogRedditToast(res);
         _blogCostToast(res);
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90
+        if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150
     }, `Regenerating ${part}`);
 }
 

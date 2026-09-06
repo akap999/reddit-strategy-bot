@@ -8,6 +8,7 @@ import json
 import re
 import time
 import random
+import threading
 
 from config import DEFAULT_MODEL
 
@@ -389,6 +390,10 @@ class ClaudeClient:
         # `usage_cost()` turns it into dollars. A fresh client per blog task scopes it to
         # one generation. Callers that don't read it are unaffected.
         self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+        # FU151 (B): the usage accumulator is read/written from parallel worker threads (blog_gen
+        # parallelizes evidence fetches + Pass-A competitor sourcing), so guard it with a lock —
+        # otherwise `+=` races drop counts and the cost ceiling reads a stale total.
+        self._usage_lock = threading.Lock()
         # FU55: optional live COST CEILING ($). Once accumulated cost reaches it, further
         # web_search-backed calls (search_sources / fetch_site_facts / find_official_domain) are
         # SKIPPED, so a generation can't blow past a dollar budget. None = no cap (default).
@@ -396,7 +401,8 @@ class ClaudeClient:
 
     def reset_usage(self):
         """Zero the usage accumulator (call at the start of a generation to cost it)."""
-        self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+        with self._usage_lock:
+            self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
 
     def set_cost_ceiling(self, dollars):
         """Cap web-search spend for this generation: once usage_cost() >= dollars, further
@@ -413,11 +419,12 @@ class ClaudeClient:
             u = getattr(message, "usage", None)
             if not u:
                 return
-            self._usage["input_tokens"] += getattr(u, "input_tokens", 0) or 0
-            self._usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
             stu = getattr(u, "server_tool_use", None)
-            if stu:
-                self._usage["web_search_requests"] += getattr(stu, "web_search_requests", 0) or 0
+            with self._usage_lock:   # FU151 (B): safe under parallel workers
+                self._usage["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+                self._usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+                if stu:
+                    self._usage["web_search_requests"] += getattr(stu, "web_search_requests", 0) or 0
         except Exception:
             pass
 
@@ -426,7 +433,8 @@ class ClaudeClient:
         (input+output tokens + web_search requests). Approximate (cache tokens billed at
         the standard input rate)."""
         rin, rout = self._MODEL_RATES.get(self.model, (3.0, 15.0))
-        u = self._usage
+        with self._usage_lock:   # FU151 (B): consistent snapshot under parallel workers
+            u = dict(self._usage)
         return (u["input_tokens"] / 1e6 * rin
                 + u["output_tokens"] / 1e6 * rout
                 + u["web_search_requests"] * self._WEB_SEARCH_COST)

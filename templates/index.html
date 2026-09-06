@@ -12847,6 +12847,11 @@ async function renderBlogs(c) {
                 🔗 Internal links + meta title
                 <span class="text-gray-600">— weave 3-6 links to the brand's own (verified) pages + published sibling blogs into the body, and generate an SEO meta title. Quality/extractability preserved; off = today's output exactly.</span>
             </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-refresh-competitors">
+                🔄 Refresh competitor data (ignore cache)
+                <span class="text-gray-600">— re-source every competitor's facts from scratch instead of reusing the brand's cached facts. Slower/costlier; use when a competitor's pricing changed. Off = reuse the cache (faster, consistent).</span>
+            </label>
             <details class="mt-2">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default for this article)</summary>
                 <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
@@ -12881,8 +12886,17 @@ function _blogRow(b) {
         .map(p => `<a href="${_blogEsc(p.published_url || '#')}" target="_blank" class="badge" style="background:#0b3b2e;color:#6ee7b7" title="${_blogEsc(p.published_url||'')}">${p.platform}</a>`).join(' ')
         || '<span class="text-xs text-gray-600">—</span>';
     const upd = (b.updated_at || '').replace('T', ' ').slice(0, 16);
+    // FU151 (D): quality-score chip (quality_report arrives as a JSON string in the list query).
+    let qChip = '';
+    try {
+        const _q = typeof b.quality_report === 'string' ? JSON.parse(b.quality_report || '{}') : (b.quality_report || {});
+        if (typeof _q.score === 'number') {
+            const bg = _q.score >= 80 ? '#0b3b2e;color:#6ee7b7' : (_q.score >= 60 ? '#4a3a12;color:#fbbf24' : '#4a1a1a;color:#ff8b8b');
+            qChip = ` <span class="badge" style="background:${bg}" title="Quality scorecard — open the blog for the checklist">Q ${_q.score}</span>`;
+        }
+    } catch (e) {}
     return `<tr>
-        <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span><div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
+        <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span>${qChip}<div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
         <td>${_blogEsc(b.brand_name || '—')}</td>
         <td>${b.status === 'awaiting_sources'
             ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'
@@ -12946,6 +12960,23 @@ function _blogRedditToast(res) {
 function _blogCostToast(res) {
     // FU54: show the real API cost (tokens + web searches) of the generation.
     if (res && res.gen_cost) toast('≈ $' + Number(res.gen_cost).toFixed(2) + ' to generate', 'info');
+}
+
+function _blogQualityToast(res) {
+    // FU151 (D): flag a low quality score or failing checks so the operator opens the Quality panel.
+    const qr = res && res.quality_report;
+    if (qr && typeof qr.score === 'number') {
+        const failed = (qr.checks || []).filter(c => !c.ok).length + (qr.warnings || []).length;
+        if (qr.score < 80 || failed) toast(`Quality ${qr.score}/100${failed ? ` · ${failed} check(s) need attention` : ''} — see the blog's Quality panel`, 'info', 9000);
+    }
+}
+
+function blogCheckLinks(id) {
+    // FU151 (D): on-demand HTTP link-rot check (Source + internal URLs); persists into the quality report.
+    runTask('/api/blogs/' + id + '/check-links', {}, (res) => {
+        if (res) toast(res.dead ? `⚠ ${res.dead} dead link(s) of ${res.checked}` : `✓ all ${res.checked} links OK`, res.dead ? 'error' : 'info', 8000);
+        openBlog(id);
+    }, 'Checking links');
 }
 
 // FU79 — generation PAUSED: the model couldn't source a tool after all retries. Ask for a link/fact
@@ -13024,6 +13055,7 @@ function blogGenerate() {
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
+    const refresh_competitor_facts = !!document.getElementById('blog-gen-refresh-competitors')?.checked;   // FU151
     const ymyl = !!document.getElementById('blog-gen-ymyl')?.checked;   // FU133
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
@@ -13034,12 +13066,13 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, refresh_competitor_facts, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90 doorway signal
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150 pricing conflict
+        _blogQualityToast(res);   // FU151 (D)
         if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
@@ -13134,9 +13167,30 @@ async function openBlog(id) {
             <button class="btn btn-sm btn-primary mt-2" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing)">Provide sources</button>
         </div>`;
     }
+    // FU151 (D): persisted quality scorecard panel — structure/meta/link checks, folded warnings,
+    // the actual flagged claims (before hidden behind a count), and the on-demand link-rot result.
+    const qr = b.quality_report || {};
+    let qualityPanel = '';
+    if (qr && (qr.checks || qr.warnings || qr.link_check)) {
+        const chk = (qr.checks || []).map(c =>
+            `<div>${c.ok ? '✅' : '⚠️'} ${_blogEsc(c.label)}${c.detail ? ` <span class="text-gray-500">(${_blogEsc(c.detail)})</span>` : ''}</div>`).join('');
+        const warns = (qr.warnings || []).map(w => `<div class="text-amber-400">⚠ ${_blogEsc(w)}</div>`).join('');
+        const claimsList = (claims || []).length
+            ? `<details class="mt-1"><summary class="cursor-pointer text-amber-400">${claims.length} claim(s) adjusted — show which</summary><div class="mt-1 space-y-1">${claims.map(c => `<div class="border-l-2 border-amber-700 pl-2"><div>${_blogEsc(c.claim || '')}</div><div class="text-gray-500">${_blogEsc(c.reason || '')}</div></div>`).join('')}</div></details>`
+            : '';
+        let lc = '';
+        if (qr.link_check) {
+            const d = qr.link_check.dead || 0;
+            lc = `<div class="${d ? 'text-red-400' : 'text-emerald-400'}">${d ? `⚠ ${d} dead link(s) of ${qr.link_check.checked}` : `✓ all ${qr.link_check.checked} links OK`}${(qr.link_check.results || []).filter(r => !r.ok).map(r => `<div class="text-gray-500 pl-3">${r.status || 'err'} — ${_blogEsc(r.url)}</div>`).join('')}</div>`;
+        }
+        const score = (typeof qr.score === 'number') ? qr.score : null;
+        const scoreCls = score == null ? 'text-gray-400' : (score >= 80 ? 'text-emerald-400' : (score >= 60 ? 'text-amber-400' : 'text-red-400'));
+        qualityPanel = `<details class="mb-2 text-xs" style="background:#0f0f16;border-radius:6px;padding:6px"><summary class="cursor-pointer"><span class="${scoreCls} font-bold">Quality${score == null ? '' : ' ' + score + '/100'}</span> <span class="text-gray-500">— structure / meta / links checklist</span> <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="event.preventDefault();blogCheckLinks(${id})">Check links</button></summary><div class="mt-2 space-y-1">${chk}${warns ? '<div class="mt-1">' + warns + '</div>' : ''}${lc ? '<div class="mt-1">' + lc + '</div>' : ''}${claimsList}</div></details>`;
+    }
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
+        ${qualityPanel}
         ${pendBanner}
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
@@ -13429,6 +13483,7 @@ function blogRegen(id, part) {
         _blogCostToast(res);
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150
+        _blogQualityToast(res);   // FU151 (D)
     }, `Regenerating ${part}`);
 }
 

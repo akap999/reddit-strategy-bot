@@ -280,7 +280,7 @@ class Database:
                      personas=None, competitor_domains=None, author_name=None,
                      author_title=None, reviewer_name=None, reviewer_title=None,
                      disclosure=None, logo_url=None, known_sources=None,
-                     meta_autofetched_at=None, key_facts=None,
+                     meta_autofetched_at=None, key_facts=None, competitor_facts=None,
                      name=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
@@ -301,6 +301,7 @@ class Database:
             "known_sources": known_sources,
             "meta_autofetched_at": meta_autofetched_at,
             "key_facts": key_facts,   # FU150 (#4): canonical first-party facts JSON
+            "competitor_facts": competitor_facts,   # FU151 (A): per-competitor sourced-fact cache JSON
         }
         for col, val in field_map.items():
             if val is not None:
@@ -1095,6 +1096,10 @@ class Database:
             blog["youtube_meta"] = json.loads(blog.get("youtube_meta") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["youtube_meta"] = {}
+        try:   # FU151 (D): deterministic quality scorecard {score,checks,warnings}
+            blog["quality_report"] = json.loads(blog.get("quality_report") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["quality_report"] = {}
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1106,7 +1111,7 @@ class Database:
         """List blogs (newest first) + a compact platforms summary, with optional
         brand/status filters."""
         q = ("SELECT b.id, b.brand_id, b.seed, b.title, b.status, b.created_at, "
-             "b.updated_at, br.name AS brand_name "
+             "b.updated_at, b.quality_report, br.name AS brand_name "   # FU151 (D): list-row score chip
              "FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id WHERE 1=1")
         params = []
         if brand_id is not None:
@@ -1144,15 +1149,16 @@ class Database:
                    "geo",   # FU90
                    "qualifier",   # FU93
                    "meta_title", "internal_links",   # FU114
-                   "ymyl"}   # FU133
+                   "ymyl",   # FU133
+                   "quality_report"}   # FU151 (D)
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
-            elif k in ("pending_state", "youtube_meta") and not isinstance(v, str):   # FU79/FU80: JSON dict
-                v = json.dumps(v or {})
+            elif k in ("pending_state", "youtube_meta", "quality_report") and not isinstance(v, str):
+                v = json.dumps(v or {})   # FU79/FU80/FU151: JSON dict
             sets.append(f"{k} = ?")
             params.append(v)
         if not sets:
@@ -2284,6 +2290,10 @@ class Database:
             # brand's blogs so its own values stay consistent; the blog generator syncs + conflict-
             # resolves this against a fresh first-party fetch each run.
             "key_facts":         "ALTER TABLE brands ADD COLUMN key_facts TEXT",
+            # FU151 (A): per-competitor sourced facts CACHE (JSON, keyed by competitor slug) reused
+            # across the brand's blogs within a TTL — cuts the ~90%-of-cost competitor re-sourcing and
+            # keeps a competitor's facts consistent cluster-wide.
+            "competitor_facts":  "ALTER TABLE brands ADD COLUMN competitor_facts TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:
@@ -2312,7 +2322,10 @@ class Database:
                     "meta_title",
                     # FU133: YMYL vertical ('medical'/'finance'/'legal', 'off' = explicit opt-out,
                     # ''/NULL = auto-detect at generation).
-                    "ymyl"):
+                    "ymyl",
+                    # FU151 (D): deterministic quality scorecard (JSON {score,checks,warnings}) —
+                    # persisted so it re-shows on reopen instead of a vanishing toast.
+                    "quality_report"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

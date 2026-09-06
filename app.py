@@ -2533,6 +2533,7 @@ def api_blog_generate():
     geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
+    refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     # FU133: YMYL authoritative sourcing — checkbox True/False; absent = auto-detect from the brand.
     ymyl_in = data.get("ymyl")
     ymyl_arg = (True if ymyl_in is True else (False if ymyl_in is False else None))
@@ -2579,7 +2580,8 @@ def api_blog_generate():
                 geo=geo, sibling_titles=sibling_titles,      # FU90
                 qualifier=qualifier,                         # FU93
                 internal_links=internal_links, sibling_links=sibling_links,  # FU114
-                ymyl=ymyl_arg)                               # FU133
+                ymyl=ymyl_arg,                               # FU133
+                refresh_competitor_facts=refresh_competitor_facts)   # FU151 (A)
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -2649,11 +2651,15 @@ def api_blog_generate():
             if internal_links:
                 bg.update_blog(blog_id, internal_links=1,      # FU114: regenerate re-reads the row
                                meta_title=(blog.get("meta_title") or ""))
+            _qr = blog.get("quality_report") or {}   # FU151 (D): persist + return the quality scorecard
+            if _qr:
+                bg.update_blog(blog_id, quality_report=_qr)
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
                     "geo_warning": blog.get("geo_warning", ""),   # FU90: doorway signal → toast
-                    "key_facts_warning": blog.get("key_facts_warning", "")}   # FU150: pricing-conflict toast
+                    "key_facts_warning": blog.get("key_facts_warning", ""),   # FU150: pricing-conflict toast
+                    "quality_report": _qr}   # FU151 (D)
         finally:
             bg.close()
 
@@ -2801,13 +2807,55 @@ def api_blog_regenerate(blog_id):
             # FU90: surface the doorway signal from a full regen (part=all runs _finalize_article).
             _geo_warn = (fresh.get("geo_warning", "") if part == "all" else "")
             _kf_warn = (fresh.get("key_facts_warning", "") if part == "all" else "")   # FU150
+            _qr = (fresh.get("quality_report") or {}) if part == "all" else {}   # FU151 (D)
+            if _qr:
+                bg.update_blog(blog_id, quality_report=_qr)
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost,
-                    "geo_warning": _geo_warn, "key_facts_warning": _kf_warn}
+                    "geo_warning": _geo_warn, "key_facts_warning": _kf_warn, "quality_report": _qr}
         finally:
             bg.close()
 
     return jsonify({"task_id": start_task("blog_regenerate", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>/check-links", methods=["POST"])
+def api_blog_check_links(blog_id):
+    """FU151 (D): on-demand HTTP-verify the blog's ## Sources URLs + emitted links (link-rot). Kept OFF
+    the generation hot path — the operator triggers it. Persists the result into the quality_report."""
+    def task(_task_id=None):
+        import requests as _rq
+        import time as _time
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            body = blog.get("body_markdown") or ""
+            urls = set(re.findall(r"\]\((https?://[^)\s]+)\)", body))          # markdown links
+            urls |= set(re.findall(r"(?m)^\s*[-*].*?(https?://[^\s)]+)", body))  # ## Sources bullet URLs
+            results = []
+            for u in sorted(urls):
+                u = u.rstrip(".,);]")
+                ok, status = False, 0
+                try:
+                    r = _rq.get(u, headers={"User-Agent": _BROWSER_UA}, timeout=8, allow_redirects=True)
+                    status = r.status_code
+                    ok = 200 <= status < 400
+                except Exception:
+                    ok, status = False, 0
+                results.append({"url": u, "ok": ok, "status": status})
+            dead = [r for r in results if not r["ok"]]
+            qr = blog.get("quality_report") if isinstance(blog.get("quality_report"), dict) else {}
+            qr = dict(qr or {})
+            qr["link_check"] = {"checked": len(results), "dead": len(dead), "results": results,
+                                "at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())}
+            bg.update_blog(blog_id, quality_report=qr)
+            return {"blog_id": blog_id, "checked": len(results), "dead": len(dead), "results": results}
+        finally:
+            bg.close()
+    return jsonify({"task_id": start_task("blog_check_links", task, pass_task_id=True)})
 
 @app.route("/api/blogs/<int:blog_id>/provide-sources", methods=["POST"])
 def api_blog_provide_sources(blog_id):
@@ -3437,7 +3485,7 @@ def api_blog_export(blog_id):
     published = (blog.get("created_at") or "")[:10]
     updated = (blog.get("updated_at") or "")[:10]
 
-    from generators.blog_gen import build_blog_jsonld
+    from generators.blog_gen import build_blog_jsonld, _validate_jsonld
     # Canonical URL from a published website platform — populates Article url + mainEntityOfPage
     # (empty before the blog is published anywhere, which is fine).
     page_url = ""
@@ -3445,10 +3493,14 @@ def api_blog_export(blog_id):
         if p.get("platform") == "website" and (p.get("published_url") or "").strip():
             page_url = p["published_url"].strip()
             break
-    jsonld_str = json.dumps(build_blog_jsonld(blog, brand, page_url=page_url),
-                            ensure_ascii=False, indent=2)
+    _graph = build_blog_jsonld(blog, brand, page_url=page_url)   # FU151 (C): now Article/FAQPage/HowTo/
+    jsonld_str = json.dumps(_graph, ensure_ascii=False, indent=2)   # ItemList/Product/BreadcrumbList
+    _schema_problems = _validate_jsonld(_graph.get("@graph"))   # FU151 (C): required-field validation
+    if _schema_problems:
+        print(f"[blog] schema-validation: blog {blog_id} — {'; '.join(_schema_problems)}", flush=True)
     if fmt == "jsonld":
-        return Response(jsonld_str, mimetype="application/ld+json")
+        return Response(jsonld_str, mimetype="application/ld+json",
+                        headers=({"X-Schema-Warnings": "; ".join(_schema_problems)} if _schema_problems else {}))
 
     slug = (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "blog")[:60]
     # FU131: format=gdoc — the SAME rendered document served as a Word-compatible .doc.

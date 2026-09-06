@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor   # FU151 (B): parallelize independent network work
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
@@ -97,6 +98,9 @@ _LICENSE_DIM_RE = re.compile(
 # FU56/FU78: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
 # skipped (search result tokens are ~90% of a blog's cost). Bumped 1.5→2.0 (FU78) to leave headroom for the
 # price-rescue searches so public pricing gets fetched rather than punted. Env-overridable.
+_COMPETITOR_FACTS_TTL_DAYS = float(os.environ.get("COMPETITOR_FACTS_TTL_DAYS", "21"))   # FU151 (A)
+_COMPETITOR_FACTS_CAP = 40   # FU151 (A): max competitors kept in the per-brand fact cache (prune oldest)
+_BLOG_FETCH_WORKERS = int(os.environ.get("BLOG_FETCH_WORKERS", "5"))   # FU151 (B): parallel fetch pool
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
@@ -766,6 +770,21 @@ class BlogGenerator:
         # not just pricing (the gap that left competitor feature rows "not confirmed").
         _comp_paths = ("", "/pricing", "/features", "/product", "/platform",
                        "/how-it-works", "/testimonials", "/terms", "/license")
+        # FU151 (B): PARALLEL-fetch every (target, path) URL up front — these ~24 HTTP round-trips are
+        # independent and dominate evidence latency. The validation + block-ordering loop below is
+        # UNCHANGED (it just reads the pre-fetched text), so output + [S#] order stay byte-identical.
+        _fetch_urls = []
+        for _lbl, _dm, _val in targets:
+            _dm2 = re.sub(r"^https?://", "", _dm).rstrip("/")
+            for _p in (_EVIDENCE_PATHS if not _val else _comp_paths):
+                u = f"https://{_dm2}{_p}"
+                if u not in _fetch_urls:
+                    _fetch_urls.append(u)
+        _fetched = {}
+        if _fetch_urls:
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_fetch_urls))) as _ex:
+                for _u, _t in zip(_fetch_urls, _ex.map(self._fetch_url, _fetch_urls)):
+                    _fetched[_u] = _t or ""
         for label, dom, validate in targets:
             dom = re.sub(r"^https?://", "", dom).rstrip("/")
             target_dom[label] = dom
@@ -775,7 +794,7 @@ class BlogGenerator:
             paths = _EVIDENCE_PATHS if not validate else _comp_paths
             kept = 0
             for path in paths:
-                txt = _fetch(f"https://{dom}{path}")
+                txt = _fetched.get(f"https://{dom}{path}", "")
                 if not txt:
                     continue
                 if validate:
@@ -2051,7 +2070,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         return stored, warning, ([seed_product] if seed_product else []), extra_blocks
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
-                               ymyl=None):
+                               ymyl=None, refresh_competitor_facts=False):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -2339,9 +2358,47 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     t2 = True
             return blocks, t1, t2
 
+        # ---- FU151 (A): COMPETITOR-FACT CACHE read — reuse a competitor's sourced blocks across the
+        # brand's blogs within a TTL, so we don't re-buy the ~90%-of-cost competitor sourcing every blog
+        # and a competitor's facts stay consistent cluster-wide. A cache HIT skips domain-resolve +
+        # Tier1/2/3 + rescue entirely for that tool; only MISSING/STALE competitors are sourced LIVE.
+        try:
+            _cfacts = json.loads((brand or {}).get("competitor_facts") or "{}")
+        except Exception:
+            _cfacts = {}
+        if not isinstance(_cfacts, dict):
+            _cfacts = {}
+        import calendar as _cal
+        _now_ts = time.time()
+
+        def _cf_fresh(entry):
+            va = (entry or {}).get("verified_at")
+            if not va:
+                return False
+            try:
+                return (_now_ts - _cal.timegm(time.strptime(va, "%Y-%m-%dT%H:%M:%SZ"))) \
+                    <= _COMPETITOR_FACTS_TTL_DAYS * 86400
+            except Exception:
+                return False
+        _cached_tools = {}   # tool -> its cached blocks (fresh + non-empty)
+        if not refresh_competitor_facts:
+            for tool in tools:
+                _e = _cfacts.get(_kf_slug(tool))
+                if isinstance(_e, dict) and _cf_fresh(_e):
+                    _blks = [b for b in (_e.get("blocks") or [])
+                             if isinstance(b, dict) and (b.get("text") or "").strip() and b.get("label")]
+                    if _blks:
+                        _cached_tools[tool] = _blks
+        if _cached_tools:
+            print(f"[blog_gen] competitor-cache: HIT {len(_cached_tools)}/{len(tools)} — "
+                  f"{', '.join(_cached_tools)} (no re-sourcing)", flush=True)
+        _live_tools = [t for t in tools if t not in _cached_tools]
+        _cf_dirty = False
+
         # ---- Pass 0: batched domain pre-resolve (ONE cheap non-search LLM call; ~free) ----
         # Seed from the brand's FU54 web-verified competitor_domains cache first (neutralizes the
         # same-name-domain risk without a web search), then resolve the rest in one batched call.
+        # Only the LIVE (uncached) tools need domain resolution.
         try:
             _cached = json.loads((brand or {}).get("competitor_domains") or "{}")
         except Exception:
@@ -2352,8 +2409,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 dk = _dom(v)
                 if str(k).strip() and dk:
                     _cached_lc[str(k).strip().lower()] = dk
-        dom_map = {t: _cached_lc[t.lower()] for t in tools if t.lower() in _cached_lc}
-        _need_dom = [t for t in tools if t not in dom_map]
+        dom_map = {t: _cached_lc[t.lower()] for t in _live_tools if t.lower() in _cached_lc}
+        _need_dom = [t for t in _live_tools if t not in dom_map]
         if _need_dom:
             try:
                 _resolved = self._resolve_brand_domains(_need_dom, seed=seed, subject=name,
@@ -2367,13 +2424,26 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         print(f"[blog_gen] verify+complete: pre-resolved {len(dom_map)}/{len(tools)} competitor "
               f"domain(s) (cache+batch)", flush=True)
 
-        # ---- Pass A: cheap first-party BASELINE for EVERY tool (Tier1+Tier2, no rescue) ----
+        # ---- Pass A: cheap first-party BASELINE for EVERY (LIVE) tool (Tier1+Tier2, no rescue) ----
         # Runs before any competitor consumes the expensive rescue budget, so no tool is starved.
+        # A CACHED tool takes its blocks from the cache and skips sourcing entirely. FU151 (B): the
+        # LIVE baselines are sourced CONCURRENTLY — each is independent and writes a distinct
+        # tool_state key (no shared-list race); the finalize loop still emits `fresh` in ORIGINAL order.
         tool_state = {}
         for tool in tools:
+            if tool in _cached_tools:
+                tool_state[tool] = {"dom": "", "blocks": list(_cached_tools[tool]),
+                                    "t1": 0, "t2": 0, "t3": 0, "rescue": 0, "cached": True}
+
+        def _do_baseline(tool):
             dom = dom_map.get(tool, "")
             blocks, t1, t2 = _baseline(tool, dom)
-            tool_state[tool] = {"dom": dom, "blocks": blocks, "t1": t1, "t2": t2, "t3": 0, "rescue": 0}
+            return tool, {"dom": dom, "blocks": blocks, "t1": t1, "t2": t2, "t3": 0, "rescue": 0}
+        _live_baseline = [t for t in tools if t not in _cached_tools]
+        if _live_baseline:
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_live_baseline))) as _ex:
+                for _tool, _st in _ex.map(_do_baseline, _live_baseline):
+                    tool_state[_tool] = _st
 
         # ---- Pass B: rescue what still needs it, ZERO-BLOCK tools FIRST, then missing-key-fact ----
         def _rescue_prio(t):
@@ -2383,6 +2453,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             return 1 if _missing_facts(st["blocks"]) else 2   # 2 = fully sourced, skip
         for tool in sorted(tools, key=_rescue_prio):
             st = tool_state[tool]
+            if st.get("cached"):
+                continue                                   # FU151: cached facts are trusted as-is
             if _rescue_prio(tool) == 2:
                 continue                                   # nothing missing — no rescue spend
             dom = st["dom"]
@@ -2485,7 +2557,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             blocks = st["blocks"]
             if blocks:
                 fresh.extend(blocks)
+                # FU151 (A): write LIVE-sourced competitors back to the per-brand cache (skip cache hits).
+                if not st.get("cached"):
+                    _cfacts[_kf_slug(tool)] = {
+                        "domain": st.get("dom") or "",
+                        "blocks": [{"label": b["label"], "url": b["url"], "text": b["text"]}
+                                   for b in blocks[:_MAX_TOOL_PAGES * 2]],
+                        "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    _cf_dirty = True
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} "
+                      f"{'(cache) ' if st.get('cached') else ''}"
                       f"t1={st['t1']} t2={int(st['t2'])} t3={st['t3']} rescue={st['rescue']} "
                       f"missing={','.join(_missing_facts(blocks)) or 'none'} -> "
                       f"{'vendor' if _has_vendor(blocks, st['dom']) else 'third-party'} <- "
@@ -2497,6 +2578,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf})
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
+
+        # FU151 (A): persist the refreshed competitor-fact cache (best-effort; prune to the cap,
+        # keeping the most-recently-verified entries).
+        if _cf_dirty and (brand or {}).get("id") is not None and getattr(self, "db", None):
+            try:
+                if len(_cfacts) > _COMPETITOR_FACTS_CAP:
+                    _cfacts = dict(sorted(_cfacts.items(),
+                                          key=lambda kv: (kv[1] or {}).get("verified_at") or "",
+                                          reverse=True)[:_COMPETITOR_FACTS_CAP])
+                self.db.update_brand(brand["id"], competitor_facts=json.dumps(_cfacts))
+            except Exception as e:
+                print(f"[blog_gen] competitor-cache: persist failed: {e}", flush=True)
 
         # FU139 — DIMENSION RESCUE ("try harder", user directive): the FU78 rescue covers only
         # price/license; every OTHER extracted comparison dimension (eligibility, delivery,
@@ -3408,7 +3501,8 @@ Return JSON only:
     def generate_blog(self, brand, seed, extra_keywords=None, source_urls=None,
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
-                      qualifier="", internal_links=False, sibling_links=None, ymyl=None):
+                      qualifier="", internal_links=False, sibling_links=None, ymyl=None,
+                      refresh_competitor_facts=False):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -3501,7 +3595,8 @@ Return JSON only:
         # link/fact, instead of silently dropping the tool's row. `deep` deepens corroboration (FU48).
         sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo,
                                                qualifier=qualifier,   # FU93
-                                               ymyl=rymyl)   # FU133
+                                               ymyl=rymyl,   # FU133
+                                               refresh_competitor_facts=refresh_competitor_facts)   # FU151
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
@@ -3524,14 +3619,15 @@ Return JSON only:
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
         return self._finalize_article(brand, seed, article, draft_body, geo=geo,
                                       qualifier=qualifier,   # FU93
-                                      ymyl=rymyl)   # FU133
+                                      ymyl=rymyl,   # FU133
+                                      link_targets=link_targets)   # FU151 (D): internal-link honesty
 
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
-                          ymyl=None):
+                          ymyl=None, link_targets=None):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
-        geo-check — a WARNING (never a block) when a geo page barely mentions its geography. Mutates +
-        returns `article`."""
+        geo-check — a WARNING (never a block) when a geo page barely mentions its geography. FU151 (D):
+        also computes the deterministic quality scorecard. Mutates + returns `article`."""
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
@@ -3758,10 +3854,70 @@ Return JSON only:
                         x for x in [article.get("geo_warning", ""), _pbnote] if x)
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
+        # FU151 (D): deterministic quality scorecard (structure/meta/links + folded warnings), persisted.
+        try:
+            article["quality_report"] = self._quality_report(article, brand, link_targets=link_targets)
+        except Exception as e:
+            print(f"[blog_gen] quality-report skipped: {e}", flush=True)
+            article["quality_report"] = {}
         # FU54: real dollar cost of this generation (tokens + web searches), surfaced in the UI.
         article["gen_cost"] = round(self.claude.usage_cost(), 4)
         article["gen_usage"] = dict(self.claude._usage)
         return article
+
+    def _quality_report(self, article, brand, link_targets=None):
+        """FU151 (D): deterministic quality scorecard — STRUCTURE (Quick answer / question-headings /
+        FAQ / ≥3-competitor table), META lengths, INTERNAL-LINK honesty — plus the folded `geo_warning`
+        notes. Returns {score, checks:[{key,label,ok,detail}], warnings:[...]}. Never raises. No network."""
+        body = article.get("body_markdown") or ""
+        name = ((brand or {}).get("name") or "").strip()
+        low = body.lower()
+        checks = []
+
+        def add(key, label, ok, detail=""):
+            checks.append({"key": key, "label": label, "ok": bool(ok), "detail": detail})
+        # STRUCTURE (the real gap — was prompt-trust only)
+        add("quick_answer", "Quick answer present",
+            bool(re.search(r"(?im)^#{1,4}\s*(quick answer|short answer|tl;?dr)\b", body))
+            or "quick answer" in low)
+        _qh = len(re.findall(r"(?m)^#{2,4}\s+.*\?\s*$", body))
+        add("question_headings", "Question-shaped headings", _qh >= 1, f"{_qh} found")
+        add("faq", "FAQ section present",
+            bool(re.search(r"(?im)^#{1,4}\s*(faq|frequently asked)", body)) or bool(_parse_faq_pairs(body)))
+        _ents = _first_table_entities(body)
+        if _ents:
+            _comp = [e for e in _ents if not (name and name.lower() in e.lower())]
+            add("comparison", "Comparison names ≥3 competitors", len(_comp) >= 3,
+                f"{len(_comp)} competitor row(s)")
+        # META lengths (SEO hygiene — WARN, never silently reword)
+        _mt = (article.get("meta_title") or "").strip()
+        _md = (article.get("meta_description") or "").strip()
+        add("meta_title", "Meta title present, ≤60 chars", bool(_mt) and len(_mt) <= 60, f"{len(_mt)} chars")
+        add("meta_desc", "Meta description present, ≤160 chars",
+            bool(_md) and len(_md) <= 160, f"{len(_md)} chars")
+        # INTERNAL-LINK HONESTY (only when internal linking was on): every emitted internal link must be
+        # one of the FU114 verified targets. No network.
+        if link_targets:
+            _verified = set()
+            for t in link_targets:
+                u = ((t.get("url") if isinstance(t, dict) else t) or "").strip().split("?")[0].rstrip("/").lower()
+                if u:
+                    _verified.add(u)
+            _own = _norm_domain((brand or {}).get("domain_url") or "")
+            _bad = []
+            for u in re.findall(r"\]\((https?://[^)\s]+)\)", body):
+                key = u.strip().split("?")[0].rstrip("/").lower()
+                d = _norm_domain(u)
+                if _own and d and (d == _own or d.endswith("." + _own)) and key not in _verified:
+                    _bad.append(u)
+            add("internal_links", "Internal links are verified targets", not _bad,
+                (f"{len(_bad)} not in the verified list" if _bad else "all verified"))
+        # Fold in the existing finalize warnings (geo/qualifier/YMYL/peer/publisher-blank/source-authority/…)
+        warnings = [w.strip() for w in (article.get("geo_warning") or "").split(";") if w.strip()]
+        total = len(checks) or 1
+        passed = sum(1 for c in checks if c["ok"])
+        score = max(0, round(100 * passed / total) - min(len(warnings) * 5, 25))
+        return {"score": score, "checks": checks, "warnings": warnings}
 
     def finish_pending_blog(self, brand, seed, checkpoint, provided):
         """FU79 resume — complete a blog paused for manual sources WITHOUT re-gathering / re-generating /
@@ -3870,6 +4026,89 @@ def _parse_faq_pairs(body_md):
     return pairs
 
 
+def _parse_howto_steps(body_md):
+    """FU151 (C): the LONGEST run of consecutive Markdown numbered-list items (`1. …`) as ordered
+    step texts. [] when fewer than 2 — deterministic, no LLM."""
+    best, run = [], []
+    for line in (body_md or "").splitlines():
+        m = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
+        if m:
+            run.append(m.group(1).strip())
+        else:
+            if len(run) > len(best):
+                best = run
+            run = []
+    if len(run) > len(best):
+        best = run
+    return best if len(best) >= 2 else []
+
+
+def _first_table_entities(body_md):
+    """FU151 (C): the first Markdown pipe-table's data-row FIRST-column values (the compared
+    entities), for an ItemList. []-safe."""
+    lines = (body_md or "").splitlines()
+    hdr = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("|") and "|" in s[1:]:
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if "-" in nxt and re.fullmatch(r"\|?[\s:|-]+\|?", nxt):
+                hdr = i
+                break
+    if hdr is None:
+        return []
+    out = []
+    for ln in lines[hdr + 2:]:
+        s = ln.strip()
+        if not (s.startswith("|") and "|" in s[1:]):
+            break
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        first = re.sub(r"[\*`\[\]]", "", (cells[0] if cells else "")).strip()
+        if first and not re.fullmatch(r":?-{2,}:?", first):
+            out.append(first)
+    return out
+
+
+def _price_amount(value):
+    """FU151 (C): first currency amount in a free-form pricing string → (amount, currency) or
+    (None, None)."""
+    m = re.search(r"([\$€£])\s?(\d[\d,]*(?:\.\d+)?)", value or "")
+    if not m:
+        return None, None
+    return m.group(2).replace(",", ""), {"$": "USD", "€": "EUR", "£": "GBP"}.get(m.group(1), "USD")
+
+
+def _validate_jsonld(graph):
+    """FU151 (C): deterministic required-field check per schema.org type. Returns a list of problem
+    strings ([] = clean) so the operator sees a schema gap instead of shipping invalid markup."""
+    problems = []
+    for node in (graph or []):
+        t = node.get("@type")
+        if t == "Article":
+            for f in ("headline", "datePublished", "author", "publisher"):
+                if not node.get(f):
+                    problems.append(f"Article missing {f}")
+        elif t == "FAQPage":
+            me = node.get("mainEntity") or []
+            if not me:
+                problems.append("FAQPage has no questions")
+            elif any(not q.get("name") or not ((q.get("acceptedAnswer") or {}).get("text")) for q in me):
+                problems.append("FAQPage question missing name/answer")
+        elif t == "HowTo":
+            if len(node.get("step") or []) < 2:
+                problems.append("HowTo has <2 steps")
+        elif t == "ItemList":
+            if len(node.get("itemListElement") or []) < 2:
+                problems.append("ItemList has <2 items")
+        elif t == "Product":
+            if not node.get("name") or not node.get("offers"):
+                problems.append("Product missing name/offers")
+        elif t == "BreadcrumbList":
+            if not node.get("itemListElement"):
+                problems.append("BreadcrumbList empty")
+    return problems
+
+
 def build_blog_jsonld(blog, brand=None, page_url=""):
     """Build an Article + FAQPage JSON-LD @graph for a blog (pure parsing, no LLM). Dates from
     blog.created_at/updated_at. Byline is resolved per-field as a PER-BLOG value overriding the
@@ -3959,4 +4198,55 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
                 for f in faqs
             ],
         })
+    body_md = blog.get("body_markdown") or ""
+    # FU151 (C) — HowTo: only for a how-to intent (seed/title) WITH a real numbered-step sequence.
+    if re.search(r"\bhow to\b|\bhow do i\b|\bstep[- ]by[- ]step\b|\bsteps to\b",
+                 ((blog.get("seed") or "") + " " + title).lower()):
+        steps = _parse_howto_steps(body_md)
+        if len(steps) >= 2:
+            graph.append({"@type": "HowTo", "name": title or "How-to",
+                          "step": [{"@type": "HowToStep",
+                                    "name": (re.split(r"[.:]", s)[0] or s)[:80], "text": s}
+                                   for s in steps]})
+    # FU151 (C) — ItemList: the compared entities when a comparison table exists.
+    entities = _first_table_entities(body_md)
+    if len(entities) >= 2:
+        graph.append({"@type": "ItemList",
+                      "itemListElement": [{"@type": "ListItem", "position": i + 1, "name": e}
+                                          for i, e in enumerate(entities)]})
+    # FU151 (C) — Product + Offer for the SUBJECT from canonical FU150 key_facts pricing (first-party
+    # only; the verbatim value in `description`, a best-effort numeric `price` when parseable).
+    try:
+        kf_items = _kf_pricing_items(json.loads(brand.get("key_facts") or "{}"))
+    except Exception:
+        kf_items = []
+    offers = []
+    for it in kf_items:
+        val = (it.get("value") or "").strip()
+        if not val:
+            continue
+        off = {"@type": "Offer", "description": val[:200]}
+        amt, cur = _price_amount(val)
+        if amt:
+            off["price"] = amt
+            off["priceCurrency"] = cur
+        if it.get("product"):
+            off["name"] = it["product"]
+        if it.get("source_url"):
+            off["url"] = it["source_url"]
+        offers.append(off)
+    if offers and brand_name:
+        prod = {"@type": "Product", "name": brand_name,
+                "offers": offers if len(offers) > 1 else offers[0]}
+        if brand_url:
+            prod["url"] = brand_url
+        if image_url:
+            prod["image"] = image_url
+        graph.append(prod)
+    # FU151 (C) — BreadcrumbList: only once the article has a live URL (published).
+    if page_url:
+        graph.append({"@type": "BreadcrumbList", "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": brand_name or "Home",
+             "item": brand_url or page_url},
+            {"@type": "ListItem", "position": 2, "name": title or "Article", "item": page_url}]})
     return {"@context": "https://schema.org", "@graph": graph}

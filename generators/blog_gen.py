@@ -498,14 +498,12 @@ class BlogGenerator:
         return name, url, "\n".join(lines)
 
     def _byline_md(self, brand):
-        """EEAT byline + disclosure block (Markdown), or "" when the brand supplies none.
-        NEVER fabricated — rendered only from brand-supplied fields."""
+        """EEAT byline + disclosure block (Markdown). FU152: the AUTHOR line is ALWAYS a generic
+        placeholder — blogs are client deliverables, so the client inserts their own byline before
+        publishing; a specific/auto-guessed name must never ship. NEVER fabricated. The reviewer +
+        disclosure lines still render only from brand-supplied fields."""
         b = brand or {}
-        bits = []
-        au = (b.get("author_name") or "").strip()
-        if au:
-            at = (b.get("author_title") or "").strip()
-            bits.append(f"By {au}" + (f", {at}" if at else ""))
+        bits = ["[Add author byline before publishing]"]   # FU152: always a replace-me placeholder
         rv = (b.get("reviewer_name") or "").strip()
         if rv:
             rt = (b.get("reviewer_title") or "").strip()

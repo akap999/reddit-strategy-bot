@@ -3643,6 +3643,20 @@ Return JSON only:
         grams_b = {tuple(wb[i:i + n]) for i in range(len(wb) - n + 1)}
         return len(grams_a & grams_b) / len(grams_a)
 
+    @staticmethod
+    def _restore_headings(orig_heads, rewritten_body):
+        """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
+        reworded heading is put back to its exact original text + level while the reworded PROSE (the
+        watermark-stripped part) is kept. Returns the restored body when the heading COUNT matches;
+        None when it differs (a genuine section add/drop → the caller rejects that rewrite)."""
+        lines = (rewritten_body or "").split("\n")   # split (not splitlines) → faithful round-trip
+        idxs = [i for i, l in enumerate(lines) if l.lstrip().startswith("#")]
+        if len(idxs) != len(orig_heads or []):
+            return None
+        for k, i in enumerate(idxs):
+            lines[i] = orig_heads[k]
+        return "\n".join(lines)
+
     def _apply_writer_pass(self, article, draft_body, brand, seed):
         """FU153: re-author the finished blog body on the self-hosted open model so a Claude SynthID
         watermark is replaced by the open model's tokens. Modes (self.writer_mode):
@@ -3664,9 +3678,10 @@ Return JSON only:
 
             def _build_prompt(aggressive=False):
                 harder = ("\n\nIMPORTANT: a previous attempt reused too much of the original wording. "
-                          "Rewrite FAR more aggressively — share NO run of 8+ words with the original; "
-                          "change sentence structure and word choice throughout. Keep every [S#], "
-                          "heading, number and fact exactly.") if aggressive else ""
+                          "Rewrite the PROSE FAR more aggressively — share NO run of 8+ words with the "
+                          "original body text; change sentence structure and word choice throughout. But "
+                          "copy every [S#] and every heading line CHARACTER-FOR-CHARACTER — only the "
+                          "paragraph text under the headings changes.") if aggressive else ""
                 if self.writer_mode == "compose":
                     blocks = []
                     for i, bl in enumerate(self._evidence_blocks or [], 1):
@@ -3696,7 +3711,9 @@ Return JSON only:
                     "words, sharing no verbatim phrasing with the original — a FULL rewrite, not a light edit.\n\n"
                     "PRESERVE EXACTLY (do not change, drop, move, or renumber):\n"
                     "- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
-                    "- every Markdown heading (##, ###) verbatim;\n"
+                    "- EVERY heading line (starting with #, ##, or ###) — copy it CHARACTER-FOR-CHARACTER; "
+                    "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
+                    "the paragraph text UNDER the headings;\n"
                     "- every number, price, date, product name, and factual claim;\n"
                     "- every Markdown table (structure and cell values);\n"
                     "- the '## Sources' section at the end.\n"
@@ -3728,11 +3745,20 @@ Return JSON only:
                             return False, f"dropped headings {miss[:3]}"
                 return True, ""
 
-            best, overlap = None, 1.0
+            best, overlap, last_why = None, 1.0, ""
             for attempt in range(2):
                 out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)), max_tokens=9000)
+                # Rewrite mode: put the ORIGINAL headings back onto the rewrite (positionally) so a
+                # reworded heading isn't a failure — only the PROSE is watermark-stripped. If the
+                # section COUNT changed, restore returns None → _valid's heading check fails (a real
+                # structural change, correctly rejected).
+                if self.writer_mode == "rewrite" and out and heads:
+                    restored = self._restore_headings(heads, out)
+                    if restored is not None:
+                        out = restored
                 ok, why = _valid(out)
                 if not ok:
+                    last_why = why
                     print(f"[writer] attempt {attempt+1} quality gate failed: {why}", flush=True)
                     continue
                 best = out
@@ -3743,7 +3769,8 @@ Return JSON only:
 
             if best is None:
                 article["writer_mode_used"] = "fallback"
-                article["writer_warning"] = "fell back to Claude (open-model rewrite failed validation)"
+                article["writer_warning"] = (f"fell back to Claude — {last_why}" if last_why
+                                             else "fell back to Claude (open-model rewrite failed validation)")
                 print("[writer] fell back to the Claude body (quality gate).", flush=True)
                 return claude_body
 

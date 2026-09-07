@@ -113,6 +113,37 @@ def test_rewrite_existing_blog_falls_back_when_citation_dropped():
     assert art["writer_mode_used"] == "fallback"         # endpoint will NOT store; returns ok:false
 
 
+# --- heading restore (the fix: a reworded heading no longer fails the gate) ----------------------
+def test_restore_headings_positional_and_count_guard():
+    restored = BlogGenerator._restore_headings(
+        ["# A", "## B"], "# X reworded\ntext\n## Y reworded\nmore")
+    assert restored == "# A\ntext\n## B\nmore"                       # headings put back exactly
+    # a genuine section add/drop (count mismatch) → None (caller rejects)
+    assert BlogGenerator._restore_headings(["# A", "## B", "## C"], "# X\ntext\n## Y") is None
+
+
+REWORDED_HEADS_BODY = (
+    "# Top widgets for teams\n\n## The short answer\n"
+    "Acme is the standout choice for the majority of squads because deployment is rapid and its pricing "
+    "sits well under the alternatives [S1], and wiring it into an existing toolchain requires no bespoke "
+    "integration work whatsoever [S2].\n\n## How dependable is the Acme widget?\n"
+    "Independent stress testing consistently reports solid, reliable uptime across a broad spread of "
+    "workloads and sudden traffic spikes [S1].\n"
+)
+
+
+def test_rewrite_reworded_headings_now_succeeds_with_original_headings():
+    # The open model reworded the headings (same count) but reworded the prose — this used to FAIL
+    # the gate; now the original headings are restored and the rewrite ships.
+    gen = _gen(StubWriter(lambda p, i: REWORDED_HEADS_BODY))
+    art = {"body_markdown": CLAUDE_BODY}
+    out = gen._apply_writer_pass(art, CLAUDE_BODY, {"name": "Acme"}, "best widgets for teams")
+    assert art["writer_mode_used"] == "rewrite"                     # shipped, not a fallback
+    assert "## Quick answer" in out and "## Is the Acme widget reliable?" in out   # originals restored
+    assert "## The short answer" not in out                         # the model's reworded heading is gone
+    assert "[S1]" in out and "[S2]" in out
+
+
 # --- db: the 4 new columns migrate + round-trip (original body untouched) -------------------------
 def test_rewritten_columns_migrate_and_roundtrip():
     fd, path = tempfile.mkstemp(suffix=".db")

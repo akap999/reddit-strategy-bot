@@ -247,6 +247,58 @@ def _kf_pricing_items(key_facts):
     return []
 
 
+# FU156: generic filler dropped so a category/price word doesn't match every page.
+_PRODUCT_FILLER = {"the", "and", "for", "with", "its", "their", "together", "combined", "use",
+                   "therapy", "treatment", "medication", "medications", "drug", "drugs", "injection",
+                   "tablets", "oral", "weekly", "online", "clinic", "clinics", "program", "programs",
+                   "plan", "plans", "price", "pricing", "cost", "costs", "buy", "get", "best", "shop"}
+
+
+def _product_tokens(s):
+    """FU156: a product name's distinctive tokens for matching a URL path / title / fact — generic
+    filler dropped (so 'tirzepatide program' doesn't match every /program/ page). Mirrors the FU142
+    subject tokenizer."""
+    return [w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower()) if w not in _PRODUCT_FILLER]
+
+
+def _best_product_price(results, product, own_domain):
+    """FU156: PURE selection (issues NO search) — from a list of {url,title,fact} results a search
+    ALREADY returned, return the best {url, fact} that is (a) on `own_domain`, (b) carries a price
+    signal, and (c) product-MATCHES `product` (a distinctive product token in the URL PATH, title, or
+    fact). Prefers a URL-PATH match (the dedicated /product/<product>/ page) over a text-only mention.
+    Returns None when nothing matches. `product` empty (single-product/general brand) → the best
+    own-domain priced result (any). This is the shared logic used for the subject AND every competitor;
+    it adds zero cost — it just picks smartly among results already paid for."""
+    toks = _product_tokens(product)
+    best, best_score = None, -1
+    for s in (results or []):
+        if not isinstance(s, dict):
+            continue
+        url = (s.get("url") or "").strip()
+        fct = (s.get("fact") or s.get("title") or "").strip()
+        if not url or not fct:
+            continue
+        dom = _norm_domain(url)
+        if not dom or not (dom == own_domain or dom.endswith("." + own_domain)):
+            continue
+        if not _PRICE_SIGNAL_RE.search(fct):
+            continue
+        if toks:   # a specific product → require a token match; prefer the product-page URL
+            path = re.sub(r"^[a-z]+://[^/]+", "", url).lower()   # URL path (scheme+host stripped)
+            blob = (fct + " " + str(s.get("title") or "")).lower()
+            if any(t in path for t in toks):
+                score = 2
+            elif any(t in blob for t in toks):
+                score = 1
+            else:
+                continue   # priced own-domain page but NOT about this product → reject (the TRT case)
+        else:
+            score = 0
+        if score > best_score:
+            best, best_score = {"url": url, "fact": fct}, score
+    return best
+
+
 def _canonical_facts_block(name, key_facts, seed_products=None):
     """FU150 (#4): render {name}'s CANONICAL PER-PRODUCT first-party facts (pricing) into a writer-
     prompt block so EVERY blog states the SAME values (cluster sync). The blog's seed-product item is
@@ -1615,6 +1667,11 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     brand. Format STRICTLY: each question is an H3 heading ending in "?" (a real question about the topic,
     not about {name}), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (Keep
     this exact format — it is parsed into FAQPage structured data.)
+  - PRICING PRODUCT-MATCH: any price you state for a brand/tool must be the price of the ARTICLE'S product
+    at that brand — NEVER the brand's DIFFERENT product (e.g. do not use a TRT price in a tirzepatide
+    article). Distinguish a PROGRAM / MEMBERSHIP / SUBSCRIPTION fee from the MEDICATION / product cost and
+    LABEL which one a number is; never present a membership/program fee as the medication price. If the
+    product's own price isn't in the EVIDENCE, state the pricing model — never a different product's number.
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
@@ -1737,6 +1794,10 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - The "Quick answer" block (it gets cited verbatim — every claim in it must be supported).
   - Every NUMBER / STATISTIC / review count / price / "X+ markers" — if not in the brand
     context, hedge it ("per {name}'s site"), attribute it, or remove the figure.
+  - PRICING PRODUCT-MATCH: a price in a cell/sentence about the article's product that is actually a
+    DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
+    presented AS the medication price — fix it (use the product's own price), label the fee type, or drop
+    the figure and state the pricing model. These MUST appear in `flagged`.
   - CERTIFICATIONS / accreditations (e.g. "LegitScript certified") — keep ONLY if in context.
   - SUPERLATIVES & BLANKET-COVERAGE claims ("largest", "best", "#1", "the only", "all 50
     states") — drop or qualify unless explicitly supported by the context.
@@ -1968,7 +2029,27 @@ Return JSON only:
         warning, extra_blocks = "", []
         own_dom = _norm_domain((brand or {}).get("domain_url") or "")
         stored_items = _kf_pricing_items(stored)
+        # FU156: purge an AUTO-mislabeled non-operator item — one whose product label doesn't appear
+        # in its OWN source_url path (e.g. {product:"tirzepatide", url:".../mens-trt/"}) — so a
+        # regeneration self-heals the wrong price instead of preserving it. operator_set is untouched.
+        def _mislabeled(it):
+            prod = str(it.get("product") or "").strip()
+            if not prod or it.get("operator_set"):
+                return False
+            toks = _product_tokens(prod)
+            if not toks:
+                return False
+            path = re.sub(r"^[a-z]+://[^/]+", "", (it.get("source_url") or "")).strip("/").lower()
+            if not path:
+                return False   # bare-domain / no real path → can't judge it → keep
+            return not any(t in path for t in toks)
+        _clean_items = [i for i in stored_items if not _mislabeled(i)]
+        _purged = len(_clean_items) != len(stored_items)
+        stored_items = _clean_items
         if not name or not own_dom or not (evidence or "").strip():
+            if _purged:
+                stored["pricing"] = {"items": stored_items}
+                self._persist_key_facts(brand, stored)
             return stored, warning, [], extra_blocks   # can't first-party-verify → reuse stored
 
         # (a) extract per-product pricing from FIRST-PARTY evidence only (one cheap call, no search).
@@ -2019,26 +2100,35 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         _stored_t = next((i for i in stored_items if _kf_slug(i.get("product")) == _t_slug), None)
         _operator_locked = bool(_stored_t and _stored_t.get("operator_set"))
         if not _in_evidence and not _operator_locked:
-            q = f"{name} {target} pricing" if target else f"{name} pricing"
-            try:
-                res = self.claude.search_sources(
-                    f"{q} — plan names and exact price, from {name}'s OWN official site only",
-                    max_searches=1, allowed_domains=[own_dom], first_party=True)
-            except Exception:
-                res = []
-            for s in (res or []):
-                u = (s.get("url") or "").strip()
-                fct = (s.get("fact") or s.get("title") or "").strip()
-                if u and fct and _norm_domain(u) and (
-                        _norm_domain(u) == own_dom or _norm_domain(u).endswith("." + own_dom)) \
-                        and _PRICE_SIGNAL_RE.search(fct):
-                    fresh.append({"product": target, "value": fct[:300], "source_url": u})
-                    extra_blocks.append({"label": name, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
-                    print(f"[blog_gen] key-facts: Case-2 free web-search found {name} "
-                          f"{target or '(general)'} pricing on {u}", flush=True)
-                    break
+            # FU156: search for the TARGET PRODUCT's price and pick a product-MATCHING own-domain
+            # priced page via _best_product_price (never a DIFFERENT product's price — the TRT bug).
+            # One retry ONLY when the first query returns no product match (cost: 1 call, +1 iff missed).
+            picked = None
+            _queries = ([f"{name} {target} price", f"{name} {target} cost per month plan"]
+                        if target else [f"{name} pricing"])
+            for q in _queries:
+                try:
+                    res = self.claude.search_sources(
+                        f"{q} — plan names and exact price, from {name}'s OWN official site only",
+                        max_searches=1, allowed_domains=[own_dom], first_party=True)
+                except Exception:
+                    res = []
+                picked = _best_product_price(res, target, own_dom)
+                if picked:
+                    break   # product-matching price found → no retry
+            if picked:
+                fresh.append({"product": target, "value": picked["fact"][:300], "source_url": picked["url"]})
+                extra_blocks.append({"label": name, "url": picked["url"], "text": picked["fact"][:_EVIDENCE_TEXT_CAP]})
+                print(f"[blog_gen] key-facts: Case-2 web-search found {name} "
+                      f"{target or '(general)'} pricing on {picked['url']}", flush=True)
+            elif target:
+                print(f"[blog_gen] key-facts: no product-matching own-domain price for {name} "
+                      f"'{target}' — storing nothing (never a wrong-product price)", flush=True)
 
         if not fresh:
+            if _purged:   # FU156: still persist a self-heal purge even when no fresh price was found
+                stored["pricing"] = {"items": stored_items}
+                self._persist_key_facts(brand, stored)
             return stored, warning, ([seed_product] if seed_product else []), extra_blocks
 
         # (c) merge per-product into the stored items; warn per changed product
@@ -2066,7 +2156,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
             # same value → keep stored item untouched
         if notes:
             warning = "⚠ " + "; ".join(notes) + " — earlier blogs may show the old value; regenerate them to sync."
-        if changed:
+        if changed or _purged:   # FU156: persist a self-heal purge even when nothing new was found
             stored["pricing"] = {"items": list(by_slug.values())}
             self._persist_key_facts(brand, stored)
             if warning:
@@ -2264,7 +2354,13 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         qual_brief = (f"; {rqual} — terms, options and conditions offered" if rqual else "")
         # FU150 (Change 9) — VERTICAL-NEUTRAL, category-anchored (was music-specific): works for SaaS,
         # e-commerce, finance, legal, medical … not just creative tools.
-        fetch_brief = (f"pricing and plans; commercial / license / eligibility / contract terms as "
+        # FU156 — the article's PRIMARY product (a specific drug/product); anchor competitor pricing on
+        # it so a competitor's price cell shows the MEDICATION/product cost, not a generic membership fee.
+        _product = (products[0] if products else (core_topic or "")).strip()
+        _prod_price_brief = (f"the price/cost of {_product} (the medication/program for {_product}), plan "
+                             f"names, billing basis; " if _product else "")
+        fetch_brief = (_prod_price_brief
+                       + f"pricing and plans; commercial / license / eligibility / contract terms as "
                        f"applicable; the key capabilities and differentiators for "
                        f"{cat or 'this product/service'}; who it's best for" + geo_brief + qual_brief)
         # FU150 — TWO-PASS competitor sourcing so NO competitor is starved to zero purely by loop
@@ -2329,14 +2425,23 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 return []
             try:
                 pin = self.claude.search_sources(
-                    f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
+                    (f"{tool} {_product} price/cost; " if _product else "")   # FU156: product-anchored
+                    + f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
                     f"key capabilities"
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
                     + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
                     max_searches=2, allowed_domains=[_dom(dom)], first_party=True)   # FU55
             except Exception:
                 pin = []
-            return _blocks_from(pin, tool, dom)
+            blocks = _blocks_from(pin, tool, dom)
+            # FU156: guarantee the tool's PRODUCT price is in its evidence — pick a product-matching
+            # own-domain priced page from the SAME results (pure selection, no extra search).
+            if _product and dom:
+                pp = _best_product_price(pin, _product, _dom(dom))
+                if pp and not any((b.get("url") or "") == pp["url"] for b in blocks):
+                    blocks.insert(0, {"label": tool, "url": pp["url"],
+                                      "text": pp["fact"][:_EVIDENCE_TEXT_CAP]})
+            return blocks
 
         def _tier2(tool, dom):
             # fetch_site_facts — the IP-INDEPENDENT web-search-pinned vendor path.
@@ -2496,7 +2601,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if not _has_vendor(blocks, dom):
                 try:
                     br = self.claude.search_sources(
-                        f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
+                        (f"{tool} {_product} price/cost; " if _product else "")   # FU156: product-anchored
+                        + f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
                         f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
                         f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=2)
                 except Exception:
@@ -2881,6 +2987,12 @@ COMPLETE and every stated fact is sourced:
     vs annual) — NEVER present an annual price as a monthly one. NEVER cite a stale SaaS aggregator (e.g.
     SaaSworthy, SoftwareFinder) for a price when a vendor page or reputable review is available; if only an
     aggregator has it, attribute it and keep the billing basis, or drop the exact figure.
+  - PRICING PRODUCT-MATCH (hard rule): a price in a cell/sentence about the ARTICLE'S product must be the
+    price for THAT product's access at that clinic/tool — NEVER the brand's DIFFERENT product (e.g. a TRT
+    price in a tirzepatide article) or another product's page. Distinguish a PROGRAM / MEMBERSHIP /
+    SUBSCRIPTION fee from the MEDICATION / product cost and LABEL which one a number is; never present a
+    membership/program fee AS the medication price. If only a different product's price or a bare program
+    fee is available, drop the exact figure and state the pricing model — never a misleading number.
   - {name}'s OWN facts are FIRST-PARTY ONLY (this is a hard rule): a fact about {name} (its price, plans,
     features, terms, policies) may ONLY cite a first-party block labeled "{name}" (its own site/published
     content) — NEVER a "third-party ·" / review / analyst block, even for {name}'s pricing. If no
@@ -4429,6 +4541,16 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
         val = (it.get("value") or "").strip()
         if not val:
             continue
+        # FU156: skip an Offer whose product label doesn't appear in its OWN source_url path (an
+        # auto-mislabeled item like {product:"tirzepatide", url:".../mens-trt/"}) — never advertise a
+        # wrong-product price in the schema. (After the FU156 retrieval fix this rarely fires; it
+        # protects already-corrupted brands on export.)
+        _p = str(it.get("product") or "").strip()
+        if _p:
+            _toks = _product_tokens(_p)
+            _path = re.sub(r"^[a-z]+://[^/]+", "", (it.get("source_url") or "")).lower()
+            if _toks and not any(t in _path for t in _toks):
+                continue
         off = {"@type": "Offer", "description": val[:200]}
         amt, cur = _price_amount(val)
         if amt:

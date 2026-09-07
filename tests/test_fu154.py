@@ -144,6 +144,21 @@ def test_rewrite_reworded_headings_now_succeeds_with_original_headings():
     assert "[S1]" in out and "[S2]" in out
 
 
+# --- prose-only overlap (structural parts don't count against watermark removal) ----------------
+def test_prose_for_overlap_strips_structure():
+    body = (
+        "# Heading one\n\nReal prose sentence lives here for the metric [S1].\n\n"
+        "| Tool | Price |\n|---|---|\n| Acme | $9 |\n\n"
+        "## Sources\n- [S1] Acme pricing — https://acme.com/pricing\n"
+    )
+    prose = BlogGenerator._prose_for_overlap(body)
+    assert "Real prose sentence lives here" in prose
+    assert "Heading one" not in prose          # heading stripped
+    assert "| Acme |" not in prose             # table row stripped
+    assert "acme.com/pricing" not in prose     # whole ## Sources section stripped
+    assert "[S1]" not in prose                 # inline citation markers stripped
+
+
 # --- db: the 4 new columns migrate + round-trip (original body untouched) -------------------------
 def test_rewritten_columns_migrate_and_roundtrip():
     fd, path = tempfile.mkstemp(suffix=".db")

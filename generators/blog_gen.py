@@ -3644,6 +3644,21 @@ Return JSON only:
         return len(grams_a & grams_b) / len(grams_a)
 
     @staticmethod
+    def _prose_for_overlap(body):
+        """FU154: return only the PROSE for the watermark-overlap metric — strip the structural /
+        must-preserve-verbatim parts (headings, Markdown table rows, the whole ## Sources section,
+        inline [S#] markers). Those are low-entropy, deliberately kept identical, and would otherwise
+        inflate the overlap even though they carry ~no SynthID watermark (which lives in the prose)."""
+        head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body or "", maxsplit=1)[0]   # drop Sources
+        keep = []
+        for l in head.split("\n"):
+            s = l.lstrip()
+            if s.startswith("#") or s.startswith("|"):   # heading or table row/separator
+                continue
+            keep.append(l)
+        return re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
+
+    @staticmethod
     def _restore_headings(orig_heads, rewritten_body):
         """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
         reworded heading is put back to its exact original text + level while the reworded PROSE (the
@@ -3709,6 +3724,9 @@ Return JSON only:
                 return (
                     f"Re-compose the following finished blog article for {name} ENTIRELY in your own "
                     "words, sharing no verbatim phrasing with the original — a FULL rewrite, not a light edit.\n\n"
+                    "GOAL: change the WORDING of every paragraph so the rewrite shares NO run of 8 or more "
+                    "consecutive words with the original prose. Recast each sentence with different structure "
+                    "and vocabulary — this is a full re-write, not a light paraphrase.\n\n"
                     "PRESERVE EXACTLY (do not change, drop, move, or renumber):\n"
                     "- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
                     "- EVERY heading line (starting with #, ##, or ###) — copy it CHARACTER-FOR-CHARACTER; "
@@ -3762,10 +3780,12 @@ Return JSON only:
                     print(f"[writer] attempt {attempt+1} quality gate failed: {why}", flush=True)
                     continue
                 best = out
-                overlap = self._ngram_overlap(claude_body, out, n=8)
+                # Measure overlap on PROSE only (headings/table/Sources/[S#] are preserved by design).
+                overlap = self._ngram_overlap(self._prose_for_overlap(claude_body),
+                                              self._prose_for_overlap(out), n=8)
                 if overlap < 0.15:
                     break
-                print(f"[writer] attempt {attempt+1} overlap {overlap:.2f} ≥ 0.15 — retrying harder", flush=True)
+                print(f"[writer] attempt {attempt+1} prose overlap {overlap:.2f} ≥ 0.15 — retrying harder", flush=True)
 
             if best is None:
                 article["writer_mode_used"] = "fallback"

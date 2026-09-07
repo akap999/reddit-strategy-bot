@@ -15,9 +15,11 @@ class StubWriter:
     def __init__(self, responder):
         self.responder = responder
         self.prompts = []
+        self.temps = []
 
     def call_text(self, prompt, system_prompt=None, max_tokens=6000, temperature=0.7, timeout=300):
         self.prompts.append(prompt)
+        self.temps.append(temperature)
         return self.responder(prompt, len(self.prompts) - 1)
 
 
@@ -105,6 +107,15 @@ def test_rewrite_existing_blog_stores_when_valid():
     assert art.get("writer_overlap", 1.0) < 0.15
 
 
+def test_rewrite_uses_higher_temperature_and_records_secs():
+    w = StubWriter(lambda p, i: REWRITE_BODY)
+    gen = _gen(w)
+    art = {"body_markdown": CLAUDE_BODY}
+    gen._apply_writer_pass(art, CLAUDE_BODY, {"name": "Acme"}, "seed")
+    assert w.temps and w.temps[0] > 0.7                 # FU155: bumped sampling temperature (was 0.7)
+    assert art.get("writer_secs") is not None and art["writer_secs"] >= 0   # FU155: timed for cost
+
+
 def test_rewrite_existing_blog_falls_back_when_citation_dropped():
     gen = _gen(StubWriter(lambda p, i: REWRITE_BODY.replace(" [S2]", "")))
     art = {"body_markdown": CLAUDE_BODY}
@@ -171,11 +182,13 @@ def test_rewritten_columns_migrate_and_roundtrip():
         brand_id = db.add_brand(sub["id"], "Test Brand")
         bid = db.save_blog(brand_id=brand_id, seed="s", body_markdown="orig body")
         db.update_blog(bid, rewritten_body="new body", rewritten_overlap=0.04,
-                       rewritten_at="2026-09-07T00:00:00Z", rewritten_warning="")
+                       rewritten_at="2026-09-07T00:00:00Z", rewritten_warning="",
+                       rewritten_cost=0.03)
         blog = db.get_blog(bid)
         assert blog["body_markdown"] == "orig body"      # original never touched
         assert blog["rewritten_body"] == "new body"
         assert abs((blog["rewritten_overlap"] or 0) - 0.04) < 1e-6
+        assert abs((blog["rewritten_cost"] or 0) - 0.03) < 1e-6   # FU155
         assert blog["rewritten_at"] == "2026-09-07T00:00:00Z"
         db.close()
     finally:

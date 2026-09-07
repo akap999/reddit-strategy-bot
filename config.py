@@ -31,6 +31,10 @@ WRITER_MODE = os.environ.get("WRITER_MODE", "off")
 WRITER_ENDPOINT_URL = os.environ.get("WRITER_ENDPOINT_URL", "")  # e.g. https://<modal-app>.modal.run/v1
 WRITER_API_KEY = os.environ.get("WRITER_API_KEY", "")            # bearer token the endpoint checks
 WRITER_MODEL = os.environ.get("WRITER_MODEL", "qwen-writer")   # must match deploy.py's --served-model-name
+try:                                                            # FU155: $/hr of the writer's GPU, for a
+    WRITER_GPU_HOURLY = float(os.environ.get("WRITER_GPU_HOURLY", "3.72"))   # rough rewrite-cost estimate
+except (TypeError, ValueError):                                 # (A100-80GB on Modal ≈ $3.72/hr)
+    WRITER_GPU_HOURLY = 3.72
 
 # --- Authentication ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "")

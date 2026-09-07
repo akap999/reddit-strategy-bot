@@ -39,7 +39,7 @@ from config import (
     ANTHROPIC_API_KEY, DB_PATH, DEFAULT_BRAND_MENTION_RATIO, DEFAULT_MODEL,
     SECRET_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAILS,
     REDDIT_PROXY_URL, REDDIT_USER_AGENT,
-    WRITER_MODE, WRITER_ENDPOINT_URL, WRITER_API_KEY, WRITER_MODEL,
+    WRITER_MODE, WRITER_ENDPOINT_URL, WRITER_API_KEY, WRITER_MODEL, WRITER_GPU_HOURLY,
 )
 from db import Database
 from generators.base import ClaudeClient, WriterClient
@@ -5828,14 +5828,18 @@ def api_blog_rewrite(blog_id):
                         "warning": article.get("writer_warning")
                         or "rewrite failed validation — original kept, no watermark-free version produced; try again"}
             import time as _t
+            secs = float(article.get("writer_secs") or 0)
+            cost = round(secs * WRITER_GPU_HOURLY / 3600.0, 4)   # FU155: rough GPU-time cost estimate
             bg.update_blog(blog_id,
                            rewritten_body=new_body,
                            rewritten_overlap=article.get("writer_overlap"),
                            rewritten_at=_t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
-                           rewritten_warning=article.get("writer_warning") or "")
+                           rewritten_warning=article.get("writer_warning") or "",
+                           rewritten_cost=cost)
             return {"blog_id": blog_id, "ok": True,
                     "overlap": article.get("writer_overlap"),
-                    "warning": article.get("writer_warning") or ""}
+                    "warning": article.get("writer_warning") or "",
+                    "cost": cost, "secs": round(secs, 1)}
         finally:
             bg.close()
 

@@ -3763,9 +3763,18 @@ Return JSON only:
                             return False, f"dropped headings {miss[:3]}"
                 return True, ""
 
-            best, overlap, last_why = None, 1.0, ""
+            import time as _t
+            best, overlap, last_why, secs = None, 1.0, "", 0.0
             for attempt in range(2):
-                out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)), max_tokens=9000)
+                # FU155: higher sampling temperature → more lexical diversity → lower verbatim
+                # overlap (the gates + heading-restore still protect facts/structure). Time the call
+                # so app.py can show a rough GPU-cost estimate.
+                _temp = 0.95 if attempt == 0 else 1.1
+                _t0 = _t.time()
+                out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)),
+                                            max_tokens=9000, temperature=_temp)
+                secs += _t.time() - _t0
+                article["writer_secs"] = round(secs, 1)
                 # Rewrite mode: put the ORIGINAL headings back onto the rewrite (positionally) so a
                 # reworded heading isn't a failure — only the PROSE is watermark-stripped. If the
                 # section COUNT changed, restore returns None → _valid's heading check fails (a real

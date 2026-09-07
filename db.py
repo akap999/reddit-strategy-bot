@@ -1151,7 +1151,8 @@ class Database:
                    "meta_title", "internal_links",   # FU114
                    "ymyl",   # FU133
                    "quality_report",   # FU151 (D)
-                   "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning"}   # FU154
+                   "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning",   # FU154
+                   "rewritten_cost"}   # FU155
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2350,6 +2351,9 @@ class Database:
             self.conn.commit()
         if "rewritten_overlap" not in blog_cols:   # FU154: verbatim overlap of the rewrite vs Claude
             self.conn.execute("ALTER TABLE blogs ADD COLUMN rewritten_overlap REAL DEFAULT 0")
+            self.conn.commit()
+        if "rewritten_cost" not in blog_cols:   # FU155: rough GPU-cost estimate of the rewrite
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN rewritten_cost REAL DEFAULT 0")
             self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----

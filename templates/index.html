@@ -13233,6 +13233,7 @@ async function openBlog(id) {
     const _rwStatus = b.rewritten_body
         ? '<div class="text-xs" style="color:' + (_rwGood ? '#4ade80' : '#fbbf24') + '">verbatim overlap '
           + (_rwOv != null ? _rwOv + '%' : '?') + (_rwGood ? ' ✓ watermark replaced' : ' ⚠ high overlap — watermark may remain')
+          + (b.rewritten_cost ? ' · ≈ $' + Number(b.rewritten_cost).toFixed(2) + ' GPU (est.)' : '')
           + (b.rewritten_warning ? ' · ' + _blogEsc(b.rewritten_warning) : '')
           + (b.rewritten_at ? ' · ' + _blogEsc((b.rewritten_at || '').slice(0, 10)) : '') + '</div>'
         : '<div class="text-xs text-gray-500">No watermark-free version yet — click Generate. The original above is always kept.</div>';
@@ -13521,8 +13522,9 @@ function blogGenRewrite(id) {
             toast('Rewrite failed: ' + (res.warning || 'try again'), 'error');
         } else {
             const ov = (res && res.overlap != null) ? (' — ' + Math.round(res.overlap * 100) + '% overlap') : '';
+            const ct = (res && res.cost != null) ? (' · ≈ $' + Number(res.cost).toFixed(2) + (res.secs ? ' (' + res.secs + 's)' : '')) : '';
             const wn = (res && res.warning) ? (' (⚠ ' + res.warning + ')') : '';
-            toast('Watermark-free version created' + ov + wn, 'success');
+            toast('Watermark-free version created' + ov + ct + wn, 'success');
         }
     }, 'Rewriting (watermark-free)');
 }

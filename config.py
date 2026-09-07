@@ -30,7 +30,7 @@ DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 WRITER_MODE = os.environ.get("WRITER_MODE", "off")
 WRITER_ENDPOINT_URL = os.environ.get("WRITER_ENDPOINT_URL", "")  # e.g. https://<modal-app>.modal.run/v1
 WRITER_API_KEY = os.environ.get("WRITER_API_KEY", "")            # bearer token the endpoint checks
-WRITER_MODEL = os.environ.get("WRITER_MODEL", "Qwen/Qwen3-14B-Instruct")
+WRITER_MODEL = os.environ.get("WRITER_MODEL", "qwen-writer")   # must match deploy.py's --served-model-name
 
 # --- Authentication ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "")

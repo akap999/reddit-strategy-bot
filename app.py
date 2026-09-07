@@ -3475,7 +3475,13 @@ def api_blog_export(blog_id):
             yt_resp.headers["Content-Disposition"] = f'attachment; filename="{_slug}-youtube.html"'
         return yt_resp
 
-    body = blog.get("body_markdown") or ""
+    # FU154: `?use=rewritten` exports the watermark-free rewrite (falls back to the original when
+    # no rewrite exists). One swap covers md / html / gdoc below.
+    _use = (request.args.get("use") or "").lower()
+    if _use == "rewritten" and (blog.get("rewritten_body") or "").strip():
+        body = blog["rewritten_body"]
+    else:
+        body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
     # FU114: the exported <title> tag prefers the SEO meta_title (when generated); the H1
     # and the download slug stay seed-based (stable, FU88).
@@ -5763,6 +5769,77 @@ def api_writer_settings_set():
         return jsonify({"ok": True})
     finally:
         db.close()
+
+
+@app.route("/api/settings/writer/test", methods=["POST"])
+def api_writer_settings_test():
+    """FU154: quick health probe of the writer endpoint for the Settings 'Test connection' button.
+    Tests the CURRENTLY-ENTERED form values (falling back to the saved config for any omitted field),
+    so the operator can test before saving. Returns {state, detail, sample?} — never the API key."""
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    try:
+        cfg = _resolve_writer_config(db)
+        url = ((data.get("endpoint_url") or cfg["endpoint_url"]) or "").strip()
+        model = ((data.get("model") or cfg["model"]) or "").strip()
+        key = (data.get("api_key") or "").strip() or cfg["key"]   # form key when typed, else saved
+        if not url or not model:
+            return jsonify({"state": "error", "detail": "set the endpoint URL and model first"})
+        return jsonify(WriterClient(url, key, model).probe())
+    finally:
+        db.close()
+
+
+@app.route("/api/blogs/<int:blog_id>/rewrite", methods=["POST"])
+def api_blog_rewrite(blog_id):
+    """FU154: produce an on-demand WATERMARK-FREE rewrite of an already-generated blog on the
+    self-hosted open model. The original body_markdown is NEVER touched — the reworded version is
+    stored in rewritten_body (regenerable). Uses REWRITE mode only (the finished blog has no live
+    evidence for compose), and works whenever the writer endpoint is configured, independent of the
+    global WRITER_MODE toggle."""
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            body = blog.get("body_markdown") or ""
+            if not body.strip():
+                raise ValueError("this blog has no body to rewrite")
+            cfg = _resolve_writer_config(bg)
+            if not cfg["endpoint_url"] or not cfg["key"]:
+                raise ValueError("configure the writer endpoint + API key in Settings first")
+            brand = bg.get_brand(blog.get("brand_id")) or {}
+            writer = WriterClient(cfg["endpoint_url"], cfg["key"], cfg["model"])
+            gen = BlogGenerator(ClaudeClient(api_key), bg, writer=writer, writer_mode="rewrite")
+            article = {"body_markdown": body}
+            new_body = gen._apply_writer_pass(article, body, brand, blog.get("seed") or "")
+            new_body = gen._force_h1(new_body, blog.get("seed") or "")   # light guard (re-pin H1)
+            if article.get("writer_mode_used") == "fallback" or not (new_body or "").strip():
+                # The open model dropped citations / returned nothing → we did NOT get a usable
+                # rewrite. Keep the original untouched; tell the UI so it doesn't mistake the
+                # unchanged original for a watermark-free version.
+                return {"blog_id": blog_id, "ok": False,
+                        "warning": article.get("writer_warning")
+                        or "rewrite failed validation — original kept, no watermark-free version produced; try again"}
+            import time as _t
+            bg.update_blog(blog_id,
+                           rewritten_body=new_body,
+                           rewritten_overlap=article.get("writer_overlap"),
+                           rewritten_at=_t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                           rewritten_warning=article.get("writer_warning") or "")
+            return {"blog_id": blog_id, "ok": True,
+                    "overlap": article.get("writer_overlap"),
+                    "warning": article.get("writer_warning") or ""}
+        finally:
+            bg.close()
+
+    return jsonify({"task_id": start_task("blog_rewrite", task, pass_task_id=True)})
 
 
 @app.route("/api/blogs/<int:blog_id>/upload-gdoc", methods=["POST"])

@@ -1150,7 +1150,8 @@ class Database:
                    "qualifier",   # FU93
                    "meta_title", "internal_links",   # FU114
                    "ymyl",   # FU133
-                   "quality_report"}   # FU151 (D)
+                   "quality_report",   # FU151 (D)
+                   "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning"}   # FU154
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2325,7 +2326,10 @@ class Database:
                     "ymyl",
                     # FU151 (D): deterministic quality scorecard (JSON {score,checks,warnings}) —
                     # persisted so it re-shows on reopen instead of a vanishing toast.
-                    "quality_report"):
+                    "quality_report",
+                    # FU154: on-demand watermark-free REWRITE of a finished blog (the original
+                    # body_markdown is kept; this is the alternate version to hand clients).
+                    "rewritten_body", "rewritten_at", "rewritten_warning"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
@@ -2343,6 +2347,9 @@ class Database:
             self.conn.commit()
         if "gen_cost" not in blog_cols:   # FU54: real $ cost of the generation, shown in the UI
             self.conn.execute("ALTER TABLE blogs ADD COLUMN gen_cost REAL DEFAULT 0")
+            self.conn.commit()
+        if "rewritten_overlap" not in blog_cols:   # FU154: verbatim overlap of the rewrite vs Claude
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN rewritten_overlap REAL DEFAULT 0")
             self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----

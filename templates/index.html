@@ -12195,6 +12195,7 @@ function _json(o) { return ContentService.createTextOutput(JSON.stringify(o)).se
                     <br><input id="writer-key" type="password" placeholder="leave blank to keep" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
             </div>
             <button class="btn btn-sm btn-secondary" onclick="writerSettingsSave()">Save</button>
+            <button class="btn btn-sm" style="background:#0d9488;color:white" onclick="writerSettingsTest()">Test connection</button>
             <div id="writer-settings-status" class="text-sm text-gray-400 mt-2"></div>
         </div>`;
     checkLiveCronLoad();
@@ -12251,6 +12252,26 @@ async function writerSettingsSave() {
         const kf = document.getElementById('writer-key'); if (kf) kf.value = '';
         writerSettingsLoad();
     } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); }
+}
+async function writerSettingsTest() {
+    const st = document.getElementById('writer-settings-status');
+    if (st) { st.style.color = '#9ca3af'; st.textContent = 'Testing… (the model may take a few minutes to wake if it has been idle)'; }
+    const body = {
+        endpoint_url: document.getElementById('writer-endpoint')?.value || '',
+        model: document.getElementById('writer-model')?.value || '',
+    };
+    const key = document.getElementById('writer-key')?.value || '';
+    if (key.trim()) body.api_key = key.trim();
+    try {
+        const r = await api('/api/settings/writer/test', { method: 'POST', body });
+        const icon = r.state === 'ok' ? '✓' : (r.state === 'warming' ? '⏳' : '✗');
+        let msg = icon + ' ' + (r.detail || r.state);
+        if (r.state === 'ok' && r.sample) msg += ` — reply: "${r.sample}"`;
+        if (st) {
+            st.textContent = msg;
+            st.style.color = r.state === 'ok' ? '#4ade80' : (r.state === 'warming' ? '#fbbf24' : '#f87171');
+        }
+    } catch (e) { if (st) { st.style.color = '#f87171'; st.textContent = '✗ test failed: ' + (e.message || e); } }
 }
 
 async function targetedCheckLoad() {
@@ -13206,6 +13227,15 @@ async function openBlog(id) {
     const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
     const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
     const _ytCta = _blogEsc(_ytMeta.cta || '');
+    // FU154: watermark-free rewrite status line (overlap + any warning)
+    const _rwOv = (b.rewritten_overlap != null) ? Math.round((b.rewritten_overlap || 0) * 100) : null;
+    const _rwGood = (b.rewritten_overlap != null && b.rewritten_overlap < 0.15);
+    const _rwStatus = b.rewritten_body
+        ? '<div class="text-xs" style="color:' + (_rwGood ? '#4ade80' : '#fbbf24') + '">verbatim overlap '
+          + (_rwOv != null ? _rwOv + '%' : '?') + (_rwGood ? ' ✓ watermark replaced' : ' ⚠ high overlap — watermark may remain')
+          + (b.rewritten_warning ? ' · ' + _blogEsc(b.rewritten_warning) : '')
+          + (b.rewritten_at ? ' · ' + _blogEsc((b.rewritten_at || '').slice(0, 10)) : '') + '</div>'
+        : '<div class="text-xs text-gray-500">No watermark-free version yet — click Generate. The original above is always kept.</div>';
     // FU82 — pinned comment ({link} filled from the published website URL when present) + tags.
     const _ytSite = (((b.platforms || []).find(p => p.platform === 'website' && (p.published_url || '').trim()) || {}).published_url || '').trim();
     const _ytPinnedRaw = (_ytMeta.pinned_comment || '').replace(/\{link\}/g, _ytSite || '{link}');
@@ -13285,6 +13315,21 @@ async function openBlog(id) {
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;dl=1" title="Download the formatted article as an .html file">⬇ Download HTML</a>
                     <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_article')" title="FU143: creates a Google Doc of this LinkedIn article in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
+                </div>
+            </div>
+            <div class="card p-2" style="background:#0c1a1e;border:1px solid #155e75">
+                <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free version (rewritten on the self-hosted model)</label>
+                    <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button>
+                </div>
+                <div class="text-xs text-gray-400 mb-1">The original blog is always kept. This is a reworded, watermark-free copy to hand clients — same facts, citations &amp; structure, different wording. Needs the writer endpoint configured in Settings (Content writer card).</div>
+                ${_rwStatus}
+                <textarea id="blog-e-rw" rows="14" placeholder="Click Generate to produce the watermark-free version…">${_blogEsc(b.rewritten_body || '')}</textarea>
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-rw')" title="Copy as clean plain text">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html&amp;use=rewritten" target="_blank" title="Open the formatted watermark-free version">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md&amp;use=rewritten" title="Download the watermark-free version as Markdown">⬇ Download MD</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc&amp;use=rewritten" title="Word-compatible .doc of the watermark-free version — opens as a Google Doc in Drive">⬇ Google Doc</a>
                 </div>
             </div>
             <div class="card p-2" style="background:#0f1a12;border:1px solid #14532d">
@@ -13403,6 +13448,7 @@ async function blogSave(id) {
             youtube_persona: _v('blog-e-yt-persona'),
             geo: _v('blog-e-geo'),
             qualifier: _v('blog-e-qualifier'),
+            rewritten_body: _v('blog-e-rw'),   // FU154: watermark-free version (manual edits persist)
         }});
         toast('Saved', 'success');
         blogReload();
@@ -13465,6 +13511,20 @@ function blogGenLinkedInArticle(id) {
         openBlog(id);
         _blogCostToast(res);
     }, 'Generating LinkedIn article');
+}
+
+// FU154 — produce a watermark-free rewrite of this blog (original kept; stored as rewritten_body).
+function blogGenRewrite(id) {
+    runTask(`/api/blogs/${id}/rewrite`, {}, (res) => {
+        openBlog(id);
+        if (res && res.ok === false) {
+            toast('Rewrite failed: ' + (res.warning || 'try again'), 'error');
+        } else {
+            const ov = (res && res.overlap != null) ? (' — ' + Math.round(res.overlap * 100) + '% overlap') : '';
+            const wn = (res && res.warning) ? (' (⚠ ' + res.warning + ')') : '';
+            toast('Watermark-free version created' + ov + wn, 'success');
+        }
+    }, 'Rewriting (watermark-free)');
 }
 
 // FU80 — YouTube package helpers (presenter voice-seed prefill + generate).

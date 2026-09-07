@@ -420,6 +420,42 @@ class WriterClient:
             print(f"[writer] endpoint error: {e}", flush=True)
             return None
 
+    def probe(self, timeout=30):
+        """FU154: quick health probe for the Settings 'Test connection' button. Returns
+        {state, detail, sample?}: 'ok' (200 + a reply → endpoint AND generation work), 'warming'
+        (a cold-start 3xx redirect OR a timeout → configured fine, the model is just waking),
+        'auth' (401/403 → key mismatch), 'unreachable' (connection/DNS error → bad URL), or 'error'
+        (other / missing config). Never raises. Distinguishes 'asleep' from 'misconfigured' and
+        returns fast (a short timeout) instead of blocking on a multi-minute cold start."""
+        if not self.endpoint_url or not self.model:
+            return {"state": "error", "detail": "endpoint URL or model not set"}
+        try:
+            resp = requests.post(
+                f"{self.endpoint_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"model": self.model, "messages": [{"role": "user", "content": "Reply with: OK"}],
+                      "max_tokens": 5},
+                timeout=timeout, allow_redirects=False,
+            )
+            sc = resp.status_code
+            if sc == 200:
+                try:
+                    sample = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                except Exception:
+                    sample = ""
+                return {"state": "ok", "detail": "endpoint answered", "sample": (sample or "").strip()[:80]}
+            if sc in (301, 302, 303, 307, 308):
+                return {"state": "warming",
+                        "detail": "reachable, but the model is cold-starting (Modal) — retry in a few minutes; it also loads on the first blog"}
+            if sc in (401, 403):
+                return {"state": "auth", "detail": f"auth rejected ({sc}) — the API key doesn't match the endpoint"}
+            return {"state": "error", "detail": f"HTTP {sc}: {(resp.text or '')[:160]}"}
+        except requests.exceptions.Timeout:
+            return {"state": "warming",
+                    "detail": f"no response within {timeout}s — the model is likely cold-starting; retry shortly"}
+        except Exception as e:
+            return {"state": "unreachable", "detail": f"cannot reach the endpoint: {e}"}
+
 
 class ClaudeClient:
     """Shared Claude API caller extracted from CommentGeneratorBot._call_claude."""

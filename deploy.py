@@ -17,12 +17,13 @@ RUNBOOK (operator does these — I cannot: they need your Modal account, payment
   7. In the app: Settings → "Content writer — watermark strip" card (or Railway env):
         Endpoint URL = https://<your-workspace>--geo-writer-serve.modal.run/v1   ← note the /v1
         API key      = the SAME token from step 5
-        Model        = the MODEL_NAME below
+        Model        = qwen-writer   (the SERVED_NAME below)
         Mode         = rewrite   (or compose)
 
 Serverless + scale-to-zero: you pay only for GPU-seconds while a blog is actually being written
-(~$0.02/blog at ~60s on an A10G). Idle = $0. Upgrade MODEL_NAME to a 32B for higher quality and
-raise GPU accordingly.
+(~$0.12/blog at ~120s on an A100-80GB → roughly $35-55/mo at ~10 blogs/day). Idle = $0. The FIRST
+request after a deploy downloads ~40GB of weights + loads them, so it takes several minutes; after
+that the weights are cached on the volume and cold starts are much faster.
 
 NOTE: Modal's Python API evolves. This targets a recent Modal + vLLM. If a decorator name or arg has
 changed by the time you deploy, cross-check Modal's current "Run an OpenAI-compatible LLM server with
@@ -34,22 +35,39 @@ import subprocess
 import modal
 
 # --- what to serve ---------------------------------------------------------------------------
-MODEL_NAME = "Qwen/Qwen3-14B-Instruct"   # upgradeable to "Qwen/Qwen3-32B" (raise GPU to A100-40GB)
-GPU = "A10G"                             # 24GB — fits 14B (4-bit/AWQ or fp16-tight); A100-40GB for 32B
+# Qwen2.5-72B-Instruct in 4-bit AWQ (~40GB) → fits a single 80GB A100. The strongest open writing
+# quality (closest to Claude). Pure instruct model — no "thinking mode" that would leak <think>
+# traces into the blog. To go cheaper: "Qwen/Qwen2.5-32B-Instruct-AWQ" on GPU "A100-40GB".
+MODEL_REPO = "Qwen/Qwen2.5-72B-Instruct-AWQ"   # what vLLM downloads + loads (4-bit, ~40GB)
+SERVED_NAME = "qwen-writer"                     # the "model" id clients send → set the app's Model to THIS
+GPU = "A100-80GB"                               # 80GB — fits 72B AWQ + KV cache on ONE GPU
 PORT = 8000
 MINUTES = 60
 
-# vLLM + the Hugging Face weights cache live in the image / a persistent volume so cold starts
-# don't re-download the model every time.
+# The Hugging Face weights cache lives on a persistent Volume so the 40GB is downloaded ONCE.
+hf_cache = modal.Volume.from_name("geo-writer-hf-cache", create_if_missing=True)
+HF_CACHE_PATH = "/root/.cache/huggingface"
+
+
+def _predownload_model():
+    """Front-load the ~40GB weight download to a STABLE build step (into the Volume) so the serving
+    container just loads from local disk (~2 min) instead of downloading 40GB on the first request —
+    which is what the A100 capacity preemption kept interrupting."""
+    from huggingface_hub import snapshot_download
+    snapshot_download(MODEL_REPO)
+
+
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "vllm==0.6.6",                           # bump if a newer vLLM is out at deploy time
-        "huggingface_hub[hf_transfer]==0.27.0",
+        "vllm==0.8.5",            # supports Qwen2.5 AWQ; brings its own huggingface_hub (>=0.30)
+        "transformers==4.51.3",   # PIN to what vLLM 0.8.5 was built against — a newer transformers
+                                  # removed Qwen2Tokenizer.all_special_tokens_extended → load crash
     )
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    # Download the weights during BUILD (once) into the Volume. Runs on stable CPU build capacity,
+    # not the request-driven GPU container, so it isn't interrupted by A100 preemption.
+    .run_function(_predownload_model, volumes={HF_CACHE_PATH: hf_cache}, timeout=60 * MINUTES)
 )
-hf_cache = modal.Volume.from_name("geo-writer-hf-cache", create_if_missing=True)
 
 app = modal.App("geo-writer")
 
@@ -57,25 +75,27 @@ app = modal.App("geo-writer")
 @app.function(
     image=vllm_image,
     gpu=GPU,
-    volumes={"/root/.cache/huggingface": hf_cache},
+    volumes={HF_CACHE_PATH: hf_cache},
     secrets=[modal.Secret.from_name("writer-secret")],   # provides WRITER_API_KEY in the container env
     scaledown_window=5 * MINUTES,   # keep warm 5 min after the last request, then scale to zero (idle = $0)
     timeout=30 * MINUTES,
     max_containers=1,               # one GPU is plenty for ~10 blogs/day
 )
 @modal.concurrent(max_inputs=8)
-@modal.web_server(port=PORT, startup_timeout=15 * MINUTES)
+@modal.web_server(port=PORT, startup_timeout=20 * MINUTES)   # loads ~40GB from the Volume onto the GPU
 def serve():
     """Run vLLM's own OpenAI-compatible server. It enforces the bearer token via --api-key, so the
     endpoint is authenticated with the SAME WRITER_API_KEY the app sends in its Authorization header."""
     import os
 
     cmd = [
-        "vllm", "serve", MODEL_NAME,
+        "vllm", "serve", MODEL_REPO,
         "--host", "0.0.0.0",
         "--port", str(PORT),
         "--api-key", os.environ["WRITER_API_KEY"],
-        "--served-model-name", MODEL_NAME,
+        "--served-model-name", SERVED_NAME,
         "--max-model-len", "24576",     # prompt (rewrite feeds the full article) + up to ~9k output
+        "--enforce-eager",              # skip CUDA-graph capture → much faster startup (fine for our low volume)
+        # vLLM auto-detects AWQ 4-bit from the model config — no --quantization flag needed.
     ]
     subprocess.Popen(" ".join(cmd), shell=True)

@@ -12167,10 +12167,40 @@ function _json(o) { return ContentService.createTextOutput(JSON.stringify(o)).se
                     <br><input id="gdu-secret" type="password" placeholder="leave blank to keep" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
             </div>
             <button class="btn btn-sm btn-secondary" onclick="gdocUploadSave()">Save</button>
+        </div>
+        <div class="card p-5 mt-4" style="background:#1a1a1b;border:1px solid #343536;max-width:680px">
+            <h3 class="font-bold mb-1" style="color:#c4b5fd">Content writer — watermark strip (self-hosted)</h3>
+            <p class="text-xs text-gray-400 mb-3" style="line-height:1.5">
+                Route the <b>final blog writing</b> through your own self-hosted open model so a Claude
+                text-watermark is replaced. <b style="color:#c4b5fd">Off = today's flow, byte-identical.</b>
+                <b>Rewrite</b> re-composes Claude's finished article; <b>Compose</b> writes it from Claude's
+                evidence. Claude still does all research, sourcing &amp; fact-checking; if the open model
+                fails or damages a blog it <b>falls back to Claude</b>. Needs a deployed OpenAI-compatible
+                endpoint (see <code>deploy.py</code>). GPU cost is billed on your host, not here.
+            </p>
+            <div class="flex gap-3 items-end flex-wrap mb-2">
+                <label class="text-xs text-gray-400">Mode
+                    <br><select id="writer-mode" class="text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px">
+                        <option value="off">Off (use Claude — today's flow)</option>
+                        <option value="rewrite">Rewrite Claude's article</option>
+                        <option value="compose">Compose from evidence</option>
+                    </select></label>
+                <label class="text-xs text-gray-400">Model
+                    <br><input id="writer-model" placeholder="Qwen/Qwen3-14B-Instruct" class="text-xs" style="width:220px;background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+            </div>
+            <div class="grid gap-2 mb-2" style="grid-template-columns:2fr 1fr">
+                <label class="text-xs text-gray-400">Endpoint URL (OpenAI-compatible, up to /v1)
+                    <br><input id="writer-endpoint" placeholder="https://&lt;app&gt;.modal.run/v1" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+                <label class="text-xs text-gray-400">API key <span id="writer-key-state" class="text-gray-600"></span>
+                    <br><input id="writer-key" type="password" placeholder="leave blank to keep" class="w-full text-xs" style="background:#272729;color:#D7DADC;border:1px solid #343536;border-radius:4px;padding:5px 8px"></label>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="writerSettingsSave()">Save</button>
+            <div id="writer-settings-status" class="text-sm text-gray-400 mt-2"></div>
         </div>`;
     checkLiveCronLoad();
     targetedCheckLoad();
     gdocUploadLoad();
+    writerSettingsLoad();
 }
 
 async function gdocUploadLoad() {
@@ -12193,6 +12223,33 @@ async function gdocUploadSave() {
         await api('/api/settings/gdoc-upload', { method: 'POST', body });
         toast('Drive upload settings saved', 'success');
         gdocUploadLoad();
+    } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); }
+}
+
+async function writerSettingsLoad() {
+    try {
+        const c = await api('/api/settings/writer');
+        const m = document.getElementById('writer-mode'); if (m) m.value = c.mode || 'off';
+        const e = document.getElementById('writer-endpoint'); if (e) e.value = c.endpoint_url || '';
+        const md = document.getElementById('writer-model'); if (md) md.value = c.model || '';
+        const st = document.getElementById('writer-key-state');
+        if (st) st.textContent = c.key_set ? '(set)' : '(not set)';
+    } catch (_) {}
+}
+async function writerSettingsSave() {
+    const body = {
+        mode: document.getElementById('writer-mode')?.value || 'off',
+        endpoint_url: document.getElementById('writer-endpoint')?.value || '',
+        model: document.getElementById('writer-model')?.value || '',
+    };
+    const key = document.getElementById('writer-key')?.value || '';
+    if (key.trim()) body.api_key = key.trim();
+    try {
+        const r = await api('/api/settings/writer', { method: 'POST', body });
+        if (r && r.error) { toast(r.error, 'error'); return; }
+        toast('Writer settings saved (mode: ' + body.mode + ')', 'success');
+        const kf = document.getElementById('writer-key'); if (kf) kf.value = '';
+        writerSettingsLoad();
     } catch (e) { toast('Save failed: ' + (e.message || e), 'error'); }
 }
 

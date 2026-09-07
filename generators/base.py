@@ -9,6 +9,7 @@ import re
 import time
 import random
 import threading
+import requests
 
 from config import DEFAULT_MODEL
 
@@ -366,6 +367,58 @@ def _forgiving_json_loads(s):
             except Exception:
                 pass
     return None
+
+
+class WriterClient:
+    """FU153: a lightweight OpenAI-compatible caller for a SELF-HOSTED open-weight model
+    (e.g. Qwen3-14B on Modal/vLLM), used ONLY for the final blog content-writing pass that
+    strips a Claude SynthID watermark by making the open model the last author of the prose.
+
+    Deliberately separate from ClaudeClient: its own model id + endpoint + key, plain HTTP via
+    `requests` (mirrors PostGenerator._embed_texts — no new dependency, no anthropic SDK). Cost
+    is billed by the host (Modal, by GPU-time) so there is NO usage/cost accumulator here — the
+    blog's `gen_cost` stays Claude-only.
+
+    `endpoint_url` is the OpenAI-compatible base up to and including `/v1`
+    (e.g. `https://<app>.modal.run/v1`); we POST to `<endpoint_url>/chat/completions`.
+    `call_text` returns the assistant message string, or None on any failure (caller falls back
+    to the Claude output)."""
+
+    def __init__(self, endpoint_url, api_key, model):
+        self.endpoint_url = (endpoint_url or "").rstrip("/")
+        self.api_key = api_key or ""
+        self.model = model or ""
+
+    def call_text(self, prompt, system_prompt=None, max_tokens=6000, temperature=0.7, timeout=300):
+        """POST one chat completion to the self-hosted endpoint. Returns the message content
+        string, or None on missing config / non-200 / bad shape / exception (never raises)."""
+        if not self.endpoint_url or not self.model:
+            return None
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        try:
+            resp = requests.post(
+                f"{self.endpoint_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json"},
+                json={"model": self.model, "messages": messages,
+                      "max_tokens": max_tokens, "temperature": temperature},
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                print(f"[writer] endpoint {resp.status_code}: {resp.text[:200]}", flush=True)
+                return None
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+            content = (choices[0].get("message") or {}).get("content")
+            return content.strip() if isinstance(content, str) and content.strip() else None
+        except Exception as e:
+            print(f"[writer] endpoint error: {e}", flush=True)
+            return None
 
 
 class ClaudeClient:

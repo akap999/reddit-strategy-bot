@@ -21,6 +21,17 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # redeploy. Default = Sonnet 4.6 (successor to the retired claude-sonnet-4-20250514).
 DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
+# --- FU153: self-hosted open-model FINAL content-writing pass (watermark strip) ---
+# A separate, OpenAI-compatible endpoint (a self-hosted open-weight model, e.g. Qwen3-14B on
+# Modal/vLLM) that re-writes/composes the FINAL blog prose so a Claude SynthID watermark is
+# replaced by the open model's tokens. OFF by default → today's flow byte-identical. The env
+# vars supply DEFAULTS; the operator-flippable values live in the app_meta table (Settings UI),
+# so a mode change needs no redeploy. WRITER_MODE ∈ {"off","rewrite","compose"}.
+WRITER_MODE = os.environ.get("WRITER_MODE", "off")
+WRITER_ENDPOINT_URL = os.environ.get("WRITER_ENDPOINT_URL", "")  # e.g. https://<modal-app>.modal.run/v1
+WRITER_API_KEY = os.environ.get("WRITER_API_KEY", "")            # bearer token the endpoint checks
+WRITER_MODEL = os.environ.get("WRITER_MODEL", "Qwen/Qwen3-14B-Instruct")
+
 # --- Authentication ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")

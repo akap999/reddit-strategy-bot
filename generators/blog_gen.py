@@ -463,9 +463,15 @@ def _norm_domain(u):
 
 
 class BlogGenerator:
-    def __init__(self, claude, db):
+    def __init__(self, claude, db, writer=None, writer_mode="off"):
         self.claude = claude
         self.db = db
+        # FU153: optional self-hosted open-model writer for the final content-writing pass
+        # (watermark strip). writer=None / writer_mode="off" → NO writer pass → today's flow
+        # byte-identical. Set (a WriterClient, "rewrite"|"compose") to enable. app.py resolves
+        # the mode/endpoint/key from app_meta→env and injects them.
+        self.writer = writer
+        self.writer_mode = (writer_mode or "off")
         self._evidence_blocks = []   # set by _gather_evidence; read by _rebuild_sources
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
@@ -3620,6 +3626,140 @@ Return JSON only:
                                       ymyl=rymyl,   # FU133
                                       link_targets=link_targets)   # FU151 (D): internal-link honesty
 
+    # ------------------------------------------------------------------ FU153 writer pass
+    @staticmethod
+    def _ngram_overlap(a, b, n=8):
+        """Fraction of a's distinct word n-grams that also appear in b — a proxy for how much of
+        Claude's exact wording survived a rewrite: LOW overlap ⇒ the token sequence was genuinely
+        replaced ⇒ a SynthID watermark on `a` is gone (we have no detector, so this is the removal
+        signal). Deterministic, no network. Returns 0.0 when `a` has fewer than n words."""
+        wa = re.findall(r"\w+", (a or "").lower())
+        wb = re.findall(r"\w+", (b or "").lower())
+        if len(wa) < n:
+            return 0.0
+        grams_a = {tuple(wa[i:i + n]) for i in range(len(wa) - n + 1)}
+        if not grams_a:
+            return 0.0
+        grams_b = {tuple(wb[i:i + n]) for i in range(len(wb) - n + 1)}
+        return len(grams_a & grams_b) / len(grams_a)
+
+    def _apply_writer_pass(self, article, draft_body, brand, seed):
+        """FU153: re-author the finished blog body on the self-hosted open model so a Claude SynthID
+        watermark is replaced by the open model's tokens. Modes (self.writer_mode):
+          - 'rewrite' — re-compose Claude's finished body sentence-by-sentence (preserve [S#]/facts).
+          - 'compose' — write the article from Claude's gathered evidence + outline.
+        Claude still did ALL research/sourcing/verification; this is only the final prose author.
+        A QUALITY gate (length / [S#] citations / headings) FALLS BACK to the Claude body on failure;
+        a WATERMARK gate (verbatim overlap) retries-then-warns but NEVER falls back (that would
+        reinstate the watermark). Returns the final body_markdown. Records writer_* fields on
+        `article`. Never raises → returns the Claude body on any trouble."""
+        try:
+            claude_body = article.get("body_markdown") or ""
+            if not self.writer or not claude_body.strip():
+                return claude_body
+            name = (brand or {}).get("name") or "the brand"
+            cited = set(re.findall(r"\[S\d+\]", claude_body))          # what Claude actually cited
+            heads = [l.strip() for l in claude_body.splitlines() if l.lstrip().startswith("#")]
+            n_ev = len(self._evidence_blocks or [])
+
+            def _build_prompt(aggressive=False):
+                harder = ("\n\nIMPORTANT: a previous attempt reused too much of the original wording. "
+                          "Rewrite FAR more aggressively — share NO run of 8+ words with the original; "
+                          "change sentence structure and word choice throughout. Keep every [S#], "
+                          "heading, number and fact exactly.") if aggressive else ""
+                if self.writer_mode == "compose":
+                    blocks = []
+                    for i, bl in enumerate(self._evidence_blocks or [], 1):
+                        blocks.append(f"[S{i}] {bl.get('label','')} — {bl.get('url','')}\n"
+                                      f"{(bl.get('text') or '')[:1200]}")
+                    ev = "\n\n".join(blocks) if blocks else "(no external evidence — use the outline)"
+                    kf = ((brand or {}).get("key_facts") or "").strip()
+                    kf_line = f"\n\nCANONICAL BRAND FACTS (use verbatim, never alter):\n{kf}" if kf else ""
+                    outline = "\n".join(heads) if heads else "(derive a clear structure)"
+                    return (
+                        f"You are writing a first-party blog article for {name}. Target query / H1: \"{seed}\".\n\n"
+                        "Write the FULL article in Markdown from the EVIDENCE below. Requirements:\n"
+                        "- Open with a '## Quick answer' whose first sentence names the answer.\n"
+                        "- Use question-shaped H2/H3 headings, each answered in its FIRST sentence.\n"
+                        "- Include a comparison table and an FAQ where the outline has them.\n"
+                        "- CITE every non-obvious fact inline with its source's [S#] label exactly as "
+                        "[S1], [S2] … (they are renumbered afterward).\n"
+                        "- NEVER invent facts, numbers, prices, or citations beyond the evidence.\n"
+                        "- End with a '## Sources' section (a placeholder line is fine — it is rebuilt).\n"
+                        "Return ONLY the Markdown article.\n\n"
+                        f"OUTLINE (headings to cover):\n{outline}{kf_line}\n\n"
+                        f"EVIDENCE:\n{ev}{harder}"
+                    )
+                # rewrite mode
+                return (
+                    f"Re-compose the following finished blog article for {name} ENTIRELY in your own "
+                    "words, sharing no verbatim phrasing with the original — a FULL rewrite, not a light edit.\n\n"
+                    "PRESERVE EXACTLY (do not change, drop, move, or renumber):\n"
+                    "- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
+                    "- every Markdown heading (##, ###) verbatim;\n"
+                    "- every number, price, date, product name, and factual claim;\n"
+                    "- every Markdown table (structure and cell values);\n"
+                    "- the '## Sources' section at the end.\n"
+                    "Change ONLY the wording of the prose — meaning, facts, structure and citations stay identical.\n"
+                    "Return ONLY the rewritten Markdown article, nothing else.\n\n"
+                    f"ARTICLE:\n{claude_body}{harder}"
+                )
+
+            def _valid(out):
+                if not out or not out.strip():
+                    return False, "empty"
+                if not (0.6 * len(claude_body) <= len(out) <= 1.4 * len(claude_body)):
+                    return False, f"length {len(out)} outside band"
+                out_cited = set(re.findall(r"\[S\d+\]", out))
+                if self.writer_mode == "compose":
+                    if n_ev:
+                        idxs = [int(m) for m in re.findall(r"\[S(\d+)\]", out)]
+                        if any(i < 1 or i > n_ev for i in idxs):
+                            return False, "cited an out-of-range source index"
+                        if len(out_cited) < min(3, n_ev):
+                            return False, f"too few citations ({len(out_cited)})"
+                else:  # rewrite — preserve Claude's exact citations + headings
+                    if not cited <= out_cited:
+                        return False, f"dropped citations {sorted(cited - out_cited)}"
+                    if heads:
+                        out_heads = {l.strip().lower() for l in out.splitlines() if l.lstrip().startswith("#")}
+                        miss = [h for h in heads if h.lower() not in out_heads]
+                        if miss:
+                            return False, f"dropped headings {miss[:3]}"
+                return True, ""
+
+            best, overlap = None, 1.0
+            for attempt in range(2):
+                out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)), max_tokens=9000)
+                ok, why = _valid(out)
+                if not ok:
+                    print(f"[writer] attempt {attempt+1} quality gate failed: {why}", flush=True)
+                    continue
+                best = out
+                overlap = self._ngram_overlap(claude_body, out, n=8)
+                if overlap < 0.15:
+                    break
+                print(f"[writer] attempt {attempt+1} overlap {overlap:.2f} ≥ 0.15 — retrying harder", flush=True)
+
+            if best is None:
+                article["writer_mode_used"] = "fallback"
+                article["writer_warning"] = "fell back to Claude (open-model rewrite failed validation)"
+                print("[writer] fell back to the Claude body (quality gate).", flush=True)
+                return claude_body
+
+            article["writer_mode_used"] = self.writer_mode
+            article["writer_overlap"] = round(overlap, 3)
+            if overlap >= 0.15:
+                article["writer_warning"] = (f"watermark removal not fully confirmed "
+                                             f"(verbatim overlap {overlap:.2f} ≥ 0.15)")
+                print(f"[writer] shipping open-model body with high overlap {overlap:.2f} (warned).", flush=True)
+            else:
+                print(f"[writer] {self.writer_mode} pass ok — overlap {overlap:.2f}.", flush=True)
+            return best
+        except Exception as e:
+            print(f"[writer] pass errored ({e}) — keeping the Claude body.", flush=True)
+            return article.get("body_markdown") or ""
+
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
                           ymyl=None, link_targets=None):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
@@ -3632,6 +3772,16 @@ Return JSON only:
         # FU88: re-pin the H1 to the seed AFTER the verify/reconcile rewrites (they preserve structure
         # but could still reword the heading) — the visible H1 must stay the exact target prompt.
         article["body_markdown"] = self._force_h1(article["body_markdown"], seed)
+        # FU153: OPTIONAL self-hosted open-model FINAL writing pass (watermark strip). Gated —
+        # runs ONLY when a WriterClient is injected AND writer_mode is rewrite/compose; otherwise
+        # a no-op and everything below is byte-identical to today. Placed AFTER
+        # _restore_dropped_sections + _force_h1 so _restore_dropped_sections can't re-inject
+        # Claude's watermarked sections under the rewrite; the deterministic guards below
+        # (_rebuild_sources, warnings, _quality_report) then re-run on the rewritten body. Re-pin
+        # the H1 after, since the open model may have reworded it.
+        if self.writer is not None and self.writer_mode in ("rewrite", "compose"):
+            article["body_markdown"] = self._apply_writer_pass(article, draft_body, brand, seed)
+            article["body_markdown"] = self._force_h1(article["body_markdown"], seed)
         missing_stats = self._dropped_stats(draft_body, article["body_markdown"])
         if missing_stats:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)

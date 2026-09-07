@@ -39,9 +39,10 @@ from config import (
     ANTHROPIC_API_KEY, DB_PATH, DEFAULT_BRAND_MENTION_RATIO, DEFAULT_MODEL,
     SECRET_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAILS,
     REDDIT_PROXY_URL, REDDIT_USER_AGENT,
+    WRITER_MODE, WRITER_ENDPOINT_URL, WRITER_API_KEY, WRITER_MODEL,
 )
 from db import Database
-from generators.base import ClaudeClient
+from generators.base import ClaudeClient, WriterClient
 from generators.subreddit_gen import SubredditGenerator
 from generators.post_gen import PostGenerator
 from generators.comment_gen import CommentGenerator
@@ -2567,7 +2568,8 @@ def api_blog_generate():
                                  if pl.get("platform") == "website" and (pl.get("published_url") or "").strip()][:8]
             except Exception:
                 sibling_titles, sibling_links = [], []
-            blog = BlogGenerator(claude, bg).generate_blog(
+            _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
+            blog = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
@@ -2691,7 +2693,8 @@ def api_blog_regenerate(blog_id):
             except Exception:
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
-            gen = BlogGenerator(claude, bg)
+            _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
+            gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
             seed = blog.get("seed") or ""
             # Reuse the sources captured at generate time so regeneration stays grounded.
             stored_urls = blog.get("source_urls") or []
@@ -2888,7 +2891,8 @@ def api_blog_provide_sources(blog_id):
             except Exception:
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)
-            gen = BlogGenerator(claude, bg)
+            _writer, _wmode = _build_blog_writer(bg)   # FU153: resume path also runs the writer pass
+            gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
             seed = blog.get("seed") or ""
             art = gen.finish_pending_blog(brand, seed, checkpoint, sources)
             if not art:
@@ -5691,6 +5695,71 @@ def api_gdoc_upload_set():
             db.meta_set("gdoc_folder_id", _normalize_drive_folder_id(data.get("folder_id")))
         if (data.get("secret") or "").strip():
             db.meta_set("gdoc_secret", data["secret"].strip())
+        return jsonify({"ok": True})
+    finally:
+        db.close()
+
+
+def _resolve_writer_config(db):
+    """FU153: resolve the self-hosted writer config — app_meta OVERRIDES the env defaults (so the
+    operator flips it in Settings without a redeploy). Returns {mode, endpoint_url, model, key}."""
+    def _pick(meta_key, env_default):
+        v = db.meta_get(meta_key)
+        return ((v if v is not None else env_default) or "").strip()
+    mode = _pick("writer_mode", WRITER_MODE) or "off"
+    return {
+        "mode": mode,
+        "endpoint_url": _pick("writer_endpoint_url", WRITER_ENDPOINT_URL),
+        "model": _pick("writer_model", WRITER_MODEL),
+        # the key is NOT stripped-empty-defaulted away — meta wins, else env
+        "key": (db.meta_get("writer_api_key") if db.meta_get("writer_api_key") is not None
+                else WRITER_API_KEY) or "",
+    }
+
+
+def _build_blog_writer(db):
+    """FU153: build (WriterClient|None, mode) for a blog task. Returns (None, 'off') — a NO-OP,
+    today's flow — unless mode is rewrite/compose AND an endpoint + key are configured."""
+    cfg = _resolve_writer_config(db)
+    if cfg["mode"] in ("rewrite", "compose") and cfg["endpoint_url"] and cfg["key"]:
+        return WriterClient(cfg["endpoint_url"], cfg["key"], cfg["model"]), cfg["mode"]
+    return None, "off"
+
+
+@app.route("/api/settings/writer", methods=["GET"])
+def api_writer_settings_get():
+    """FU153: config for the self-hosted open-model FINAL writing pass (watermark strip).
+    Never echoes the API key — only whether one is set."""
+    db = get_db()
+    try:
+        cfg = _resolve_writer_config(db)
+        return jsonify({
+            "mode": cfg["mode"] if cfg["mode"] in ("off", "rewrite", "compose") else "off",
+            "endpoint_url": cfg["endpoint_url"],
+            "model": cfg["model"],
+            "key_set": bool(cfg["key"]),
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/settings/writer", methods=["POST"])
+def api_writer_settings_set():
+    """Persist writer config to app_meta (read live per blog task — no redeploy). The API key is
+    store-on-write: only overwritten when a non-blank one is submitted ('leave blank to keep')."""
+    data = request.get_json(silent=True) or {}
+    if "mode" in data and (data.get("mode") or "off").strip() not in ("off", "rewrite", "compose"):
+        return jsonify({"error": "mode must be off, rewrite, or compose"}), 400
+    db = get_db()
+    try:
+        if "mode" in data:
+            db.meta_set("writer_mode", (data.get("mode") or "off").strip())
+        if "endpoint_url" in data:
+            db.meta_set("writer_endpoint_url", (data.get("endpoint_url") or "").strip())
+        if "model" in data:
+            db.meta_set("writer_model", (data.get("model") or "").strip())
+        if (data.get("api_key") or "").strip():
+            db.meta_set("writer_api_key", data["api_key"].strip())
         return jsonify({"ok": True})
     finally:
         db.close()

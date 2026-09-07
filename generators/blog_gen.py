@@ -84,6 +84,10 @@ _PRICE_SIGNAL_RE = re.compile(
     r"(\$\s?\d|[€£]\s?\d|\b\d+(?:\.\d+)?\s?(?:usd|eur|gbp)\b|"
     r"\b\d+(?:\.\d+)?\s?(?:/|per\s+)mo(?:nth)?\b|\bper\s+month\b|\bfree\s+(?:tier|plan|version|forever)\b)",
     re.IGNORECASE)
+# FU158: a comparison DIMENSION that is a pricing/cost column (vertical-neutral) — used to skip the
+# subject's own-domain pricing re-search when an authoritative canonical price already exists.
+_PRICE_DIM_RE = re.compile(r"pric|cost|\bfee\b|\bfees\b|\$|/mo|month|subscription|billing|plan\b",
+                           re.IGNORECASE)
 _LICENSE_SIGNAL_RE = re.compile(
     r"\b(commercial(?:ly|[- ]use)?|licen[sc]e[ds]?|royalty[- ]free|copyright|monetiz\w*|own\s+the\s+(?:output|rights))\b",
     re.IGNORECASE)
@@ -299,6 +303,27 @@ def _best_product_price(results, product, own_domain):
     return best
 
 
+def _canonical_price_item(key_facts, product):
+    """FU158: from stored key_facts pricing items, return the single AUTHORITATIVE item for `product` —
+    an OPERATOR-SET product match first, then any product-token match, then (only for a general/empty
+    `product`) an operator-set item else the first item. Returns None for a SPECIFIC product with no
+    matching item (never substitute a different product's / general price as this product's price).
+    Used to make an operator-set / canonical price the single source of truth for the SUBJECT's pricing
+    cell (Change 1) AND the JSON-LD Offer (Change 3)."""
+    items = _kf_pricing_items(key_facts)
+    if not items:
+        return None
+    ptoks = set(_product_tokens(product))
+
+    def _match(it):
+        return bool(ptoks and (ptoks & set(_product_tokens(it.get("product") or ""))))
+
+    return (next((it for it in items if it.get("operator_set") and _match(it)), None)
+            or next((it for it in items if _match(it)), None)
+            or (None if ptoks
+                else (next((it for it in items if it.get("operator_set")), None) or items[0])))
+
+
 def _canonical_facts_block(name, key_facts, seed_products=None):
     """FU150 (#4): render {name}'s CANONICAL PER-PRODUCT first-party facts (pricing) into a writer-
     prompt block so EVERY blog states the SAME values (cluster sync). The blog's seed-product item is
@@ -316,8 +341,10 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
     for it in items:
         prod = str(it.get("product") or "").strip()
         val = str(it.get("value") or "").strip()
+        # FU158: mark an operator-set/locked line so the writer knows it OUTRANKS any priced evidence.
+        tag = " [operator-set, authoritative — locked]" if it.get("operator_set") else ""
         if val:
-            lines.append(f"  - pricing ({prod}): {val}" if prod else f"  - pricing: {val}")
+            lines.append((f"  - pricing ({prod}){tag}: {val}" if prod else f"  - pricing{tag}: {val}"))
     kf = key_facts if isinstance(key_facts, dict) else {}
     for k, v in kf.items():
         if k == "pricing":
@@ -328,9 +355,17 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
             lines.append(f"  - {k}: {val}")
     if not lines:
         return ""
+    # FU158: these values are AUTHORITATIVE first-party EVIDENCE — they must fill {name}'s COMPARISON-
+    # TABLE pricing cell and every {name} price sentence (not only the meta/prose), and a general
+    # plan/consult/membership/base fee must NEVER be substituted as {name}'s product price.
     return (f"CANONICAL {name} FACTS (first-party — {name}'s OWN authoritative values; use these EXACT "
             f"values VERBATIM everywhere {name}'s own facts appear, and cite {name}'s own site; NEVER a "
-            f"third-party number. Each pricing line is for the named product/service):\n"
+            f"third-party number. Each pricing line is for the named product/service. These ARE "
+            f"first-party EVIDENCE: for {name}'s comparison-table pricing cell AND any {name} price "
+            f"sentence, use the canonical value for THIS article's product VERBATIM — do NOT substitute a "
+            f"general plan / consult / membership / base fee (e.g. a base '$X/mo plans' or a processing "
+            f"fee) as {name}'s product price; an [operator-set] line is locked and overrides any priced "
+            f"page you find):\n"
             + "\n".join(lines) + "\n")
 
 
@@ -1672,6 +1707,25 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     article). Distinguish a PROGRAM / MEMBERSHIP / SUBSCRIPTION fee from the MEDICATION / product cost and
     LABEL which one a number is; never present a membership/program fee as the medication price. If the
     product's own price isn't in the EVIDENCE, state the pricing model — never a different product's number.
+  - CANONICAL PRICE IS AUTHORITATIVE (subject): when the CANONICAL FACTS block above lists a price for THIS
+    article's product ({name}'s own authoritative value), that value IS the EVIDENCE — use it VERBATIM in
+    {name}'s comparison-table pricing cell and every {name} price sentence; an [operator-set] line overrides
+    any priced page you found. NEVER substitute a general plan / consult / membership / base fee (a base
+    "$X/mo plans", a processing/lab fee) as {name}'s product price. The "state the pricing model" fallback
+    applies ONLY when there is NO canonical value AND no product price in the EVIDENCE.
+  - COMPETITOR PRICE = the vendor's OWN site: a price you state for a COMPETITOR must come from that
+    competitor's OWN website (its own pricing/product page in the EVIDENCE) — NEVER from a third-party
+    review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
+    the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
+    this product") — NEVER copy a number from a review-site source.
+  - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
+    quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
+    specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not
+    strip it. Label an introductory / entry-tier / lowest-unit price AS such (e.g. "first month $X then $Y",
+    "from $X on the cheapest tier / smallest size") and do NOT present it as the ongoing/typical cost when
+    the source shows the ladder differs. Do NOT compare cells on DIFFERENT bases as if equal — note each
+    cell's basis when it differs. When a price is a plain flat number with no such qualifier, state it
+    plainly — never invent a basis.
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
@@ -1798,6 +1852,16 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
     presented AS the medication price — fix it (use the product's own price), label the fee type, or drop
     the figure and state the pricing model. These MUST appear in `flagged`.
+  - CANONICAL / OPERATOR PRICE OVERRIDDEN: {name}'s pricing cell/sentence showing a value OTHER than the
+    CANONICAL {name} FACTS value for THIS article's product (e.g. a general "$X/mo plans" or a
+    processing/lab fee where a canonical product price exists) — replace it with the canonical value.
+  - COMPETITOR PRICE FROM A REVIEW SOURCE: a competitor's price cited to a third-party review / aggregator /
+    listicle rather than the competitor's OWN site — re-cite to the vendor's own page, or if its own current
+    price isn't in the EVIDENCE, state its pricing honestly (never a review-site number). These MUST appear
+    in `flagged`.
+  - PRICE MISSING ITS BASIS: a price whose source states a unit / quantity / tier / term (per seat, per
+    supply, a dose/size, annual-vs-monthly, an intro-vs-ongoing tier) but the article dropped it, or an
+    entry/intro-tier price presented as the ongoing cost — restore the basis / label the tier.
   - CERTIFICATIONS / accreditations (e.g. "LegitScript certified") — keep ONLY if in context.
   - SUPERLATIVES & BLANKET-COVERAGE claims ("largest", "best", "#1", "the only", "all 50
     states") — drop or qualify unless explicitly supported by the context.
@@ -2357,8 +2421,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU156 — the article's PRIMARY product (a specific drug/product); anchor competitor pricing on
         # it so a competitor's price cell shows the MEDICATION/product cost, not a generic membership fee.
         _product = (products[0] if products else (core_topic or "")).strip()
-        _prod_price_brief = (f"the price/cost of {_product} (the medication/program for {_product}), plan "
-                             f"names, billing basis; " if _product else "")
+        # FU158: anchor competitor pricing on the vendor's OWN CURRENT price for THIS product, and ask for
+        # the basis it applies to (the unit/tier/dose/supply the source states) — generic across verticals.
+        _prod_price_brief = (f"the CURRENT price/cost of {_product} as listed on the vendor's OWN site, "
+                             f"the plan / unit / tier / dose / supply it applies to and the billing basis; "
+                             if _product else "")
         fetch_brief = (_prod_price_brief
                        + f"pricing and plans; commercial / license / eligibility / contract terms as "
                        f"applicable; the key capabilities and differentiators for "
@@ -2425,7 +2492,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 return []
             try:
                 pin = self.claude.search_sources(
-                    (f"{tool} {_product} price/cost; " if _product else "")   # FU156: product-anchored
+                    # FU156: product-anchored; FU158: the vendor's OWN CURRENT price + the unit/tier/dose it applies to
+                    (f"{tool} {_product} CURRENT price/cost on {tool}'s own site (the unit/tier/dose/supply "
+                     f"it applies to); " if _product else "")
                     + f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
                     f"key capabilities"
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
@@ -2732,13 +2801,42 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if t.lower() in lbl.lower():
                     tool_texts[t] = tool_texts.get(t, "") + " " + str(f.get("text") or "").lower()
 
+        # FU158 — the SUBJECT's canonical/operator-set price is AUTHORITATIVE for this article's product:
+        # inject it as a first-party fresh block (so the reconcile fills {name}'s pricing cell from THIS
+        # product-matched [S#], closing the FU156 "not in EVIDENCE → state the pricing model" escape
+        # hatch) and mark {name}'s pricing dimension SATISFIED so the un-anchored own-domain pricing
+        # re-search (which otherwise grabs a general '$X/mo plans' page) never runs for the subject.
+        try:
+            _kf = json.loads(brand.get("key_facts") or "{}")
+        except Exception:
+            _kf = {}
+        _canon_item = _canonical_price_item(_kf, _product)
+        _has_canon_price = bool(_canon_item and str(_canon_item.get("value") or "").strip())
+        if _has_canon_price:
+            _cv = str(_canon_item.get("value")).strip()
+            _cp = str(_canon_item.get("product") or _product or "").strip()
+            _curl = (_canon_item.get("source_url") or "").strip() or (
+                f"https://{own_dom_s}" if own_dom_s else "")
+            _ctext = (f"{_cp} pricing: {_cv} (per {name}'s own site)" if _cp
+                      else f"pricing: {_cv} (per {name}'s own site)")
+            if not any(str(b.get("label") or "").strip().lower() == name.strip().lower()
+                       and _cv[:12].lower() in str(b.get("text") or "").lower() for b in fresh):
+                fresh.append({"label": name, "url": _curl, "text": _ctext[:_EVIDENCE_TEXT_CAP]})
+            # mark {name}'s pricing dims satisfied (covers price/cost/fee/plan wordings)
+            tool_texts[name] = tool_texts.get(name, "") + " pricing price cost fee plan " + _cv.lower()
+
         _pairs = []
         for d in dims:
             ws = _dim_words(d)
             if not ws:
                 continue
-            miss = [t for t in [name] + tools
-                    if not any(w in tool_texts.get(t, "") for w in ws)]
+            # FU158: never re-search the SUBJECT's price when a canonical price exists — it's authoritative.
+            if _has_canon_price and _PRICE_DIM_RE.search(d or ""):
+                miss = [t for t in tools
+                        if not any(w in tool_texts.get(t, "") for w in ws)]
+            else:
+                miss = [t for t in [name] + tools
+                        if not any(w in tool_texts.get(t, "") for w in ws)]
             for t in miss:
                 _pairs.append((1 if t == name else 0, len(miss), d, t))
         _pairs.sort(key=lambda x: (-x[0], -x[1]))
@@ -2993,6 +3091,20 @@ COMPLETE and every stated fact is sourced:
     SUBSCRIPTION fee from the MEDICATION / product cost and LABEL which one a number is; never present a
     membership/program fee AS the medication price. If only a different product's price or a bare program
     fee is available, drop the exact figure and state the pricing model — never a misleading number.
+  - CANONICAL PRICE IS AUTHORITATIVE (FU158, hard rule): when the CANONICAL FACTS block lists a price for
+    THIS article's product, {name}'s pricing cell AND any {name} price sentence MUST show that exact value
+    (an [operator-set] line is locked and overrides any priced page). NEVER fill {name}'s pricing cell with
+    a general plan / consult / membership / base fee when a canonical product price exists — replace such a
+    cell with the canonical value, cited to {name}'s own site.
+  - COMPETITOR PRICE = the vendor's OWN site (FU158, hard rule): a COMPETITOR's price must come from that
+    competitor's OWN first-party block — NEVER a "third-party ·" / review / aggregator / listicle block
+    (those go stale, e.g. an outdated membership fee). If a competitor's own current price is not in the
+    FRESH FACTS, state its pricing honestly (its pricing model, or leave the cell "—") rather than copy a
+    review-site number; a "—" plus honesty beats a wrong number.
+  - PRICE BASIS (FU158, only when the source states one): keep the unit / quantity / tier / term a price
+    applies to (per seat, per supply, a dose/size, annual-vs-monthly, an intro-vs-ongoing tier) VERBATIM;
+    label an entry/intro-tier price as such and don't present it as the ongoing cost; don't equate cells on
+    DIFFERENT bases. A plain flat price with no such qualifier stays plain — never invent a basis.
   - {name}'s OWN facts are FIRST-PARTY ONLY (this is a hard rule): a fact about {name} (its price, plans,
     features, terms, policies) may ONLY cite a first-party block labeled "{name}" (its own site/published
     content) — NEVER a "third-party ·" / review / analyst block, even for {name}'s pricing. If no
@@ -4530,27 +4642,37 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
         graph.append({"@type": "ItemList",
                       "itemListElement": [{"@type": "ListItem", "position": i + 1, "name": e}
                                           for i, e in enumerate(entities)]})
-    # FU151 (C) — Product + Offer for the SUBJECT from canonical FU150 key_facts pricing (first-party
-    # only; the verbatim value in `description`, a best-effort numeric `price` when parseable).
+    # FU151 (C) / FU158 — Product + Offer for the SUBJECT from canonical key_facts pricing. Honor
+    # operator-set items (never guard-skip them) and emit the ONE Offer for THIS article's product
+    # (operator-set match preferred) so an operator's canonical price wins over a stale general /
+    # other-product item; the verbatim value in `description`, a best-effort numeric `price`.
     try:
         kf_items = _kf_pricing_items(json.loads(brand.get("key_facts") or "{}"))
     except Exception:
         kf_items = []
-    offers = []
-    for it in kf_items:
-        val = (it.get("value") or "").strip()
-        if not val:
-            continue
-        # FU156: skip an Offer whose product label doesn't appear in its OWN source_url path (an
-        # auto-mislabeled item like {product:"tirzepatide", url:".../mens-trt/"}) — never advertise a
-        # wrong-product price in the schema. (After the FU156 retrieval fix this rarely fires; it
-        # protects already-corrupted brands on export.)
+
+    def _url_path(u):   # FU158: the real URL path ("" for a bare domain, whether or not it has a scheme)
+        u = re.sub(r"^[a-z]+://", "", (u or "").strip(), flags=re.I)
+        i = u.find("/")
+        return u[i:].strip("/").lower() if i != -1 else ""
+
+    def _offer_ok(it):
+        if not (it.get("value") or "").strip():
+            return False
+        if it.get("operator_set"):
+            return True   # FU158: operator items are trusted — never guard-skip
         _p = str(it.get("product") or "").strip()
-        if _p:
-            _toks = _product_tokens(_p)
-            _path = re.sub(r"^[a-z]+://[^/]+", "", (it.get("source_url") or "")).lower()
-            if _toks and not any(t in _path for t in _toks):
-                continue
+        if not _p:
+            return True
+        # FU156: skip a NAMED non-operator item whose product token isn't in its OWN url path (an
+        # auto-mislabeled item like {tirzepatide, url:.../mens-trt/}); FU158: keep an empty-path
+        # (bare-domain) item — with no path we can't judge it, so don't drop it.
+        _toks = _product_tokens(_p)
+        _path = _url_path(it.get("source_url"))
+        return not (_toks and _path and not any(t in _path for t in _toks))
+
+    def _mk_offer(it):
+        val = (it.get("value") or "").strip()
         off = {"@type": "Offer", "description": val[:200]}
         amt, cur = _price_amount(val)
         if amt:
@@ -4558,9 +4680,25 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
             off["priceCurrency"] = cur
         if it.get("product"):
             off["name"] = it["product"]
-        if it.get("source_url"):
-            off["url"] = it["source_url"]
-        offers.append(off)
+        u = (it.get("source_url") or "").strip()
+        if u:   # FU158: normalize a bare-domain / http url to https for the schema
+            if u.startswith("http://"):
+                u = "https://" + u[len("http://"):]
+            elif not u.startswith("https://"):
+                u = "https://" + u
+            off["url"] = u
+        return off
+
+    _ok_items = [it for it in kf_items if _offer_ok(it)]
+    # FU158: prefer the ONE item for THIS article's product (operator-set first), so a stale general /
+    # other-product item can never be advertised as the price on a product-specific article.
+    _art_toks = set(_product_tokens((blog.get("seed") or "") + " " + title))
+    _matched = [it for it in _ok_items
+                if _art_toks and (_art_toks & set(_product_tokens(it.get("product") or "")))]
+    if _matched:
+        offers = [_mk_offer(next((it for it in _matched if it.get("operator_set")), _matched[0]))]
+    else:
+        offers = [_mk_offer(it) for it in _ok_items]
     if offers and brand_name:
         prod = {"@type": "Product", "name": brand_name,
                 "offers": offers if len(offers) > 1 else offers[0]}

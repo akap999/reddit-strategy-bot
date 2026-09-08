@@ -1848,6 +1848,10 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
         self._article_prompt = prompt   # FU165: the EXACT instruction set + evidence — reused for the
         #                                 self-hosted writer's COMPOSE pass so Qwen writes its OWN full
         #                                 article from the SAME rules Claude got (no Claude-output reference).
+        self._article_prompt_ev = evidence_block   # FU166: the EARLY evidence chunk in the reused prompt;
+        #     the writer pass SWAPS this for the FULL post-sourcing evidence (self._evidence_blocks, which
+        #     _source_for_completion/reconcile grow with the FDA/official/pricing sources) so Qwen composes
+        #     from the SAME material Claude's FINAL body used — not the stale pre-sourcing set.
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("body_markdown") or "").strip():
             return None
@@ -4131,6 +4135,27 @@ Return JSON only:
             lines[i] = orig_heads[k]
         return "\n".join(lines)
 
+    def _writer_evidence_str(self, char_budget=None):
+        """FU166: render the FULL post-sourcing evidence (self._evidence_blocks — which now carry the
+        FDA/official/pricing sources fetched AFTER generate_article) as "[S#] label — url\\ntext" blocks,
+        numbered [S1..Sn] to MATCH self._evidence_blocks order so _rebuild_sources maps the writer's
+        citations correctly. When char_budget is set, spread it across ALL blocks (trim each block's TEXT)
+        so every source stays represented — never drop whole (later-appended) sources to fit."""
+        blocks = getattr(self, "_evidence_blocks", None) or []
+        if not blocks:
+            return ""
+        per = 2500
+        if char_budget:
+            per = max(400, min(2500, (int(char_budget) // len(blocks)) - 140))
+        parts = []
+        for i, b in enumerate(blocks, 1):
+            lbl = (b.get("label") or "").strip()
+            url = (b.get("url") or "").strip()
+            txt = (b.get("text") or "").strip()[:per]
+            head = f"[S{i}] {lbl}" + (f" — {url}" if url else "")
+            parts.append(head + ("\n" + txt if txt else ""))
+        return "\n\n".join(parts)
+
     def _apply_writer_pass(self, article, draft_body, brand, seed):
         """FU153: re-author the finished blog body on the self-hosted open model so a Claude SynthID
         watermark is replaced by the open model's tokens. Modes (self.writer_mode):
@@ -4164,12 +4189,28 @@ Return JSON only:
                     # the OUTPUT FORMAT is overridden: Markdown body, not the JSON envelope Claude returns.
                     base = getattr(self, "_article_prompt", "") or ""
                     if base:
-                        base = base[:55000]   # bound to Qwen's --max-model-len 24576 (≈14k-tok input + 9k output)
+                        # FU166: swap the EARLY evidence chunk in the reused prompt for the FULL post-sourcing
+                        # evidence (FDA/official/pricing sources are appended AFTER generate_article) so Qwen
+                        # composes from the SAME material Claude's final body used — not the stale pre-sourcing
+                        # set (which left the body citing only S1-S3 and gutted the clinical depth).
+                        early_ev = getattr(self, "_article_prompt_ev", "") or ""
+                        fixed_len = len(base) - len(early_ev)                 # rules + brand, minus the old evidence
+                        ev_budget = max(6000, 52000 - fixed_len)             # keep all rules; fit evidence to context
+                        final_ev = self._writer_evidence_str(char_budget=ev_budget)
+                        if early_ev and final_ev:
+                            base = base.replace(early_ev, "\n" + final_ev + "\n", 1)
+                        base = base[:55000]   # hard safety bound (Qwen --max-model-len 24576 ≈ 14k-tok in + 9k out)
                         return (base
                                 + "\n\nOUTPUT FORMAT — IGNORE any JSON instruction above. Return ONLY the "
                                 "finished Markdown ARTICLE BODY (the value that would go in \"body_markdown\"): "
                                 "start with the first heading, cover EVERY section in full, no JSON, no code "
-                                "fences, no preamble, no commentary." + harder)
+                                "fences, no preamble, no commentary.\n"
+                                "STRUCTURE: use ## (H2) for each MAIN section — the question-shaped ## headings "
+                                "are the retrieval anchors an engine lifts for a sub-query; use ### ONLY for "
+                                "sub-points WITHIN a section, NEVER as the main section level (do not put every "
+                                "section at ###). Keep the FULL clinical/technical depth and every specific "
+                                "number, dose, threshold and named [S#] source from the EVIDENCE — do NOT "
+                                "compress a well-sourced section into one or two sentences." + harder)
                     # Fallback (compose invoked without a preceding generate_article — not the normal path):
                     blocks = [f"[S{i}] {bl.get('label','')} — {bl.get('url','')}\n{(bl.get('text') or '')[:2500]}"
                               for i, bl in enumerate(self._evidence_blocks or [], 1)]

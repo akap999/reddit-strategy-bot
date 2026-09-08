@@ -145,6 +145,23 @@ _YMYL_OFFICIAL_DOMAINS = {
     "legal": [],
 }
 
+# FU163: RECOGNIZED-AUTHORITY .org/.int bodies — professional societies + international organizations
+# that legitimately earn the `official ·` badge on a non-.gov TLD. A GENERIC .org/.int (industry /
+# education / advocacy site — e.g. telehealth.org) is NOT a credential and must NOT be labeled official.
+# Extensible per vertical; seeded to cover every society the pages/tests already expect (auanet, ama-assn).
+_AUTHORITY_ORGS = {
+    # medical / clinical professional societies + guideline bodies
+    "ama-assn.org", "auanet.org", "endocrine.org", "aace.com", "obesitymedicine.org",
+    "diabetes.org", "heart.org", "acc.org", "cancer.org", "aad.org", "aap.org", "acog.org",
+    "apa.org", "psychiatry.org", "aafp.org", "acponline.org", "gastro.org", "thyroid.org",
+    "kidney.org", "lung.org", "rheumatology.org", "uspreventiveservicestaskforce.org",
+    "cochrane.org", "ada.org",
+    # finance / legal professional bodies
+    "finra.org", "sipc.org", "aicpa.org", "cfainstitute.org", "nfcc.org", "americanbar.org",
+    # international organizations
+    "who.int", "oecd.org", "un.org", "worldbank.org", "imf.org",
+}
+
 
 def _is_ymyl_brand(brand):
     """FU133: deterministic YMYL vertical ('medical'|'finance'|'legal'|None) from the brand's
@@ -257,6 +274,18 @@ def _kf_pricing_items(key_facts):
     return []
 
 
+def _drop_nameless_when_named(items):
+    """FU163: a NAMELESS general (empty-product) pricing item must never coexist with NAMED-product
+    items — a catch-all price (e.g. a homepage "flexible plans … $79/mo") contradicts the specific
+    per-product prices. Drops every empty-product item when ≥1 named-product item exists; a
+    single-product / general-only brand (no named items) is left untouched. Returns (items, dropped)."""
+    items = list(items or [])
+    if any(str(it.get("product") or "").strip() for it in items):
+        kept = [it for it in items if str(it.get("product") or "").strip()]
+        return kept, (len(kept) != len(items))
+    return items, False
+
+
 # FU156: generic filler dropped so a category/price word doesn't match every page.
 _PRODUCT_FILLER = {"the", "and", "for", "with", "its", "their", "together", "combined", "use",
                    "therapy", "treatment", "medication", "medications", "drug", "drugs", "injection",
@@ -334,7 +363,7 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
     """FU150 (#4): render {name}'s CANONICAL PER-PRODUCT first-party facts (pricing) into a writer-
     prompt block so EVERY blog states the SAME values (cluster sync). The blog's seed-product item is
     listed FIRST (this blog's product), the rest as consistency context. Empty when nothing stored."""
-    items = _kf_pricing_items(key_facts)
+    items, _ = _drop_nameless_when_named(_kf_pricing_items(key_facts))   # FU163: no nameless general beside named
     sp = [_kf_slug(p) for p in (seed_products or []) if str(p).strip()]
 
     def _rank(it):
@@ -440,13 +469,13 @@ def _official_source_ok(url, title, brand_name, own_domain, pins):
     for p in (pins or []):
         if d == p or d.endswith("." + p):
             return True
-    # WEAK tier (.org / .int — affiliates squat these TLDs): shape checks decide.
-    bn = re.sub(r"\s+", "", (brand_name or "")).lower()
-    if bn and bn in re.sub(r"\s+", "", title or "").lower():
-        return False              # regulators don't title pages with the client's brand
-    if _REVIEWISH_RE.search(title or ""):
-        return False
-    return d.endswith(".org") or d.endswith(".int")
+    # FU163: RECOGNIZED-AUTHORITY .org/.int only — professional societies / international bodies (the
+    # domain IS the authority, like a pin). A GENERIC .org/.int (industry / education / advocacy site —
+    # e.g. telehealth.org) is NOT a credential and no longer earns "official ·" for the TLD alone; it
+    # flows to normal "third-party ·" labeling, and a leg that keeps 0 officials retries for a .gov source.
+    if d in _AUTHORITY_ORGS or any(d.endswith("." + a) for a in _AUTHORITY_ORGS):
+        return True
+    return False
 
 
 def _evidence_tier(block, brand_name, own_domain):
@@ -2171,6 +2200,11 @@ Return JSON only:
         _clean_items = [i for i in stored_items if not _mislabeled(i)]
         _purged = len(_clean_items) != len(stored_items)
         stored_items = _clean_items
+        stored_items, _dropped_gen = _drop_nameless_when_named(stored_items)   # FU163
+        if _dropped_gen:
+            _purged = True
+            print(f"[blog_gen] key-facts: dropped a nameless general price item — {name} has named "
+                  f"products (a separate tier must be NAMED)", flush=True)
         if not name or not own_dom or not (evidence or "").strip():
             if _purged:
                 stored["pricing"] = {"items": stored_items}
@@ -2224,7 +2258,10 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         _in_evidence = any(_kf_slug(f["product"]) == _t_slug for f in fresh)
         _stored_t = next((i for i in stored_items if _kf_slug(i.get("product")) == _t_slug), None)
         _operator_locked = bool(_stored_t and _stored_t.get("operator_set"))
-        if not _in_evidence and not _operator_locked:
+        _has_named = any(str(i.get("product") or "").strip() for i in stored_items)   # FU163
+        # FU163: skip the GENERAL homepage-price search (target=="" → "{name} pricing") when named
+        # products already exist — it re-fetches the contradictory nameless "$79 flexible plans" item.
+        if not _in_evidence and not _operator_locked and not (not target and _has_named):
             # FU156: search for the TARGET PRODUCT's price and pick a product-MATCHING own-domain
             # priced page via _best_product_price (never a DIFFERENT product's price — the TRT bug).
             # One retry ONLY when the first query returns no product match (cost: 1 call, +1 iff missed).
@@ -2281,8 +2318,9 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
             # same value → keep stored item untouched
         if notes:
             warning = "⚠ " + "; ".join(notes) + " — earlier blogs may show the old value; regenerate them to sync."
-        if changed or _purged:   # FU156: persist a self-heal purge even when nothing new was found
-            stored["pricing"] = {"items": list(by_slug.values())}
+        _final_items, _dropped_gen2 = _drop_nameless_when_named(list(by_slug.values()))   # FU163
+        if changed or _purged or _dropped_gen2:   # FU156/163: persist a self-heal purge even when nothing new was found
+            stored["pricing"] = {"items": _final_items}
             self._persist_key_facts(brand, stored)
             if warning:
                 print(f"[blog_gen] key-facts: {warning}", flush=True)
@@ -4874,7 +4912,7 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
             off["url"] = u
         return off
 
-    _ok_items = [it for it in kf_items if _offer_ok(it)]
+    _ok_items, _ = _drop_nameless_when_named([it for it in kf_items if _offer_ok(it)])   # FU163: no nameless general Offer beside named
     # FU158: prefer the ONE item for THIS article's product (operator-set first), so a stale general /
     # other-product item can never be advertised as the price on a product-specific article.
     _art_toks = set(_product_tokens((blog.get("seed") or "") + " " + title))

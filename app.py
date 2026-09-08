@@ -2149,7 +2149,7 @@ def api_update_brand(bid):
         if isinstance(data.get("key_facts"), dict):
             kf_update = json.dumps(data["key_facts"])
         elif isinstance(_kf_items_in, list) or (data.get("key_facts_pricing") or "").strip():
-            from generators.blog_gen import _kf_pricing_items, _kf_slug
+            from generators.blog_gen import _kf_pricing_items, _kf_slug, _drop_nameless_when_named
             import time as _time
             _existing = db.get_brand(bid) or {}
             try:
@@ -2163,16 +2163,27 @@ def api_update_brand(bid):
             by = {_kf_slug(i.get("product")): i for i in _kf_pricing_items(kf)}   # migrate + key by product
             _incoming = _kf_items_in if isinstance(_kf_items_in, list) else \
                 [{"product": "", "value": data.get("key_facts_pricing")}]
+            _incoming_slugs = set()
             for it in _incoming:
                 prod = str((it or {}).get("product") or "").strip()
                 val = str((it or {}).get("value") or "").strip()
                 if not val:
                     continue
+                _incoming_slugs.add(_kf_slug(prod))
                 by[_kf_slug(prod)] = {"product": prod, "value": val, "source_url": _dom,
                                       "verified_at": _now, "operator_set": True}
-            if by:
-                kf["pricing"] = {"items": list(by.values())}
-                kf_update = json.dumps(kf)
+            # FU163: the textarea is AUTHORITATIVE for OPERATOR items — an operator-set item whose line
+            # the operator removed (its slug isn't in the incoming set) is DELETED. Non-operator
+            # (auto-synced) items are left alone (managed by the generation sync + "Clear all cached data").
+            by = {s: it for s, it in by.items()
+                  if s in _incoming_slugs or not it.get("operator_set")}
+            # FU163: a nameless general item must not coexist with named products (a separate tier is NAMED).
+            _final_items, _ = _drop_nameless_when_named(list(by.values()))
+            if _final_items:
+                kf["pricing"] = {"items": _final_items}
+            else:
+                kf.pop("pricing", None)   # operator cleared all pricing lines
+            kf_update = json.dumps(kf)
         db.update_brand(
             brand_id=bid,
             name=(data.get("name") or "").strip() or None,   # FU84: rename (exact casing followed)

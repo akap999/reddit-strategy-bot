@@ -102,7 +102,7 @@ _LICENSE_DIM_RE = re.compile(
 # FU56/FU78: hard per-generation cost ceiling ($). Once the running cost hits this, further web searches are
 # skipped (search result tokens are ~90% of a blog's cost). Bumped 1.5→2.0 (FU78) to leave headroom for the
 # price-rescue searches so public pricing gets fetched rather than punted. Env-overridable.
-_COMPETITOR_FACTS_TTL_DAYS = float(os.environ.get("COMPETITOR_FACTS_TTL_DAYS", "21"))   # FU151 (A)
+_COMPETITOR_FACTS_TTL_DAYS = float(os.environ.get("COMPETITOR_FACTS_TTL_DAYS", "45"))   # FU151 (A); FU160: 21→45d
 _COMPETITOR_FACTS_CAP = 40   # FU151 (A): max competitors kept in the per-brand fact cache (prune oldest)
 _BLOG_FETCH_WORKERS = int(os.environ.get("BLOG_FETCH_WORKERS", "5"))   # FU151 (B): parallel fetch pool
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
@@ -1968,12 +1968,15 @@ Return JSON only:
                     + str(blk.get("text") or "")).lower()
             return any(t in blob for t in toks)
 
-        def _run(tag, brief, allowed=None, must_name=None, keep_cap=None):
-            try:
-                res = self.claude.search_sources(brief, max_searches=2,
-                                                 allowed_domains=(allowed or None))
-            except Exception:
-                res = []
+        def _run(tag, brief, allowed=None, must_name=None, keep_cap=None, prefetched=None):
+            if prefetched is not None:   # FU159: reuse a concurrently pre-fetched result (same call)
+                res = prefetched
+            else:
+                try:
+                    res = self.claude.search_sources(brief, max_searches=2,
+                                                     allowed_domains=(allowed or None))
+                except Exception:
+                    res = []
             toks = _subj_tokens(must_name) if must_name else []
             kept = 0
             for s in (res or []):
@@ -2018,14 +2021,32 @@ Return JSON only:
         strict = bool(subjects)
         subjects = subjects[:3] or [topic]
         primary = subjects[0]
+        def _brief_a(sub):
+            return (f"the OFFICIAL regulator documentation for {sub}: prescribing information, "
+                    f"label, or official safety/standards page — the regulator's or manufacturer's "
+                    f"OWN page, never a blog, review, or news article")
+
+        # FU159: pre-fetch the per-subject pinned leg-A searches CONCURRENTLY (independent network calls);
+        # validation/dedup/retry stay SEQUENTIAL below (over the `seen` set, in subject order) → output
+        # byte-identical, just faster. Retries (rare — only when a subject's pinned kept 0) stay live.
+        _pin_prefetch = {}
+        if len(subjects) > 1:
+            def _pin_fetch(sub):
+                try:
+                    return sub, self.claude.search_sources(
+                        _brief_a(sub), max_searches=2, allowed_domains=(pins or None))
+                except Exception:
+                    return sub, []
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(subjects))) as _ex:
+                for _s, _r in _ex.map(_pin_fetch, subjects):
+                    _pin_prefetch[_s] = _r
+
         subj_named = {}
         for sub in subjects:
-            brief_a = (f"the OFFICIAL regulator documentation for {sub}: prescribing information, "
-                       f"label, or official safety/standards page — the regulator's or manufacturer's "
-                       f"OWN page, never a blog, review, or news article")
+            brief_a = _brief_a(sub)
             mn = sub if strict else None
             kept = _run(f"legA/pinned[{sub[:40]}]", brief_a, allowed=(pins or None),
-                        must_name=mn, keep_cap=2)
+                        must_name=mn, keep_cap=2, prefetched=_pin_prefetch.get(sub))
             if kept == 0:
                 kept = _run(f"legA/retry[{sub[:40]}]", brief_a + f" — topic context: {seed}",
                             must_name=mn, keep_cap=2)
@@ -2228,7 +2249,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         return stored, warning, ([seed_product] if seed_product else []), extra_blocks
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
-                               ymyl=None, refresh_competitor_facts=False):
+                               ymyl=None, refresh_competitor_facts=False, refresh_competitor_slugs=None):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -2559,14 +2580,19 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             except Exception:
                 return False
         _cached_tools = {}   # tool -> its cached blocks (fresh + non-empty)
-        if not refresh_competitor_facts:
-            for tool in tools:
-                _e = _cfacts.get(_kf_slug(tool))
-                if isinstance(_e, dict) and _cf_fresh(_e):
-                    _blks = [b for b in (_e.get("blocks") or [])
-                             if isinstance(b, dict) and (b.get("text") or "").strip() and b.get("label")]
-                    if _blks:
-                        _cached_tools[tool] = _blks
+        # FU160: PER-SLUG bypass — refresh_competitor_facts=True (all) OR a competitor's slug in the
+        # selected `refresh_competitor_slugs` set → skip the cache for THAT competitor (re-source live);
+        # the rest still take their cached blocks. The UI sends the exact cache-key slugs.
+        _refresh_slugs = {str(s).strip().lower() for s in (refresh_competitor_slugs or []) if str(s).strip()}
+        for tool in tools:
+            if refresh_competitor_facts or _kf_slug(tool) in _refresh_slugs:
+                continue
+            _e = _cfacts.get(_kf_slug(tool))
+            if isinstance(_e, dict) and _cf_fresh(_e):
+                _blks = [b for b in (_e.get("blocks") or [])
+                         if isinstance(b, dict) and (b.get("text") or "").strip() and b.get("label")]
+                if _blks:
+                    _cached_tools[tool] = _blks
         if _cached_tools:
             print(f"[blog_gen] competitor-cache: HIT {len(_cached_tools)}/{len(tools)} — "
                   f"{', '.join(_cached_tools)} (no re-sourcing)", flush=True)
@@ -2629,12 +2655,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if not st["blocks"]:
                 return 0                                   # zero-block — highest priority
             return 1 if _missing_facts(st["blocks"]) else 2   # 2 = fully sourced, skip
-        for tool in sorted(tools, key=_rescue_prio):
+        def _do_rescue(tool):
             st = tool_state[tool]
             if st.get("cached"):
-                continue                                   # FU151: cached facts are trusted as-is
+                return                                     # FU151: cached facts are trusted as-is
             if _rescue_prio(tool) == 2:
-                continue                                   # nothing missing — no rescue spend
+                return                                     # nothing missing — no rescue spend
             dom = st["dom"]
             blocks = list(st["blocks"])
             # (i) still no domain → resolve via web search, then retry the baseline
@@ -2729,6 +2755,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     if gadd:
                         blocks = blocks + gadd
             st["blocks"] = blocks
+
+        # FU159: rescue each tool CONCURRENTLY — each _do_rescue writes only its OWN tool_state[tool]
+        # (no shared-list race), so this adds ZERO searches (same set, in parallel) and the finalize loop
+        # below still emits `fresh` in ORIGINAL `tools` order → [S#] numbering byte-identical to serial.
+        # Zero-block tools are submitted first so a tight budget still favors them.
+        _rescue_live = [t for t in sorted(tools, key=_rescue_prio)
+                        if not tool_state[t].get("cached") and _rescue_prio(t) != 2]
+        if _rescue_live:
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_rescue_live))) as _ex:
+                list(_ex.map(_do_rescue, _rescue_live))
 
         # ---- Finalize: emit in ORIGINAL order (keeps each tool's [S#] blocks contiguous) ----
         for tool in tools:
@@ -2840,11 +2876,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             for t in miss:
                 _pairs.append((1 if t == name else 0, len(miss), d, t))
         _pairs.sort(key=lambda x: (-x[0], -x[1]))
+        # FU159: SELECT the within-budget pairs FIRST (same priority order + same counts as serial), then
+        # run their searches CONCURRENTLY and MERGE results in ORIGINAL pair order → [S#] byte-identical.
+        # (No pair reads another's result — `_pairs` is fixed upfront and the keep filter ignores
+        # tool_texts — so parallelizing adds ZERO searches and cannot change the output.)
         _budget = _DIM_RESCUE_BUDGET
         _sbudget = _SUBJ_RESCUE_BUDGET
         _skipped = 0
-        for _is_subj, _mcount, d, t in _pairs:
-            if _is_subj:
+        _selected = []
+        for _pair in _pairs:
+            if _pair[0]:   # _is_subj
                 if _sbudget <= 0:
                     _skipped += 1
                     continue
@@ -2854,12 +2895,13 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     _skipped += 1
                     continue
                 _budget -= 1
+            _selected.append(_pair)
+
+        def _do_pair(pair):
+            _is_subj, _mcount, d, t = pair
             rs = []
-            _used_fp = False
             if _is_subj and own_dom_s:
-                # first-party-preferred: the subject's own site is the authoritative place
-                # for its own pricing/terms (broad fallback below if its site yields nothing).
-                _used_fp = True
+                # first-party-preferred: the subject's own site is the authoritative place for its facts.
                 try:
                     rs = self.claude.search_sources(
                         f"{t}: {d} — the specific, current value/details from {t}'s own site",
@@ -2867,8 +2909,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 except Exception:
                     rs = []
             # FU150 (#3): the broad "or a reputable source" fallback is for COMPETITORS ONLY — a
-            # SUBJECT fact must stay FIRST-PARTY (never a third-party source about {name}). So the
-            # subject gets its single first-party search above and no broad fallback.
+            # SUBJECT fact must stay FIRST-PARTY (never a third-party source about {name}).
             if not rs and not _is_subj:
                 try:
                     rs = self.claude.search_sources(
@@ -2877,17 +2918,24 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         max_searches=1)
                 except Exception:
                     rs = []
-            kept = 0
+            kb = []
             for s in (rs or []):
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
                 if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
                         and not _is_negative_about(s, name)):   # FU150 (#2)
-                    fresh.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
-                    tool_texts[t] = tool_texts.get(t, "") + " " + fct.lower()
-                    kept += 1
-            print(f"[blog_gen] dim-rescue: {t} × '{d}' → {kept} kept", flush=True)
+                    kb.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+            return t, d, kb
+
+        if _selected:
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_selected))) as _ex:
+                _dim_results = list(_ex.map(_do_pair, _selected))   # ex.map preserves _selected order
+            for _t, _d, _kb in _dim_results:
+                for b in _kb:
+                    fresh.append(b)
+                    tool_texts[_t] = tool_texts.get(_t, "") + " " + b["text"].lower()
+                print(f"[blog_gen] dim-rescue: {_t} × '{_d}' → {len(_kb)} kept", flush=True)
         if _skipped:
             print(f"[blog_gen] dim-rescue: budget exhausted with {_skipped} pair(s) left",
                   flush=True)
@@ -3730,7 +3778,7 @@ Return JSON only:
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
                       qualifier="", internal_links=False, sibling_links=None, ymyl=None,
-                      refresh_competitor_facts=False):
+                      refresh_competitor_facts=False, refresh_competitor_slugs=None):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -3824,7 +3872,8 @@ Return JSON only:
         sourcing = self._source_for_completion(brand, seed, article, deep=deep_verify, geo=geo,
                                                qualifier=qualifier,   # FU93
                                                ymyl=rymyl,   # FU133
-                                               refresh_competitor_facts=refresh_competitor_facts)   # FU151
+                                               refresh_competitor_facts=refresh_competitor_facts,   # FU151
+                                               refresh_competitor_slugs=refresh_competitor_slugs)   # FU160
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)

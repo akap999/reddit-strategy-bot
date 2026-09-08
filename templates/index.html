@@ -1990,6 +1990,7 @@ async function editBrandContext(brandName) {
     if (!brandInstances.length) { toast('Brand not found', 'error'); return; }
 
     const first = brandInstances[0];
+    window._editBrand = first;   // FU160: so blogCompetitorCacheModal can resolve this brand
     const context = first.context || '';
     const domainUrl = first.domain_url || '';
     let keywords = [];
@@ -2076,6 +2077,10 @@ async function editBrandContext(brandName) {
                     <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
                     <div><label class="text-xs text-gray-400">Known sources <span class="text-gray-600">(one URL per line — links you supplied during past generations; auto-fetched as evidence on EVERY future blog for this brand)</span></label><textarea id="edit-brand-knownsources" rows="3" placeholder="https://www.accessdata.fda.gov/…/label.pdf&#10;https://diabetesjournals.org/care/…" style="font-family:inherit">${(() => { try { return (JSON.parse(first.known_sources || '[]') || []).join('\n'); } catch (_) { return ''; } })()}</textarea></div>
                     <div><label class="text-xs text-gray-400">Canonical pricing <span class="text-gray-600">(first-party — ${_ev(brandName)}'s OWN pricing per product, reused &amp; kept consistent across every blog; set this when the site blocks fetches. Auto-synced from the site. One per line as <code>Product | Price</code>; a single-price brand can enter just the price.)</span></label><textarea id="edit-brand-keyfacts-pricing" rows="3" placeholder="Tirzepatide | $149 first month, then $249/mo billed quarterly (60mg)&#10;Semaglutide | $199/mo" style="font-family:inherit">${(() => { try { const p = (JSON.parse(first.key_facts || '{}') || {}).pricing || {}; const items = Array.isArray(p.items) ? p.items : (p.value ? [{product:'',value:p.value}] : []); return items.map(it => (it.product ? (it.product + ' | ' + (it.value||'')) : (it.value||''))).filter(Boolean).join('\n'); } catch(_) { return ''; } })()}</textarea></div>
+                    <div class="flex gap-2 mt-1">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="blogCompetitorCacheModal(${first.id}, 'view')">🗄 Cached competitor data (${(() => { try { return Object.keys(JSON.parse(first.competitor_facts||'{}')||{}).length; } catch(_){ return 0; } })()})</button>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="_blogClearCachedData(${first.id})">🧹 Clear all cached data</button>
+                    </div>
                 </div>
             </details>
         </div>
@@ -12892,7 +12897,7 @@ async function renderBlogs(c) {
         <div class="card p-4 mb-5" style="border:1px solid #3b0764">
             <h3 class="font-bold mb-2" style="color:#c084fc">Generate a blog</h3>
             <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault()">${brandOpts || '<option value="">No brands</option>'}</select></div>
+                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault();_blogRefreshReset()">${brandOpts || '<option value="">No brands</option>'}</select></div>
                 <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
@@ -12926,9 +12931,11 @@ async function renderBlogs(c) {
                 <span class="text-gray-600">— weave 3-6 links to the brand's own (verified) pages + published sibling blogs into the body, and generate an SEO meta title. Quality/extractability preserved; off = today's output exactly.</span>
             </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
-                <input type="checkbox" id="blog-gen-refresh-competitors">
-                🔄 Refresh competitor data (ignore cache)
-                <span class="text-gray-600">— re-source every competitor's facts from scratch instead of reusing the brand's cached facts. Slower/costlier; use when a competitor's pricing changed. Off = reuse the cache (faster, consistent).</span>
+                <input type="checkbox" id="blog-gen-refresh-competitors" onchange="_blogRefreshCbToggle()">
+                🔄 Refresh competitor data
+                <a href="javascript:void(0)" onclick="event.preventDefault();blogCompetitorCacheModal(+document.getElementById('blog-gen-brand').value, 'refresh')" class="underline text-blue-400">choose / view…</a>
+                <span id="blog-refresh-sel-label" class="text-gray-500"></span>
+                <span class="text-gray-600">— reuse the brand's 45-day cached competitor facts by default; tick to refresh ALL, or "choose / view…" to see the cached data and refresh only specific competitors.</span>
             </label>
             <details class="mt-2">
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Byline (optional — overrides the brand default for this article)</summary>
@@ -13133,7 +13140,13 @@ function blogGenerate() {
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
-    const refresh_competitor_facts = !!document.getElementById('blog-gen-refresh-competitors')?.checked;   // FU151
+    // FU160: selective competitor-cache refresh — a per-competitor selection from the popup wins;
+    // else the plain checkbox = refresh ALL (back-compat).
+    const _rs = window._blogRefreshSel || { all: false, slugs: [] };
+    const _cbOn = !!document.getElementById('blog-gen-refresh-competitors')?.checked;
+    let refresh_competitor_facts = false, refresh_competitor_slugs = [];
+    if (_rs.slugs && _rs.slugs.length) refresh_competitor_slugs = _rs.slugs;
+    else if (_rs.all || _cbOn) refresh_competitor_facts = true;
     const ymyl = !!document.getElementById('blog-gen-ymyl')?.checked;   // FU133
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
@@ -13144,7 +13157,7 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, refresh_competitor_facts, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -13154,6 +13167,123 @@ function blogGenerate() {
         if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
+}
+
+// ---- FU160: competitor-cache management (selective refresh + view + delete + reset) ----
+window._blogRefreshSel = window._blogRefreshSel || { all: false, slugs: [] };
+function _kfSlug(s) { return (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
+const _BLOG_PRICE_RE = /(\$\s?\d|[€£]\s?\d|\b\d+(?:\.\d+)?\s?(?:usd|eur|gbp)\b|\b\d+(?:\.\d+)?\s?(?:\/|per\s+)mo(?:nth)?\b|\bper\s+month\b|\bfree\s+(?:tier|plan|version|forever)\b)/i;
+function _blogFindBrand(brandId) {
+    return (_blogBrands || []).find(x => x.id == brandId)
+        || ((window._editBrand && window._editBrand.id == brandId) ? window._editBrand : null);
+}
+function _blogRefreshSelLabel() {
+    const s = window._blogRefreshSel || { all: false, slugs: [] };
+    const el = document.getElementById('blog-refresh-sel-label');
+    if (!el) return;
+    el.textContent = s.all ? '(all)' : ((s.slugs && s.slugs.length) ? '(' + s.slugs.length + ' selected)' : '');
+}
+function _blogRefreshCbToggle() {
+    const on = !!document.getElementById('blog-gen-refresh-competitors')?.checked;
+    window._blogRefreshSel = { all: on, slugs: [] };   // manual toggle: checked = all, unchecked = none
+    _blogRefreshSelLabel();
+}
+function _blogRefreshReset() {
+    window._blogRefreshSel = { all: false, slugs: [] };
+    const cb = document.getElementById('blog-gen-refresh-competitors');
+    if (cb) cb.checked = false;
+    _blogRefreshSelLabel();
+}
+function blogCompetitorCacheModal(brandId, mode) {
+    mode = mode || 'view';
+    window._blogCacheMode = mode;
+    window._blogCacheBrandId = brandId;
+    const brand = _blogFindBrand(brandId);
+    if (!brand) { toast('Pick a brand first', 'error'); return; }
+    let cf = {}, cd = {};
+    try { cf = JSON.parse(brand.competitor_facts || '{}') || {}; } catch (_) {}
+    try { cd = JSON.parse(brand.competitor_domains || '{}') || {}; } catch (_) {}
+    const slugName = {};
+    Object.keys(cd).forEach(nm => { slugName[_kfSlug(nm)] = nm; });
+    const now = Date.now();
+    const slugs = Object.keys(cf);
+    const rows = slugs.map(slug => {
+        const e = cf[slug] || {};
+        const blocks = Array.isArray(e.blocks) ? e.blocks : [];
+        let name = slugName[slug];
+        if (!name) { const fp = blocks.find(b => b && b.label && !/^third-party ·/i.test(b.label)); name = fp ? fp.label : slug.replace(/-/g, ' '); }
+        let price = '';
+        for (const b of blocks) { if (b && b.text && _BLOG_PRICE_RE.test(b.text)) { price = b.text; break; } }
+        if (!price && blocks[0] && blocks[0].text) price = blocks[0].text;
+        price = (price || '').slice(0, 140);
+        let badge = '';
+        if (e.verified_at) {
+            const t = Date.parse(String(e.verified_at).replace(' ', 'T'));
+            if (!isNaN(t)) { const days = Math.floor((now - t) / 86400000); const fresh = days <= 45;
+                badge = `<span class="${fresh ? 'text-green-400' : 'text-yellow-400'}">${fresh ? 'fresh' : 'stale'} · ${days}d</span>`; }
+        }
+        const details = blocks.map(b => `<div class="text-xs text-gray-400 mt-1"><b>${_blogEsc(b.label || '')}</b> — <a href="${_blogEsc(b.url || '')}" target="_blank" class="underline">${_blogEsc((b.url || '').replace(/^https?:\/\//, ''))}</a><br>${_blogEsc((b.text || '').slice(0, 600))}</div>`).join('');
+        const chk = (mode === 'refresh') ? `<input type="checkbox" class="blog-cache-chk" value="${_blogEsc(slug)}">` : '';
+        return `
+        <div class="border border-gray-700 rounded p-2 mb-2">
+          <div class="flex items-center gap-2">
+            ${chk}
+            <div class="flex-1">
+              <div class="text-sm font-bold">${_blogEsc(name)} <span class="text-gray-500 text-xs">${_blogEsc(e.domain || '')}</span> <span class="text-xs">${badge}</span></div>
+              <div class="text-xs text-gray-400">${price ? _blogEsc(price) : '<i>(no price cached)</i>'}</div>
+            </div>
+            <button class="btn btn-sm btn-secondary" title="Remove from cache" onclick="_blogCacheDelete('${_blogEsc(slug)}')">🗑</button>
+          </div>
+          <details class="mt-1"><summary class="text-xs text-gray-500 cursor-pointer">details</summary>${details || '<div class="text-xs text-gray-500">(no blocks)</div>'}</details>
+        </div>`;
+    }).join('');
+    const footer = (mode === 'refresh')
+        ? `<button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+           <button class="btn btn-sm btn-secondary" onclick="_blogCacheRefreshAll()">Refresh all</button>
+           <button class="btn btn-sm btn-primary" onclick="_blogCacheUseSelected()">Use selected</button>`
+        : `<button class="btn btn-sm btn-primary" onclick="closeModal()">Close</button>`;
+    showModal(`<div style="max-width:680px">
+        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold">Cached competitor data — ${_blogEsc(brand.name || '')}</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-400 mb-3">${mode === 'refresh' ? 'Tick the competitors whose data is wrong/stale to re-source them for this generation (the rest keep their cached data). 🗑 removes an entry from the cache.' : 'All competitor data cached for this brand. 🗑 removes an entry.'} Cache lasts 45 days.</p>
+        ${rows || '<div class="text-sm text-gray-500 mb-2">No cached competitor data yet — competitors are sourced live.</div>'}
+        <div class="flex gap-2 justify-end mt-3">${footer}</div>
+    </div>`);
+}
+function _blogCacheUseSelected() {
+    const slugs = Array.from(document.querySelectorAll('.blog-cache-chk')).filter(c => c.checked).map(c => c.value);
+    window._blogRefreshSel = { all: false, slugs };
+    const cb = document.getElementById('blog-gen-refresh-competitors');
+    if (cb) cb.checked = slugs.length > 0;
+    _blogRefreshSelLabel();
+    closeModal();
+}
+function _blogCacheRefreshAll() {
+    window._blogRefreshSel = { all: true, slugs: [] };
+    const cb = document.getElementById('blog-gen-refresh-competitors');
+    if (cb) cb.checked = true;
+    _blogRefreshSelLabel();
+    closeModal();
+}
+async function _blogCacheDelete(slug) {
+    if (!confirm('Remove this competitor from the cache? It will be re-sourced fresh the next time it appears in a blog.')) return;
+    const bid = window._blogCacheBrandId;
+    try {
+        await api('/api/brands/' + bid + '/competitor-cache/delete', { method: 'POST', body: { slugs: [slug] } });
+        const b = _blogFindBrand(bid);
+        if (b) { try { const cf = JSON.parse(b.competitor_facts || '{}'); delete cf[slug]; b.competitor_facts = JSON.stringify(cf); } catch (_) {} }
+        toast('Removed from cache', 'success');
+        blogCompetitorCacheModal(bid, window._blogCacheMode || 'view');
+    } catch (e) {}
+}
+async function _blogClearCachedData(brandId) {
+    if (!confirm('Clear ALL cached data for this brand?\n\nRemoves: cached competitor facts, auto-resolved competitor domains, and auto-synced pricing.\nKeeps: your operator-set canonical pricing, and the brand identity (name, domain, personas).')) return;
+    try {
+        const res = await api('/api/brands/' + brandId + '/reset-cached-data', { method: 'POST', body: {} });
+        const b = _blogFindBrand(brandId);
+        if (b) { b.competitor_facts = '{}'; b.competitor_domains = '{}'; }
+        const n = (res && res.cleared && res.cleared.auto_pricing_items_removed) || 0;
+        toast('Cached data cleared' + (n ? ' (' + n + ' auto-synced pricing item(s) removed)' : ''), 'success');
+    } catch (e) {}
 }
 
 // FU137 — one-click upload: server renders the doc HTML and posts it to the operator's

@@ -2186,6 +2186,62 @@ def api_update_brand(bid):
     finally:
         db.close()
 
+@app.route("/api/brands/<int:bid>/competitor-cache/delete", methods=["POST"])
+def api_brand_competitor_cache_delete(bid):
+    """FU160: remove specific competitor entries (by cache slug) from the brand's competitor_facts."""
+    db = get_db()
+    try:
+        slugs = [str(s).strip().lower() for s in ((request.json or {}).get("slugs") or [])
+                 if str(s).strip()]
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        try:
+            cf = json.loads(brand.get("competitor_facts") or "{}")
+        except Exception:
+            cf = {}
+        if not isinstance(cf, dict):
+            cf = {}
+        removed = [s for s in slugs if s in cf]
+        for s in removed:
+            cf.pop(s, None)
+        if removed:
+            db.update_brand(bid, competitor_facts=json.dumps(cf))
+        return jsonify({"ok": True, "removed": removed, "remaining": len(cf)})
+    finally:
+        db.close()
+
+@app.route("/api/brands/<int:bid>/reset-cached-data", methods=["POST"])
+def api_brand_reset_cached_data(bid):
+    """FU160: clear the brand's AUTO-generated caches — competitor_facts + auto-resolved
+    competitor_domains + auto-synced key_facts pricing — while KEEPING operator-set pricing and
+    brand identity/profile (name/domain/personas/enrichment/competitor names)."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        from generators.blog_gen import _kf_pricing_items
+        try:
+            kf = json.loads(brand.get("key_facts") or "{}")
+        except Exception:
+            kf = {}
+        if not isinstance(kf, dict):
+            kf = {}
+        _all = _kf_pricing_items(kf)
+        kept = [it for it in _all if it.get("operator_set")]   # keep ONLY operator-set pricing
+        if kept:
+            kf["pricing"] = {"items": kept}
+        else:
+            kf.pop("pricing", None)
+        db.update_brand(bid, competitor_facts="{}", competitor_domains="{}",
+                        key_facts=json.dumps(kf))
+        return jsonify({"ok": True, "cleared": {
+            "competitor_facts": True, "competitor_domains": True,
+            "auto_pricing_items_removed": len(_all) - len(kept)}})
+    finally:
+        db.close()
+
 @app.route("/api/brands/enrich", methods=["POST"])
 def api_enrich_brand_draft():
     """Enrich a brand from its homepage + LLM. Returns a draft dict — does NOT save.
@@ -2530,6 +2586,8 @@ def api_blog_generate():
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
+    refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
+                                if str(s).strip()]   # FU160: selectively refresh only these competitors
     # FU133: YMYL authoritative sourcing — checkbox True/False; absent = auto-detect from the brand.
     ymyl_in = data.get("ymyl")
     ymyl_arg = (True if ymyl_in is True else (False if ymyl_in is False else None))
@@ -2578,7 +2636,8 @@ def api_blog_generate():
                 qualifier=qualifier,                         # FU93
                 internal_links=internal_links, sibling_links=sibling_links,  # FU114
                 ymyl=ymyl_arg,                               # FU133
-                refresh_competitor_facts=refresh_competitor_facts)   # FU151 (A)
+                refresh_competitor_facts=refresh_competitor_facts,   # FU151 (A)
+                refresh_competitor_slugs=refresh_competitor_slugs)   # FU160
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation

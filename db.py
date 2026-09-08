@@ -1143,6 +1143,7 @@ class Database:
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
                    "reddit_status", "deep_verify", "include_pricing", "writer_secs", "writer_mode_used",
+                   "writer_overlap", "writer_longest_run", "writer_grade",
                    "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
@@ -2351,6 +2352,15 @@ class Database:
             self.conn.commit()
         if "writer_mode_used" not in blog_cols:   # FU164: 'compose'|'rewrite'|'fallback' — detect silent fallbacks
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_mode_used TEXT DEFAULT ''")
+            self.conn.commit()
+        if "writer_overlap" not in blog_cols:   # FU167: n=5 discretionary-prose overlap (watermark-removal proxy)
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_overlap REAL DEFAULT 0")
+            self.conn.commit()
+        if "writer_longest_run" not in blog_cols:   # FU167: longest shared verbatim word-run (worst-case guard)
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_longest_run INTEGER DEFAULT 0")
+            self.conn.commit()
+        if "writer_grade" not in blog_cols:   # FU167: thorough|strong|not-confirmed|fallback removal grade
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_grade TEXT DEFAULT ''")
             self.conn.commit()
         if "internal_links" not in blog_cols:   # FU114: opt-in internal linking + meta title
             self.conn.execute("ALTER TABLE blogs ADD COLUMN internal_links INTEGER DEFAULT 0")

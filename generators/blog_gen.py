@@ -15,6 +15,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor   # FU151 (B): parallelize independent network work
+from difflib import SequenceMatcher as _SequenceMatcher   # FU167: longest-shared-run watermark metric
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
@@ -1263,6 +1264,15 @@ class BlogGenerator:
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
+    @staticmethod
+    def _split_grouped_citations(body):
+        r"""FU167: an open model sometimes writes GROUPED citations `[S1, S2, S3]`, which the single-marker
+        `\[S\d+\]` renumber/drop pass in _rebuild_sources cannot see → the orphan markers survive un-renumbered
+        (the broken `[S21-S29]` seen in a live compose). Split any grouped bracket into individual `[S#]`
+        markers first. Matches `[S1, S2]`, `[S1,S2,S3]`, `[S1, 2, 3]`; leaves single `[S1]` untouched."""
+        return re.sub(r"\[S\d+(?:\s*,\s*S?\d+)+\]",
+                      lambda m: "".join(f"[S{n}]" for n in re.findall(r"\d+", m.group(0))), body or "")
+
     def _scrub_meta(self, body):
         """FU55: drop the model's edit-narration that leaked into the article — a comparison-table ROW
         or a blockquote/prose SENTENCE that explains a sourcing/editing decision ("… deduplicated above",
@@ -1346,6 +1356,7 @@ class BlogGenerator:
         body = self._resolve_table_punts(body or "")   # FU138: structural table punt resolution
         body = self._scrub_punts(body)         # FU47: kill reader-directed punts on every path
         body = self._scrub_meta(body)          # FU55: drop leaked edit-narration (broken table rows/notes)
+        body = self._split_grouped_citations(body)   # FU167: [S1, S2, S3] → [S1][S2][S3] so the renumber sees them
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not body or not blocks:
             return body
@@ -4122,6 +4133,67 @@ Return JSON only:
         return re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
 
     @staticmethod
+    def _longest_shared_run(a, b):
+        """FU167: the length (in WORDS) of the LONGEST run of consecutive identical words shared by a and b.
+        The watermark = key + the ~4 preceding words → the chosen word; so a surviving verbatim run of >4
+        words preserves a marked word PLUS its full hashing context → residual signal. This is the WORST-CASE
+        guard (a single long intact passage) that the average n-gram overlap can miss. Deterministic."""
+        wa = re.findall(r"\w+", (a or "").lower())
+        wb = re.findall(r"\w+", (b or "").lower())
+        if not wa or not wb:
+            return 0
+        m = _SequenceMatcher(None, wa, wb, autojunk=False)   # autojunk off → don't skip common words
+        return m.find_longest_match(0, len(wa), 0, len(wb)).size
+
+    # FU167: invisible / zero-width / Default_Ignorable / noncharacter / bidi carrier code points — the
+    # "invisible character" watermark/steganography class (NOT Claude's statistical mark, which is word
+    # choice). Stripped from every final body as belt-and-suspenders (borrowed from watermarks-remover
+    # "Layer A"). Built from explicit code-point ranges (no literal invisibles in the source); EXCLUDES
+    # real spaces, line separators (U+2028/2029) and emoji variation selectors (U+FE00-FE0F) so the
+    # VISIBLE text never changes.
+    _INVISIBLE_RANGES = [
+        (0x200B, 0x200F),   # ZWSP, ZWNJ, ZWJ, LRM, RLM
+        (0x202A, 0x202E),   # bidi embeddings / overrides
+        (0x2060, 0x2069),   # word joiner, invisible operators, bidi isolates
+        (0xFEFF, 0xFEFF),   # ZWNBSP / BOM
+        (0x180E, 0x180F),   # Mongolian vowel / free variation selector
+        (0x3164, 0x3164), (0xFFA0, 0xFFA0),   # Hangul / halfwidth-Hangul filler
+        (0xFDD0, 0xFDEF),   # noncharacters
+        (0xFFF0, 0xFFFB),   # reserved + interlinear annotation
+        (0xFFFE, 0xFFFF),   # noncharacters
+        (0xE0000, 0xE01EF), # tags block + variation-selectors supplement
+    ]
+    _INVISIBLE_RE = re.compile(
+        "[" + "".join(chr(a) if a == b else f"{chr(a)}-{chr(b)}" for a, b in _INVISIBLE_RANGES) + "]")
+
+    @classmethod
+    def _strip_invisible_chars(cls, text):
+        """FU167: delete invisible/zero-width/bidi carrier code points. Returns (cleaned, removed_count).
+        Never alters VISIBLE text (real spaces / line breaks / emoji VS are left alone)."""
+        cleaned, n = cls._INVISIBLE_RE.subn("", text or "")
+        return cleaned, n
+
+    @classmethod
+    def _watermark_removal_report(cls, claude_body, out):
+        """FU167: MEASURE the watermark-removal level from the researched mechanism factors. Returns
+        {n5_prose_overlap, longest_shared_run, invisible_chars, grade}. `out` is expected already
+        invisible-char-sanitized (so invisible_chars is ~0). GRADE (proxy — SynthID is not detector-
+        verifiable, and no AI engine can detect it): thorough / strong / not-confirmed."""
+        pa, pb = cls._prose_for_overlap(claude_body), cls._prose_for_overlap(out)
+        overlap = cls._ngram_overlap(pa, pb, n=5)            # discretionary-prose overlap at context-window+1
+        run = cls._longest_shared_run(pa, pb)                # worst-case surviving verbatim run
+        inv = len(cls._INVISIBLE_RE.findall(out or ""))
+        target = float(os.environ.get("WRITER_OVERLAP_TARGET", "0.05"))
+        if overlap < target and run <= 4 and inv == 0:
+            grade = "thorough"
+        elif overlap < 0.15 and run <= 4 and inv == 0:
+            grade = "strong"
+        else:
+            grade = "not-confirmed"
+        return {"n5_prose_overlap": round(overlap, 3), "longest_shared_run": int(run),
+                "invisible_chars": int(inv), "grade": grade}
+
+    @staticmethod
     def _restore_headings(orig_heads, rewritten_body):
         """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
         reworded heading is put back to its exact original text + level while the reworded PROSE (the
@@ -4177,10 +4249,10 @@ Return JSON only:
 
             def _build_prompt(aggressive=False):
                 harder = ("\n\nIMPORTANT: a previous attempt reused too much of the original wording. "
-                          "Rewrite the PROSE FAR more aggressively — share NO run of 8+ words with the "
-                          "original body text; change sentence structure and word choice throughout. But "
-                          "copy every [S#] and every heading line CHARACTER-FOR-CHARACTER — only the "
-                          "paragraph text under the headings changes.") if aggressive else ""
+                          "Rewrite the PROSE FAR more aggressively — share NO run of more than 4 words with the "
+                          "original body text; replace EVERY discretionary word, reorder clauses and sentences, "
+                          "and reword right up to each preserved atom. But copy every [S#] and every heading "
+                          "line CHARACTER-FOR-CHARACTER — only the paragraph text under the headings changes.") if aggressive else ""
                 if self.writer_mode == "compose":
                     # FU165: give Qwen the EXACT SAME article-writing prompt Claude used (all the rules +
                     # brand context + evidence, captured on self._article_prompt in generate_article) — so
@@ -4224,22 +4296,33 @@ Return JSON only:
                         "ending with a '## Sources' line. Return ONLY the Markdown article.\n\n"
                         f"OUTLINE (headings to cover):\n{outline}\n\nEVIDENCE (the ONLY source of facts):\n{ev}{harder}"
                     )
-                # rewrite mode
+                # rewrite mode — FU167: mechanism-derived (the watermark = a secret key + the ~4 preceding
+                # words → the chosen word, only among low-stakes/discretionary choices; sparse on facts). So
+                # the removal is: replace every discretionary word, break every verbatim run past the ~4-word
+                # context window, and reword the context around every preserved atom.
                 return (
-                    f"Re-compose the following finished blog article for {name} ENTIRELY in your own "
-                    "words, sharing no verbatim phrasing with the original — a FULL rewrite, not a light edit.\n\n"
-                    "GOAL: change the WORDING of every paragraph so the rewrite shares NO run of 8 or more "
-                    "consecutive words with the original prose. Recast each sentence with different structure "
-                    "and vocabulary — this is a full re-write, not a light paraphrase.\n\n"
-                    "PRESERVE EXACTLY (do not change, drop, move, or renumber):\n"
+                    f"Re-compose the following finished blog article for {name} ENTIRELY in your own words — a "
+                    "FULL rewrite, not a light edit.\n\n"
+                    "WHY (do this precisely): the original was written by another AI whose word-choices carry a "
+                    "hidden statistical mark. The mark lives in the DISCRETIONARY word choices and phrasing, NOT "
+                    "in the facts. To remove it:\n"
+                    "- REPLACE EVERY discretionary word — connectives, transitions, adjectives, verbs, adverbs, "
+                    "sentence openers — with a different word or phrasing, and RECAST every sentence's structure.\n"
+                    "- Share NO run of MORE THAN 4 consecutive words with the original (a run of 5+ preserves a "
+                    "marked word plus its context — this is the single most important rule).\n"
+                    "- REORDER clauses and sentences wherever the meaning allows — this changes the words that "
+                    "precede each word.\n"
+                    "- When you MUST keep an atom verbatim (see PRESERVE below), REWORD the words IMMEDIATELY "
+                    "BEFORE and AFTER it — never leave the original phrasing touching a preserved atom.\n\n"
+                    "PRESERVE EXACTLY (do not change, drop, move, or renumber — but reword the prose around them):\n"
                     "- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
                     "- EVERY heading line (starting with #, ##, or ###) — copy it CHARACTER-FOR-CHARACTER; "
                     "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
                     "the paragraph text UNDER the headings;\n"
-                    "- every number, price, date, product name, and factual claim;\n"
+                    "- every number, price, date, product/drug name, and factual claim;\n"
                     "- every Markdown table (structure and cell values);\n"
                     "- the '## Sources' section at the end.\n"
-                    "Change ONLY the wording of the prose — meaning, facts, structure and citations stay identical.\n"
+                    "Meaning, facts, structure and citations stay IDENTICAL — only the discretionary wording changes.\n"
                     "Return ONLY the rewritten Markdown article, nothing else.\n\n"
                     f"ARTICLE:\n{claude_body}{harder}"
                 )
@@ -4273,25 +4356,26 @@ Return JSON only:
                 return True, ""
 
             import time as _t
-            best, overlap, last_why, secs = None, 1.0, "", 0.0
-            for attempt in range(2):
-                # FU155: higher sampling temperature → more lexical diversity → lower verbatim
-                # overlap (the gates + heading-restore still protect facts/structure). Time the call
-                # so app.py can show a rough GPU-cost estimate.
-                _temp = 0.95 if attempt == 0 else 1.1
+            # FU167: rewrite runs up to N escalating attempts and ships the LOWEST-(overlap, longest_run)
+            # valid one (not the last); compose keeps its 2-attempt / ship-first-valid behavior.
+            _attempts = int(os.environ.get("WRITER_REWRITE_ATTEMPTS", "4")) if self.writer_mode == "rewrite" else 2
+            best, best_rep, last_why, secs = None, None, "", 0.0
+            for attempt in range(_attempts):
+                # FU155/167: ramp the sampling temperature each attempt → more lexical diversity → lower
+                # verbatim overlap (the gates + heading-restore still protect facts/structure).
+                _temp = min(0.9 + 0.1 * attempt, 1.2)
                 _t0 = _t.time()
-                out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)),
+                out = self.writer.call_text(_build_prompt(aggressive=(attempt > 0)),
                                             max_tokens=9000, temperature=_temp,
-                                            # FU164: a warm compose gen is ~2-5 min — 300s false-timed-out →
-                                            # fell back (wasted time + reinstated the watermark). 600s + the
-                                            # app-level keep-warm (base.WriterClient.warm) fixes both.
+                                            # FU164: a warm gen is ~2-5 min — 300s false-timed-out → fell back
+                                            # (wasted time + reinstated the watermark). 600s + the app-level
+                                            # keep-warm (base.WriterClient.warm) fixes both.
                                             timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
                 secs += _t.time() - _t0
                 article["writer_secs"] = round(secs, 1)
-                # Rewrite mode: put the ORIGINAL headings back onto the rewrite (positionally) so a
-                # reworded heading isn't a failure — only the PROSE is watermark-stripped. If the
-                # section COUNT changed, restore returns None → _valid's heading check fails (a real
-                # structural change, correctly rejected).
+                # Rewrite mode: put the ORIGINAL headings back positionally so a reworded heading isn't a
+                # failure — only the PROSE is watermark-stripped. Section-COUNT change → restore returns
+                # None → _valid's heading check rejects it.
                 if self.writer_mode == "rewrite" and out and heads:
                     restored = self._restore_headings(heads, out)
                     if restored is not None:
@@ -4301,36 +4385,54 @@ Return JSON only:
                     last_why = why
                     print(f"[writer] attempt {attempt+1} quality gate failed: {why}", flush=True)
                     continue
-                best = out
-                # FU165: a compose that's still notably shorter than the reference SHIPS (never fall back),
-                # but log + warn so the operator can regenerate for more depth if they want.
+                # FU167: strip invisible-char carriers, then MEASURE the watermark-removal level
+                # (n=5 discretionary-prose overlap + longest-shared-run + grade).
+                out, _inv = self._strip_invisible_chars(out)
+                rep = self._watermark_removal_report(claude_body, out)
+                # keep the attempt with the LOWEST (overlap, longest_run) — never just the last one.
+                if best is None or (rep["n5_prose_overlap"], rep["longest_shared_run"]) < \
+                        (best_rep["n5_prose_overlap"], best_rep["longest_shared_run"]):
+                    best, best_rep = out, rep
+                # FU165: a compose shorter than the reference SHIPS (never fall back) — warn only.
                 if self.writer_mode == "compose" and claude_body and len(out) < 0.6 * len(claude_body):
                     print(f"[writer] compose shorter than reference ({len(out)} vs {len(claude_body)}) "
                           f"— shipping anyway (FU165, watermark stripped)", flush=True)
                     article["writer_warning"] = (f"compose article is shorter than the reference "
                                                  f"({len(out)} vs {len(claude_body)} chars)")
-                # Measure overlap on PROSE only (headings/table/Sources/[S#] are preserved by design).
-                overlap = self._ngram_overlap(self._prose_for_overlap(claude_body),
-                                              self._prose_for_overlap(out), n=8)
-                if overlap < 0.15:
-                    break
-                print(f"[writer] attempt {attempt+1} prose overlap {overlap:.2f} ≥ 0.15 — retrying harder", flush=True)
+                if self.writer_mode == "compose":
+                    break   # compose writes fresh from evidence → ship the first valid (FU165/166)
+                if best_rep["grade"] == "thorough":
+                    break   # rewrite: watermark thoroughly stripped → stop early
+                print(f"[writer] attempt {attempt+1}: n5-overlap {rep['n5_prose_overlap']:.2f} "
+                      f"longest-run {rep['longest_shared_run']} grade={rep['grade']} — retrying harder", flush=True)
 
             if best is None:
                 article["writer_mode_used"] = "fallback"
-                article["writer_warning"] = (f"fell back to Claude — {last_why}" if last_why
-                                             else "fell back to Claude (open-model rewrite failed validation)")
+                article["writer_grade"] = "fallback"
+                article["writer_warning"] = (f"⚠ watermark NOT stripped — fell back to Claude ({last_why})"
+                                             if last_why else
+                                             "⚠ watermark NOT stripped — fell back to Claude (rewrite failed validation)")
                 print(f"[blog_gen] writer: FALLBACK {secs:.1f}s — {last_why or 'validation failed'} "
                       f"(watermark NOT stripped — is the container warm / the timeout high enough?)", flush=True)
                 return claude_body
 
+            _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
             article["writer_mode_used"] = self.writer_mode
-            article["writer_overlap"] = round(overlap, 3)
-            if overlap >= 0.15:
-                article["writer_warning"] = (f"watermark removal not fully confirmed "
-                                             f"(verbatim overlap {overlap:.2f} ≥ 0.15)")
-            print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s overlap={overlap:.2f}"
-                  + (" (HIGH — warned)" if overlap >= 0.15 else ""), flush=True)
+            article["writer_overlap"] = _ov
+            article["writer_longest_run"] = _run
+            article["writer_grade"] = _grade
+            if _grade == "thorough":
+                _wm = ""
+            elif _grade == "strong":
+                _wm = (f"watermark-strip strong, low residual (n=5 overlap {_ov:.2f}, longest run {_run}) "
+                       f"— proxy, not detector-verifiable")
+            else:
+                _wm = (f"watermark-strip: not fully confirmed (n=5 overlap {_ov:.2f}, longest run {_run}) "
+                       f"— proxy; regenerate for a cleaner strip")
+            # preserve any compose-shorter note set inside the loop
+            article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
+            print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s grade={_grade} "
+                  f"n5_overlap={_ov:.2f} longest_run={_run}", flush=True)
             return best
         except Exception as e:
             print(f"[writer] pass errored ({e}) — keeping the Claude body.", flush=True)
@@ -4363,6 +4465,13 @@ Return JSON only:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
+        # FU167 (Change 6): strip invisible/zero-width/bidi carrier chars from EVERY final body (belt-and-
+        # suspenders — the invisible-CHARACTER watermark class + stray chars from any source). NOT Claude's
+        # statistical mark (that's word choice), and it never alters visible text.
+        article["body_markdown"], _n_inv = self._strip_invisible_chars(article["body_markdown"])
+        if _n_inv:
+            article["writer_invisible_removed"] = _n_inv
+            print(f"[blog_gen] invisible-char sanitizer: removed {_n_inv} zero-width/bidi char(s)", flush=True)
         # FU90 — geo-check (soft signal, never blocks): a geo page whose BODY barely mentions its
         # geography is the doorway pattern; warn the operator immediately instead of at review.
         rgeo = (geo or "").strip() or _seed_geo(seed)

@@ -93,7 +93,7 @@ def test_rewrite_dropped_citation_falls_back():
     assert out == CLAUDE_BODY                      # fell back to Claude (today's output for this blog)
     assert art["writer_mode_used"] == "fallback"
     assert "fell back" in art["writer_warning"].lower()
-    assert len(w.prompts) == 2                     # tried once + one retry before giving up
+    assert len(w.prompts) == 4                     # FU167: 4 escalating attempts before giving up
 
 
 def test_rewrite_high_overlap_ships_with_warning():
@@ -105,7 +105,8 @@ def test_rewrite_high_overlap_ships_with_warning():
     assert art["writer_mode_used"] == "rewrite"
     assert art["writer_overlap"] >= 0.15
     assert "not fully confirmed" in art["writer_warning"]
-    assert len(w.prompts) == 2                      # retried harder once
+    assert art["writer_grade"] == "not-confirmed"   # FU167: graded removal level
+    assert len(w.prompts) == 4                       # FU167: 4 escalating attempts (never reached "thorough")
 
 
 # --- compose mode --------------------------------------------------------------------------------

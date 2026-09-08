@@ -13062,13 +13062,21 @@ function _blogQualityToast(res) {
 }
 
 function _blogWriterToast(res) {
-    // FU164: surface the self-hosted writer-pass time + a LOUD warning when it fell back (the
-    // watermark was NOT stripped — usually a cold-start/timeout on the Modal GPU).
+    // FU164/167: surface the self-hosted writer-pass time + the WATERMARK-REMOVAL LEVEL (grade, n=5
+    // prose overlap, longest verbatim run). 'fallback' = the watermark was NOT stripped.
     if (!res) return;
     const mode = res.writer_mode_used || '';
     const secs = Number(res.writer_secs || 0);
+    const grade = res.writer_grade || '';
+    const ov = Number(res.writer_overlap || 0);
+    const run = Number(res.writer_longest_run || 0);
     if (mode === 'fallback') {
         toast('⚠ Watermark-strip FELL BACK — the self-hosted writer failed/timed out; the watermark is NOT stripped. Regenerate.', 'error', 12000);
+    } else if (grade === 'not-confirmed') {
+        toast(`⚠ Watermark-strip NOT fully confirmed (${mode}, ${secs.toFixed(0)}s) — n=5 overlap ${(ov*100).toFixed(0)}%, longest run ${run} words. Proxy only (SynthID isn't detector-verifiable); regenerate for a cleaner strip.`, 'error', 12000);
+    } else if (mode && grade) {
+        const lvl = grade === 'thorough' ? 'thorough' : 'strong';
+        toast(`Watermark-strip: ${lvl} (${mode}, ${secs.toFixed(0)}s) — n=5 overlap ${(ov*100).toFixed(0)}%, longest run ${run} words (proxy).`, 'info', 8000);
     } else if (mode && secs) {
         toast(`Writer: ${secs.toFixed(0)}s (${mode})`, 'info');
     }

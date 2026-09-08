@@ -2727,10 +2727,13 @@ def api_blog_generate():
             _qr = blog.get("quality_report") or {}   # FU151 (D): persist + return the quality scorecard
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
-            # FU164: persist the self-hosted writer-pass duration + outcome (visibility + fallback detection)
+            # FU164/167: persist the self-hosted writer-pass duration + outcome + watermark-removal LEVEL
             if blog.get("writer_secs") or blog.get("writer_mode_used"):
                 bg.update_blog(blog_id, writer_secs=(blog.get("writer_secs") or 0),
-                               writer_mode_used=(blog.get("writer_mode_used") or ""))
+                               writer_mode_used=(blog.get("writer_mode_used") or ""),
+                               writer_overlap=(blog.get("writer_overlap") or 0),
+                               writer_longest_run=(blog.get("writer_longest_run") or 0),
+                               writer_grade=(blog.get("writer_grade") or ""))
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
@@ -2739,6 +2742,9 @@ def api_blog_generate():
                     "writer_secs": blog.get("writer_secs", 0),   # FU164
                     "writer_mode_used": blog.get("writer_mode_used", ""),   # FU164 ('fallback' = watermark NOT stripped)
                     "writer_warning": blog.get("writer_warning", ""),   # FU164
+                    "writer_overlap": blog.get("writer_overlap", 0),   # FU167: n=5 prose overlap
+                    "writer_longest_run": blog.get("writer_longest_run", 0),   # FU167: longest verbatim run
+                    "writer_grade": blog.get("writer_grade", ""),   # FU167: thorough|strong|not-confirmed|fallback
                     "quality_report": _qr}   # FU151 (D)
         finally:
             bg.close()
@@ -2838,9 +2844,12 @@ def api_blog_regenerate(blog_id):
                 # FU84: fill a BLANK stored disclosure from the fresh generation (never clobber an edit).
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
-                if fresh.get("writer_secs") or fresh.get("writer_mode_used"):   # FU164
+                if fresh.get("writer_secs") or fresh.get("writer_mode_used"):   # FU164/167
                     bg.update_blog(blog_id, writer_secs=(fresh.get("writer_secs") or 0),
-                                   writer_mode_used=(fresh.get("writer_mode_used") or ""))
+                                   writer_mode_used=(fresh.get("writer_mode_used") or ""),
+                                   writer_overlap=(fresh.get("writer_overlap") or 0),
+                                   writer_longest_run=(fresh.get("writer_longest_run") or 0),
+                                   writer_grade=(fresh.get("writer_grade") or ""))
             elif part == "article":
                 # FU114/115: rebuild verified targets via the shared builder (own evidence pages +
                 # published siblings + the site's existing live posts discovered from the sitemap).
@@ -2904,6 +2913,9 @@ def api_blog_regenerate(blog_id):
                     "writer_secs": (fresh.get("writer_secs", 0) if part == "all" else 0),   # FU164
                     "writer_mode_used": (fresh.get("writer_mode_used", "") if part == "all" else ""),   # FU164
                     "writer_warning": (fresh.get("writer_warning", "") if part == "all" else ""),   # FU164
+                    "writer_overlap": (fresh.get("writer_overlap", 0) if part == "all" else 0),   # FU167
+                    "writer_longest_run": (fresh.get("writer_longest_run", 0) if part == "all" else 0),   # FU167
+                    "writer_grade": (fresh.get("writer_grade", "") if part == "all" else ""),   # FU167
                     "quality_report": _qr}
         finally:
             bg.close()

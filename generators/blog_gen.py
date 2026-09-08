@@ -63,6 +63,7 @@ _THIRD_PARTY_DOMAINS = [
     "softwareadvice.com", "producthunt.com", "gartner.com", "forrester.com",
     "techcrunch.com", "theverge.com", "forbes.com", "businessinsider.com",
     "reuters.com", "crunchbase.com", "wikipedia.org",
+    "usnews.com", "health.usnews.com",   # FU161: U.S. News — a reputable review source (preferred over affiliates)
 ]
 _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources folded in (was 8 — cost)
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
@@ -118,6 +119,11 @@ _CEIL_EVIDENCE = round(_BLOG_COST_CEILING * 0.3, 2)   # FU150: 0.4→0.3 — the
 _STALE_AGGREGATORS = {
     "saasworthy.com", "softwarefinder.com", "eesel.ai", "softwaresuggest.com",
     "goodfirms.co", "sourceforge.net", "slashdot.org", "toolify.ai", "futurepedia.io",
+    # FU161: low-quality affiliate / SEO-review domains (vertical-neutral) — never cite a competitor
+    # price from these; the vendor's own site or a reputable review (_THIRD_PARTY_DOMAINS) wins.
+    "manytreatments.com", "choosingtherapy.com", "nutritionnc.com", "healthrx.com",
+    "consumerrating.org", "weightrxguide.com", "bariatricreports.org", "plexusdx.com",
+    "businessmodelcanvastemplate.com", "ai-health-apps.com", "xcode.life",
 }
 
 # FU133 — YMYL (Your Money / Your Life) verticals: pages whose value is CLINICAL / regulatory
@@ -388,6 +394,27 @@ def _is_subject_review(src_or_title, brand_name):
     if not bn or bn not in re.sub(r"\s+", "", title).lower():
         return False
     return bool(_REVIEWISH_RE.search(title))
+
+
+def _is_affiliate_review(src, own_domain=""):
+    """FU161: True when a source is a LOW-QUALITY AFFILIATE / SEO review that must be DROPPED for a
+    competitor (a positive review of a COMPETITOR is caught by none of the hit-piece / subject-review
+    filters). Affiliate = the domain is a known aggregator/affiliate (_STALE_AGGREGATORS) OR its title
+    is review-shaped AND the domain is NOT reputable (_THIRD_PARTY_DOMAINS), NOT official/.gov/.nih, and
+    NOT the competitor's OWN site. Reputable reviews (Forbes / G2 / U.S. News) and own-site pages are
+    NEVER affiliate. Vertical-neutral (shape + domain heuristic)."""
+    if not isinstance(src, dict):
+        return False
+    d = _norm_domain(src.get("url") or "")
+    if not d:
+        return False
+    if own_domain and (d == own_domain or d.endswith("." + own_domain)):
+        return False   # the competitor's own site is never 'affiliate'
+    if d in _STALE_AGGREGATORS:
+        return True
+    if d in _THIRD_PARTY_DOMAINS or d.endswith(".gov") or "nlm.nih" in d or "ncbi.nlm" in d:
+        return False   # reputable / official — keep
+    return bool(_REVIEWISH_RE.search(src.get("title") or ""))
 
 
 def _official_source_ok(url, title, brand_name, own_domain, pins):
@@ -679,6 +706,10 @@ class BlogGenerator:
                     continue
                 if _is_negative_about(s, subject):   # FU150 (#2): never cite anything negative about {name}
                     print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                if _is_affiliate_review(s):   # FU161: drop low-quality affiliate/SEO reviews
+                    print(f"[blog_gen] source-hygiene: dropped affiliate review "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
                     continue
                 url = (s.get("url") or "").strip()
@@ -1713,6 +1744,12 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     any priced page you found. NEVER substitute a general plan / consult / membership / base fee (a base
     "$X/mo plans", a processing/lab fee) as {name}'s product price. The "state the pricing model" fallback
     applies ONLY when there is NO canonical value AND no product price in the EVIDENCE.
+  - PRICE IN FULL (FU161): carry the ENTIRE canonical pricing structure — the intro price, the ongoing
+    price, AND the billing cadence/dose — VERBATIM everywhere {name}'s price appears, INCLUDING the
+    `meta_description` and the Quick answer; NEVER truncate to just the first/intro figure. E.g. a canonical
+    "Starts at $149/month then $249/month billed quarterly for 60mg" must appear as "$149/month intro, then
+    $249/month billed quarterly" — not "starting at $149/month". If the ≤160-char meta is tight, keep BOTH
+    figures (intro AND ongoing), never only the intro.
   - COMPETITOR PRICE = the vendor's OWN site: a price you state for a COMPETITOR must come from that
     competitor's OWN website (its own pricing/product page in the EVIDENCE) — NEVER from a third-party
     review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
@@ -1855,6 +1892,9 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - CANONICAL / OPERATOR PRICE OVERRIDDEN: {name}'s pricing cell/sentence showing a value OTHER than the
     CANONICAL {name} FACTS value for THIS article's product (e.g. a general "$X/mo plans" or a
     processing/lab fee where a canonical product price exists) — replace it with the canonical value.
+  - CANONICAL PRICE TRUNCATED (FU161): a {name} price (incl. the meta_description / Quick answer) that shows
+    only the intro figure while the canonical value has a "then $X/month billed …" ongoing tail — restore
+    the FULL structure (intro + ongoing + cadence).
   - COMPETITOR PRICE FROM A REVIEW SOURCE: a competitor's price cited to a third-party review / aggregator /
     listicle rather than the competitor's OWN site — re-cite to the vendor's own page, or if its own current
     price isn't in the EVIDENCE, state its pricing honestly (never a review-site number). These MUST appear
@@ -2265,6 +2305,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         self._auth_note = ""
         self._auth_primary_tokens = []
         self._auth_primary_name = ""
+        self._price_warn = ""   # FU161: subject price could-not-confirm note (folded into geo_warning)
         rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
         rqual = (qualifier or "").strip() or _seed_qualifier(seed)   # FU93: same rule for the qualifier
         body = (article or {}).get("body_markdown") or ""
@@ -2386,11 +2427,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 fresh.append({"label": f"official · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
             elif _is_subject_review({"title": ttl, "fact": fct}, name) \
-                    or _is_negative_about({"title": ttl, "fact": fct}, name):
-                # FU150 (#2/#3): a demoted core-topic source that is actually a REVIEW OF or a
-                # NEGATIVE page about the subject must never become a citable third-party block.
-                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name} — "
-                      f"dropped", flush=True)
+                    or _is_negative_about({"title": ttl, "fact": fct}, name) \
+                    or _is_affiliate_review({"title": ttl, "url": u}):   # FU161: affiliate/SEO review
+                # FU150 (#2/#3): a demoted core-topic source that is a REVIEW OF or NEGATIVE about the
+                # subject — or a low-quality affiliate review (FU161) — never becomes a third-party block.
+                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name} or "
+                      f"affiliate — dropped", flush=True)
             elif not ymyl:
                 fresh.append({"label": f"third-party · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
@@ -2442,11 +2484,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU156 — the article's PRIMARY product (a specific drug/product); anchor competitor pricing on
         # it so a competitor's price cell shows the MEDICATION/product cost, not a generic membership fee.
         _product = (products[0] if products else (core_topic or "")).strip()
-        # FU158: anchor competitor pricing on the vendor's OWN CURRENT price for THIS product, and ask for
-        # the basis it applies to (the unit/tier/dose/supply the source states) — generic across verticals.
-        _prod_price_brief = (f"the CURRENT price/cost of {_product} as listed on the vendor's OWN site, "
-                             f"the plan / unit / tier / dose / supply it applies to and the billing basis; "
-                             if _product else "")
+        # FU161: the FULL list of the article's compared products (cap 3), so competitor + subject price
+        # retrieval runs PER product — a multi-drug comparison (semaglutide + tirzepatide) fetches EACH
+        # product's own-site price, not just products[0]. GENERAL — products are extracted per article.
+        _products = [str(p).strip() for p in (products[:3] if products else []) if str(p).strip()] \
+            or ([_product] if _product else [])
+        # FU158/FU161: anchor competitor pricing on the vendor's OWN CURRENT price for EACH product, with
+        # the basis it applies to (unit/tier/dose/supply) — generic across verticals.
+        _prod_price_brief = (f"the CURRENT price/cost of {' and '.join(_products)} as listed on the "
+                             f"vendor's OWN site (state EACH product's price), the plan / unit / tier / "
+                             f"dose / supply it applies to and the billing basis; " if _products else "")
         fetch_brief = (_prod_price_brief
                        + f"pricing and plans; commercial / license / eligibility / contract terms as "
                        f"applicable; the key capabilities and differentiators for "
@@ -2478,6 +2525,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
                     continue
+                # FU161: drop a low-quality AFFILIATE / SEO review of a competitor (own-site + reputable
+                # + official always survive) so the vendor's own price / reputable coverage is used.
+                if not _same_site(s.get("url") or "", dom) and _is_affiliate_review(s, _dom(dom)):
+                    print(f"[blog_gen] source-hygiene: dropped affiliate review "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
                 u = (s.get("url") or "").strip()
                 fc = (s.get("fact") or s.get("title") or "").strip()
                 key = u.lower().split("?")[0].rstrip("/")
@@ -2507,30 +2560,61 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             t = " ".join(b.get("text", "") for b in (blocks or []))
             return [k for k in _active_facts if not _FACT_SIGNALS[k].search(t)]
 
+        def _fetch_product_price(dd, brand_name, product):
+            """FU161: web_search READS a vendor page even when a direct fetch 403s — fetch the OWN site
+            for THIS product's price when the search snippet omitted it (the /product/glp1m2m/ case).
+            Returns {url, fact} (product-labeled) or None."""
+            try:
+                fj = self.claude.fetch_site_facts(
+                    dd, brand_name, f"{product} price/pricing — the plan/dose and exact monthly cost",
+                    max_searches=2) or ""
+            except Exception:
+                fj = ""
+            if fj.strip() and _PRICE_SIGNAL_RE.search(fj):
+                return {"url": f"https://{dd}", "fact": f"{product}: " + fj.strip()}
+            return None
+
         def _tier1(tool, dom):
             # web search PINNED to the tool's OWN domain → SPECIFIC pages (pricing/terms) with urls.
             if not dom:
                 return []
+            _dd = _dom(dom)
             try:
                 pin = self.claude.search_sources(
-                    # FU156: product-anchored; FU158: the vendor's OWN CURRENT price + the unit/tier/dose it applies to
-                    (f"{tool} {_product} CURRENT price/cost on {tool}'s own site (the unit/tier/dose/supply "
-                     f"it applies to); " if _product else "")
+                    # FU161: product-anchored on ALL the article's products so the search returns EACH
+                    # product's own pricing page; FU158: the vendor's OWN CURRENT price + unit/tier/dose.
+                    (f"{tool} {' and '.join(_products)} CURRENT price/cost on {tool}'s own site (EACH "
+                     f"product's price, the unit/tier/dose/supply it applies to); " if _products else "")
                     + f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
                     f"key capabilities"
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
                     + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
-                    max_searches=2, allowed_domains=[_dom(dom)], first_party=True)   # FU55
+                    max_searches=2, allowed_domains=[_dd], first_party=True)   # FU55
             except Exception:
                 pin = []
             blocks = _blocks_from(pin, tool, dom)
-            # FU156: guarantee the tool's PRODUCT price is in its evidence — pick a product-matching
-            # own-domain priced page from the SAME results (pure selection, no extra search).
-            if _product and dom:
-                pp = _best_product_price(pin, _product, _dom(dom))
+            # FU161: pick EACH product's own-domain priced page from the SAME results (STRICT token gate —
+            # right product's page, and a DIFFERENT product's price still rejected). The PRIMARY product
+            # (index 0) gets the full fallback ladder (one targeted own-domain search → fetch-the-page);
+            # secondary products are selected free from the general results (cost bound).
+            for _i, prod in enumerate(_products or ([_product] if _product else [])):
+                if not prod:
+                    continue
+                pp = _best_product_price(pin, prod, _dd)
+                if not pp and _i == 0 and _dd:
+                    try:
+                        res2 = self.claude.search_sources(
+                            f"{tool} {prod} price/pricing — the plan/dose/tier and exact cost, from "
+                            f"{tool}'s OWN official site only", max_searches=1,
+                            allowed_domains=[_dd], first_party=True)
+                    except Exception:
+                        res2 = []
+                    pp = _best_product_price(res2, prod, _dd) or _fetch_product_price(_dd, tool, prod)
                 if pp and not any((b.get("url") or "") == pp["url"] for b in blocks):
-                    blocks.insert(0, {"label": tool, "url": pp["url"],
-                                      "text": pp["fact"][:_EVIDENCE_TEXT_CAP]})
+                    _ptxt = (pp.get("fact") or "")[:_EVIDENCE_TEXT_CAP]
+                    if prod.lower() not in _ptxt.lower():
+                        _ptxt = f"{prod}: {_ptxt}"   # FU161: label the block product-wise (per-product cache)
+                    blocks.insert(0, {"label": tool, "url": pp["url"], "text": _ptxt})
             return blocks
 
         def _tier2(tool, dom):
@@ -2786,6 +2870,20 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                       f"missing={','.join(_missing_facts(blocks)) or 'none'} -> "
                       f"{'vendor' if _has_vendor(blocks, st['dom']) else 'third-party'} <- "
                       f"{', '.join(b['url'] for b in blocks)}", flush=True)
+                # FU161: when the article compares PRICING and this competitor has NO price from its OWN
+                # site OR a reputable source (only affiliate-dropped / nothing), FLAG-AND-ASK the operator
+                # (the FU79 pause) rather than ship an honest/blank cell — user decision.
+                if not st.get("cached") and any(_PRICE_DIM_RE.search(d or "") for d in dims):
+                    _has_price = any(
+                        _PRICE_SIGNAL_RE.search(b.get("text") or "")
+                        and (_same_site(b.get("url") or "", st.get("dom") or "")
+                             or _dom(b.get("url")) in _THIRD_PARTY_DOMAINS)
+                        for b in blocks)
+                    if not _has_price:
+                        unsourced.append({"tool": tool, "dom": st.get("dom") or "",
+                                          "facts": ["current price"], "price_only": True})
+                        print(f"[blog_gen] price-check: {tool} has no confirmed own-site/reputable price "
+                              f"— FU79 will ask the operator", flush=True)
             else:
                 # FU150: the pause names the actual comparison COLUMNS the operator must supply — a
                 # zero-block tool is missing EVERY dimension — not the old static "price + license".
@@ -2837,37 +2935,64 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if t.lower() in lbl.lower():
                     tool_texts[t] = tool_texts.get(t, "") + " " + str(f.get("text") or "").lower()
 
-        # FU158 — the SUBJECT's canonical/operator-set price is AUTHORITATIVE for this article's product:
-        # inject it as a first-party fresh block (so the reconcile fills {name}'s pricing cell from THIS
-        # product-matched [S#], closing the FU156 "not in EVIDENCE → state the pricing model" escape
-        # hatch) and mark {name}'s pricing dimension SATISFIED so the un-anchored own-domain pricing
-        # re-search (which otherwise grabs a general '$X/mo plans' page) never runs for the subject.
+        # FU158/FU161 — SUBJECT pricing is OPERATOR-SET-FIRST, honest fallback (the operator's canonical
+        # values are authoritative; auto-fetch is unreliable). (1) inject EVERY operator-set item
+        # (MULTI-PRODUCT — tirzepatide AND semaglutide both appear when both are set); (2) for an article
+        # product WITHOUT an operator value, do a PRODUCT-ANCHORED own-domain search + fetch-the-page;
+        # (3) if still unconfirmed → honest cell + a `_price_warn` (never a shaky affiliate number). The
+        # subject is ALWAYS excluded from the generic price dim-rescue below (it grabbed the wrong page).
         try:
             _kf = json.loads(brand.get("key_facts") or "{}")
         except Exception:
             _kf = {}
-        _canon_item = _canonical_price_item(_kf, _product)
-        _has_canon_price = bool(_canon_item and str(_canon_item.get("value") or "").strip())
-        if _has_canon_price:
-            _cv = str(_canon_item.get("value")).strip()
-            _cp = str(_canon_item.get("product") or _product or "").strip()
-            _curl = (_canon_item.get("source_url") or "").strip() or (
-                f"https://{own_dom_s}" if own_dom_s else "")
+        _op_items = [it for it in _kf_pricing_items(_kf)
+                     if it.get("operator_set") and str(it.get("value") or "").strip()]
+        for _it in _op_items:
+            _cv = str(_it.get("value")).strip()
+            _cp = str(_it.get("product") or "").strip()
+            _curl = (_it.get("source_url") or "").strip() or (f"https://{own_dom_s}" if own_dom_s else "")
             _ctext = (f"{_cp} pricing: {_cv} (per {name}'s own site)" if _cp
                       else f"pricing: {_cv} (per {name}'s own site)")
             if not any(str(b.get("label") or "").strip().lower() == name.strip().lower()
                        and _cv[:12].lower() in str(b.get("text") or "").lower() for b in fresh):
                 fresh.append({"label": name, "url": _curl, "text": _ctext[:_EVIDENCE_TEXT_CAP]})
-            # mark {name}'s pricing dims satisfied (covers price/cost/fee/plan wordings)
             tool_texts[name] = tool_texts.get(name, "") + " pricing price cost fee plan " + _cv.lower()
+        _op_prod_slugs = {_kf_slug(it.get("product")) for it in _op_items}
+        _subj_unpriced = []
+        for prod in (_products if own_dom_s else []):
+            if not prod or _kf_slug(prod) in _op_prod_slugs:
+                continue   # operator value already injected — authoritative, don't auto-fetch
+            _ptoks = _product_tokens(prod)
+            _stxt = tool_texts.get(name, "")
+            if _ptoks and any(t in _stxt for t in _ptoks) and _PRICE_SIGNAL_RE.search(_stxt):
+                continue   # already in the subject's gathered evidence
+            try:
+                rs = self.claude.search_sources(
+                    f"{name} {prod} price/pricing — the plan/dose and exact cost, from {name}'s OWN "
+                    f"official site only", max_searches=1, allowed_domains=[own_dom_s], first_party=True)
+            except Exception:
+                rs = []
+            pp = _best_product_price(rs, prod, own_dom_s) or _fetch_product_price(own_dom_s, name, prod)
+            if pp:
+                fresh.append({"label": name, "url": pp["url"],
+                              "text": (f"{prod}: " + (pp.get("fact") or ""))[:_EVIDENCE_TEXT_CAP]})
+                tool_texts[name] = tool_texts.get(name, "") + " pricing price cost " + (pp.get("fact") or "").lower()
+            else:
+                _subj_unpriced.append(prod)
+        if _subj_unpriced:
+            self._price_warn = (f"{name}'s price for {', '.join(_subj_unpriced)} could not be confirmed "
+                                f"from its own site — set it in Edit Brand → Canonical pricing, else the "
+                                f"cell stays honest (\"see {name}'s site\").")
+            print(f"[blog_gen] subject-price: unconfirmed for {', '.join(_subj_unpriced)}", flush=True)
 
         _pairs = []
         for d in dims:
             ws = _dim_words(d)
             if not ws:
                 continue
-            # FU158: never re-search the SUBJECT's price when a canonical price exists — it's authoritative.
-            if _has_canon_price and _PRICE_DIM_RE.search(d or ""):
+            # FU161: the SUBJECT is always handled by the per-product price fetch above — never by the
+            # generic own-domain price dim-rescue (which grabbed the first "{name}" page, e.g. /how-it-works/).
+            if _PRICE_DIM_RE.search(d or ""):
                 miss = [t for t in tools
                         if not any(w in tool_texts.get(t, "") for w in ws)]
             else:
@@ -2924,7 +3049,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
                 if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
-                        and not _is_negative_about(s, name)):   # FU150 (#2)
+                        and not _is_negative_about(s, name)      # FU150 (#2)
+                        and not (t != name and _is_affiliate_review(s))):   # FU161: no affiliate for a competitor
                     kb.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
             return t, d, kb
 
@@ -3002,6 +3128,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 continue
             if _is_negative_about(c, name):   # FU150 (#2): never cite anything negative about {name}
                 print(f"[blog_gen] source-hygiene: dropped negative-about-brand "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
+            if _is_affiliate_review(c):   # FU161: drop low-quality affiliate/SEO reviews
+                print(f"[blog_gen] source-hygiene: dropped affiliate review "
                       f"'{(c.get('title') or '')[:70]}'", flush=True)
                 continue
             u = (c.get("url") or "").strip()
@@ -3143,7 +3273,9 @@ COMPLETE and every stated fact is sourced:
     THIS article's product, {name}'s pricing cell AND any {name} price sentence MUST show that exact value
     (an [operator-set] line is locked and overrides any priced page). NEVER fill {name}'s pricing cell with
     a general plan / consult / membership / base fee when a canonical product price exists — replace such a
-    cell with the canonical value, cited to {name}'s own site.
+    cell with the canonical value, cited to {name}'s own site. FU161: carry the FULL structure (intro +
+    ongoing + billing cadence/dose) VERBATIM — INCLUDING the meta_description and Quick answer; never
+    truncate to just the intro figure (e.g. keep "then $X/month billed quarterly").
   - COMPETITOR PRICE = the vendor's OWN site (FU158, hard rule): a COMPETITOR's price must come from that
     competitor's OWN first-party block — NEVER a "third-party ·" / review / aggregator / listicle block
     (those go stale, e.g. an outdated membership fee). If a competitor's own current price is not in the
@@ -4173,6 +4305,10 @@ Return JSON only:
         if _an142:  # FU142: a NON-primary product with no official source naming it
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _an142] if x)
+        _pw = getattr(self, "_price_warn", "")
+        if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _pw] if x)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""
@@ -4747,7 +4883,11 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
     if _matched:
         offers = [_mk_offer(next((it for it in _matched if it.get("operator_set")), _matched[0]))]
     else:
-        offers = [_mk_offer(it) for it in _ok_items]
+        # FU161: no product-token match (a general-topic seed like "GLP-1 programs") — when the operator
+        # has set canonical pricing, emit ONLY operator-set items so a stale auto-synced general item
+        # (e.g. the $79 TRT price) can never accompany the operator's price. No operator items → today's.
+        _ops = [it for it in _ok_items if it.get("operator_set")]
+        offers = [_mk_offer(it) for it in (_ops if _ops else _ok_items)]
     if offers and brand_name:
         prod = {"@type": "Product", "name": brand_name,
                 "offers": offers if len(offers) > 1 else offers[0]}

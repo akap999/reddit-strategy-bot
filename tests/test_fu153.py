@@ -121,13 +121,16 @@ def test_compose_prompt_has_evidence_and_validates_indices():
                                  {"name": "Acme", "key_facts": '{"pricing":"$9/mo"}'}, "best widgets")
     assert out == COMPOSED_BODY
     assert art["writer_mode_used"] == "compose"
-    assert "EVIDENCE:" in w.prompts[0]
+    # FU165: with no captured Claude prompt (this test doesn't run generate_article) the compose falls
+    # back to the minimal evidence prompt — which still carries the evidence.
+    assert "EVIDENCE" in w.prompts[0]
     assert "Acme pricing" in w.prompts[0] and "$9/mo" in w.prompts[0]
-    assert "CANONICAL BRAND FACTS" in w.prompts[0]
 
 
-def test_compose_out_of_range_citation_falls_back():
-    bad = COMPOSED_BODY.replace("[S2]", "[S9]")    # only 2 evidence blocks → [S9] is invalid
+def test_compose_out_of_range_citation_still_ships():
+    # FU165: compose ALWAYS ships (never Claude's watermarked body). A stray/out-of-range [S#] is no
+    # longer a fallback — the compose ships and the downstream `_rebuild_sources` renumbers/drops it.
+    bad = COMPOSED_BODY.replace("[S2]", "[S9]")    # only 2 evidence blocks → [S9] is out of range
     w = StubWriter(lambda p, i: bad)
     gen = _gen(writer=w, mode="compose")
     gen._evidence_blocks = [
@@ -136,8 +139,8 @@ def test_compose_out_of_range_citation_falls_back():
     ]
     art = {"body_markdown": CLAUDE_BODY}
     out = gen._apply_writer_pass(art, CLAUDE_BODY, {"name": "Acme"}, "seed")
-    assert out == CLAUDE_BODY
-    assert art["writer_mode_used"] == "fallback"
+    assert out == bad                              # SHIPPED the Qwen body (watermark stripped)
+    assert art["writer_mode_used"] == "compose"
 
 
 # --- inert when off (today's flow) --------------------------------------------------------------

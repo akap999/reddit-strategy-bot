@@ -1845,6 +1845,9 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
   "keywords": ["target queries + key terms this page should be cited for"],
   "body_markdown": "the full article in Markdown",
   "disclosure": "one factually-accurate transparency sentence"}}"""
+        self._article_prompt = prompt   # FU165: the EXACT instruction set + evidence — reused for the
+        #                                 self-hosted writer's COMPOSE pass so Qwen writes its OWN full
+        #                                 article from the SAME rules Claude got (no Claude-output reference).
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("body_markdown") or "").strip():
             return None
@@ -4154,27 +4157,31 @@ Return JSON only:
                           "copy every [S#] and every heading line CHARACTER-FOR-CHARACTER — only the "
                           "paragraph text under the headings changes.") if aggressive else ""
                 if self.writer_mode == "compose":
-                    blocks = []
-                    for i, bl in enumerate(self._evidence_blocks or [], 1):
-                        blocks.append(f"[S{i}] {bl.get('label','')} — {bl.get('url','')}\n"
-                                      f"{(bl.get('text') or '')[:1200]}")
-                    ev = "\n\n".join(blocks) if blocks else "(no external evidence — use the outline)"
-                    kf = ((brand or {}).get("key_facts") or "").strip()
-                    kf_line = f"\n\nCANONICAL BRAND FACTS (use verbatim, never alter):\n{kf}" if kf else ""
+                    # FU165: give Qwen the EXACT SAME article-writing prompt Claude used (all the rules +
+                    # brand context + evidence, captured on self._article_prompt in generate_article) — so
+                    # Qwen writes its OWN complete article from the SAME instructions, matching Claude's
+                    # structure/depth/length. NO reference to Claude's OUTPUT (that would be rewriting). Only
+                    # the OUTPUT FORMAT is overridden: Markdown body, not the JSON envelope Claude returns.
+                    base = getattr(self, "_article_prompt", "") or ""
+                    if base:
+                        base = base[:55000]   # bound to Qwen's --max-model-len 24576 (≈14k-tok input + 9k output)
+                        return (base
+                                + "\n\nOUTPUT FORMAT — IGNORE any JSON instruction above. Return ONLY the "
+                                "finished Markdown ARTICLE BODY (the value that would go in \"body_markdown\"): "
+                                "start with the first heading, cover EVERY section in full, no JSON, no code "
+                                "fences, no preamble, no commentary." + harder)
+                    # Fallback (compose invoked without a preceding generate_article — not the normal path):
+                    blocks = [f"[S{i}] {bl.get('label','')} — {bl.get('url','')}\n{(bl.get('text') or '')[:2500]}"
+                              for i, bl in enumerate(self._evidence_blocks or [], 1)]
+                    ev = "\n\n".join(blocks) if blocks else "(no external evidence)"
                     outline = "\n".join(heads) if heads else "(derive a clear structure)"
                     return (
                         f"You are writing a first-party blog article for {name}. Target query / H1: \"{seed}\".\n\n"
-                        "Write the FULL article in Markdown from the EVIDENCE below. Requirements:\n"
-                        "- Open with a '## Quick answer' whose first sentence names the answer.\n"
-                        "- Use question-shaped H2/H3 headings, each answered in its FIRST sentence.\n"
-                        "- Include a comparison table and an FAQ where the outline has them.\n"
-                        "- CITE every non-obvious fact inline with its source's [S#] label exactly as "
-                        "[S1], [S2] … (they are renumbered afterward).\n"
-                        "- NEVER invent facts, numbers, prices, or citations beyond the evidence.\n"
-                        "- End with a '## Sources' section (a placeholder line is fine — it is rebuilt).\n"
-                        "Return ONLY the Markdown article.\n\n"
-                        f"OUTLINE (headings to cover):\n{outline}{kf_line}\n\n"
-                        f"EVIDENCE:\n{ev}{harder}"
+                        "Write a COMPLETE, comprehensive article in Markdown from the EVIDENCE below — a full "
+                        "'## Quick answer', question-shaped H2/H3 headings answered in their FIRST sentence, the "
+                        "full comparison table and FAQ, every non-obvious fact cited inline as [S#], no fabrication, "
+                        "ending with a '## Sources' line. Return ONLY the Markdown article.\n\n"
+                        f"OUTLINE (headings to cover):\n{outline}\n\nEVIDENCE (the ONLY source of facts):\n{ev}{harder}"
                     )
                 # rewrite mode
                 return (
@@ -4197,26 +4204,31 @@ Return JSON only:
                 )
 
             def _valid(out):
+                # FU165: COMPOSE must ALWAYS ship (operator: compose is non-negotiable) — so only a
+                # genuinely EMPTY / non-article output hard-fails (there'd be nothing real to ship, and
+                # the ONLY alternative is Claude's WATERMARKED body). A leaner-than-Claude length or a
+                # stray/out-of-range [S#] is NOT a failure here (the length is fixed by the prompt's
+                # reference/depth rule, and `_rebuild_sources` renumbers/drops a stray citation safely).
+                # REWRITE is unchanged: its output SHOULD mirror Claude's body, so the length band +
+                # citation/heading preservation still hard-gate it.
                 if not out or not out.strip():
                     return False, "empty"
+                if self.writer_mode == "compose":
+                    has_head = any(l.lstrip().startswith("#") for l in out.splitlines())
+                    if len(out.strip()) < 200 or not has_head:   # reject only a non-article stub — real
+                        return False, f"not a usable article (len {len(out.strip())}, headings={has_head})"
+                    return True, ""      # FU165: any real article ships (length/citations → soft warnings)
+                # rewrite mode — the output must mirror Claude's finished body
                 if not (0.6 * len(claude_body) <= len(out) <= 1.4 * len(claude_body)):
                     return False, f"length {len(out)} outside band"
                 out_cited = set(re.findall(r"\[S\d+\]", out))
-                if self.writer_mode == "compose":
-                    if n_ev:
-                        idxs = [int(m) for m in re.findall(r"\[S(\d+)\]", out)]
-                        if any(i < 1 or i > n_ev for i in idxs):
-                            return False, "cited an out-of-range source index"
-                        if len(out_cited) < min(3, n_ev):
-                            return False, f"too few citations ({len(out_cited)})"
-                else:  # rewrite — preserve Claude's exact citations + headings
-                    if not cited <= out_cited:
-                        return False, f"dropped citations {sorted(cited - out_cited)}"
-                    if heads:
-                        out_heads = {l.strip().lower() for l in out.splitlines() if l.lstrip().startswith("#")}
-                        miss = [h for h in heads if h.lower() not in out_heads]
-                        if miss:
-                            return False, f"dropped headings {miss[:3]}"
+                if not cited <= out_cited:
+                    return False, f"dropped citations {sorted(cited - out_cited)}"
+                if heads:
+                    out_heads = {l.strip().lower() for l in out.splitlines() if l.lstrip().startswith("#")}
+                    miss = [h for h in heads if h.lower() not in out_heads]
+                    if miss:
+                        return False, f"dropped headings {miss[:3]}"
                 return True, ""
 
             import time as _t
@@ -4249,6 +4261,13 @@ Return JSON only:
                     print(f"[writer] attempt {attempt+1} quality gate failed: {why}", flush=True)
                     continue
                 best = out
+                # FU165: a compose that's still notably shorter than the reference SHIPS (never fall back),
+                # but log + warn so the operator can regenerate for more depth if they want.
+                if self.writer_mode == "compose" and claude_body and len(out) < 0.6 * len(claude_body):
+                    print(f"[writer] compose shorter than reference ({len(out)} vs {len(claude_body)}) "
+                          f"— shipping anyway (FU165, watermark stripped)", flush=True)
+                    article["writer_warning"] = (f"compose article is shorter than the reference "
+                                                 f"({len(out)} vs {len(claude_body)} chars)")
                 # Measure overlap on PROSE only (headings/table/Sources/[S#] are preserved by design).
                 overlap = self._ngram_overlap(self._prose_for_overlap(claude_body),
                                               self._prose_for_overlap(out), n=8)

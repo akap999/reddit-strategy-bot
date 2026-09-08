@@ -1971,7 +1971,7 @@ Return JSON only:
             "flagged": [f for f in (res.get("flagged") or []) if isinstance(f, dict)],
         }
 
-    def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier=""):
+    def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier="", include_pricing=True):
         """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
         then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
         into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
@@ -1981,7 +1981,8 @@ Return JSON only:
         over seed auto-detect for the geo-aware briefs + reconcile rules. `qualifier` (FU93): the page's
         variant qualifier ("financing", "free shipping") — same explicit-wins rule. Returns
         {body_markdown, flagged} or None (draft unchanged). Never raises."""
-        sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo, qualifier=qualifier)
+        sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo, qualifier=qualifier,
+                                         include_pricing=include_pricing)
         if not sr:
             return None
         if not sr.get("fresh"):
@@ -2164,7 +2165,7 @@ Return JSON only:
         except Exception:
             pass
 
-    def _resolve_and_sync_key_facts(self, brand, evidence, seed=""):
+    def _resolve_and_sync_key_facts(self, brand, evidence, seed="", include_pricing=True):
         """FU150 (#4): keep {name}'s OWN pricing CONSISTENT across all its blogs, PER PRODUCT. Extract
         {name}'s per-product pricing (verbatim) from THIS run's FIRST-PARTY evidence; for the product
         THIS blog's SEED is about (Case 2 — price often lives on a product page, not /pricing), if it
@@ -2180,6 +2181,8 @@ Return JSON only:
             stored = {}
         if not isinstance(stored, dict):
             stored = {}
+        if not include_pricing:   # FU162: pricing OFF — never sync/search a price; strip pricing from the
+            return ({k: v for k, v in stored.items() if k != "pricing"}, "", [], [])   # writer's canonical block too
         warning, extra_blocks = "", []
         own_dom = _norm_domain((brand or {}).get("domain_url") or "")
         stored_items = _kf_pricing_items(stored)
@@ -2327,7 +2330,8 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         return stored, warning, ([seed_product] if seed_product else []), extra_blocks
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
-                               ymyl=None, refresh_competitor_facts=False, refresh_competitor_slugs=None):
+                               ymyl=None, refresh_competitor_facts=False, refresh_competitor_slugs=None,
+                               include_pricing=True):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -2344,6 +2348,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         self._auth_primary_tokens = []
         self._auth_primary_name = ""
         self._price_warn = ""   # FU161: subject price could-not-confirm note (folded into geo_warning)
+        _px = bool(include_pricing)   # FU162: pricing OFF ⇒ skip ALL pricing searches / injection / flag-and-ask
         rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
         rqual = (qualifier or "").strip() or _seed_qualifier(seed)   # FU93: same rule for the qualifier
         body = (article or {}).get("body_markdown") or ""
@@ -2531,9 +2536,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # the basis it applies to (unit/tier/dose/supply) — generic across verticals.
         _prod_price_brief = (f"the CURRENT price/cost of {' and '.join(_products)} as listed on the "
                              f"vendor's OWN site (state EACH product's price), the plan / unit / tier / "
-                             f"dose / supply it applies to and the billing basis; " if _products else "")
+                             f"dose / supply it applies to and the billing basis; " if (_products and _px) else "")
         fetch_brief = (_prod_price_brief
-                       + f"pricing and plans; commercial / license / eligibility / contract terms as "
+                       + (f"pricing and plans; " if _px else "")   # FU162: no price ask when pricing is OFF
+                       + f"commercial / license / eligibility / contract terms as "
                        f"applicable; the key capabilities and differentiators for "
                        f"{cat or 'this product/service'}; who it's best for" + geo_brief + qual_brief)
         # FU150 — TWO-PASS competitor sourcing so NO competitor is starved to zero purely by loop
@@ -2590,7 +2596,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # license/commercial/terms/royalty dimension. So a loans / HR-software blog (no license
         # column) never burns rescue searches — or mis-flags a "missing" fact — for a fact that
         # doesn't exist in its vertical.
-        _active_facts = {"price"}
+        _active_facts = {"price"} if _px else set()   # FU162: pricing OFF ⇒ never chase/rescue a price fact
         if any(_LICENSE_DIM_RE.search(d or "") for d in dims):
             _active_facts.add("license")
 
@@ -2622,9 +2628,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     # FU161: product-anchored on ALL the article's products so the search returns EACH
                     # product's own pricing page; FU158: the vendor's OWN CURRENT price + unit/tier/dose.
                     (f"{tool} {' and '.join(_products)} CURRENT price/cost on {tool}'s own site (EACH "
-                     f"product's price, the unit/tier/dose/supply it applies to); " if _products else "")
-                    + f"{tool}: pricing and plans, commercial-use / licensing / royalty-free terms, "
-                    f"key capabilities"
+                     f"product's price, the unit/tier/dose/supply it applies to); " if (_products and _px) else "")
+                    + f"{tool}: " + ("pricing and plans, " if _px else "")   # FU162: no price ask when OFF
+                    + f"commercial-use / licensing / royalty-free terms, key capabilities"
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
                     + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
                     max_searches=2, allowed_domains=[_dd], first_party=True)   # FU55
@@ -2635,24 +2641,25 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # right product's page, and a DIFFERENT product's price still rejected). The PRIMARY product
             # (index 0) gets the full fallback ladder (one targeted own-domain search → fetch-the-page);
             # secondary products are selected free from the general results (cost bound).
-            for _i, prod in enumerate(_products or ([_product] if _product else [])):
-                if not prod:
-                    continue
-                pp = _best_product_price(pin, prod, _dd)
-                if not pp and _i == 0 and _dd:
-                    try:
-                        res2 = self.claude.search_sources(
-                            f"{tool} {prod} price/pricing — the plan/dose/tier and exact cost, from "
-                            f"{tool}'s OWN official site only", max_searches=1,
-                            allowed_domains=[_dd], first_party=True)
-                    except Exception:
-                        res2 = []
-                    pp = _best_product_price(res2, prod, _dd) or _fetch_product_price(_dd, tool, prod)
-                if pp and not any((b.get("url") or "") == pp["url"] for b in blocks):
-                    _ptxt = (pp.get("fact") or "")[:_EVIDENCE_TEXT_CAP]
-                    if prod.lower() not in _ptxt.lower():
-                        _ptxt = f"{prod}: {_ptxt}"   # FU161: label the block product-wise (per-product cache)
-                    blocks.insert(0, {"label": tool, "url": pp["url"], "text": _ptxt})
+            if _px:   # FU162: pricing OFF ⇒ no per-product price selection/fetch for this competitor
+                for _i, prod in enumerate(_products or ([_product] if _product else [])):
+                    if not prod:
+                        continue
+                    pp = _best_product_price(pin, prod, _dd)
+                    if not pp and _i == 0 and _dd:
+                        try:
+                            res2 = self.claude.search_sources(
+                                f"{tool} {prod} price/pricing — the plan/dose/tier and exact cost, from "
+                                f"{tool}'s OWN official site only", max_searches=1,
+                                allowed_domains=[_dd], first_party=True)
+                        except Exception:
+                            res2 = []
+                        pp = _best_product_price(res2, prod, _dd) or _fetch_product_price(_dd, tool, prod)
+                    if pp and not any((b.get("url") or "") == pp["url"] for b in blocks):
+                        _ptxt = (pp.get("fact") or "")[:_EVIDENCE_TEXT_CAP]
+                        if prod.lower() not in _ptxt.lower():
+                            _ptxt = f"{prod}: {_ptxt}"   # FU161: label the block product-wise (per-product cache)
+                        blocks.insert(0, {"label": tool, "url": pp["url"], "text": _ptxt})
             return blocks
 
         def _tier2(tool, dom):
@@ -2818,8 +2825,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if not _has_vendor(blocks, dom):
                 try:
                     br = self.claude.search_sources(
-                        (f"{tool} {_product} price/cost; " if _product else "")   # FU156: product-anchored
-                        + f"{tool} ({cat}) official pricing and plans, commercial-use / licensing / "
+                        (f"{tool} {_product} price/cost; " if (_product and _px) else "")   # FU156/162: product-anchored, only when pricing ON
+                        + f"{tool} ({cat}) official " + ("pricing and plans, " if _px else "")
+                        + f"commercial-use / licensing / "
                         f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
                         f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=2)
                 except Exception:
@@ -2911,7 +2919,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU161: when the article compares PRICING and this competitor has NO price from its OWN
                 # site OR a reputable source (only affiliate-dropped / nothing), FLAG-AND-ASK the operator
                 # (the FU79 pause) rather than ship an honest/blank cell — user decision.
-                if not st.get("cached") and any(_PRICE_DIM_RE.search(d or "") for d in dims):
+                if _px and not st.get("cached") and any(_PRICE_DIM_RE.search(d or "") for d in dims):
                     _has_price = any(
                         _PRICE_SIGNAL_RE.search(b.get("text") or "")
                         and (_same_site(b.get("url") or "", st.get("dom") or "")
@@ -2983,8 +2991,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             _kf = json.loads(brand.get("key_facts") or "{}")
         except Exception:
             _kf = {}
-        _op_items = [it for it in _kf_pricing_items(_kf)
-                     if it.get("operator_set") and str(it.get("value") or "").strip()]
+        _op_items = ([it for it in _kf_pricing_items(_kf)
+                      if it.get("operator_set") and str(it.get("value") or "").strip()]
+                     if _px else [])   # FU162: pricing OFF ⇒ inject no operator price
         for _it in _op_items:
             _cv = str(_it.get("value")).strip()
             _cp = str(_it.get("product") or "").strip()
@@ -2997,7 +3006,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             tool_texts[name] = tool_texts.get(name, "") + " pricing price cost fee plan " + _cv.lower()
         _op_prod_slugs = {_kf_slug(it.get("product")) for it in _op_items}
         _subj_unpriced = []
-        for prod in (_products if own_dom_s else []):
+        for prod in (_products if (own_dom_s and _px) else []):   # FU162: no subject price search when OFF
             if not prod or _kf_slug(prod) in _op_prod_slugs:
                 continue   # operator value already injected — authoritative, don't auto-fetch
             _ptoks = _product_tokens(prod)
@@ -3031,6 +3040,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # FU161: the SUBJECT is always handled by the per-product price fetch above — never by the
             # generic own-domain price dim-rescue (which grabbed the first "{name}" page, e.g. /how-it-works/).
             if _PRICE_DIM_RE.search(d or ""):
+                if not _px:   # FU162: pricing OFF ⇒ no price-dimension rescue at all
+                    continue
                 miss = [t for t in tools
                         if not any(w in tool_texts.get(t, "") for w in ws)]
             else:
@@ -3948,7 +3959,8 @@ Return JSON only:
                       research_notes="", use_web_search=False, reddit_thread=None,
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
                       qualifier="", internal_links=False, sibling_links=None, ymyl=None,
-                      refresh_competitor_facts=False, refresh_competitor_slugs=None):
+                      refresh_competitor_facts=False, refresh_competitor_slugs=None,
+                      include_pricing=True):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -4007,7 +4019,7 @@ Return JSON only:
         # persisted + surfaced as a warning. `extra_blocks` = a product page the web-search found —
         # fold it into the article's evidence so the writer can cite it as a first-party [S#].
         key_facts, kf_warning, seed_products, extra_blocks = \
-            self._resolve_and_sync_key_facts(brand, evidence, seed)
+            self._resolve_and_sync_key_facts(brand, evidence, seed, include_pricing=include_pricing)
         if extra_blocks:
             _start = len(getattr(self, "_evidence_blocks", None) or []) + 1
             _lines = [f"[S{_start + i}] {b['label']}" + (f" — {b['url']}" if b.get('url') else "")
@@ -4043,7 +4055,8 @@ Return JSON only:
                                                qualifier=qualifier,   # FU93
                                                ymyl=rymyl,   # FU133
                                                refresh_competitor_facts=refresh_competitor_facts,   # FU151
-                                               refresh_competitor_slugs=refresh_competitor_slugs)   # FU160
+                                               refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
+                                               include_pricing=include_pricing)   # FU162
         if allow_pause and sourcing and sourcing.get("unsourced"):
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
@@ -4215,7 +4228,11 @@ Return JSON only:
                 _temp = 0.95 if attempt == 0 else 1.1
                 _t0 = _t.time()
                 out = self.writer.call_text(_build_prompt(aggressive=(attempt == 1)),
-                                            max_tokens=9000, temperature=_temp)
+                                            max_tokens=9000, temperature=_temp,
+                                            # FU164: a warm compose gen is ~2-5 min — 300s false-timed-out →
+                                            # fell back (wasted time + reinstated the watermark). 600s + the
+                                            # app-level keep-warm (base.WriterClient.warm) fixes both.
+                                            timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
                 secs += _t.time() - _t0
                 article["writer_secs"] = round(secs, 1)
                 # Rewrite mode: put the ORIGINAL headings back onto the rewrite (positionally) so a
@@ -4243,7 +4260,8 @@ Return JSON only:
                 article["writer_mode_used"] = "fallback"
                 article["writer_warning"] = (f"fell back to Claude — {last_why}" if last_why
                                              else "fell back to Claude (open-model rewrite failed validation)")
-                print("[writer] fell back to the Claude body (quality gate).", flush=True)
+                print(f"[blog_gen] writer: FALLBACK {secs:.1f}s — {last_why or 'validation failed'} "
+                      f"(watermark NOT stripped — is the container warm / the timeout high enough?)", flush=True)
                 return claude_body
 
             article["writer_mode_used"] = self.writer_mode
@@ -4251,9 +4269,8 @@ Return JSON only:
             if overlap >= 0.15:
                 article["writer_warning"] = (f"watermark removal not fully confirmed "
                                              f"(verbatim overlap {overlap:.2f} ≥ 0.15)")
-                print(f"[writer] shipping open-model body with high overlap {overlap:.2f} (warned).", flush=True)
-            else:
-                print(f"[writer] {self.writer_mode} pass ok — overlap {overlap:.2f}.", flush=True)
+            print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s overlap={overlap:.2f}"
+                  + (" (HIGH — warned)" if overlap >= 0.15 else ""), flush=True)
             return best
         except Exception as e:
             print(f"[writer] pass errored ({e}) — keeping the Claude body.", flush=True)

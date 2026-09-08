@@ -456,6 +456,26 @@ class WriterClient:
         except Exception as e:
             return {"state": "unreachable", "detail": f"cannot reach the endpoint: {e}"}
 
+    def warm(self, timeout=20):
+        """FU164: keep-alive ping to SPIN UP / HOLD the self-hosted container warm — Modal boots the
+        GPU on an incoming request and resets its idle timer, so pinging during the (long) Claude
+        stages means the writer pass finds the model ALREADY LOADED (no cold start on the critical
+        path). Sends a 1-token completion; a warm container answers in ~1s, a cold one starts booting
+        (the client may time out but Modal keeps loading). Returns 'ok' | 'warming' | 'error'. Never raises."""
+        if not self.endpoint_url or not self.model:
+            return "error"
+        try:
+            resp = requests.post(
+                f"{self.endpoint_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json={"model": self.model, "messages": [{"role": "user", "content": "ok"}],
+                      "max_tokens": 1},
+                timeout=timeout,
+            )
+            return "ok" if resp.status_code == 200 else "warming"
+        except Exception:
+            return "warming"   # a timeout / cold-start still triggered the boot — treat as warming, not error
+
 
 class ClaudeClient:
     """Shared Claude API caller extracted from CommentGeneratorBot._call_claude."""

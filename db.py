@@ -1033,6 +1033,7 @@ class Database:
                   body_markdown="", linkedin_text="", claims_flagged=None,
                   status="draft", prompt_version="", source_urls=None, research_notes="",
                   use_web_search=0, reddit_url="", reddit_status="", deep_verify=0,
+                  include_pricing=1,
                   author_name="", author_title="", reviewer_name="", reviewer_title="",
                   disclosure="", image_url="", gen_cost=0):
         """Insert a blog row. keywords/claims_flagged/source_urls are stored as JSON. The byline
@@ -1044,10 +1045,10 @@ class Database:
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
                                   research_notes, use_web_search, reddit_url, reddit_status, deep_verify,
-                                  status, prompt_version,
+                                  include_pricing, status, prompt_version,
                                   author_name, author_title, reviewer_name, reviewer_title,
                                   disclosure, image_url, gen_cost)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
@@ -1058,6 +1059,7 @@ class Database:
              (reddit_url or "").strip(),
              (reddit_status or "").strip(),
              1 if deep_verify else 0,
+             1 if include_pricing else 0,
              status, prompt_version,
              author_name or "", author_title or "", reviewer_name or "",
              reviewer_title or "", disclosure or "", image_url or "",
@@ -1140,7 +1142,8 @@ class Database:
         allowed = {"seed", "title", "meta_description", "keywords", "body_markdown",
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
-                   "reddit_status", "deep_verify", "author_name", "author_title", "reviewer_name",
+                   "reddit_status", "deep_verify", "include_pricing", "writer_secs", "writer_mode_used",
+                   "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
                    "pending_state",   # FU79
@@ -2339,6 +2342,15 @@ class Database:
             self.conn.commit()
         if "deep_verify" not in blog_cols:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN deep_verify INTEGER DEFAULT 0")
+            self.conn.commit()
+        if "include_pricing" not in blog_cols:   # FU162: default ON — legacy rows keep today's pricing
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN include_pricing INTEGER DEFAULT 1")
+            self.conn.commit()
+        if "writer_secs" not in blog_cols:   # FU164: self-hosted writer-pass duration (visibility)
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_secs REAL DEFAULT 0")
+            self.conn.commit()
+        if "writer_mode_used" not in blog_cols:   # FU164: 'compose'|'rewrite'|'fallback' — detect silent fallbacks
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_mode_used TEXT DEFAULT ''")
             self.conn.commit()
         if "internal_links" not in blog_cols:   # FU114: opt-in internal linking + meta title
             self.conn.execute("ALTER TABLE blogs ADD COLUMN internal_links INTEGER DEFAULT 0")

@@ -2596,6 +2596,7 @@ def api_blog_generate():
     geo = (data.get("geo") or "").strip()   # FU90: explicit geography — wins over seed auto-detect
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
+    include_pricing = bool(data.get("include_pricing", True))   # FU162: default ON; unchecked = skip ALL pricing
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
                                 if str(s).strip()]   # FU160: selectively refresh only these competitors
@@ -2638,6 +2639,8 @@ def api_blog_generate():
             except Exception:
                 sibling_titles, sibling_links = [], []
             _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
+            if _wmode != "off":
+                _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
             blog = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode).generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
@@ -2648,7 +2651,8 @@ def api_blog_generate():
                 internal_links=internal_links, sibling_links=sibling_links,  # FU114
                 ymyl=ymyl_arg,                               # FU133
                 refresh_competitor_facts=refresh_competitor_facts,   # FU151 (A)
-                refresh_competitor_slugs=refresh_competitor_slugs)   # FU160
+                refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
+                include_pricing=include_pricing)   # FU162
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -2672,6 +2676,7 @@ def api_blog_generate():
                     source_urls=source_urls, research_notes=research_notes,
                     use_web_search=use_web_search, reddit_url=reddit_url,
                     reddit_status=reddit_status, deep_verify=deep_verify,
+                    include_pricing=(1 if include_pricing else 0),   # FU162
                     gen_cost=gcost, **byline,
                 )
                 bg.update_blog(blog_id, pending_state=json.dumps(pending))
@@ -2707,6 +2712,7 @@ def api_blog_generate():
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_url=reddit_url,
                 reddit_status=reddit_status, deep_verify=deep_verify,
+                include_pricing=(1 if include_pricing else 0),   # FU162
                 gen_cost=blog.get("gen_cost", 0), **byline,
             )
             if geo:
@@ -2721,11 +2727,18 @@ def api_blog_generate():
             _qr = blog.get("quality_report") or {}   # FU151 (D): persist + return the quality scorecard
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
+            # FU164: persist the self-hosted writer-pass duration + outcome (visibility + fallback detection)
+            if blog.get("writer_secs") or blog.get("writer_mode_used"):
+                bg.update_blog(blog_id, writer_secs=(blog.get("writer_secs") or 0),
+                               writer_mode_used=(blog.get("writer_mode_used") or ""))
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
                     "geo_warning": blog.get("geo_warning", ""),   # FU90: doorway signal → toast
                     "key_facts_warning": blog.get("key_facts_warning", ""),   # FU150: pricing-conflict toast
+                    "writer_secs": blog.get("writer_secs", 0),   # FU164
+                    "writer_mode_used": blog.get("writer_mode_used", ""),   # FU164 ('fallback' = watermark NOT stripped)
+                    "writer_warning": blog.get("writer_warning", ""),   # FU164
                     "quality_report": _qr}   # FU151 (D)
         finally:
             bg.close()
@@ -2764,6 +2777,8 @@ def api_blog_regenerate(blog_id):
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
             _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
+            if _wmode != "off":
+                _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
             gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
             seed = blog.get("seed") or ""
             # Reuse the sources captured at generate time so regeneration stays grounded.
@@ -2777,6 +2792,7 @@ def api_blog_regenerate(blog_id):
             _sy = (blog.get("ymyl") or "").strip()   # FU133: reuse the YMYL choice
             stored_ymyl = (False if _sy == "off" else (_sy or None))
             stored_il = bool(blog.get("internal_links"))   # FU114: reuse the linking choice
+            stored_px = (blog.get("include_pricing", 1) != 0)   # FU162: reuse the pricing choice
             sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
                 _sibs = bg.get_all_blogs(brand_id=blog.get("brand_id"))
@@ -2805,7 +2821,8 @@ def api_blog_regenerate(blog_id):
                                           geo=stored_geo, sibling_titles=sib_titles,   # FU90
                                           qualifier=stored_qual,                       # FU93
                                           internal_links=stored_il, sibling_links=sib_links,  # FU114
-                                          ymyl=stored_ymyl)                            # FU133
+                                          ymyl=stored_ymyl,                            # FU133
+                                          include_pricing=stored_px)                   # FU162
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -2821,6 +2838,9 @@ def api_blog_regenerate(blog_id):
                 # FU84: fill a BLANK stored disclosure from the fresh generation (never clobber an edit).
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
+                if fresh.get("writer_secs") or fresh.get("writer_mode_used"):   # FU164
+                    bg.update_blog(blog_id, writer_secs=(fresh.get("writer_secs") or 0),
+                                   writer_mode_used=(fresh.get("writer_mode_used") or ""))
             elif part == "article":
                 # FU114/115: rebuild verified targets via the shared builder (own evidence pages +
                 # published siblings + the site's existing live posts discovered from the sitemap).
@@ -2836,7 +2856,7 @@ def api_blog_regenerate(blog_id):
                 flagged = (v or {}).get("flagged") or []
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
                 vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo,
-                                             qualifier=stored_qual)   # FU93
+                                             qualifier=stored_qual, include_pricing=stored_px)   # FU93/162
                 if vc:
                     a["body_markdown"] = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -2858,7 +2878,7 @@ def api_blog_regenerate(blog_id):
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
                 vc = gen.verify_and_complete(brand, seed, {**article, "body_markdown": body_md},
                                              deep=stored_deep, geo=stored_geo,
-                                             qualifier=stored_qual)   # FU93
+                                             qualifier=stored_qual, include_pricing=stored_px)   # FU93/162
                 if vc:
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -2880,7 +2900,11 @@ def api_blog_regenerate(blog_id):
                 bg.update_blog(blog_id, quality_report=_qr)
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost,
-                    "geo_warning": _geo_warn, "key_facts_warning": _kf_warn, "quality_report": _qr}
+                    "geo_warning": _geo_warn, "key_facts_warning": _kf_warn,
+                    "writer_secs": (fresh.get("writer_secs", 0) if part == "all" else 0),   # FU164
+                    "writer_mode_used": (fresh.get("writer_mode_used", "") if part == "all" else ""),   # FU164
+                    "writer_warning": (fresh.get("writer_warning", "") if part == "all" else ""),   # FU164
+                    "quality_report": _qr}
         finally:
             bg.close()
 
@@ -2962,6 +2986,8 @@ def api_blog_provide_sources(blog_id):
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)
             _writer, _wmode = _build_blog_writer(bg)   # FU153: resume path also runs the writer pass
+            if _wmode != "off":
+                _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
             gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
             seed = blog.get("seed") or ""
             art = gen.finish_pending_blog(brand, seed, checkpoint, sources)
@@ -3282,14 +3308,9 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
         logo = "https://" + logo[len("http://"):]
     byline_bits = []
     au = _bp("author_name")
-    if au:
+    if au:   # show a byline ONLY when a real author is explicitly set — no auto "Editorial Team" attribution
         at = _bp("author_title")
         byline_bits.append("By " + _html.escape(au) + (f", {_html.escape(at)}" if at else ""))
-    else:
-        # ALWAYS show a complete byline. When no real author was found/set (e.g. the site
-        # names no person), fall back to a truthful, role-bearing team attribution — the brand
-        # published it — rather than fabricating a fake human. Override per-brand/per-blog.
-        byline_bits.append("By the " + _html.escape(brand_name or "Editorial") + " Editorial Team")
     rv = _bp("reviewer_name")
     if rv:
         rt = _bp("reviewer_title")
@@ -3299,21 +3320,10 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
                    else "Reviewed by")
         byline_bits.append(f"{_rvverb} " + _html.escape(rv) + (f", {_html.escape(rt)}" if rt else ""))
     meta_byline = " · ".join(byline_bits)
-    # Disclosure: the supplied one (per-blog — now generated adaptively at gen time, FU84 — else
-    # the brand's), else a FACTUALLY-SAFE fallback: "sells the products discussed" was wrong for
-    # broker/comparison brands (e.g. Outsail IS one of the platforms compared), so the fallback is
-    # comparison-aware and never claims a business model.
-    disclosure = _bp("disclosure")
-    if not disclosure and brand_name:
-        from generators.blog_gen import _brand_in_comparison
-        disclosure = (f"This guide is published by {brand_name}, which is one of the options "
-                      f"compared in this guide." if _brand_in_comparison(body, brand_name)
-                      else f"This guide is published by {brand_name}.")
+    # Publisher disclosure line + the visible Published/Updated dateline are removed from blog
+    # exports per operator request (the JSON-LD datePublished/dateModified are kept for SEO).
+    disclosure = ""
     dline = []
-    if published:
-        dline.append("Published: " + published)
-    if updated and updated != published:
-        dline.append("Updated: " + updated)
     header = ""
     if logo:
         # Inline the logo (base64) so it renders in mobile file/email viewers that block remote
@@ -3586,7 +3596,7 @@ def api_blog_export(blog_id):
         return _render_blog_doc_page(blog, brand, body, page_title, desc, published,
                                      updated, jsonld_str, slug, fmt)
 
-    md_out = (f"*Last updated: {updated}*\n\n{body}") if updated else body
+    md_out = body   # visible "Last updated" dateline removed from blog exports (per request)
     return Response(md_out, mimetype="text/markdown")
 
 @app.route("/api/blogs/<int:blog_id>", methods=["DELETE"])
@@ -5800,6 +5810,49 @@ def _build_blog_writer(db):
     if cfg["mode"] in ("rewrite", "compose") and cfg["endpoint_url"] and cfg["key"]:
         return WriterClient(cfg["endpoint_url"], cfg["key"], cfg["model"]), cfg["mode"]
     return None, "off"
+
+
+# ── FU164: APP-LEVEL keep-warm for the self-hosted writer container ───────────────────────────
+# The writer pass runs LAST (~15 min into a blog) on a Modal GPU that scales to zero after idle, so
+# every blog cold-started (~2-5 min) + false-timed-out → fell back. This holds the container LOADED
+# across BACK-TO-BACK blogs: each blog task calls `_writer_touch()` on start; a single daemon thread
+# then pings the endpoint every few minutes while a blog ran recently, so blog #2, #3, … find the
+# model already loaded. It stops pinging (→ Modal scales to zero, $0 idle) once the run goes quiet.
+_writer_last_active = 0.0
+_writer_warm_lock = threading.Lock()
+_writer_warm_started = False
+_WRITER_WARM_IDLE = float(os.environ.get("WRITER_WARM_IDLE", "600"))       # keep warm while a blog ran in the last N s
+_WRITER_WARM_INTERVAL = float(os.environ.get("WRITER_WARM_INTERVAL", "180"))  # ping cadence (< Modal scaledown_window)
+
+
+def _writer_warm_loop():
+    while True:
+        try:
+            if _fu128_time.time() - _writer_last_active < _WRITER_WARM_IDLE:
+                db = Database(DB_PATH)
+                db.connect()
+                try:
+                    w, _mode = _build_blog_writer(db)
+                finally:
+                    db.close()
+                if w is not None:
+                    st = w.warm()
+                    print(f"[writer-warm] ping -> {st}", flush=True)
+        except Exception as e:
+            print(f"[writer-warm] loop error: {e}", flush=True)
+        _fu128_time.sleep(_WRITER_WARM_INTERVAL)
+
+
+def _writer_touch():
+    """FU164: mark blog activity so the keep-warm loop holds the self-hosted writer container loaded
+    across back-to-back blogs. Starts the loop lazily on first use. No-op-safe (never raises)."""
+    global _writer_last_active, _writer_warm_started
+    _writer_last_active = _fu128_time.time()
+    if not _writer_warm_started:
+        with _writer_warm_lock:
+            if not _writer_warm_started:
+                _writer_warm_started = True
+                threading.Thread(target=_writer_warm_loop, daemon=True, name="writer-warm").start()
 
 
 @app.route("/api/settings/writer", methods=["GET"])

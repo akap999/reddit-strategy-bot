@@ -12931,6 +12931,11 @@ async function renderBlogs(c) {
                 <span class="text-gray-600">— weave 3-6 links to the brand's own (verified) pages + published sibling blogs into the body, and generate an SEO meta title. Quality/extractability preserved; off = today's output exactly.</span>
             </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-pricing" checked>
+                💲 Include pricing
+                <span class="text-gray-600">— research &amp; compare per-product prices, canonical prices and price cells (default on). UNCHECK for a non-pricing blog (how-to, doctor-led comparison) to skip ALL pricing work — no pricing searches, no price cells, cheaper.</span>
+            </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
                 <input type="checkbox" id="blog-gen-refresh-competitors" onchange="_blogRefreshCbToggle()">
                 🔄 Refresh competitor data
                 <a href="javascript:void(0)" onclick="event.preventDefault();blogCompetitorCacheModal(+document.getElementById('blog-gen-brand').value, 'refresh')" class="underline text-blue-400">choose / view…</a>
@@ -13056,6 +13061,19 @@ function _blogQualityToast(res) {
     }
 }
 
+function _blogWriterToast(res) {
+    // FU164: surface the self-hosted writer-pass time + a LOUD warning when it fell back (the
+    // watermark was NOT stripped — usually a cold-start/timeout on the Modal GPU).
+    if (!res) return;
+    const mode = res.writer_mode_used || '';
+    const secs = Number(res.writer_secs || 0);
+    if (mode === 'fallback') {
+        toast('⚠ Watermark-strip FELL BACK — the self-hosted writer failed/timed out; the watermark is NOT stripped. Regenerate.', 'error', 12000);
+    } else if (mode && secs) {
+        toast(`Writer: ${secs.toFixed(0)}s (${mode})`, 'info');
+    }
+}
+
 function blogCheckLinks(id) {
     // FU151 (D): on-demand HTTP link-rot check (Source + internal URLs); persists into the quality report.
     runTask('/api/blogs/' + id + '/check-links', {}, (res) => {
@@ -13140,6 +13158,7 @@ function blogGenerate() {
     const use_web_search = !!document.getElementById('blog-gen-websearch')?.checked;
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
+    const include_pricing = document.getElementById('blog-gen-pricing')?.checked !== false;   // FU162: default ON
     // FU160: selective competitor-cache refresh — a per-competitor selection from the popup wins;
     // else the plain checkbox = refresh ALL (back-compat).
     const _rs = window._blogRefreshSel || { all: false, slugs: [] };
@@ -13157,13 +13176,14 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90 doorway signal
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150 pricing conflict
         _blogQualityToast(res);   // FU151 (D)
+        _blogWriterToast(res);    // FU164 writer time / fallback
         if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
@@ -13733,6 +13753,7 @@ function blogRegen(id, part) {
         if (res && res.geo_warning) toast('⚠ ' + res.geo_warning, 'info', 9000);   // FU90
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150
         _blogQualityToast(res);   // FU151 (D)
+        _blogWriterToast(res);    // FU164 writer time / fallback
     }, `Regenerating ${part}`);
 }
 

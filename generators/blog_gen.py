@@ -4156,10 +4156,11 @@ Return JSON only:
         keep = []
         for l in head.split("\n"):
             s = l.lstrip()
-            if s.startswith("#") or s.startswith("|"):   # heading or table row/separator
+            if s.startswith("#") or s.startswith("|") or s.startswith(">"):  # heading / table row / blockquote
                 continue
             keep.append(l)
         prose = re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
+        prose = re.sub(r"[\"\u201c\u201d][^\"\u201c\u201d]{12,}?[\"\u201c\u201d]", " ", prose)  # drop quoted spans
         sents = re.split(r"(?<=[.!?])\s+", prose)          # drop deliberately-preserved clinical-directive sentences
         return " ".join(x for x in sents if not _CLINICAL_DIRECTIVE_RE.search(x))
 
@@ -4175,6 +4176,41 @@ Return JSON only:
             return 0
         m = _SequenceMatcher(None, wa, wb, autojunk=False)   # autojunk off → don't skip common words
         return m.find_longest_match(0, len(wa), 0, len(wb)).size
+
+    @staticmethod
+    def _residual_run_stats(a, b, min_run=5):
+        """FU171: the WORST-CASE guard, measured as RESIDUAL MASS rather than "does any single run exceed 4".
+
+        Mechanism: SynthID-Text detection scores the MEAN g-value over the whole text — it needs many
+        surviving marked tokens to clear its threshold, which is exactly why a thorough paraphrase scrubs
+        it (>90% in the published research). So the honest question is not "did ANY verbatim island
+        survive" but "how MUCH of the text is still the original token sequence". A lone 19-word island in
+        1,500 reworded words cannot lift the mean; 40% of the article surviving obviously can.
+
+        This matters because a strict `longest_run <= 4` bar is UNACHIEVABLE by construction on a YMYL
+        page: the rewrite prompt REQUIRES drug/brand names, regulation codes (503A/503B) and dosing atoms
+        verbatim, and the FU168/169 fact-integrity gate hard-FAILS a rewrite that alters them — so chained
+        atoms ("503A and 503B compounding pharmacies", "Flexible Spending Accounts and Health Savings
+        Accounts") and quoted regulator language mechanically produce 5+ word runs no regeneration can
+        remove. Grading on that bar pinned every medical article to "not-confirmed" and told the operator
+        to "regenerate for a cleaner strip" — advice that could never work.
+
+        Returns (longest_run, residual_share, sample) where residual_share = the fraction of b's prose
+        words sitting inside a shared run of >= min_run words, and sample is the longest such run's text.
+        Deterministic, no network."""
+        wa = re.findall(r"\w+", (a or "").lower())
+        wb_raw = re.findall(r"\w+", (b or ""))
+        wb = [w.lower() for w in wb_raw]
+        if not wa or not wb:
+            return 0, 0.0, ""
+        longest, covered, sample = 0, 0, ""
+        for blk in _SequenceMatcher(None, wa, wb, autojunk=False).get_matching_blocks():
+            if blk.size >= min_run:
+                covered += blk.size
+                if blk.size > longest:
+                    longest = blk.size
+                    sample = " ".join(wb_raw[blk.b:blk.b + blk.size])[:200]
+        return longest, round(covered / len(wb), 4), sample
 
     # FU167: invisible / zero-width / Default_Ignorable / noncharacter / bidi carrier code points — the
     # "invisible character" watermark/steganography class (NOT Claude's statistical mark, which is word
@@ -4212,16 +4248,25 @@ Return JSON only:
         verifiable, and no AI engine can detect it): thorough / strong / not-confirmed."""
         pa, pb = cls._prose_for_overlap(claude_body), cls._prose_for_overlap(out)
         overlap = cls._ngram_overlap(pa, pb, n=5)            # discretionary-prose overlap at context-window+1
-        run = cls._longest_shared_run(pa, pb)                # worst-case surviving verbatim run
+        run, share, sample = cls._residual_run_stats(pa, pb) # FU171: worst-case = residual MASS, not any-run>4
         inv = len(cls._INVISIBLE_RE.findall(out or ""))
         target = float(os.environ.get("WRITER_OVERLAP_TARGET", "0.05"))
-        if overlap < target and run <= 4 and inv == 0:
+        # FU171: grade on the RATE (overlap) + the MASS of surviving verbatim text (share), because
+        # detection scores the MEAN g-value over the whole text — a lone atom/quote island can't lift it,
+        # while a large surviving fraction can. `run` stays REPORTED for transparency; a single huge intact
+        # passage (>= _RESIDUAL_RUN_CAP words) still fails outright, so the guard can't be gamed by one
+        # enormous copied block hiding under a small share.
+        # Thresholds follow the published paraphrase-scrub result (>90% of the mark removed): "strong"
+        # = the great majority (>85%) of the token sequence was re-emitted; "thorough" = >95%.
+        cap = int(os.environ.get("WRITER_RESIDUAL_RUN_CAP", "40"))
+        if overlap < target and share < 0.05 and run < cap and inv == 0:
             grade = "thorough"
-        elif overlap < 0.15 and run <= 4 and inv == 0:
+        elif overlap < 0.15 and share < 0.15 and run < cap and inv == 0:
             grade = "strong"
         else:
             grade = "not-confirmed"
         return {"n5_prose_overlap": round(overlap, 3), "longest_shared_run": int(run),
+                "residual_share": share, "residual_sample": sample,
                 "invisible_chars": int(inv), "grade": grade}
 
     @staticmethod
@@ -4581,8 +4626,8 @@ Return JSON only:
                 out, _inv = self._strip_invisible_chars(out)
                 rep = self._watermark_removal_report(claude_body, out)
                 # keep the attempt with the LOWEST (overlap, longest_run) — never just the last one.
-                if best is None or (rep["n5_prose_overlap"], rep["longest_shared_run"]) < \
-                        (best_rep["n5_prose_overlap"], best_rep["longest_shared_run"]):
+                if best is None or (rep["n5_prose_overlap"], rep.get("residual_share", 1.0)) < \
+                        (best_rep["n5_prose_overlap"], best_rep.get("residual_share", 1.0)):
                     best, best_rep = out, rep
                 # FU165: a compose shorter than the reference SHIPS (never fall back) — warn only.
                 if self.writer_mode == "compose" and claude_body and len(out) < 0.6 * len(claude_body):
@@ -4635,8 +4680,8 @@ Return JSON only:
                             rep_s = self._watermark_removal_report(claude_body, sec_out)
                             print(f"[writer] section-chunked pass: n5-overlap {rep_s['n5_prose_overlap']:.2f} "
                                   f"longest-run {rep_s['longest_shared_run']} grade={rep_s['grade']}", flush=True)
-                            if (rep_s["n5_prose_overlap"], rep_s["longest_shared_run"]) < \
-                                    (best_rep["n5_prose_overlap"], best_rep["longest_shared_run"]):
+                            if (rep_s["n5_prose_overlap"], rep_s.get("residual_share", 1.0)) < \
+                                    (best_rep["n5_prose_overlap"], best_rep.get("residual_share", 1.0)):
                                 best, best_rep = sec_out, rep_s   # keep it only if it's genuinely cleaner
                         else:
                             print(f"[writer] section-chunked pass rejected: {why_s}", flush=True)
@@ -4644,22 +4689,35 @@ Return JSON only:
                     print(f"[writer] section-chunked pass failed: {_e}", flush=True)
 
             _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
+            _share = best_rep.get("residual_share", 0.0)
             article["writer_mode_used"] = self.writer_mode
             article["writer_overlap"] = _ov
             article["writer_longest_run"] = _run
+            article["writer_residual_share"] = _share
             article["writer_grade"] = _grade
+            _res = f"{_share * 100:.1f}% of the prose still verbatim, longest run {_run} words"
             if _grade == "thorough":
                 _wm = ""
             elif _grade == "strong":
-                _wm = (f"watermark-strip strong, low residual (n=5 overlap {_ov:.2f}, longest run {_run}) "
+                _wm = (f"watermark-strip strong, low residual (n=5 overlap {_ov:.2f}; {_res}) "
                        f"— proxy, not detector-verifiable")
             else:
-                _wm = (f"watermark-strip: not fully confirmed (n=5 overlap {_ov:.2f}, longest run {_run}) "
+                # FU171: only advise a regenerate when re-rolling can actually help (a genuinely weak
+                # strip). When the residual is a small amount of text the rewrite is REQUIRED to keep
+                # verbatim (drug/brand names, 503A/503B-style regulation codes, dosing atoms, quoted
+                # regulator language — all hard-gated by _facts_preserved), regenerating can never clear
+                # it, so say that plainly instead of sending the operator round the loop again.
+                _structural = _ov < 0.15 and _run < int(os.environ.get("WRITER_RESIDUAL_RUN_CAP", "40"))
+                _wm = (f"watermark-strip: residual is the preserved facts/quotes the rewrite must keep "
+                       f"verbatim ({_res}) — regenerating will NOT reduce it; review before publishing"
+                       if _structural else
+                       f"watermark-strip: not fully confirmed (n=5 overlap {_ov:.2f}; {_res}) "
                        f"— proxy; regenerate for a cleaner strip")
             # preserve any compose-shorter note set inside the loop
             article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
             print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s grade={_grade} "
-                  f"n5_overlap={_ov:.2f} longest_run={_run}", flush=True)
+                  f"n5_overlap={_ov:.2f} residual_share={_share:.3f} longest_run={_run} "
+                  f"residual_sample={(best_rep.get('residual_sample') or '')[:90]!r}", flush=True)
             return best
         except Exception as e:
             print(f"[writer] pass errored ({e}) — keeping the Claude body.", flush=True)

@@ -33,14 +33,21 @@ def test_r1_prose_overlap_grades():
     assert r2["n5_prose_overlap"] >= 0.15 and r2["grade"] == "not-confirmed"
 
 
-# ── R2: longest shared run > 4 FAILS even when the overall overlap is low ──────────────────────
-def test_r2_longest_run_fails_even_when_overlap_low():
+# ── R2: a surviving verbatim run is REPORTED, and grades by how MUCH survives (FU171) ──────────
+def test_r2_longest_run_reported_and_graded_by_mass():
+    """FU167 originally failed ANY run > 4. FU171 changed that deliberately: on a YMYL page the rewrite is
+    REQUIRED to keep drug names / 503A-503B codes / dosing atoms verbatim (the fact gate hard-fails
+    otherwise), so 5+ word runs are unavoidable and that bar could never be met. The run is still reported;
+    the grade now follows the residual MASS, because detection scores the MEAN over the whole text."""
     claude = " ".join("w%d" % i for i in range(60))                      # 60 distinct words
     out = " ".join("z%d" % i for i in range(40)) + " " + " ".join("w%d" % i for i in range(20, 27))  # a 7-word run
     r = B._watermark_removal_report(claude, out)
     assert r["n5_prose_overlap"] < 0.15            # only a couple of 5-grams overlap → low average
-    assert r["longest_shared_run"] >= 7            # but a 7-word verbatim run survived
-    assert r["grade"] == "not-confirmed"           # the run guard fails it despite the low overlap
+    assert r["longest_shared_run"] >= 7            # the surviving run is still REPORTED (transparency)
+    assert r["grade"] != "not-confirmed"           # a lone small island no longer pins the grade
+    # …but let that same run be a LARGE share of a short rewrite and it fails again
+    r2 = B._watermark_removal_report(claude, " ".join("w%d" % i for i in range(20, 32)))
+    assert r2["residual_share"] > 0.15 and r2["grade"] == "not-confirmed"
 
 
 # ── R3: context BROKEN around a preserved atom (the mechanism-derived rule) ────────────────────
@@ -247,3 +254,45 @@ def test_fu168_loop_rejects_fact_dropping_attempt():
     out = _gen(w, "rewrite")._apply_writer_pass({"body_markdown": body}, body, {"name": "X"}, "dose")
     assert out == good and "2.5" in out                         # the fact-dropping attempt was rejected → shipped the safe one
     assert len(w.prompts) == 2
+
+
+# ── FU171: grade on RESIDUAL MASS, not "any single run > 4" ────────────────────────────────────
+def test_fu171_atom_island_does_not_pin_grade_to_not_confirmed():
+    """A YMYL page REQUIRES drug names / 503A-503B codes / dosing atoms verbatim (the fact gate hard-fails
+    otherwise), so chained atoms mechanically make 5+ word runs no regeneration can remove. A lone island
+    amid thoroughly reworded prose must NOT read 'not-confirmed' — detection scores the MEAN over the text."""
+    claude = ("# H\n\n" + " ".join(f"the organization reviewed budget item {i} carefully this quarter" for i in range(30))
+              + "\n\nDuring the shortage the FDA permitted 503A and 503B compounding pharmacies to produce "
+                "compounded tirzepatide for patients.\n")
+    rewrite = ("# H\n\n" + " ".join(f"members examined spending line {i} closely during that period" for i in range(30))
+               + "\n\nDuring the shortage the FDA permitted 503A and 503B compounding pharmacies to produce "
+                 "compounded tirzepatide for patients.\n")
+    rep = B._watermark_removal_report(claude, rewrite)
+    assert rep["longest_shared_run"] >= 5              # the atom island genuinely survives (still reported)
+    assert rep["residual_share"] < 0.15                # but it is a small fraction of the prose
+    assert rep["grade"] in ("strong", "thorough")      # → no longer pinned to not-confirmed
+
+
+def test_fu171_large_verbatim_survival_still_fails():
+    """The guard can't be gamed: a mostly-unchanged body has high residual MASS → still not-confirmed."""
+    claude = "# H\n\n" + " ".join(f"the organization reviewed budget item {i} carefully this quarter" for i in range(30))
+    rep = B._watermark_removal_report(claude, claude)   # verbatim copy
+    assert rep["residual_share"] > 0.5 and rep["grade"] == "not-confirmed"
+
+
+def test_fu171_single_huge_intact_passage_still_fails():
+    """A single enormous copied block fails outright via the run cap, even at a small share."""
+    filler = " ".join(f"members examined spending line {i} closely during that period" for i in range(400))
+    intact = " ".join(f"the organization reviewed budget item {i} carefully this quarter" for i in range(12))
+    rep = B._watermark_removal_report("# H\n\n" + intact, "# H\n\n" + filler + " " + intact)
+    assert rep["longest_shared_run"] >= 40 and rep["grade"] == "not-confirmed"
+
+
+def test_fu171_prose_surface_drops_blockquote_and_quoted_spans():
+    body = ("Regular discretionary prose sits here in the body.\n\n"
+            "> Important: it is contraindicated in patients with medullary thyroid carcinoma.\n\n"
+            'The agency stated that "compounded drug may not be identical or nearly identical to an approved drug".\n')
+    prose = B._prose_for_overlap(body)
+    assert "discretionary prose" in prose
+    assert "contraindicated" not in prose                      # blockquote dropped
+    assert "nearly identical" not in prose                     # quoted span dropped (copied ⇒ not a model choice)

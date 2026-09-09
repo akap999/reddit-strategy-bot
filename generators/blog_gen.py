@@ -99,6 +99,19 @@ _LOADBEARING_NUM_RE = re.compile(
     r"|\d[\d,]*\s?(?:mg|mcg|µg|ug|ng|mL|ml|kg|g|units?|iu|mmol|meq)\b"      # number + unit: 15 mg, 500 units
     r"|\d[\d,]*\s?(?:mg|mcg|g|mL|ml)?/\s?(?:mL|ml|day|wk|week|mo|month|dose|kg|hr|hour)\b",  # rate: 2.5mg/mL, 100/day
     re.IGNORECASE)
+# FU170: a SENTENCE we DELIBERATELY keep verbatim for YMYL safety — a contraindication, a boxed warning,
+# a safety negation ("not a controlled substance", "not FDA-approved"), or a dosing-escalation directive.
+# The rewrite prompt's SAFETY FALLBACK preserves these word-for-word (rewording risks flipping a negation's
+# scope, which the fact-integrity gate can't catch), so — exactly like Markdown tables and the ## Sources
+# list — they are low-entropy, intentionally identical, and carry ~no SynthID watermark. _prose_for_overlap
+# drops them so a SAFE strip of the discretionary prose isn't graded "not-confirmed" by a residual the
+# operator could only remove by risking a clinical fact (and regenerating never clears it).
+_CLINICAL_DIRECTIVE_RE = re.compile(
+    r"contraindicat|boxed warning|medullary thyroid|multiple endocrine neoplasia|\bMEN\s?2\b"
+    r"|not a controlled substance|not FDA-approved|not approved as a|\bmust not\b"
+    r"|\bmg\b.{0,70}?(?:increment|maintenance|escalat|titrat|starting dose|once weekly)"
+    r"|(?:increment|maintenance|escalat|titrat|starting dose|once weekly).{0,70}?\bmg\b",
+    re.IGNORECASE)
 # FU158: a comparison DIMENSION that is a pricing/cost column (vertical-neutral) — used to skip the
 # subject's own-domain pricing re-search when an authoritative canonical price already exists.
 _PRICE_DIM_RE = re.compile(r"pric|cost|\bfee\b|\bfees\b|\$|/mo|month|subscription|billing|plan\b",
@@ -4132,10 +4145,13 @@ Return JSON only:
 
     @staticmethod
     def _prose_for_overlap(body):
-        """FU154: return only the PROSE for the watermark-overlap metric — strip the structural /
-        must-preserve-verbatim parts (headings, Markdown table rows, the whole ## Sources section,
-        inline [S#] markers). Those are low-entropy, deliberately kept identical, and would otherwise
-        inflate the overlap even though they carry ~no SynthID watermark (which lives in the prose)."""
+        """FU154/170: return only the DISCRETIONARY PROSE for the watermark-overlap metric — strip the
+        structural / must-preserve-verbatim parts (headings, Markdown table rows, the whole ## Sources
+        section, inline [S#] markers) AND the clinical-DIRECTIVE sentences we deliberately keep verbatim for
+        YMYL safety (contraindications, dosing schedules, safety negations — _CLINICAL_DIRECTIVE_RE). All of
+        those are low-entropy, intentionally identical, and carry ~no SynthID watermark (which lives in the
+        discretionary prose); counting them would inflate the overlap and falsely grade a SAFE strip
+        'not-confirmed' over a residual that can only be removed by risking a clinical fact."""
         head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body or "", maxsplit=1)[0]   # drop Sources
         keep = []
         for l in head.split("\n"):
@@ -4143,7 +4159,9 @@ Return JSON only:
             if s.startswith("#") or s.startswith("|"):   # heading or table row/separator
                 continue
             keep.append(l)
-        return re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
+        prose = re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
+        sents = re.split(r"(?<=[.!?])\s+", prose)          # drop deliberately-preserved clinical-directive sentences
+        return " ".join(x for x in sents if not _CLINICAL_DIRECTIVE_RE.search(x))
 
     @staticmethod
     def _longest_shared_run(a, b):
@@ -4239,6 +4257,100 @@ Return JSON only:
         return (not missing), sorted(missing)
 
     @staticmethod
+    def _split_heading_segments(body):
+        """FU170: split a Markdown body into [(heading_line_or_None, chunk_text)] segments at every
+        heading line, keeping the pre-first-heading preamble as a leading (None, text) segment. Used by
+        the section-chunked rewrite so each writer call carries ONE section instead of the whole article.
+        (Distinct from the FU54 `_split_sections`, which returns (title, block) pairs for the substance guard.)"""
+        segs, head, buf = [], None, []
+        for line in (body or "").split("\n"):
+            if line.lstrip().startswith("#"):
+                if head is not None or any(x.strip() for x in buf):
+                    segs.append((head, "\n".join(buf)))
+                head, buf = line, []
+            else:
+                buf.append(line)
+        if head is not None or any(x.strip() for x in buf):
+            segs.append((head, "\n".join(buf)))
+        return segs
+
+    def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600):
+        """FU170: SECTION-CHUNKED rewrite — the structural lever for the residual verbatim runs.
+        Rewriting a ~2,400-word article in ONE call forces the 72B to hold every constraint at once
+        (23 citations + 15 headings + a table + every number/negation), so it anchors on the original
+        wording for dense factual prose — 4 whole-article attempts still left ~57 runs of 5+ words.
+        Rewriting ONE section per call leaves few enough competing constraints that the model actually
+        recasts each paragraph. Headings are re-emitted from the ORIGINAL (never sent for rewording), and
+        a section whose call fails keeps its ORIGINAL text (safe degradation — content is never lost).
+        Returns the reassembled body, or None when the writer produced nothing usable at all."""
+        segs = self._split_heading_segments(claude_body)
+        if not segs:
+            return None
+        out_parts, rewritten_n = [], 0
+        for head, chunk in segs:
+            src = chunk if chunk.strip() else ""
+            if not src.strip():
+                out_parts.append(head if head is not None else "")
+                continue
+            # the '## Sources' section is rebuilt deterministically by _rebuild_sources — never reword it
+            if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
+                out_parts.append((head + "\n" + chunk) if head else chunk)
+                continue
+            prompt = (
+                f"Rewrite ONE SECTION of a {name} article ENTIRELY in your own words — a full rewrite, not "
+                "a light edit.\n\n"
+                "WHY: the original was written by another AI whose word choices carry a hidden statistical "
+                "mark, which lives in the DISCRETIONARY wording, not the facts. So:\n"
+                "- REPLACE every discretionary word (connectives, transitions, adjectives, verbs, adverbs, "
+                "sentence openers) and RECAST every sentence's structure;\n"
+                "- share NO run of MORE THAN 4 consecutive words with the original — the single most "
+                "important rule;\n"
+                "- REORDER clauses and sentences wherever the meaning allows;\n"
+                "- reword right up to each preserved item (never leave the original phrasing touching one).\n\n"
+                "PRESERVE EXACTLY: every [S#] citation marker (keep each on the claim it supports); every "
+                "number, dose, %, price and date; every product/drug/brand name; every Markdown table "
+                "(structure and cell values, verbatim); and every NEGATION or clinical directive with its "
+                "exact scope ('not', 'no', 'contraindicated', 'only', 'required', 'not FDA-approved', "
+                "'not a controlled substance').\n"
+                "Descriptive factual and regulatory sentences (definitions, eligibility ranges, "
+                "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
+                "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
+                "schedule, or a safety negation whose scope you cannot preserve while rewording.\n"
+                "Do NOT add a heading, a preamble, or any commentary. Return ONLY the rewritten section "
+                "text.\n\n"
+                f"SECTION TEXT:\n{src}"
+            )
+            got = None
+            try:
+                got = self.writer.call_text(prompt, max_tokens=3000, temperature=temperature,
+                                            timeout=timeout)
+            except Exception:
+                got = None
+            got = (got or "").strip()
+            # The model is told not to emit a heading, but enforce it deterministically: we re-emit the
+            # ORIGINAL heading ourselves, so any heading line the model returns would duplicate it (and a
+            # reworded one would trip the heading gate). Drop heading lines the source chunk didn't have.
+            if got and not any(l.lstrip().startswith("#") for l in src.split("\n")):
+                got = "\n".join(l for l in got.split("\n") if not l.lstrip().startswith("#")).strip()
+            # a section rewrite must not drop this section's citations or its load-bearing facts
+            if got:
+                sec_cited = set(re.findall(r"\[S\d+\]", src))
+                if not sec_cited <= set(re.findall(r"\[S\d+\]", got)):
+                    got = ""
+                elif not self._facts_preserved(src, got)[0]:
+                    got = ""
+                elif len(got) < 0.5 * len(src.strip()):     # truncated / stub
+                    got = ""
+            body_txt = got if got else chunk                 # safe degradation → keep the original section
+            if got:
+                rewritten_n += 1
+            out_parts.append((head + "\n" + body_txt) if head is not None else body_txt)
+        if not rewritten_n:
+            return None
+        print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(segs)} sections reworded", flush=True)
+        return "\n".join(out_parts)
+
+    @staticmethod
     def _restore_headings(orig_heads, rewritten_body):
         """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
         reworded heading is put back to its exact original text + level while the reworded PROSE (the
@@ -4296,7 +4408,12 @@ Return JSON only:
                 harder = ("\n\nIMPORTANT: a previous attempt reused too much of the original wording. "
                           "Rewrite the PROSE FAR more aggressively — share NO run of more than 4 words with the "
                           "original body text; replace EVERY discretionary word, reorder clauses and sentences, "
-                          "and reword right up to each preserved atom. But copy every [S#] and every heading "
+                          "and reword right up to each preserved atom. In particular FULLY RECAST every "
+                          "multi-sentence factual / regulatory paragraph and every FAQ answer (change the sentence "
+                          "order and structure, not just a few words) — a surviving 5+-word run almost always comes "
+                          "from a factual or FAQ sentence left too close to the original; the ONLY sentences you may "
+                          "keep verbatim are the narrow contraindication / dosing-schedule / safety-negation ones. "
+                          "But copy every [S#] and every heading "
                           "line CHARACTER-FOR-CHARACTER — only the paragraph text under the headings changes.") if aggressive else ""
                 if self.writer_mode == "compose":
                     # FU165: give Qwen the EXACT SAME article-writing prompt Claude used (all the rules +
@@ -4372,9 +4489,16 @@ Return JSON only:
                     "- the '## Sources' section at the end.\n"
                     "REWORD the wording of EVERY sentence, INCLUDING factual, regulatory, clinical and FAQ sentences "
                     "— keep the preserved items above EXACT and NEVER change a fact's meaning, a negation, a "
-                    "comparison, or a clinical directive. SAFETY FALLBACK: if rewording a clinical / regulatory / "
-                    "dosing / contraindication sentence would risk changing its meaning AT ALL, keep THAT sentence "
-                    "VERBATIM; when in doubt on a safety-critical clinical statement, preserve it.\n"
+                    "comparison, or a clinical directive. Descriptive factual / regulatory / FAQ sentences "
+                    "(definitions, dates, eligibility ranges, pricing prose, logistics, certifications, timelines, "
+                    "process steps) MUST be recast — do NOT leave one near-verbatim; and each FAQ answer must be "
+                    "phrased differently from the body and from the question (never paste a body sentence into it). "
+                    "NARROW SAFETY FALLBACK: keep a WHOLE sentence verbatim ONLY when it states a CONTRAINDICATION, "
+                    "a DOSING instruction/escalation schedule, or a safety NEGATION whose scope you cannot preserve "
+                    "while rewording (e.g. a medullary-thyroid/MEN2 contraindication, the 2.5 mg dose-escalation "
+                    "schedule, 'not a controlled substance', 'not FDA-approved'). That is a LAST resort for a "
+                    "genuinely meaning-critical clinical statement — NEVER a default for a sentence that merely "
+                    "sounds clinical or regulatory.\n"
                     "Meaning, facts, structure and citations stay identical; only the WORDING changes.\n"
                     "Return ONLY the rewritten Markdown article, nothing else.\n\n"
                     f"ARTICLE:\n{claude_body}{harder}"
@@ -4418,18 +4542,26 @@ Return JSON only:
             # FU167: rewrite runs up to N escalating attempts and ships the LOWEST-(overlap, longest_run)
             # valid one (not the last); compose keeps its 2-attempt / ship-first-valid behavior.
             _attempts = int(os.environ.get("WRITER_REWRITE_ATTEMPTS", "4")) if self.writer_mode == "rewrite" else 2
+            # FU170: on a LONG article the section-chunked stage below is what actually clears the residual,
+            # and the extra whole-article retries measurably do NOT (a real 4-attempt run took 963s and every
+            # attempt landed at the same ~0.29 overlap). So cap the whole-article attempts at 2 there — just
+            # enough for a baseline — and spend that time on the section pass instead of a 3rd/4th re-roll.
+            _long_article = (self.writer_mode == "rewrite"
+                             and len(claude_body) >= int(os.environ.get("WRITER_SECTION_MIN_CHARS", "4000"))
+                             and len(self._split_heading_segments(claude_body)) >= 3)
+            if _long_article:
+                _attempts = min(_attempts, 2)
             best, best_rep, last_why, secs = None, None, "", 0.0
             for attempt in range(_attempts):
                 # FU155/167: ramp the sampling temperature each attempt → more lexical diversity → lower
                 # verbatim overlap (the gates + heading-restore still protect facts/structure).
                 _temp = min(0.9 + 0.1 * attempt, 1.2)
                 _t0 = _t.time()
+                # FU164: a warm gen is ~2-5 min — 300s false-timed-out → fell back (wasted time +
+                # reinstated the watermark). 600s + the app-level keep-warm (base.WriterClient.warm) fixes both.
+                _timeout = int(os.environ.get("WRITER_CALL_TIMEOUT", "600"))
                 out = self.writer.call_text(_build_prompt(aggressive=(attempt > 0)),
-                                            max_tokens=9000, temperature=_temp,
-                                            # FU164: a warm gen is ~2-5 min — 300s false-timed-out → fell back
-                                            # (wasted time + reinstated the watermark). 600s + the app-level
-                                            # keep-warm (base.WriterClient.warm) fixes both.
-                                            timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                                            max_tokens=9000, temperature=_temp, timeout=_timeout)
                 secs += _t.time() - _t0
                 article["writer_secs"] = round(secs, 1)
                 # Rewrite mode: put the ORIGINAL headings back positionally so a reworded heading isn't a
@@ -4474,6 +4606,42 @@ Return JSON only:
                 print(f"[blog_gen] writer: FALLBACK {secs:.1f}s — {last_why or 'validation failed'} "
                       f"(watermark NOT stripped — is the container warm / the timeout high enough?)", flush=True)
                 return claude_body
+
+            # FU170 — SECTION-CHUNKED FINAL STAGE (the structural lever). On a LONG, dense article the
+            # whole-article retries above just reproduce the same anchored factual prose: the 72B must hold
+            # every constraint at once (all citations + headings + tables + numbers + negations), so it
+            # recasts the discretionary prose but leaves regulatory/FAQ sentences near-verbatim (4 attempts
+            # still left ~57 runs of 5+ words → grade stuck at not-confirmed, and "regenerate" never cleared
+            # it). Rewriting ONE section per call leaves few enough competing constraints that the model
+            # actually recasts them. Runs only when we already HAVE a valid rewrite whose grade is weak and
+            # the article is long enough for the constraint-load to be the problem — so short articles and a
+            # broken/failing writer keep their existing behavior exactly.
+            if _long_article and best_rep["grade"] not in ("thorough", "strong"):
+                try:
+                    _t0 = _t.time()
+                    sec_out = self._rewrite_sections(
+                        claude_body, name, temperature=1.1,
+                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                    secs += _t.time() - _t0
+                    article["writer_secs"] = round(secs, 1)
+                    if sec_out and heads:
+                        _restored = self._restore_headings(heads, sec_out)
+                        if _restored is not None:
+                            sec_out = _restored
+                    if sec_out:
+                        ok_s, why_s = _valid(sec_out)
+                        if ok_s:
+                            sec_out, _ = self._strip_invisible_chars(sec_out)
+                            rep_s = self._watermark_removal_report(claude_body, sec_out)
+                            print(f"[writer] section-chunked pass: n5-overlap {rep_s['n5_prose_overlap']:.2f} "
+                                  f"longest-run {rep_s['longest_shared_run']} grade={rep_s['grade']}", flush=True)
+                            if (rep_s["n5_prose_overlap"], rep_s["longest_shared_run"]) < \
+                                    (best_rep["n5_prose_overlap"], best_rep["longest_shared_run"]):
+                                best, best_rep = sec_out, rep_s   # keep it only if it's genuinely cleaner
+                        else:
+                            print(f"[writer] section-chunked pass rejected: {why_s}", flush=True)
+                except Exception as _e:
+                    print(f"[writer] section-chunked pass failed: {_e}", flush=True)
 
             _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
             article["writer_mode_used"] = self.writer_mode

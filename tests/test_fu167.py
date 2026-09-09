@@ -116,7 +116,7 @@ def test_fu168_rewrite_prompt_rewords_factual_with_safety_fallback():
     p = w.prompts[0]
     assert "and factual claim" not in p                         # no longer preserve whole factual SENTENCES
     assert "REWORD the wording of EVERY sentence" in p          # reword factual/regulatory/FAQ sentences too
-    assert "SAFETY FALLBACK" in p and "keep THAT sentence VERBATIM" in p
+    assert "SAFETY FALLBACK" in p and "keep a WHOLE sentence verbatim ONLY when" in p   # FU170 narrowed it
     assert "contraindicated" in p and "negation" in p.lower()   # negations/directives kept exact
 
 
@@ -146,6 +146,94 @@ def test_fu169_bare_and_rhetorical_numbers_not_gated():
     # a genuine unit-qualified dose (100 mg) IS load-bearing even though bare 100 is not
     ok3, miss3 = B._facts_preserved("Take 100 mg once daily [S1].", "Take it once daily [S1].")
     assert not ok3 and "100" in miss3
+
+
+def test_fu170_prose_for_overlap_drops_preserved_clinical_sentences():
+    """FU170: the clinical-directive sentences we DELIBERATELY keep verbatim for YMYL safety
+    (contraindications / dosing schedules / safety negations) must NOT count toward the overlap metric —
+    like tables/Sources, they're low-entropy, intentionally identical, and watermark-sparse, so a safe
+    discretionary-prose strip isn't perpetually graded 'not-confirmed' on a medical page."""
+    body = (
+        "LegitScript is a third-party certification body that verifies online pharmacies comply with US law.\n\n"
+        "It is contraindicated in patients with a personal or family history of medullary thyroid carcinoma.\n\n"
+        "The recommended starting dose is 2.5 mg once weekly; escalation occurs in 2.5 mg increments.\n\n"
+        "Compounded tirzepatide is not FDA-approved as a finished drug product."
+    )
+    prose = B._prose_for_overlap(body)
+    assert "LegitScript" in prose                                   # descriptive prose KEPT (must be reworded → counted)
+    assert "contraindicated" not in prose                           # contraindication sentence dropped
+    assert "increments" not in prose                                # dosing-escalation sentence dropped
+    assert "FDA-approved" not in prose                              # safety-negation sentence dropped
+    # so a rewrite that fully rewords the descriptive prose but keeps the 3 clinical sentences verbatim
+    # grades on the discretionary prose alone
+    rewrite = (
+        "A third-party accreditor, LegitScript, confirms that internet pharmacies follow American regulations.\n\n"
+        "It is contraindicated in patients with a personal or family history of medullary thyroid carcinoma.\n\n"
+        "The recommended starting dose is 2.5 mg once weekly; escalation occurs in 2.5 mg increments.\n\n"
+        "Compounded tirzepatide is not FDA-approved as a finished drug product."
+    )
+    rep = B._watermark_removal_report(body, rewrite)
+    assert rep["longest_shared_run"] <= 4 and rep["n5_prose_overlap"] < 0.15   # clinical runs no longer inflate it
+
+
+def _long_body(n_sections=5, filler="The organization reviewed its yearly finances and approved extra "
+                                    "support for scientific study programs across several departments. "):
+    """A LONG multi-section article (>= WRITER_SECTION_MIN_CHARS) so the FU170 section stage engages."""
+    parts = ["# Guide\n"]
+    for i in range(n_sections):
+        parts.append(f"## Section {i}\n\n" + (filler * 12) + f"[S1]\n")
+    parts.append("## Sources\n- [S1] X — <https://x>\n")
+    return "\n".join(parts)
+
+
+class _SectionAwareWriter:
+    """Returns a near-copy for the WHOLE-ARTICLE prompt (so the loop's best stays weak) but a genuinely
+    reworded chunk for each SECTION prompt — i.e. the real production shape the FU170 stage targets."""
+    def __init__(self, body):
+        self.body = body
+        self.prompts = []
+
+    def call_text(self, prompt, system_prompt=None, max_tokens=6000, temperature=0.7, timeout=300):
+        self.prompts.append(prompt)
+        if "SECTION TEXT:" in prompt:                      # per-section call → fully recast wording
+            src = prompt.split("SECTION TEXT:", 1)[1]
+            n = src.count("[S1]")
+            return ("Members examined this year's budget and greenlit additional money aimed at research "
+                    "efforts spanning multiple teams. " * 12) + ("[S1]" * n)
+        return self.body                                   # whole-article call → verbatim near-copy
+
+
+def test_fu170_section_stage_engages_on_long_article_and_lowers_overlap():
+    body = _long_body()
+    assert len(body) >= 4000                                # long enough to trip the gate
+    w = _SectionAwareWriter(body)
+    art = {"body_markdown": body}
+    out = _gen(w, "rewrite")._apply_writer_pass(art, body, {"name": "X"}, "guide")
+    assert any("SECTION TEXT:" in p for p in w.prompts)     # the section-chunked stage RAN
+    assert out != body                                      # shipped the reworded sections, not the near-copy
+    assert "Members examined" in out
+    assert art["writer_overlap"] < 0.15 and art["writer_longest_run"] <= 4   # residual runs cleared
+    assert art["writer_grade"] in ("thorough", "strong")
+    assert "## Sources" in out and "[S1]" in out            # structure + citations intact
+
+
+def test_fu170_section_stage_skipped_on_short_article():
+    """A short article keeps today's behavior exactly — no section calls, no extra cost."""
+    w = _ScriptWriter([CLAUDE_R5])
+    art = {"body_markdown": CLAUDE_R5}
+    _gen(w, "rewrite")._apply_writer_pass(art, CLAUDE_R5, {"name": "X"}, "guide")
+    assert not any("SECTION TEXT:" in p for p in w.prompts)
+    assert len(w.prompts) == 4                              # the 4 whole-article attempts, unchanged
+
+
+def test_fu170_rewrite_prompt_narrows_safety_fallback():
+    w = _ScriptWriter([CLAUDE_R5])
+    gen = _gen(w, "rewrite")
+    gen._apply_writer_pass({"body_markdown": CLAUDE_R5}, CLAUDE_R5, {"name": "X"}, "guide")
+    p = w.prompts[0]
+    assert "NARROW SAFETY FALLBACK" in p                            # no longer the broad "keep any clinical sentence"
+    assert "MUST be recast" in p and "FAQ answer must be phrased differently" in p
+    assert "LAST resort" in p
 
 
 def test_fu168_loop_rejects_fact_dropping_attempt():

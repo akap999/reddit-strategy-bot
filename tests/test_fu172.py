@@ -368,3 +368,44 @@ def test_fu172_fact_dense_body_not_punished_but_near_copy_still_fails():
     assert r["residual_discretionary_share"] < 0.15      # …but almost none of it is free-choice prose
     assert r["grade"] in ("strong", "thorough")
     assert B._watermark_removal_report(src, src, {"name": "Acme HR"})["grade"] == "not-confirmed"
+
+
+# ── FU174: the extraction layer must not re-introduce the FU169 bare/rhetorical-number failure ───
+def test_fu174_rhetorical_numbers_are_not_gateable():
+    """FU169 established that a bare/rhetorical number must never hard-fail a rewrite (Qwen validly turns
+    '100% of patients' into 'virtually all patients'). The FU172 extraction layer re-admitted them through
+    a new door — 'contains a digit' was enough to be accepted as an atom — and every rewrite fell back
+    with dropped facts ['100', '100%']."""
+    for rhetorical in ["100", "100%", "27%", "24/7"]:
+        assert not B._atom_shape_ok(rhetorical), rhetorical
+    for real in ["2.5 mg", "$149", "503B", "FDA", "99.9%", "3.9% APR", "5 seats", "March 19, 2025",
+                 "Zepbound®", "LillyDirect", "SOC 2"]:
+        assert B._atom_shape_ok(real), real
+
+
+def test_fu174_long_pricing_structure_is_not_enforced_verbatim():
+    """A 9-word pricing phrase enforced as a verbatim TOKEN makes every recast of that sentence fail.
+    The structure is a MEANING question — the semantic verifier owns it; the gate holds only short values."""
+    long_price = "starting at $149/month then $249/month billed quarterly for 60mg"
+    gate = B._gate_atoms(["2.5 mg", "$149", "$249", long_price, "March 19, 2025"])
+    assert long_price not in gate
+    assert gate == ["2.5 mg", "$149", "$249", "March 19, 2025"]
+    # …and a rewrite that recasts the sentence but keeps the values passes the gate
+    ok, missing = B._facts_preserved(
+        "PeterMD is starting at $149/month then $249/month billed quarterly for 60mg [S1].",
+        "PeterMD opens at $149/month and settles at $249/month, billed every quarter for 60mg [S1].",
+        {"name": "PeterMD"}, B._gate_atoms(["$149", "$249", long_price]))
+    assert ok, missing
+    # while a rewrite that DROPS a price still fails
+    bad_ok, bad_missing = B._facts_preserved(
+        "PeterMD is starting at $149/month then $249/month billed quarterly for 60mg [S1].",
+        "PeterMD opens at $149/month, billed every quarter for 60mg [S1].",
+        {"name": "PeterMD"}, B._gate_atoms(["$149", "$249", long_price]))
+    assert not bad_ok and "$249" in bad_missing
+
+
+def test_fu174_recall_audit_no_longer_restores_rhetorical_percents():
+    body = "# H\n\nThe service is 100% online and the dose is 2.5 mg once weekly [S1].\n"
+    out = _extract([])._extract_protected_facts(body, {"name": "X"})   # model returns nothing
+    kept = " ".join(out["atoms"])
+    assert "2.5" in kept and "100%" not in kept

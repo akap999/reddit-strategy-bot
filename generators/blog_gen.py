@@ -95,10 +95,12 @@ _PRICE_SIGNAL_RE = re.compile(
 # the deterministic gate protects only the numbers whose silent alteration is a real clinical/commercial error.
 _LOADBEARING_NUM_RE = re.compile(
     r"(?:\$|€|£|USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"                              # currency: $149, $1,000, €2.50
-    r"|\d[\d,]*\.\d+\s?%?"                                                       # decimal:  2.5, 6.5, 3.9% (dose/threshold/APR)
+    r"|\d[\d,]*\.\d+\s?%?"                                                       # decimal:  2.5, 6.5, 99.9%, 3.9% (dose/threshold/APR/SLA)
+    # NB (FU174): a BARE-INTEGER percent ("100%", "27%") is deliberately NOT load-bearing — it is usually
+    # rhetorical ("100% online", "100% of patients") and Qwen validly rewords it, which the FU169 fix
+    # established must never hard-fail a rewrite. Decimal percents above stay gated.
     # FU172 GENERALITY: units must not be medical-only — a "5 seats" / "99.9% uptime" / "14-day term" /
     # "3.9% APR" fact is exactly as load-bearing for a SaaS or lending brand as a dose is for a clinic.
-    r"|\d[\d,]*\s?%"                                                              # percent: 99.9%, 27%
     r"|\d[\d,]*\s?(?:mg|mcg|µg|ug|ng|mL|ml|kg|g|units?|iu|mmol|meq)\b"            # clinical: 15 mg, 500 units
     r"|\d[\d,]*\s?(?:seat|seats|user|users|licen[sc]e|licen[sc]es|member|members)\b"   # SaaS: 5 seats
     r"|\d[\d,]*\s?(?:GB|TB|MB|requests?|calls?|queries)\b"                        # quota: 100 GB, 10k requests
@@ -4703,17 +4705,41 @@ Return JSON only:
         ws = (span or "").split()
         if not (1 <= len(ws) <= 14):
             return False
-        has_digit = any(re.search(r"\d", w) for w in ws)
-        caps = sum(1 for w in ws if re.match(r"[A-Z]", w))
+        # FU174: "contains a digit" was too loose — it re-admitted the BARE/RHETORICAL numbers FU169
+        # deliberately stopped gating ("100", "100%"), so Qwen validly rewording "100% of patients" →
+        # "virtually all patients" failed every attempt and fell back. A number only counts when it is
+        # genuinely LOAD-BEARING (currency / decimal / unit-qualified / term) or part of a date.
+        loadbearing = bool(_LOADBEARING_NUM_RE.search(span))
+        dated = bool(re.search(r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d",
+                               span) or re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", span))
+        code = bool(re.search(r"\b\d+[A-Za-z]\b|\b[A-Z]{2,}\d*\b", span))    # 503A, FDA, MEN2, SOC
         marked = "®" in span or "™" in span
         # A SINGLE capitalised token is ambiguous — "LillyDirect"/"PeterMD" are names, but "Reputable" is
         # just sentence-initial prose. Internal capitalisation (or ALLCAPS) is the discriminator.
         named = any(re.search(r"[a-z][A-Z]", w) or re.fullmatch(r"[A-Z]{2,}\d*", w) for w in ws)
-        if not (has_digit or caps >= 2 or marked or named):
+        caps = sum(1 for w in ws if re.match(r"[A-Z]", w))
+        if not (loadbearing or dated or code or marked or named or caps >= 2):
             return False
-        if len(ws) > 8 and not has_digit:      # long spans allowed only as value/pricing structures
+        if len(ws) > 8 and not (loadbearing or dated):   # long spans only as value/pricing/date structures
             return False
         return True
+
+    @staticmethod
+    def _gate_atoms(atoms):
+        """FU174: which extracted atoms may be enforced VERBATIM by the fact gate.
+
+        The gate is a presence check, so a LONG span turns into "this whole phrase must survive
+        word-for-word" — which is the opposite of what we want. A 9-word pricing structure
+        ("starting at $149/month then $249/month billed quarterly for 60mg") made every rewrite of that
+        sentence fail and fall back. The structure still matters, but it is a MEANING question, so it is
+        checked by the semantic verifier (_verify_facts_semantic: intro-vs-ongoing, cadence, what it
+        covers, whose price) — while the token gate holds only the short, indivisible values."""
+        out = []
+        for a in atoms or []:
+            a = (a or "").strip()
+            if a and len(a.split()) <= 3:
+                out.append(a)
+        return out
 
     def _extract_protected_facts(self, claude_body, brand=None):
         """FU172 Change 0 — run FIRST: ask Claude for the spans that must survive verbatim, then VERIFY them
@@ -4742,6 +4768,9 @@ Return JSON only:
                 "dose and a regulation code for healthcare; a part number and a tolerance for manufacturing.\n"
                 "EXCLUDE category wording that can be freely reworded (e.g. 'compounding pharmacies', "
                 "'weight loss program', 'project management platform', 'flexible pricing').\n"
+                "EXCLUDE rhetorical or incidental numbers that carry no fact — '100% online', '24/7', "
+                "'thousands of patients', a count of list items. Rewording those changes nothing, and "
+                "locking them only stops the rewrite doing its job.\n"
                 "USE THE SHORTEST SPAN that carries the fact — a long span needlessly locks the prose "
                 "around it.\n"
                 "Also return up to 8 WHOLE sentences that cannot be safely reworded at all because their "
@@ -5051,7 +5080,9 @@ Return JSON only:
                 # FU168: fact-integrity gate — a rewrite that dropped/altered any load-bearing fact token
                 # (number/dose/price, FDA/MTC/MEN2/503A…, ®-name, brand/competitor name) is UNSAFE → reject
                 # (so aggressive rewording of factual sentences can't silently change a clinical fact).
-                ok_f, missing_f = self._facts_preserved(claude_body, out, brand, _atoms)
+                # FU174: only the SHORT atoms are enforced verbatim; long pricing/date structures inform
+                # the prompt and are checked for MEANING by the semantic verifier instead.
+                ok_f, missing_f = self._facts_preserved(claude_body, out, brand, self._gate_atoms(_atoms))
                 if not ok_f:
                     return False, f"dropped facts {missing_f[:5]}"
                 return True, ""

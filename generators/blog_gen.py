@@ -86,6 +86,19 @@ _PRICE_SIGNAL_RE = re.compile(
     r"(\$\s?\d|[€£]\s?\d|\b\d+(?:\.\d+)?\s?(?:usd|eur|gbp)\b|"
     r"\b\d+(?:\.\d+)?\s?(?:/|per\s+)mo(?:nth)?\b|\bper\s+month\b|\bfree\s+(?:tier|plan|version|forever)\b)",
     re.IGNORECASE)
+# FU169: which numbers are genuinely LOAD-BEARING for the fact-integrity gate (_facts_preserved) — a
+# decimal (dose/threshold: 2.5, 6.5), a currency amount (a price: $149, $1,000), or a number carrying a
+# physical/clinical UNIT (15 mg, 100 mg, 500 units, 2.5 mg/mL). BARE integers and rhetorical percents
+# (100%, top 100, 3 steps, the year 2026) are NOT hard-gated — they caused false-positive fallbacks (a
+# reworded "100% → all/completely" dropped an incidental "100" and killed an otherwise-perfect rewrite
+# → the rewrite NEVER shipped). The rewrite PROMPT + the human review-before-publish still cover those;
+# the deterministic gate protects only the numbers whose silent alteration is a real clinical/commercial error.
+_LOADBEARING_NUM_RE = re.compile(
+    r"(?:\$|€|£|USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"                              # currency: $149, $1,000, €2.50
+    r"|\d[\d,]*\.\d+"                                                            # decimal:  2.5, 6.5, 12.5 (dose/threshold)
+    r"|\d[\d,]*\s?(?:mg|mcg|µg|ug|ng|mL|ml|kg|g|units?|iu|mmol|meq)\b"      # number + unit: 15 mg, 500 units
+    r"|\d[\d,]*\s?(?:mg|mcg|g|mL|ml)?/\s?(?:mL|ml|day|wk|week|mo|month|dose|kg|hr|hour)\b",  # rate: 2.5mg/mL, 100/day
+    re.IGNORECASE)
 # FU158: a comparison DIMENSION that is a pricing/cost column (vertical-neutral) — used to skip the
 # subject's own-domain pricing re-search when an authoritative canonical price already exists.
 _PRICE_DIM_RE = re.compile(r"pric|cost|\bfee\b|\bfees\b|\$|/mo|month|subscription|billing|plan\b",
@@ -4195,27 +4208,35 @@ Return JSON only:
 
     @staticmethod
     def _facts_preserved(claude_body, out, brand=None):
-        """FU168: the deterministic FACT-INTEGRITY gate — how we DETERMINE a factual-sentence rewrite is
-        SAFE without trusting the 72B's judgment. Extract the load-bearing fact TOKENS from Claude's body
-        (numbers/doses/prices, acronyms + regulation codes like FDA/MTC/MEN2/503A/503B, ®-marked names,
-        the brand + competitor names) and require EVERY one to still appear VERBATIM in the rewrite. A
-        rewrite missing any protected token FAILS validation (won't ship) → a reworded sentence that
-        DROPPED or ALTERED a dose / condition / rule can never ship. Returns (ok, missing[]). Excludes the
-        ## Sources section (its URL numbers are rebuilt by _rebuild_sources — not a fact to protect)."""
+        """FU168/169: the deterministic FACT-INTEGRITY gate — how we DETERMINE a factual-sentence rewrite is
+        SAFE without trusting the 72B's judgment. Extract the LOAD-BEARING fact TOKENS from Claude's body and
+        require EVERY one to still appear in the rewrite; a rewrite missing any FAILS validation (won't ship) →
+        a reworded sentence that DROPPED or ALTERED a dose / price / condition / rule can never ship.
+        Protected: load-bearing NUMBERS only (_LOADBEARING_NUM_RE — decimals/doses, currency prices,
+        unit-qualified amounts; NOT bare integers or rhetorical percents — FU169 fixed those false positives
+        that made the rewrite never ship), regulation/clinical CODES (503A/503B; ≥3-letter acronyms FDA/MTC/
+        MEN2/HIPAA/BMI — the ≥3 floor drops US/AI/2-letter false positives), ®/™-marked names, and the brand +
+        competitor names. Number matching is comma-normalized ($1,000≡$1000, "15 mg"≡"15mg"). Returns
+        (ok, missing[]). Excludes the ## Sources section (its URL numbers are rebuilt by _rebuild_sources)."""
         head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", claude_body or "", maxsplit=1)[0]
-        protected = set()
-        protected |= set(re.findall(r"\d[\d,.]*\d|\d", head))          # numbers / doses / prices / thresholds
-        protected |= set(re.findall(r"\b[A-Z]{2,}\d*\b", head))        # FDA, MTC, MEN2, GLP, GIP, TRT, FSA, HSA, BMI
-        protected |= set(re.findall(r"\b\d+[A-Z]\b", head))            # 503A, 503B
-        protected |= set(re.findall(r"\b\w+(?=®|™)", head))            # Zepbound®, Mounjaro®
+        out_s = out or ""
+        out_nc = out_s.replace(",", "")                                   # comma-normalized (for number cores)
+        missing = set()
+        for m in _LOADBEARING_NUM_RE.finditer(head):                     # load-bearing numbers → compare on the digit CORE
+            core = re.sub(r"[^\d.]", "", m.group(0)).strip(".")          # keep digits + decimal point only
+            if core and core not in out_nc:
+                missing.add(core)
+        literal = set()
+        literal |= set(re.findall(r"\b\d+[A-Z]\b", head))                # 503A, 503B (digit-then-letter code)
+        literal |= set(re.findall(r"\b[A-Z]{3,}\d*\b", head))            # FDA, MTC, MEN2, HIPAA, BMI, GLP, TRT (≥3 → not US/AI)
+        literal |= set(re.findall(r"\b\w+(?=®|™)", head))                # Zepbound®, Mounjaro®
         if brand:
             for nm in [(brand.get("name") or "")] + list(brand.get("competitors") or []):
                 nm = (nm or "").strip()
                 if len(nm) >= 3:
-                    protected.add(nm)
-        out_s = out or ""
-        missing = sorted({t for t in protected if t and t not in out_s})
-        return (not missing), missing
+                    literal.add(nm)
+        missing |= {t for t in literal if t and t not in out_s}
+        return (not missing), sorted(missing)
 
     @staticmethod
     def _restore_headings(orig_heads, rewritten_body):

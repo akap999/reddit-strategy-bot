@@ -130,6 +130,24 @@ def test_fu168_facts_preserved_gate():
     assert not ok and "2.5" in miss and "503B" in miss and "MEN2" in miss
 
 
+def test_fu169_bare_and_rhetorical_numbers_not_gated():
+    """FU169: an incidental/rhetorical number the rewrite validly rephrases away must NOT block the ship
+    (the '100' false positive that made the on-demand rewrite always fall back). Load-bearing numbers
+    (decimals, currency, unit-qualified doses) STILL hard-gate; comma/format variance is normalized."""
+    claude = ("Nearly 100% of patients tolerate it, and 3 of the top 100 clinics offer it; the starting "
+              "dose is 2.5 mg weekly and it costs $1,000 per year [S1].")
+    # reworded "100% → virtually all", "3 of the top 100 → several", dose+price KEPT (as $1000, "2.5mg")
+    ok, miss = B._facts_preserved(claude,
+        "Virtually all patients tolerate it; several leading clinics offer it — starting at 2.5mg a week, $1000 yearly [S1].")
+    assert ok and miss == []                                  # bare 100 / 3 / rhetorical % no longer block; $1,000≡$1000, 15 mg≡15mg
+    # but DROPPING the dose or the price still fails
+    ok2, miss2 = B._facts_preserved(claude, "Virtually all tolerate it; several clinics offer it yearly [S1].")
+    assert not ok2 and "2.5" in miss2 and "1000" in miss2
+    # a genuine unit-qualified dose (100 mg) IS load-bearing even though bare 100 is not
+    ok3, miss3 = B._facts_preserved("Take 100 mg once daily [S1].", "Take it once daily [S1].")
+    assert not ok3 and "100" in miss3
+
+
 def test_fu168_loop_rejects_fact_dropping_attempt():
     body = ("# H\n\nThe starting dose is 2.5 mg once weekly for adults beginning therapy this year [S1].\n\n"
             "## Sources\n- [S1] x — <https://x>\n")

@@ -13695,15 +13695,23 @@ async function writerStatus(poll) {
     const el = document.getElementById('writer-status');
     if (!el) return;
     try {
-        const r = await api('/api/settings/writer/test', 'POST', {});
-        const st = (r && r.state) || 'error';
+        // NOTE: use fetch directly, NOT api() — api() pops an error toast on every failure, which would
+        // spam the screen while polling. The dot IS the signal here.
+        const resp = await fetch('/api/settings/writer/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const r = resp.ok ? await resp.json().catch(() => null) : null;
+        const st = (r && r.state) || (resp.ok ? 'error' : ('HTTP ' + resp.status));
         const map = {
             ok:          ['#22c55e', '● model loaded — ready'],
             warming:     ['#f59e0b', '● model cold — loading (first run will be slower)'],
             auth:        ['#ef4444', '● auth rejected — check the writer API key'],
             unreachable: ['#ef4444', '● endpoint unreachable'],
         };
-        const [c, t] = map[st] || ['#ef4444', '● ' + ((r && r.detail) || 'writer not configured')];
+        if (resp.status === 401) { el.style.color = '#ef4444'; el.textContent = '● signed out — reload the page'; return; }
+        const [c, t] = map[st] || ['#ef4444', '● ' + ((r && r.detail) || st || 'writer not configured')];
         el.style.color = c; el.textContent = t;
         if (poll && st === 'warming') setTimeout(() => writerStatus(true), 15000);
     } catch (e) { el.style.color = '#ef4444'; el.textContent = '● status unavailable'; }
@@ -13716,8 +13724,13 @@ setInterval(() => {
 function writerWarmUp() {
     const el = document.getElementById('writer-status');
     if (el) { el.style.color = '#f59e0b'; el.textContent = '● waking the GPU…'; }
-    toast('Warming the model — the dot turns green when it is loaded. You can start the rewrite then.', 'info', 8000);
-    writerStatus(true);   // the probe itself triggers the load; keep polling until it reports ok
+    // the probe itself triggers the Modal load; keep polling until it reports ok
+    writerStatus(true).then(() => {
+        const cur = (document.getElementById('writer-status') || {}).textContent || '';
+        if (cur.indexOf('ready') !== -1) toast('Model is already loaded — go ahead and rewrite.', 'success');
+        else if (cur.indexOf('cold') !== -1) toast('Warming the model — the dot turns green when it is loaded.', 'info');
+        else toast('Writer endpoint problem: ' + cur.replace(/^●\s*/, ''), 'error');
+    });
 }
 
 function blogGenRewrite(id) {

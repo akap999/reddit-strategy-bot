@@ -5097,12 +5097,58 @@ Return JSON only:
             _long_article = (self.writer_mode == "rewrite"
                              and len(claude_body) >= int(os.environ.get("WRITER_SECTION_MIN_CHARS", "4000"))
                              and len(self._split_heading_segments(claude_body)) >= 3)
-            if _long_article:
-                # FU173: the section pass SUPERSEDES the whole-article rewrite on a long article, so the
-                # extra full attempts (~2-3 min each) only ever produced a baseline to compare against.
-                # One valid baseline is enough; keep-only-if-better still governs what ships.
-                _attempts = 1
             best, best_rep, last_why, secs = None, None, "", 0.0
+
+            def _run_sections():
+                """The section-chunked rewrite as a reusable stage. Returns (body, report) or (None, None).
+                Never raises."""
+                nonlocal secs
+                try:
+                    _s0 = _t.time()
+                    sec_out = self._rewrite_sections(
+                        claude_body, name, temperature=1.1,
+                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                    _sdt = _t.time() - _s0
+                    secs += _sdt
+                    _stage["sections"] = round(_sdt, 1)
+                    article["writer_secs"] = round(secs, 1)
+                    if sec_out and heads:
+                        _restored = self._restore_headings(heads, sec_out)
+                        if _restored is not None:
+                            sec_out = _restored
+                    if not sec_out:
+                        return None, None
+                    ok_s, why_s = _valid(sec_out)
+                    if not ok_s:
+                        print(f"[writer] section-chunked pass rejected: {why_s}", flush=True)
+                        return None, None
+                    sec_out, _ = self._strip_invisible_chars(sec_out)
+                    rep_s = self._watermark_removal_report(claude_body, sec_out, brand, _atoms)
+                    print(f"[writer] section-chunked pass: n5-overlap {rep_s['n5_prose_overlap']:.2f} "
+                          f"longest-run {rep_s['longest_shared_run']} grade={rep_s['grade']}", flush=True)
+                    return sec_out, rep_s
+                except Exception as _e:
+                    print(f"[writer] section-chunked pass failed: {_e}", flush=True)
+                    return None, None
+
+            # FU175: on a LONG article run the SECTION pass FIRST. It is both faster (16 small calls in
+            # parallel ≈ 40s) and better at recasting dense factual prose than one 9k-token whole-article
+            # call (~212s, i.e. 78% of a measured 271s run) — whose output was then usually DISCARDED in
+            # favour of the section result anyway. So do the cheap-and-better stage first and only pay for
+            # the whole-article rewrite when the section pass fails or comes out weak.
+            _sections_done = False
+            if _long_article:
+                _sec, _sec_rep = _run_sections()
+                if _sec is not None:
+                    best, best_rep, _sections_done = _sec, _sec_rep, True
+                    if _sec_rep["grade"] in ("thorough", "strong"):
+                        _attempts = 0        # good enough — skip the slow whole-article rewrite entirely
+                        print("[writer] section pass is sufficient — skipping the whole-article rewrite",
+                              flush=True)
+                    else:
+                        _attempts = 1        # weak → ONE whole-article attempt as an alternative
+                else:
+                    _attempts = 1            # section pass failed → fall back to the whole-article path
             for attempt in range(_attempts):
                 # FU155/167: ramp the sampling temperature each attempt → more lexical diversity → lower
                 # verbatim overlap (the gates + heading-restore still protect facts/structure).
@@ -5179,34 +5225,14 @@ Return JSON only:
             # actually recasts them. Runs only when we already HAVE a valid rewrite whose grade is weak and
             # the article is long enough for the constraint-load to be the problem — so short articles and a
             # broken/failing writer keep their existing behavior exactly.
-            if _long_article and best_rep["grade"] not in ("thorough", "strong"):
-                try:
-                    _t0 = _t.time()
-                    sec_out = self._rewrite_sections(
-                        claude_body, name, temperature=1.1,
-                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
-                    _dt = _t.time() - _t0
-                    secs += _dt
-                    _stage["sections"] = round(_dt, 1)
-                    article["writer_secs"] = round(secs, 1)
-                    if sec_out and heads:
-                        _restored = self._restore_headings(heads, sec_out)
-                        if _restored is not None:
-                            sec_out = _restored
-                    if sec_out:
-                        ok_s, why_s = _valid(sec_out)
-                        if ok_s:
-                            sec_out, _ = self._strip_invisible_chars(sec_out)
-                            rep_s = self._watermark_removal_report(claude_body, sec_out, brand, _atoms)
-                            print(f"[writer] section-chunked pass: n5-overlap {rep_s['n5_prose_overlap']:.2f} "
-                                  f"longest-run {rep_s['longest_shared_run']} grade={rep_s['grade']}", flush=True)
-                            if (rep_s["n5_prose_overlap"], rep_s.get("residual_share", 1.0)) < \
-                                    (best_rep["n5_prose_overlap"], best_rep.get("residual_share", 1.0)):
-                                best, best_rep = sec_out, rep_s   # keep it only if it's genuinely cleaner
-                        else:
-                            print(f"[writer] section-chunked pass rejected: {why_s}", flush=True)
-                except Exception as _e:
-                    print(f"[writer] section-chunked pass failed: {_e}", flush=True)
+            # FU175: only reached when the section pass has NOT already run (short article, or the
+            # whole-article path was taken first). Keep-only-if-better is unchanged.
+            if _long_article and not _sections_done and best_rep \
+                    and best_rep["grade"] not in ("thorough", "strong"):
+                _sec, _sec_rep = _run_sections()
+                if _sec is not None and (_sec_rep["n5_prose_overlap"], _sec_rep.get("residual_share", 1.0)) < \
+                        (best_rep["n5_prose_overlap"], best_rep.get("residual_share", 1.0)):
+                    best, best_rep = _sec, _sec_rep   # keep it only if it's genuinely cleaner
 
             # ── FU172: classify the ACTUAL surviving spans, polish the discretionary residual, then
             # verify the facts semantically. Each stage keeps its result ONLY if it is genuinely better,
@@ -5313,7 +5339,9 @@ Return JSON only:
                        f"watermark-strip: not fully confirmed ({_res}) — proxy; regenerate for a cleaner "
                        f"strip{_rev}")
             article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
-            print("[writer] stages: " + " · ".join(f"{k} {v:.0f}s" for k, v in _stage.items() if v)
+            # Show EVERY stage, including zeros — "attempts 0s" is itself the signal that the slow
+            # whole-article rewrite was skipped because the section pass was already good enough.
+            print("[writer] stages: " + " · ".join(f"{k} {v:.0f}s" for k, v in _stage.items())
                   + ("  (model was COLD — the GPU load is inside first_call)" if _was_cold
                      else "  (model was warm)"), flush=True)
             print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s grade={_grade} "

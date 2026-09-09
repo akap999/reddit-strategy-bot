@@ -152,3 +152,56 @@ def test_fu173_missing_probe_does_not_break_the_pass():
     art = {"body_markdown": BODY}
     out = _gen(w)._apply_writer_pass(art, BODY, {"name": "X"}, "t")
     assert out and art.get("writer_was_cold") is False
+
+
+# ── FU175: sections run FIRST; the slow whole-article rewrite is only a FALLBACK ─────────────────
+# must exceed WRITER_SECTION_MIN_CHARS (4000) and have >=3 heading segments for the section path
+LONG = ("# T\n\n" + "".join(
+    f"## S{i}\n\n" + ("The committee reviewed the quarterly budget allocation in considerable detail "
+                       f"during this reporting period and noted item {i} for follow-up [S1]. " * 6)
+    + "\n\n" for i in range(6))
+    + "## Sources\n- [S1] x — <https://x>\n")
+
+
+def _reword(src):
+    """A genuinely different rewording → the section pass grades well."""
+    return (src.replace("The committee reviewed the quarterly budget allocation in considerable detail "
+                        "during this reporting period and noted", "Members went through spending plans "
+                        "closely across those weeks, flagging")
+            .replace("for follow-up", "to revisit later"))
+
+
+def test_fu175_good_section_pass_skips_the_whole_article_rewrite():
+    """The whole-article call was 212s of a measured 271s run and its output was usually DISCARDED in
+    favour of the section result. When sections come out clean, that call must not happen at all."""
+    w = _CountingWriter(transform=lambda src: _reword(src))
+    art = {"body_markdown": LONG}
+    out = _gen(w)._apply_writer_pass(art, LONG, {"name": "X"}, "t")
+    whole = sum(1 for p in w.prompts if "Re-compose the following finished blog article" in p)
+    assert any("SECTION TEXT:" in p for p in w.prompts), "section pass did not run"
+    assert whole == 0, f"whole-article rewrite should have been skipped, ran {whole}x"
+    assert art["writer_grade"] in ("strong", "thorough")
+    assert out and "[S1]" in out and "## S0" in out          # content + citations intact
+
+
+def test_fu175_weak_section_pass_still_falls_back_to_whole_article():
+    """If the section pass comes out weak (here: it returns the source unchanged), the slow path must
+    still run so we never ship a worse result just because it was cheap."""
+    w = _CountingWriter(transform=lambda src: src)           # no rewording at all → weak
+    art = {"body_markdown": LONG}
+    _gen(w)._apply_writer_pass(art, LONG, {"name": "X"}, "t")
+    whole = sum(1 for p in w.prompts if "Re-compose the following finished blog article" in p)
+    assert whole == 1, f"expected the whole-article fallback to run once, got {whole}"
+
+
+def test_fu175_failed_section_pass_falls_back_to_whole_article():
+    """A section pass that ERRORS must not strand the run — the whole-article path still executes."""
+    class _Boom(_CountingWriter):
+        def call_text(self, prompt, **k):
+            if "SECTION TEXT:" in prompt:
+                raise RuntimeError("section call died")
+            return super().call_text(prompt, **k)
+    w = _Boom(transform=lambda src: _reword(src))
+    art = {"body_markdown": LONG}
+    _gen(w)._apply_writer_pass(art, LONG, {"name": "X"}, "t")
+    assert sum(1 for p in w.prompts if "Re-compose the following finished blog article" in p) >= 1

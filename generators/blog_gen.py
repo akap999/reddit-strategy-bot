@@ -137,6 +137,34 @@ _CRITICAL_DIRECTIVE_RE = re.compile(
     re.IGNORECASE)
 _CLINICAL_DIRECTIVE_RE = _CRITICAL_DIRECTIVE_RE   # back-compat alias for existing call sites
 
+# FU176: a PRICE's cadence is part of the fact. "$249/month billed quarterly" (≈$747 a quarter) and
+# "$249 quarterly" differ ~3x, yet BOTH contain "$249" — so the presence-based fact gate passes them
+# equally, and the LLM semantic verifier missed exactly this in a real shipped rewrite (in the Quick
+# answer, the most-extracted position on the page). This deterministic check pairs every money token with
+# the cadence terms attached to it and fails a DROPPED cadence. Vertical-neutral: an APR losing its term
+# or a per-seat price becoming per-account is the same failure.
+# Each pattern accepts the natural PARAPHRASES of its cadence, not just the original wording — the whole
+# point of the rewrite is to reword freely, so "billed quarterly" → "charged every quarter" must PASS.
+# Only an outright DROPPED cadence is a failure. A false positive here would needlessly revert a good
+# sentence; a false negative would ship a wrong price — hence paraphrases in, synonyms folded together.
+_CADENCE_PATTERNS = [
+    (re.compile(r"per\s+month|/\s*month\b|/\s*mo\b|\bmonthly\b|(?:every|each|a)\s+month\b", re.I), "MONTH"),
+    (re.compile(r"per\s+week|/\s*week\b|\bweekly\b|(?:every|each|a)\s+week\b", re.I), "WEEK"),
+    (re.compile(r"per\s+quarter|\bquarterly\b|(?:every|each)\s+quarter\b"
+                r"|(?:every|each)\s+(?:three|3)\s+months", re.I), "QUARTER"),
+    (re.compile(r"per\s+year|/\s*year\b|\bannual(?:ly)?\b|\byearly\b|per\s+annum"
+                r"|(?:every|each|a)\s+year\b|(?:every|each)\s+(?:twelve|12)\s+months", re.I), "YEAR"),
+    (re.compile(r"first\s+month|initial\s+month|opening\s+month", re.I), "FIRST_MONTH"),
+    (re.compile(r"one[-\s]time|single\s+payment|up[-\s]front", re.I), "ONE_TIME"),
+    (re.compile(r"per\s+seat|/\s*seat\b|per\s+user|/\s*user\b|(?:each|a)\s+seat\b", re.I), "PER_SEAT"),
+    (re.compile(r"\b\d+[-\s]week\b", re.I), "N_WEEK"),
+    # a contract TERM is part of the offer too — "$1,000 per month over 12 months" losing "over 12 months"
+    # drops the total commitment (lending, SaaS annual plans, financed equipment).
+    (re.compile(r"(?:over|for|across)\s+(?:\d+|twelve|six|three|two)\s+(?:month|year|week)s?\b"
+                r"|\b\d+[-\s](?:month|year)\s+term\b", re.I), "TERM"),
+]
+_MONEY_RE = re.compile(r"(?:\$|€|£)\s?[\d,]+(?:\.\d+)?")
+
 # FU172: function words carry no real choice in context (near-deterministic), so they are not evidence of a
 # surviving watermark. Vertical-neutral.
 _FUNCTION_WORDS = frozenset("""a an the and or of to in on for with as is are was were be been being that
@@ -4518,6 +4546,8 @@ Return JSON only:
                     got = ""
                 elif not self._facts_preserved(src, got)[0]:
                     got = ""
+                elif not self._price_cadence_ok(src, got)[0]:
+                    got = ""                                 # FU176: price cadence drifted → keep original
                 elif len(got) < 0.5 * len(src.strip()):     # truncated / stub
                     got = ""
             body_txt = got if got else chunk                 # safe degradation → keep the original section
@@ -4614,8 +4644,8 @@ Return JSON only:
             if not rep or rep == orig:
                 continue
             ok, _missing = self._facts_preserved(orig, rep, brand)
-            if not ok:
-                continue                                   # dropped a fact → keep the original sentence
+            if not ok or not self._price_cadence_ok(orig, rep)[0]:
+                continue                                   # dropped a fact/cadence → keep the original
             body = body.replace(orig, rep, 1)
             applied += 1
         print(f"[writer] residual polish: {applied}/{len(cands)} sentences reworded", flush=True)
@@ -4651,6 +4681,14 @@ Return JSON only:
                 return body, reverted, False
             issues = [i for i in (res.get("issues") or []) if isinstance(i, dict)
                       and str(i.get("rewritten") or "").strip() and str(i.get("original") or "").strip()]
+            # FU176: the LLM comparison is not exhaustive — it MISSED a real "$249/month billed quarterly"
+            # → "$249 quarterly" drift in a shipped rewrite. Add the deterministic cadence findings so the
+            # same repair-or-revert machinery fixes them, sentence by sentence.
+            for _co, _cr in self._cadence_sentence_pairs(claude_body, body):
+                if not any(str(i.get("rewritten") or "").strip() == _cr for i in issues):
+                    issues.append({"original": _co, "rewritten": _cr,
+                                   "problem": "a price lost its billing cadence (e.g. '/month billed "
+                                              "quarterly' must not become just 'quarterly')"})
             if not issues:
                 print(f"[writer] fact verification: clean ({reverted} reverted)", flush=True)
                 return body, reverted, True
@@ -4723,6 +4761,80 @@ Return JSON only:
         if len(ws) > 8 and not (loadbearing or dated):   # long spans only as value/pricing/date structures
             return False
         return True
+
+    @staticmethod
+    def _price_cadences(text):
+        """FU176: map each money token to the normalized CADENCE terms attached to it. The window stops at
+        the next price / ';' / '.' so a neighbouring price's terms cannot bleed in. Returns a sorted list
+        of (amount, frozenset(cadences)) so two documents can be compared as multisets."""
+        t = re.sub(r"\s+", " ", text or "")
+        out = []
+        for m in _MONEY_RE.finditer(t):
+            rest = t[m.end():m.end() + 70]
+            cut = len(rest)
+            for stop in ("$", ";", ". ", "€", "£"):
+                i = rest.find(stop)
+                if i != -1:
+                    cut = min(cut, i)
+            win = m.group(0) + rest[:cut]
+            tags = frozenset(tag for rx, tag in _CADENCE_PATTERNS if rx.search(win))
+            out.append((m.group(0).replace(" ", ""), tags))
+        return sorted(out)
+
+    @classmethod
+    def _cadence_sentence_pairs(cls, claude_text, out_text):
+        """FU176: locate the SENTENCES behind a cadence drift, so the semantic verifier's repair-or-revert
+        loop can fix them individually instead of failing the whole body. Returns [(original, rewritten)]
+        for each rewrite sentence whose price lost a cadence its counterpart in the original still has."""
+        ok, _ = cls._price_cadence_ok(claude_text, out_text)
+        if ok:
+            return []
+        c_sents = cls._split_sentences_with_pos(claude_text)
+        r_sents = cls._split_sentences_with_pos(out_text)
+        pairs = []
+        for rs in r_sents:
+            amounts = {m.group(0).replace(" ", "") for m in _MONEY_RE.finditer(rs)}
+            if not amounts:
+                continue
+            # Find the ORIGINAL sentence this one was rewritten FROM. Matching on shared amounts ALONE
+            # mis-pairs (a table row full of prices matched a prose sentence about one of them), and a
+            # mis-pair is dangerous: the repair loop reverts a failed fix to the "original", which would
+            # then substitute UNRELATED text. So also require real word overlap, and skip when unsure.
+            # Discriminator = the EXACT SET of amounts. Lexical similarity is useless here: a good rewrite
+            # deliberately shares almost no words with its source, so word-overlap drops the true pair and
+            # keeps false ones (a price-dense table row would match a prose sentence about one price).
+            # Requiring the amount sets to be EQUAL pairs "…$149…$249…" with its counterpart and rejects
+            # the table row outright. Position breaks ties between equally-matching originals.
+            ri = r_sents.index(rs) / max(1, len(r_sents) - 1)
+            best, best_gap = None, 1e9
+            for ci, cs in enumerate(c_sents):
+                cam = {m.group(0).replace(" ", "") for m in _MONEY_RE.finditer(cs)}
+                if cam != amounts:
+                    continue                # not the same set of prices → refuse to guess
+                gap = abs(ci / max(1, len(c_sents) - 1) - ri)
+                if gap < best_gap:
+                    best, best_gap = cs, gap
+            if best and not cls._price_cadence_ok(best, rs)[0]:
+                pairs.append((best, rs))
+        return pairs[:6]
+
+    @classmethod
+    def _price_cadence_ok(cls, claude_text, out_text):
+        """FU176 HARD GATE: every price in the original must still carry its cadence in the rewrite.
+        Compares multisets, so three identical '$249/month billed quarterly' phrases must all survive.
+        Flags only a DROPPED cadence — a synonym swap ('/month' → 'per month' → both MONTH) passes.
+        Returns (ok, problems[])."""
+        from collections import Counter
+        want, got = Counter(cls._price_cadences(claude_text)), Counter(cls._price_cadences(out_text))
+        problems = []
+        for (amt, tags), n in want.items():
+            if not tags:
+                continue                     # a bare price with no stated cadence — nothing to preserve
+            missing = n - got.get((amt, tags), 0)
+            if missing > 0:
+                have = sorted({",".join(sorted(t)) or "none" for (a, t) in got if a == amt})
+                problems.append(f"{amt} lost its cadence ({','.join(sorted(tags))} → {have or ['absent']})")
+        return (not problems), problems
 
     @staticmethod
     def _gate_atoms(atoms):
@@ -5085,6 +5197,11 @@ Return JSON only:
                 ok_f, missing_f = self._facts_preserved(claude_body, out, brand, self._gate_atoms(_atoms))
                 if not ok_f:
                     return False, f"dropped facts {missing_f[:5]}"
+                # FU176: a price that lost its cadence ("$249/month billed quarterly" → "$249 quarterly")
+                # keeps every fact TOKEN, so the gate above passes it — but the meaning changed ~3x.
+                ok_c, probs_c = self._price_cadence_ok(claude_body, out)
+                if not ok_c:
+                    return False, f"price cadence changed: {probs_c[:3]}"
                 return True, ""
 
             # FU167: rewrite runs up to N escalating attempts and ships the LOWEST-(overlap, longest_run)

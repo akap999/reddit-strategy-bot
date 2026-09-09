@@ -4194,6 +4194,30 @@ Return JSON only:
                 "invisible_chars": int(inv), "grade": grade}
 
     @staticmethod
+    def _facts_preserved(claude_body, out, brand=None):
+        """FU168: the deterministic FACT-INTEGRITY gate — how we DETERMINE a factual-sentence rewrite is
+        SAFE without trusting the 72B's judgment. Extract the load-bearing fact TOKENS from Claude's body
+        (numbers/doses/prices, acronyms + regulation codes like FDA/MTC/MEN2/503A/503B, ®-marked names,
+        the brand + competitor names) and require EVERY one to still appear VERBATIM in the rewrite. A
+        rewrite missing any protected token FAILS validation (won't ship) → a reworded sentence that
+        DROPPED or ALTERED a dose / condition / rule can never ship. Returns (ok, missing[]). Excludes the
+        ## Sources section (its URL numbers are rebuilt by _rebuild_sources — not a fact to protect)."""
+        head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", claude_body or "", maxsplit=1)[0]
+        protected = set()
+        protected |= set(re.findall(r"\d[\d,.]*\d|\d", head))          # numbers / doses / prices / thresholds
+        protected |= set(re.findall(r"\b[A-Z]{2,}\d*\b", head))        # FDA, MTC, MEN2, GLP, GIP, TRT, FSA, HSA, BMI
+        protected |= set(re.findall(r"\b\d+[A-Z]\b", head))            # 503A, 503B
+        protected |= set(re.findall(r"\b\w+(?=®|™)", head))            # Zepbound®, Mounjaro®
+        if brand:
+            for nm in [(brand.get("name") or "")] + list(brand.get("competitors") or []):
+                nm = (nm or "").strip()
+                if len(nm) >= 3:
+                    protected.add(nm)
+        out_s = out or ""
+        missing = sorted({t for t in protected if t and t not in out_s})
+        return (not missing), missing
+
+    @staticmethod
     def _restore_headings(orig_heads, rewritten_body):
         """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
         reworded heading is put back to its exact original text + level while the reworded PROSE (the
@@ -4319,10 +4343,18 @@ Return JSON only:
                     "- EVERY heading line (starting with #, ##, or ###) — copy it CHARACTER-FOR-CHARACTER; "
                     "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
                     "the paragraph text UNDER the headings;\n"
-                    "- every number, price, date, product/drug name, and factual claim;\n"
+                    "- every number, dose, %, price, date, and product/drug/brand name;\n"
+                    "- every NEGATION and clinical DIRECTIVE that carries meaning — 'not', 'no', 'contraindicated', "
+                    "'may not', 'required', 'only', 'not FDA-approved', 'not a controlled substance' — keep these "
+                    "words and their scope EXACT (moving or dropping one flips the meaning);\n"
                     "- every Markdown table (structure and cell values);\n"
                     "- the '## Sources' section at the end.\n"
-                    "Meaning, facts, structure and citations stay IDENTICAL — only the discretionary wording changes.\n"
+                    "REWORD the wording of EVERY sentence, INCLUDING factual, regulatory, clinical and FAQ sentences "
+                    "— keep the preserved items above EXACT and NEVER change a fact's meaning, a negation, a "
+                    "comparison, or a clinical directive. SAFETY FALLBACK: if rewording a clinical / regulatory / "
+                    "dosing / contraindication sentence would risk changing its meaning AT ALL, keep THAT sentence "
+                    "VERBATIM; when in doubt on a safety-critical clinical statement, preserve it.\n"
+                    "Meaning, facts, structure and citations stay identical; only the WORDING changes.\n"
                     "Return ONLY the rewritten Markdown article, nothing else.\n\n"
                     f"ARTICLE:\n{claude_body}{harder}"
                 )
@@ -4353,6 +4385,12 @@ Return JSON only:
                     miss = [h for h in heads if h.lower() not in out_heads]
                     if miss:
                         return False, f"dropped headings {miss[:3]}"
+                # FU168: fact-integrity gate — a rewrite that dropped/altered any load-bearing fact token
+                # (number/dose/price, FDA/MTC/MEN2/503A…, ®-name, brand/competitor name) is UNSAFE → reject
+                # (so aggressive rewording of factual sentences can't silently change a clinical fact).
+                ok_f, missing_f = self._facts_preserved(claude_body, out, brand)
+                if not ok_f:
+                    return False, f"dropped facts {missing_f[:5]}"
                 return True, ""
 
             import time as _t

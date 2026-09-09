@@ -106,3 +106,38 @@ def test_grouped_citation_split():
     assert B._split_grouped_citations("[S1,S2,S3]") == "[S1][S2][S3]"
     assert B._split_grouped_citations("[S4, 5, 6]") == "[S4][S5][S6]"
     assert B._split_grouped_citations("a single [S7] marker") == "a single [S7] marker"   # untouched
+
+
+# ── FU168: reword factual sentences too (safely) — prompt + deterministic fact-integrity gate ──
+def test_fu168_rewrite_prompt_rewords_factual_with_safety_fallback():
+    w = _ScriptWriter([CLAUDE_R5])
+    gen = _gen(w, "rewrite")
+    gen._apply_writer_pass({"body_markdown": CLAUDE_R5}, CLAUDE_R5, {"name": "X"}, "guide")
+    p = w.prompts[0]
+    assert "and factual claim" not in p                         # no longer preserve whole factual SENTENCES
+    assert "REWORD the wording of EVERY sentence" in p          # reword factual/regulatory/FAQ sentences too
+    assert "SAFETY FALLBACK" in p and "keep THAT sentence VERBATIM" in p
+    assert "contraindicated" in p and "negation" in p.lower()   # negations/directives kept exact
+
+
+def test_fu168_facts_preserved_gate():
+    claude = "Dose is 2.5 mg weekly; BMI 30; 503A/503B; MTC and MEN2; from $149 [S1]."
+    brand = {"name": "PeterMD", "competitors": ["Ro"]}
+    assert B._facts_preserved(claude,
+        "reworded 2.5 mg per week, BMI 30, 503A 503B, MTC MEN2, at $149 [S1] PeterMD Ro", brand)[0]
+    ok, miss = B._facts_preserved(claude,
+        "reworded weekly dose, BMI 30, 503A, MTC, at $149 [S1] PeterMD Ro", brand)   # drops 2.5 / 503B / MEN2
+    assert not ok and "2.5" in miss and "503B" in miss and "MEN2" in miss
+
+
+def test_fu168_loop_rejects_fact_dropping_attempt():
+    body = ("# H\n\nThe starting dose is 2.5 mg once weekly for adults beginning therapy this year [S1].\n\n"
+            "## Sources\n- [S1] x — <https://x>\n")
+    bad = ("# H\n\nClinicians begin weekly dosing once an adult starts treatment during the year [S1].\n\n"
+           "## Sources\n- [S1] x — <https://x>\n")   # DROPS the 2.5 mg dose → unsafe
+    good = ("# H\n\nClinicians begin at 2.5 mg weekly once an adult starts treatment during the year [S1].\n\n"
+            "## Sources\n- [S1] x — <https://x>\n")
+    w = _ScriptWriter([bad, good])
+    out = _gen(w, "rewrite")._apply_writer_pass({"body_markdown": body}, body, {"name": "X"}, "dose")
+    assert out == good and "2.5" in out                         # the fact-dropping attempt was rejected → shipped the safe one
+    assert len(w.prompts) == 2

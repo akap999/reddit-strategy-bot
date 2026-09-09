@@ -162,6 +162,10 @@ _LICENSE_DIM_RE = re.compile(
 _COMPETITOR_FACTS_TTL_DAYS = float(os.environ.get("COMPETITOR_FACTS_TTL_DAYS", "45"))   # FU151 (A); FU160: 21→45d
 _COMPETITOR_FACTS_CAP = 40   # FU151 (A): max competitors kept in the per-brand fact cache (prune oldest)
 _BLOG_FETCH_WORKERS = int(os.environ.get("BLOG_FETCH_WORKERS", "5"))   # FU151 (B): parallel fetch pool
+# FU173: a SEPARATE pool for self-hosted-writer calls. Unlike the fetch pool (many web hosts) these all hit
+# ONE GPU container (deploy.py max_containers=1), so the cap is about that GPU's batch/KV-cache headroom
+# for ~3k-token generations, not about politeness to a remote host.
+_WRITER_WORKERS = int(os.environ.get("WRITER_WORKERS", "6"))
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
@@ -4458,16 +4462,17 @@ Return JSON only:
         segs = self._split_heading_segments(claude_body)
         if not segs:
             return None
-        out_parts, rewritten_n = [], 0
-        for head, chunk in segs:
+
+        def _one(idx_head_chunk):
+            """Rewrite ONE section. Returns (index, text_to_emit, was_rewritten). Pure per-section work —
+            no shared state — so it is safe to run these CONCURRENTLY; results are reassembled by index."""
+            i, head, chunk = idx_head_chunk
             src = chunk if chunk.strip() else ""
             if not src.strip():
-                out_parts.append(head if head is not None else "")
-                continue
+                return i, (head if head is not None else ""), False
             # the '## Sources' section is rebuilt deterministically by _rebuild_sources — never reword it
             if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
-                out_parts.append((head + "\n" + chunk) if head else chunk)
-                continue
+                return i, ((head + "\n" + chunk) if head else chunk), False
             prompt = (
                 f"Rewrite ONE SECTION of a {name} article ENTIRELY in your own words — a full rewrite, not "
                 "a light edit.\n\n"
@@ -4481,9 +4486,10 @@ Return JSON only:
                 "- reword right up to each preserved item (never leave the original phrasing touching one).\n\n"
                 "PRESERVE EXACTLY: every [S#] citation marker (keep each on the claim it supports); every "
                 "number, dose, %, price and date; every product/drug/brand name; every Markdown table "
-                "(structure and cell values, verbatim); and every NEGATION or clinical directive with its "
-                "exact scope ('not', 'no', 'contraindicated', 'only', 'required', 'not FDA-approved', "
-                "'not a controlled substance').\n"
+                "(structure and cell values, verbatim); every heading line and every line that is entirely "
+                "bold text (a section label) character-for-character; and every NEGATION or clinical "
+                "directive with its exact scope ('not', 'no', 'contraindicated', 'only', 'required', "
+                "'not FDA-approved', 'not a controlled substance').\n"
                 "Descriptive factual and regulatory sentences (definitions, eligibility ranges, "
                 "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
                 "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
@@ -4492,7 +4498,6 @@ Return JSON only:
                 "text.\n\n"
                 f"SECTION TEXT:\n{src}"
             )
-            got = None
             try:
                 got = self.writer.call_text(prompt, max_tokens=3000, temperature=temperature,
                                             timeout=timeout)
@@ -4514,9 +4519,25 @@ Return JSON only:
                 elif len(got) < 0.5 * len(src.strip()):     # truncated / stub
                     got = ""
             body_txt = got if got else chunk                 # safe degradation → keep the original section
-            if got:
-                rewritten_n += 1
-            out_parts.append((head + "\n" + body_txt) if head is not None else body_txt)
+            return i, ((head + "\n" + body_txt) if head is not None else body_txt), bool(got)
+
+        # FU173: run the sections CONCURRENTLY. This was the dominant cost of a rewrite — 16 sections
+        # issued one at a time (~20-25s each) is ~5-6 minutes of pure round-trip latency, while vLLM
+        # batches concurrent requests and serves them for roughly the cost of the slowest one. Results are
+        # collected by INDEX and reassembled in the ORIGINAL order, so the output is byte-identical to the
+        # serial path for the same model replies (the FU151/FU159 collect-then-merge-in-order discipline).
+        tasks = [(i, h, c) for i, (h, c) in enumerate(segs)]
+        results = {}
+        if len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(tasks))) as _ex:
+                for i, txt, done in _ex.map(_one, tasks):
+                    results[i] = (txt, done)
+        else:
+            for t in tasks:
+                i, txt, done = _one(t)
+                results[i] = (txt, done)
+        out_parts = [results[i][0] for i in range(len(tasks))]
+        rewritten_n = sum(1 for i in range(len(tasks)) if results[i][1])
         if not rewritten_n:
             return None
         print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(segs)} sections reworded", flush=True)
@@ -4633,13 +4654,14 @@ Return JSON only:
                 return body, reverted, True
             print(f"[writer] fact verification: {len(issues)} issue(s) — repair round {_round + 1}",
                   flush=True)
-            fixed = 0
-            for it in issues[:12]:
+            # FU173: fetch the repairs CONCURRENTLY (they are independent single-sentence calls), then
+            # APPLY them sequentially in the ORIGINAL issue order — `body.replace` mutates, so ordering
+            # must stay deterministic. Gates and the revert-to-original fallback are unchanged.
+            todo = [it for it in issues[:12] if str(it["rewritten"]).strip() in body]
+
+            def _repair(it):
                 bad, orig, why = str(it["rewritten"]).strip(), str(it["original"]).strip(), \
                     str(it.get("problem") or "")
-                if bad not in body:
-                    continue
-                rep = None
                 try:
                     rep = self.writer.call_text(
                         "Rewrite this sentence in your own words, but fix the factual error described.\n"
@@ -4648,7 +4670,18 @@ Return JSON only:
                         f"SENTENCE: {bad}", max_tokens=600, temperature=0.7, timeout=timeout)
                 except Exception:
                     rep = None
-                rep = (rep or "").strip().split("\n")[0].strip()
+                return (rep or "").strip().split("\n")[0].strip()
+
+            if len(todo) > 1:
+                with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(todo))) as _ex:
+                    reps = list(_ex.map(_repair, todo))
+            else:
+                reps = [_repair(it) for it in todo]
+            fixed = 0
+            for it, rep in zip(todo, reps):
+                bad, orig = str(it["rewritten"]).strip(), str(it["original"]).strip()
+                if bad not in body:
+                    continue
                 if rep and self._facts_preserved(orig, rep, brand)[0]:
                     body = body.replace(bad, rep, 1)
                     fixed += 1
@@ -4855,11 +4888,31 @@ Return JSON only:
             cited = set(re.findall(r"\[S\d+\]", claude_body))          # what Claude actually cited
             heads = [l.strip() for l in claude_body.splitlines() if l.lstrip().startswith("#")]
             n_ev = len(self._evidence_blocks or [])
+            import time as _t
+            # FU173: per-stage wall-clock, so a slow run explains itself instead of being a black box.
+            _stage = {"extract": 0.0, "attempts": 0.0, "sections": 0.0, "classify": 0.0,
+                      "polish": 0.0, "verify": 0.0, "cold_start": 0.0}
+            # FU173: is the model LOADED? probe() returns fast (it never blocks on a full cold start), so
+            # this cheaply separates "the GPU was loading" from "generation is slow" — the question the
+            # operator could not answer before. The probe ALSO wakes the Modal container, so the load it
+            # reports starts here rather than inside the first real call.
+            _cold_t0 = _t.time()
+            try:
+                _pr = self.writer.probe(timeout=8) if hasattr(self.writer, "probe") else {"state": "ok"}
+            except Exception:
+                _pr = {"state": "unknown"}
+            _was_cold = (_pr or {}).get("state") != "ok"
+            if _was_cold:
+                print(f"[writer] model COLD ({(_pr or {}).get('state')}) — loading before the rewrite; "
+                      f"this run pays the GPU load time", flush=True)
+
             # FU172 Change 0 — the INTELLIGENT protect-list, computed BEFORE any rewriting and cached.
+            _x0 = _t.time()
             _extracted = article.get("writer_facts")
             if _extracted is None and self.writer_mode == "rewrite":
                 _extracted = self._extract_protected_facts(claude_body, brand)
                 article["writer_facts"] = _extracted
+            _stage["extract"] = round(_t.time() - _x0, 1)
             _extracted = _extracted or {}
             _atoms = _extracted.get("atoms") or []
 
@@ -5003,7 +5056,6 @@ Return JSON only:
                     return False, f"dropped facts {missing_f[:5]}"
                 return True, ""
 
-            import time as _t
             # FU167: rewrite runs up to N escalating attempts and ships the LOWEST-(overlap, longest_run)
             # valid one (not the last); compose keeps its 2-attempt / ship-first-valid behavior.
             _attempts = int(os.environ.get("WRITER_REWRITE_ATTEMPTS", "4")) if self.writer_mode == "rewrite" else 2
@@ -5015,7 +5067,10 @@ Return JSON only:
                              and len(claude_body) >= int(os.environ.get("WRITER_SECTION_MIN_CHARS", "4000"))
                              and len(self._split_heading_segments(claude_body)) >= 3)
             if _long_article:
-                _attempts = min(_attempts, 2)
+                # FU173: the section pass SUPERSEDES the whole-article rewrite on a long article, so the
+                # extra full attempts (~2-3 min each) only ever produced a baseline to compare against.
+                # One valid baseline is enough; keep-only-if-better still governs what ships.
+                _attempts = 1
             best, best_rep, last_why, secs = None, None, "", 0.0
             for attempt in range(_attempts):
                 # FU155/167: ramp the sampling temperature each attempt → more lexical diversity → lower
@@ -5027,7 +5082,11 @@ Return JSON only:
                 _timeout = int(os.environ.get("WRITER_CALL_TIMEOUT", "600"))
                 out = self.writer.call_text(_build_prompt(aggressive=(attempt > 0)),
                                             max_tokens=9000, temperature=_temp, timeout=_timeout)
-                secs += _t.time() - _t0
+                _dt = _t.time() - _t0
+                secs += _dt
+                _stage["attempts"] += round(_dt, 1)
+                if attempt == 0:
+                    _stage["first_call"] = round(_dt, 1)   # a COLD model's load time lands in this call
                 article["writer_secs"] = round(secs, 1)
                 # Rewrite mode: put the ORIGINAL headings back positionally so a reworded heading isn't a
                 # failure — only the PROSE is watermark-stripped. Section-COUNT change → restore returns
@@ -5065,11 +5124,19 @@ Return JSON only:
             if best is None:
                 article["writer_mode_used"] = "fallback"
                 article["writer_grade"] = "fallback"
+                # FU173: record the timing/warmth on the FALLBACK path too — this is exactly when the
+                # operator most needs to know the GPU was cold (a cold model timing out CAUSES fallback).
+                article["writer_stage_secs"] = dict(_stage)
+                article["writer_was_cold"] = bool(_was_cold)
                 article["writer_warning"] = (f"⚠ watermark NOT stripped — fell back to Claude ({last_why})"
                                              if last_why else
                                              "⚠ watermark NOT stripped — fell back to Claude (rewrite failed validation)")
+                print("[writer] stages: " + " · ".join(f"{k} {v:.0f}s" for k, v in _stage.items() if v)
+                      + ("  (model was COLD)" if _was_cold else "  (model was warm)"), flush=True)
                 print(f"[blog_gen] writer: FALLBACK {secs:.1f}s — {last_why or 'validation failed'} "
-                      f"(watermark NOT stripped — is the container warm / the timeout high enough?)", flush=True)
+                      f"(watermark NOT stripped — "
+                      f"{'the GPU was COLD — warm it first and retry' if _was_cold else 'the model was warm; check the timeout'})",
+                      flush=True)
                 return claude_body
 
             # FU170 — SECTION-CHUNKED FINAL STAGE (the structural lever). On a LONG, dense article the
@@ -5087,7 +5154,9 @@ Return JSON only:
                     sec_out = self._rewrite_sections(
                         claude_body, name, temperature=1.1,
                         timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
-                    secs += _t.time() - _t0
+                    _dt = _t.time() - _t0
+                    secs += _dt
+                    _stage["sections"] = round(_dt, 1)
                     article["writer_secs"] = round(secs, 1)
                     if sec_out and heads:
                         _restored = self._restore_headings(heads, sec_out)
@@ -5118,7 +5187,9 @@ Return JSON only:
                     _pb = self._prose_for_overlap(best)
                     _sp, _wraw, _ = self._residual_spans(_pa, _pb)
                     _texts = [" ".join(_wraw[a:b]) for a, b in _sp if b - a >= 5]
+                    _c0 = _t.time()
                     _verdicts = self._classify_spans(_texts, brand, _extracted)
+                    _stage["classify"] = round(_t.time() - _c0, 1)
                     best_rep = self._watermark_removal_report(claude_body, best, brand, _atoms, _verdicts)
                 except Exception as _e:
                     print(f"[writer] span classification skipped ({_e})", flush=True)
@@ -5127,7 +5198,9 @@ Return JSON only:
                         _t0 = _t.time()
                         _pol = self._residual_polish(claude_body, best, brand, _extracted, _verdicts,
                                                      timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
-                        secs += _t.time() - _t0
+                        _dt = _t.time() - _t0
+                        secs += _dt
+                        _stage["polish"] = round(_dt, 1)
                         if _pol:
                             if heads:
                                 _r = self._restore_headings(heads, _pol)
@@ -5151,7 +5224,9 @@ Return JSON only:
                     _vb, _reverted, _verified = self._verify_facts_semantic(
                         claude_body, best, brand,
                         timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
-                    secs += _t.time() - _t0
+                    _dt = _t.time() - _t0
+                    secs += _dt
+                    _stage["verify"] = round(_dt, 1)
                     if _vb and _vb != best:
                         ok_v, why_v = _valid(_vb)
                         if ok_v:
@@ -5178,6 +5253,13 @@ Return JSON only:
             article["writer_facts_verified"] = bool(_verified)
             article["writer_facts_reverted"] = int(_reverted)
             article["writer_grade"] = _grade
+            # FU173: report the model's WARM/COLD state plainly rather than inventing a "load time".
+            # The GPU load happens INSIDE the first writer call, so we surface that call's duration and
+            # let the operator compare it against the others — an honest signal instead of a derived
+            # number that would just be the first call minus a guess.
+            _stage.pop("cold_start", None)
+            article["writer_stage_secs"] = dict(_stage)
+            article["writer_was_cold"] = bool(_was_cold)
             # Report BOTH axes: the raw verbatim figure (transparency) and the free-choice figure the grade
             # actually turns on — the rest is facts/quotes/labels the rewrite is REQUIRED to keep, which
             # carry no watermark (the mark is weak-to-absent on low-entropy factual text).
@@ -5200,6 +5282,9 @@ Return JSON only:
                        f"watermark-strip: not fully confirmed ({_res}) — proxy; regenerate for a cleaner "
                        f"strip{_rev}")
             article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
+            print("[writer] stages: " + " · ".join(f"{k} {v:.0f}s" for k, v in _stage.items() if v)
+                  + ("  (model was COLD — the GPU load is inside first_call)" if _was_cold
+                     else "  (model was warm)"), flush=True)
             print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s grade={_grade} "
                   f"n5_overlap={_ov:.2f} residual_share={_share:.3f} longest_run={_run} "
                   f"discretionary={_dshare:.3f} longest_disc_run={_drun}/{_floor} "

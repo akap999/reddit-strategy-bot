@@ -13490,7 +13490,11 @@ async function openBlog(id) {
             <div class="card p-2" style="background:#0c1a1e;border:1px solid #155e75">
                 <div class="flex items-center justify-between mb-1">
                     <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free version (rewritten on the self-hosted model)</label>
-                    <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button>
+                    <div class="flex items-center gap-2">
+                        <span id="writer-status" class="text-xs" style="color:#94a3b8" title="Is the self-hosted model loaded? A cold GPU spends several minutes loading ~40GB before the rewrite can start.">● checking model…</span>
+                        <button class="btn btn-sm" style="background:#0e7490;color:#cffafe" onclick="writerWarmUp()" title="Wake the GPU now so the model is loaded BEFORE you start a rewrite — pinging the endpoint is what triggers the load. Watch the dot turn green.">🔥 Warm up</button>
+                        <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button>
+                    </div>
                 </div>
                 <div class="text-xs text-gray-400 mb-1">The original blog is always kept. This is a reworded, watermark-free copy to hand clients — same facts, citations &amp; structure, different wording. Needs the writer endpoint configured in Settings (Content writer card).</div>
                 ${_rwStatus}
@@ -13684,6 +13688,38 @@ function blogGenLinkedInArticle(id) {
 }
 
 // FU154 — produce a watermark-free rewrite of this blog (original kept; stored as rewritten_body).
+// FU173: is the self-hosted model LOADED? /api/settings/writer/test probes the endpoint (and, usefully,
+// pinging it is exactly what wakes a scaled-to-zero Modal container), so the same call powers both the
+// status dot and the "Warm up" button.
+async function writerStatus(poll) {
+    const el = document.getElementById('writer-status');
+    if (!el) return;
+    try {
+        const r = await api('/api/settings/writer/test', 'POST', {});
+        const st = (r && r.state) || 'error';
+        const map = {
+            ok:          ['#22c55e', '● model loaded — ready'],
+            warming:     ['#f59e0b', '● model cold — loading (first run will be slower)'],
+            auth:        ['#ef4444', '● auth rejected — check the writer API key'],
+            unreachable: ['#ef4444', '● endpoint unreachable'],
+        };
+        const [c, t] = map[st] || ['#ef4444', '● ' + ((r && r.detail) || 'writer not configured')];
+        el.style.color = c; el.textContent = t;
+        if (poll && st === 'warming') setTimeout(() => writerStatus(true), 15000);
+    } catch (e) { el.style.color = '#ef4444'; el.textContent = '● status unavailable'; }
+}
+// paint the dot as soon as the blog modal exists (the element only appears with the rewrite card)
+setInterval(() => {
+    const el = document.getElementById('writer-status');
+    if (el && !el.dataset.checked) { el.dataset.checked = '1'; writerStatus(false); }
+}, 1000);
+function writerWarmUp() {
+    const el = document.getElementById('writer-status');
+    if (el) { el.style.color = '#f59e0b'; el.textContent = '● waking the GPU…'; }
+    toast('Warming the model — the dot turns green when it is loaded. You can start the rewrite then.', 'info', 8000);
+    writerStatus(true);   // the probe itself triggers the load; keep polling until it reports ok
+}
+
 function blogGenRewrite(id) {
     runTask(`/api/blogs/${id}/rewrite`, {}, (res) => {
         openBlog(id);
@@ -13693,7 +13729,10 @@ function blogGenRewrite(id) {
             const ov = (res && res.overlap != null) ? (' — ' + Math.round(res.overlap * 100) + '% overlap') : '';
             const ct = (res && res.cost != null) ? (' · ≈ $' + Number(res.cost).toFixed(2) + (res.secs ? ' (' + res.secs + 's)' : '')) : '';
             const wn = (res && res.warning) ? (' (⚠ ' + res.warning + ')') : '';
-            toast('Watermark-free version created' + ov + ct + wn, 'success');
+            const st = (res && res.stage_secs) || {};
+            const parts = Object.keys(st).filter(k => st[k]).map(k => k + ' ' + Math.round(st[k]) + 's');
+            const br = parts.length ? ('\n⏱ ' + parts.join(' · ') + (res.was_cold ? '  (model was COLD — the GPU load is inside first_call)' : '  (model was warm)')) : '';
+            toast('Watermark-free version created' + ov + ct + wn + br, 'success', 14000);
         }
     }, 'Rewriting (watermark-free)');
 }

@@ -1145,6 +1145,7 @@ class Database:
                    "reddit_status", "deep_verify", "include_pricing", "writer_secs", "writer_mode_used",
                    "writer_overlap", "writer_longest_run", "writer_residual_share",
                    "writer_residual_discretionary", "writer_longest_discretionary_run", "writer_grade",
+                   "writer_stage_secs", "writer_was_cold",
                    "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
@@ -2365,6 +2366,10 @@ class Database:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_residual_discretionary REAL DEFAULT 0")
         if "writer_longest_discretionary_run" not in blog_cols:  # FU172: graded axis vs the detection floor
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_longest_discretionary_run INTEGER DEFAULT 0")
+        if "writer_stage_secs" not in blog_cols:   # FU173: per-stage wall-clock JSON (where the time went)
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_stage_secs TEXT DEFAULT ''")
+        if "writer_was_cold" not in blog_cols:     # FU173: was the GPU cold at the start of this run?
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_was_cold INTEGER DEFAULT 0")
             self.conn.commit()
         if "writer_grade" not in blog_cols:   # FU167: thorough|strong|not-confirmed|fallback removal grade
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_grade TEXT DEFAULT ''")

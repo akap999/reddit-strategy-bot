@@ -2736,6 +2736,8 @@ def api_blog_generate():
                                writer_residual_share=(blog.get("writer_residual_share") or 0),
                                writer_residual_discretionary=(blog.get("writer_residual_discretionary") or 0),
                                writer_longest_discretionary_run=(blog.get("writer_longest_discretionary_run") or 0),
+                               writer_stage_secs=json.dumps(blog.get("writer_stage_secs") or {}),
+                               writer_was_cold=(1 if blog.get("writer_was_cold") else 0),
                                writer_grade=(blog.get("writer_grade") or ""))
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
@@ -2750,6 +2752,8 @@ def api_blog_generate():
                     "writer_residual_share": blog.get("writer_residual_share", 0),   # FU171: residual mass
                     "writer_residual_discretionary": blog.get("writer_residual_discretionary", 0),   # FU172
                     "writer_longest_discretionary_run": blog.get("writer_longest_discretionary_run", 0),
+                    "writer_stage_secs": blog.get("writer_stage_secs") or {},   # FU173: where the time went
+                    "writer_was_cold": bool(blog.get("writer_was_cold")),
                     "writer_grade": blog.get("writer_grade", ""),   # FU167: thorough|strong|not-confirmed|fallback
                     "quality_report": _qr}   # FU151 (D)
         finally:
@@ -2858,6 +2862,8 @@ def api_blog_regenerate(blog_id):
                                    writer_residual_share=(fresh.get("writer_residual_share") or 0),
                                    writer_residual_discretionary=(fresh.get("writer_residual_discretionary") or 0),
                                    writer_longest_discretionary_run=(fresh.get("writer_longest_discretionary_run") or 0),
+                                   writer_stage_secs=json.dumps(fresh.get("writer_stage_secs") or {}),
+                                   writer_was_cold=(1 if fresh.get("writer_was_cold") else 0),
                                    writer_grade=(fresh.get("writer_grade") or ""))
             elif part == "article":
                 # FU114/115: rebuild verified targets via the shared builder (own evidence pages +
@@ -2927,6 +2933,8 @@ def api_blog_regenerate(blog_id):
                     "writer_residual_share": (fresh.get("writer_residual_share", 0) if part == "all" else 0),   # FU171
                     "writer_residual_discretionary": (fresh.get("writer_residual_discretionary", 0) if part == "all" else 0),
                     "writer_longest_discretionary_run": (fresh.get("writer_longest_discretionary_run", 0) if part == "all" else 0),
+                    "writer_stage_secs": (fresh.get("writer_stage_secs", {}) if part == "all" else {}),
+                    "writer_was_cold": (bool(fresh.get("writer_was_cold")) if part == "all" else False),
                     "writer_grade": (fresh.get("writer_grade", "") if part == "all" else ""),   # FU167
                     "quality_report": _qr}
         finally:
@@ -5986,6 +5994,9 @@ def api_blog_rewrite(blog_id):
             return {"blog_id": blog_id, "ok": True,
                     "overlap": article.get("writer_overlap"),
                     "warning": article.get("writer_warning") or "",
+                    # FU173: where the time actually went + whether the GPU was cold
+                    "stage_secs": article.get("writer_stage_secs") or {},
+                    "was_cold": bool(article.get("writer_was_cold")),
                     "cost": cost, "secs": round(secs, 1)}
         finally:
             bg.close()

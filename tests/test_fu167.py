@@ -104,7 +104,9 @@ def test_r6_not_confirmed_grade_and_caveat():
     assert out == CLAUDE_R5 and art["writer_mode_used"] == "rewrite"
     assert art["writer_grade"] == "not-confirmed"
     assert "not fully confirmed" in art["writer_warning"] and "proxy" in art["writer_warning"]
-    assert len(w.prompts) == 4                                    # never thorough → all 4 escalating attempts
+    # never thorough → all 4 escalating WHOLE-ARTICLE attempts (FU172 adds a separate residual-polish call,
+    # so count the attempts by their prompt shape rather than by total calls)
+    assert sum(1 for p in w.prompts if "Re-compose the following finished blog article" in p) == 4
 
 
 # ── Change 4: grouped citations split so _rebuild_sources can renumber them ────────────────────
@@ -230,7 +232,7 @@ def test_fu170_section_stage_skipped_on_short_article():
     art = {"body_markdown": CLAUDE_R5}
     _gen(w, "rewrite")._apply_writer_pass(art, CLAUDE_R5, {"name": "X"}, "guide")
     assert not any("SECTION TEXT:" in p for p in w.prompts)
-    assert len(w.prompts) == 4                              # the 4 whole-article attempts, unchanged
+    assert sum(1 for p in w.prompts if "Re-compose the following finished blog article" in p) == 4
 
 
 def test_fu170_rewrite_prompt_narrows_safety_fallback():

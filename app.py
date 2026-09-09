@@ -2734,6 +2734,8 @@ def api_blog_generate():
                                writer_overlap=(blog.get("writer_overlap") or 0),
                                writer_longest_run=(blog.get("writer_longest_run") or 0),
                                writer_residual_share=(blog.get("writer_residual_share") or 0),
+                               writer_residual_discretionary=(blog.get("writer_residual_discretionary") or 0),
+                               writer_longest_discretionary_run=(blog.get("writer_longest_discretionary_run") or 0),
                                writer_grade=(blog.get("writer_grade") or ""))
             return {"blog_id": blog_id, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status),
@@ -2746,6 +2748,8 @@ def api_blog_generate():
                     "writer_overlap": blog.get("writer_overlap", 0),   # FU167: n=5 prose overlap
                     "writer_longest_run": blog.get("writer_longest_run", 0),   # FU167: longest verbatim run
                     "writer_residual_share": blog.get("writer_residual_share", 0),   # FU171: residual mass
+                    "writer_residual_discretionary": blog.get("writer_residual_discretionary", 0),   # FU172
+                    "writer_longest_discretionary_run": blog.get("writer_longest_discretionary_run", 0),
                     "writer_grade": blog.get("writer_grade", ""),   # FU167: thorough|strong|not-confirmed|fallback
                     "quality_report": _qr}   # FU151 (D)
         finally:
@@ -2852,6 +2856,8 @@ def api_blog_regenerate(blog_id):
                                    writer_overlap=(fresh.get("writer_overlap") or 0),
                                    writer_longest_run=(fresh.get("writer_longest_run") or 0),
                                    writer_residual_share=(fresh.get("writer_residual_share") or 0),
+                                   writer_residual_discretionary=(fresh.get("writer_residual_discretionary") or 0),
+                                   writer_longest_discretionary_run=(fresh.get("writer_longest_discretionary_run") or 0),
                                    writer_grade=(fresh.get("writer_grade") or ""))
             elif part == "article":
                 # FU114/115: rebuild verified targets via the shared builder (own evidence pages +
@@ -2919,6 +2925,8 @@ def api_blog_regenerate(blog_id):
                     "writer_overlap": (fresh.get("writer_overlap", 0) if part == "all" else 0),   # FU167
                     "writer_longest_run": (fresh.get("writer_longest_run", 0) if part == "all" else 0),   # FU167
                     "writer_residual_share": (fresh.get("writer_residual_share", 0) if part == "all" else 0),   # FU171
+                    "writer_residual_discretionary": (fresh.get("writer_residual_discretionary", 0) if part == "all" else 0),
+                    "writer_longest_discretionary_run": (fresh.get("writer_longest_discretionary_run", 0) if part == "all" else 0),
                     "writer_grade": (fresh.get("writer_grade", "") if part == "all" else ""),   # FU167
                     "quality_report": _qr}
         finally:

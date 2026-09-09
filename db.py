@@ -1143,7 +1143,8 @@ class Database:
                    "linkedin_text", "claims_flagged", "status", "prompt_version",
                    "source_urls", "research_notes", "use_web_search", "reddit_url",
                    "reddit_status", "deep_verify", "include_pricing", "writer_secs", "writer_mode_used",
-                   "writer_overlap", "writer_longest_run", "writer_residual_share", "writer_grade",
+                   "writer_overlap", "writer_longest_run", "writer_residual_share",
+                   "writer_residual_discretionary", "writer_longest_discretionary_run", "writer_grade",
                    "author_name", "author_title", "reviewer_name",
                    "reviewer_title", "disclosure", "image_url", "gen_cost",
                    "linkedin_article", "linkedin_article_title", "linkedin_article_persona",
@@ -2360,6 +2361,10 @@ class Database:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_longest_run INTEGER DEFAULT 0")
         if "writer_residual_share" not in blog_cols:   # FU171: fraction of prose still verbatim (graded axis)
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_residual_share REAL DEFAULT 0")
+        if "writer_residual_discretionary" not in blog_cols:   # FU172: free-choice (signal-bearing) share
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_residual_discretionary REAL DEFAULT 0")
+        if "writer_longest_discretionary_run" not in blog_cols:  # FU172: graded axis vs the detection floor
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_longest_discretionary_run INTEGER DEFAULT 0")
             self.conn.commit()
         if "writer_grade" not in blog_cols:   # FU167: thorough|strong|not-confirmed|fallback removal grade
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_grade TEXT DEFAULT ''")

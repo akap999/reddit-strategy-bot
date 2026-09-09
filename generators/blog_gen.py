@@ -95,9 +95,16 @@ _PRICE_SIGNAL_RE = re.compile(
 # the deterministic gate protects only the numbers whose silent alteration is a real clinical/commercial error.
 _LOADBEARING_NUM_RE = re.compile(
     r"(?:\$|€|£|USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"                              # currency: $149, $1,000, €2.50
-    r"|\d[\d,]*\.\d+"                                                            # decimal:  2.5, 6.5, 12.5 (dose/threshold)
-    r"|\d[\d,]*\s?(?:mg|mcg|µg|ug|ng|mL|ml|kg|g|units?|iu|mmol|meq)\b"      # number + unit: 15 mg, 500 units
-    r"|\d[\d,]*\s?(?:mg|mcg|g|mL|ml)?/\s?(?:mL|ml|day|wk|week|mo|month|dose|kg|hr|hour)\b",  # rate: 2.5mg/mL, 100/day
+    r"|\d[\d,]*\.\d+\s?%?"                                                       # decimal:  2.5, 6.5, 3.9% (dose/threshold/APR)
+    # FU172 GENERALITY: units must not be medical-only — a "5 seats" / "99.9% uptime" / "14-day term" /
+    # "3.9% APR" fact is exactly as load-bearing for a SaaS or lending brand as a dose is for a clinic.
+    r"|\d[\d,]*\s?%"                                                              # percent: 99.9%, 27%
+    r"|\d[\d,]*\s?(?:mg|mcg|µg|ug|ng|mL|ml|kg|g|units?|iu|mmol|meq)\b"            # clinical: 15 mg, 500 units
+    r"|\d[\d,]*\s?(?:seat|seats|user|users|licen[sc]e|licen[sc]es|member|members)\b"   # SaaS: 5 seats
+    r"|\d[\d,]*\s?(?:GB|TB|MB|requests?|calls?|queries)\b"                        # quota: 100 GB, 10k requests
+    r"|\d[\d,]*[- ]?(?:day|week|month|year|mo|yr)s?\b"                             # term: 14-day, 12 months
+    r"|\d[\d,]*\s?(?:bps|APR|x|×)\b"                                              # finance/multiplier: 250 bps, 3x
+    r"|\d[\d,]*\s?(?:mg|mcg|g|mL|ml)?/\s?(?:mL|ml|day|wk|week|mo|month|dose|kg|hr|hour|seat|user)\b",  # rate
     re.IGNORECASE)
 # FU170: a SENTENCE we DELIBERATELY keep verbatim for YMYL safety — a contraindication, a boxed warning,
 # a safety negation ("not a controlled substance", "not FDA-approved"), or a dosing-escalation directive.
@@ -106,12 +113,34 @@ _LOADBEARING_NUM_RE = re.compile(
 # list — they are low-entropy, intentionally identical, and carry ~no SynthID watermark. _prose_for_overlap
 # drops them so a SAFE strip of the discretionary prose isn't graded "not-confirmed" by a residual the
 # operator could only remove by risking a clinical fact (and regenerating never clears it).
-_CLINICAL_DIRECTIVE_RE = re.compile(
+# FU172 GENERALITY: the FU170 rule was MEDICAL-ONLY, so for a SaaS / lending / legal brand it matched
+# NOTHING and the "keep this sentence whole" protection silently did not exist for them. Generalized to
+# any sentence whose meaning is safety-, legal-, money- or eligibility-critical and whose scope cannot be
+# preserved while rewording. Every original medical pattern is retained → YMYL behavior cannot regress.
+_CRITICAL_DIRECTIVE_RE = re.compile(
+    # clinical (FU170, unchanged)
     r"contraindicat|boxed warning|medullary thyroid|multiple endocrine neoplasia|\bMEN\s?2\b"
     r"|not a controlled substance|not FDA-approved|not approved as a|\bmust not\b"
     r"|\bmg\b.{0,70}?(?:increment|maintenance|escalat|titrat|starting dose|once weekly)"
-    r"|(?:increment|maintenance|escalat|titrat|starting dose|once weekly).{0,70}?\bmg\b",
+    r"|(?:increment|maintenance|escalat|titrat|starting dose|once weekly).{0,70}?\bmg\b"
+    # regulatory / legal obligation (any vertical)
+    r"|\b(?:required by law|prohibited|not permitted|may not be|are not permitted|is unlawful)\b"
+    r"|\b(?:must (?:be|not|comply|retain|disclose))\b"
+    # financial terms
+    r"|\b(?:APR|interest rate|late fee|penalty|early repayment|minimum term|non[- ]refundable)\b"
+    # licence / contract restrictions
+    r"|\b(?:commercial use|non[- ]transferable|royalty[- ]free|per[- ]seat licen[sc]e|terms of service)\b"
+    # eligibility rules
+    r"|\b(?:only if|not eligible|eligibility requires|do(?:es)? not qualify)\b",
     re.IGNORECASE)
+_CLINICAL_DIRECTIVE_RE = _CRITICAL_DIRECTIVE_RE   # back-compat alias for existing call sites
+
+# FU172: function words carry no real choice in context (near-deterministic), so they are not evidence of a
+# surviving watermark. Vertical-neutral.
+_FUNCTION_WORDS = frozenset("""a an the and or of to in on for with as is are was were be been being that
+this these those it its by at from not no can could may might must should would will do does did have has
+had than then so such also more most other another each any all both which who whom whose their them they
+he she you your our we us if when while about into over under between within per via but""".split())
 # FU158: a comparison DIMENSION that is a pricing/cost column (vertical-neutral) — used to skip the
 # subject's own-domain pricing re-search when an authoritative canonical price already exists.
 _PRICE_DIM_RE = re.compile(r"pric|cost|\bfee\b|\bfees\b|\$|/mo|month|subscription|billing|plan\b",
@@ -4156,13 +4185,20 @@ Return JSON only:
         keep = []
         for l in head.split("\n"):
             s = l.lstrip()
-            if s.startswith("#") or s.startswith("|") or s.startswith(">"):  # heading / table row / blockquote
+            # FU172: a line that is ENTIRELY bold text is a SECTION LABEL (e.g. "**FSA/HSA eligibility**"
+            # above its paragraph) — functionally a heading, required verbatim by the rewrite prompt, and
+            # therefore low-entropy structure that carries no watermark. Same class as # / | / >.
+            if (s.startswith("#") or s.startswith("|") or s.startswith(">")
+                    or re.fullmatch(r"\*\*[^*].*\*\*", s.strip() or "x")):
                 continue
             keep.append(l)
         prose = re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
         prose = re.sub(r"[\"\u201c\u201d][^\"\u201c\u201d]{12,}?[\"\u201c\u201d]", " ", prose)  # drop quoted spans
         sents = re.split(r"(?<=[.!?])\s+", prose)          # drop deliberately-preserved clinical-directive sentences
-        return " ".join(x for x in sents if not _CLINICAL_DIRECTIVE_RE.search(x))
+        # FU172 guard: only a real SENTENCE is exempt. Without a length bound an UNPUNCTUATED block counts
+        # as one "sentence", so a single directive phrase could exempt an ENTIRE body from measurement.
+        return " ".join(x for x in sents
+                        if not (_CRITICAL_DIRECTIVE_RE.search(x) and len(x.split()) <= 60))
 
     @staticmethod
     def _longest_shared_run(a, b):
@@ -4178,39 +4214,97 @@ Return JSON only:
         return m.find_longest_match(0, len(wa), 0, len(wb)).size
 
     @staticmethod
-    def _residual_run_stats(a, b, min_run=5):
-        """FU171: the WORST-CASE guard, measured as RESIDUAL MASS rather than "does any single run exceed 4".
+    def _residual_spans(a, b, n=5):
+        """FU172: the ORDER-INDEPENDENT residual measure. Returns (spans, words_raw, covered_count) where
+        `spans` are (start, end) index pairs over b's words that lie inside SOME n-gram also present in a.
 
-        Mechanism: SynthID-Text detection scores the MEAN g-value over the whole text — it needs many
-        surviving marked tokens to clear its threshold, which is exactly why a thorough paraphrase scrubs
-        it (>90% in the published research). So the honest question is not "did ANY verbatim island
-        survive" but "how MUCH of the text is still the original token sequence". A lone 19-word island in
-        1,500 reworded words cannot lift the mean; 40% of the article surviving obviously can.
-
-        This matters because a strict `longest_run <= 4` bar is UNACHIEVABLE by construction on a YMYL
-        page: the rewrite prompt REQUIRES drug/brand names, regulation codes (503A/503B) and dosing atoms
-        verbatim, and the FU168/169 fact-integrity gate hard-FAILS a rewrite that alters them — so chained
-        atoms ("503A and 503B compounding pharmacies", "Flexible Spending Accounts and Health Savings
-        Accounts") and quoted regulator language mechanically produce 5+ word runs no regeneration can
-        remove. Grading on that bar pinned every medical article to "not-confirmed" and told the operator
-        to "regenerate for a cleaner strip" — advice that could never work.
-
-        Returns (longest_run, residual_share, sample) where residual_share = the fraction of b's prose
-        words sitting inside a shared run of >= min_run words, and sample is the longest such run's text.
-        Deterministic, no network."""
+        This REPLACES FU171's `_SequenceMatcher.get_matching_blocks()` coverage, which was BUGGED: that
+        returns only a MONOTONIC alignment, while the rewrite prompt explicitly instructs "REORDER clauses
+        and sentences" — so reordered verbatim chunks fell off the single increasing path and were silently
+        uncounted. Measured on the real article it reported 0.036 where the truth was 0.170 (~5x low), which
+        wrongly graded a run "strong" AND skipped the FU170 section pass (gated on a weak grade).
+        Set-membership over n-grams has no ordering assumption, is O(n), and is consistent with
+        `_ngram_overlap` by construction (same n)."""
         wa = re.findall(r"\w+", (a or "").lower())
         wb_raw = re.findall(r"\w+", (b or ""))
         wb = [w.lower() for w in wb_raw]
-        if not wa or not wb:
+        if len(wa) < n or len(wb) < n:
+            return [], wb_raw, 0
+        grams_a = {tuple(wa[i:i + n]) for i in range(len(wa) - n + 1)}
+        covered = set()
+        for i in range(len(wb) - n + 1):
+            if tuple(wb[i:i + n]) in grams_a:
+                covered.update(range(i, i + n))
+        spans, st = [], None
+        for i in range(len(wb) + 1):
+            if i in covered and st is None:
+                st = i
+            elif i not in covered and st is not None:
+                spans.append((st, i))
+                st = None
+        return spans, wb_raw, len(covered)
+
+    @staticmethod
+    def _is_protected_word(w, brand_tokens=(), extracted_words=()):
+        """FU172: is this WORD one the rewriter had NO FREEDOM over? That is the test — not "is it a fact?"
+        (semantic, fuzzy) but "could it be reworded without making something WRONG?" A token the rewrite is
+        FORBIDDEN to change is one Claude had no freedom over either, and no freedom is exactly when a
+        watermark cannot be embedded (Google: the mark is "less effective on factual responses"). The two
+        definitions coincide, so this reuses the SAME rule set the fact gate enforces.
+        BIAS: anything ambiguous returns False (= discretionary) → stricter score, never looser."""
+        lw = w.lower()
+        if lw in extracted_words:                       # Change 0/0b: verified protect-list (intelligent layer)
+            return True
+        if lw in brand_tokens:                          # brand / competitor / product names (from the record)
+            return True
+        if _LOADBEARING_NUM_RE.search(w) or re.fullmatch(r"[\d.,]+", w):
+            return True                                 # values: 2.5, $149, 15 mg, 3.9%, 5 seats, 14-day
+        if re.fullmatch(r"\d+[A-Za-z]", w):
+            return True                                 # regulation codes: 503A / 503B
+        if re.fullmatch(r"[A-Z]{3,}\d*", w):
+            return True                                 # FDA, MEN2, BMI, HIPAA, SOC (>=3 → not US/AI)
+        if "®" in w or "™" in w:
+            return True
+        return False
+
+    @classmethod
+    def _discretionary_words(cls, span_words, brand=None, extracted=None, span_class=None):
+        """FU172: the words in a surviving span that COULD carry a watermark — i.e. everything that is
+        neither a protected atom nor a function word. `span_class` is the Change-0b/2 classifier verdict
+        ('fact-bearing' / 'structural' / 'discretionary'); a non-discretionary verdict zeroes the span.
+        Returns the list of discretionary words (its LENGTH is what the grade uses)."""
+        if span_class in ("fact-bearing", "structural"):
+            return []
+        bt = cls._brand_tokens(brand)
+        ex = {w.lower() for sp in (extracted or []) for w in re.findall(r"\w+", sp)}
+        return [w for w in span_words
+                if w.lower() not in _FUNCTION_WORDS and not cls._is_protected_word(w, bt, ex)]
+
+    @staticmethod
+    def _brand_tokens(brand):
+        """Brand / competitor / product name tokens, read from the brand RECORD (never hardcoded)."""
+        out = set()
+        for nm in ([(brand or {}).get("name") or ""] + list((brand or {}).get("competitors") or [])
+                   + list((brand or {}).get("products") or [])):
+            for w in re.findall(r"\w+", str(nm)):
+                if len(w) >= 3:
+                    out.add(w.lower())
+        return out
+
+    @classmethod
+    def _residual_run_stats(cls, a, b, min_run=5):
+        """FU171/172: the WORST-CASE guard measured as RESIDUAL MASS rather than "does any single run
+        exceed 4". Detection scores the MEAN g-value over the whole text, so a lone verbatim island cannot
+        lift it while a large surviving fraction can. Returns (longest_run, residual_share, sample)."""
+        spans, wb_raw, covered = cls._residual_spans(a, b, n=min_run)
+        if not wb_raw:
             return 0, 0.0, ""
-        longest, covered, sample = 0, 0, ""
-        for blk in _SequenceMatcher(None, wa, wb, autojunk=False).get_matching_blocks():
-            if blk.size >= min_run:
-                covered += blk.size
-                if blk.size > longest:
-                    longest = blk.size
-                    sample = " ".join(wb_raw[blk.b:blk.b + blk.size])[:200]
-        return longest, round(covered / len(wb), 4), sample
+        longest, sample = 0, ""
+        for st, en in spans:
+            if en - st > longest:
+                longest = en - st
+                sample = " ".join(wb_raw[st:en])[:200]
+        return longest, round(covered / len(wb_raw), 4), sample
 
     # FU167: invisible / zero-width / Default_Ignorable / noncharacter / bidi carrier code points — the
     # "invisible character" watermark/steganography class (NOT Claude's statistical mark, which is word
@@ -4241,36 +4335,64 @@ Return JSON only:
         return cleaned, n
 
     @classmethod
-    def _watermark_removal_report(cls, claude_body, out):
-        """FU167: MEASURE the watermark-removal level from the researched mechanism factors. Returns
-        {n5_prose_overlap, longest_shared_run, invisible_chars, grade}. `out` is expected already
-        invisible-char-sanitized (so invisible_chars is ~0). GRADE (proxy — SynthID is not detector-
-        verifiable, and no AI engine can detect it): thorough / strong / not-confirmed."""
+    def _watermark_removal_report(cls, claude_body, out, brand=None, extracted=None, verdicts=None):
+        """FU167/171/172: MEASURE the watermark-removal level from the RESEARCHED mechanism.
+
+        Why the grade is based on the longest DISCRETIONARY run rather than raw verbatim-ness:
+        - Detection needs LENGTH. SynthID-Text reaches only TPR~0.30 at FPR 1% on 50-token text — and that
+          is text which is 100% watermarked and high-entropy; the Nature paper operates at 400 tokens.
+        - The mark is weak-to-absent on FACTUAL/low-entropy text (Google: "less effective on factual
+          responses, as there is less opportunity to augment generation without decreasing accuracy").
+        - Dilution degrades global detection ~O(1/T), and localizing a span is strictly harder still.
+        So a run of preserved facts/names/codes is NOT evidence of a surviving watermark, while a long run
+        of free-choice prose is. Grading on raw verbatim-ness penalized exactly the text the rewrite is
+        REQUIRED to keep, which is why every YMYL article read "not-confirmed" no matter how good the strip.
+        Raw numbers stay reported for transparency."""
         pa, pb = cls._prose_for_overlap(claude_body), cls._prose_for_overlap(out)
-        overlap = cls._ngram_overlap(pa, pb, n=5)            # discretionary-prose overlap at context-window+1
-        run, share, sample = cls._residual_run_stats(pa, pb) # FU171: worst-case = residual MASS, not any-run>4
+        overlap = cls._ngram_overlap(pa, pb, n=5)
+        run, share, sample = cls._residual_run_stats(pa, pb)
+        spans, wb_raw, _cov = cls._residual_spans(pa, pb)
+        vmap = verdicts or {}
+        disc_total, disc_longest, disc_sample = 0, 0, ""
+        for st, en in spans:
+            words = wb_raw[st:en]
+            key = " ".join(words).lower()
+            d = cls._discretionary_words(words, brand, extracted, vmap.get(key))
+            disc_total += len(d)
+            if len(d) > disc_longest:
+                disc_longest, disc_sample = len(d), " ".join(words)[:200]
+        disc_share = round(disc_total / len(wb_raw), 4) if wb_raw else 0.0
         inv = len(cls._INVISIBLE_RE.findall(out or ""))
         target = float(os.environ.get("WRITER_OVERLAP_TARGET", "0.05"))
-        # FU171: grade on the RATE (overlap) + the MASS of surviving verbatim text (share), because
-        # detection scores the MEAN g-value over the whole text — a lone atom/quote island can't lift it,
-        # while a large surviving fraction can. `run` stays REPORTED for transparency; a single huge intact
-        # passage (>= _RESIDUAL_RUN_CAP words) still fails outright, so the guard can't be gamed by one
-        # enormous copied block hiding under a small share.
-        # Thresholds follow the published paraphrase-scrub result (>90% of the mark removed): "strong"
-        # = the great majority (>85%) of the token sequence was re-emitted; "thorough" = >95%.
+        # ~36 words ≈ 50 tokens = the point at which even fully-watermarked high-entropy text only reaches
+        # ~30% TPR; below it a surviving span cannot carry a testable signal.
+        floor = int(os.environ.get("WRITER_DETECT_FLOOR_WORDS", "36"))
         cap = int(os.environ.get("WRITER_RESIDUAL_RUN_CAP", "40"))
-        if overlap < target and share < 0.05 and run < cap and inv == 0:
-            grade = "thorough"
-        elif overlap < 0.15 and share < 0.15 and run < cap and inv == 0:
+        # The discretionary run is the PRIMARY axis (detectability), but residual MASS is still a real
+        # backstop: dilution is what destroys the signal, so a rewrite that is largely verbatim overall
+        # must fail even if no single discretionary run is long (e.g. a short near-verbatim excerpt).
+        # Dilution is what destroys the signal — but only DILUTION OF WATERMARK-BEARING TOKENS counts, and
+        # facts carry no mark whoever emitted them. So the mass backstop tracks the DISCRETIONARY share; the
+        # RAW share is kept as an abuse floor (>=0.50 = a near-verbatim copy) so the guard can't be gamed.
+        abuse = float(os.environ.get("WRITER_RAW_SHARE_ABUSE", "0.50"))
+        if (disc_longest < floor // 2 and overlap < 0.15 and disc_share < 0.15
+                and share < abuse and run < cap and inv == 0):
+            grade = "thorough" if overlap < target else "strong"
+        elif (disc_longest < floor and overlap < 0.15 and disc_share < 0.30
+                and share < abuse and run < cap and inv == 0):
             grade = "strong"
         else:
             grade = "not-confirmed"
         return {"n5_prose_overlap": round(overlap, 3), "longest_shared_run": int(run),
                 "residual_share": share, "residual_sample": sample,
+                "residual_discretionary_share": disc_share,
+                "longest_discretionary_run": int(disc_longest),
+                "discretionary_sample": disc_sample,
+                "detect_floor_words": floor,
                 "invisible_chars": int(inv), "grade": grade}
 
     @staticmethod
-    def _facts_preserved(claude_body, out, brand=None):
+    def _facts_preserved(claude_body, out, brand=None, extra_atoms=None):
         """FU168/169: the deterministic FACT-INTEGRITY gate — how we DETERMINE a factual-sentence rewrite is
         SAFE without trusting the 72B's judgment. Extract the LOAD-BEARING fact TOKENS from Claude's body and
         require EVERY one to still appear in the rewrite; a rewrite missing any FAILS validation (won't ship) →
@@ -4299,6 +4421,11 @@ Return JSON only:
                 if len(nm) >= 3:
                     literal.add(nm)
         missing |= {t for t in literal if t and t not in out_s}
+        # FU172: the intelligent protect-list is enforced too (union with the regex floor above).
+        for sp in (extra_atoms or []):
+            sp = (sp or "").strip()
+            if sp and sp.lower() not in out_s.lower():
+                missing.add(sp)
         return (not missing), sorted(missing)
 
     @staticmethod
@@ -4395,6 +4522,286 @@ Return JSON only:
         print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(segs)} sections reworded", flush=True)
         return "\n".join(out_parts)
 
+    # ── FU172 Change 4/6: targeted residual polish + semantic fact verification ───────────────────
+    @staticmethod
+    def _split_sentences_with_pos(body):
+        """Sentences of the BODY paired with their exact source text, skipping structure we never touch
+        (headings, bolded section labels, table rows, blockquotes and the ## Sources section)."""
+        head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body or "", maxsplit=1)[0]
+        out = []
+        for line in head.split("\n"):
+            st = line.strip()
+            if not st or st.startswith("#") or st.startswith("|") or st.startswith(">") \
+                    or re.fullmatch(r"\*\*[^*].*\*\*", st):
+                continue
+            for sent in re.split(r"(?<=[.!?])\s+", line):
+                sent = sent.strip()
+                if len(sent.split()) >= 5:
+                    out.append(sent)
+        return out
+
+    def _residual_polish(self, claude_body, out, brand=None, extracted=None, verdicts=None, timeout=600):
+        """FU172 Change 4 — surgical pass over ONLY the sentences still carrying DISCRETIONARY verbatim
+        wording (the sole part that can hold a watermark). One small call instead of another ~700s re-roll.
+        Every replacement is fact-gated per sentence; a sentence that drops a fact keeps its ORIGINAL.
+        Returns the spliced body, or None when nothing was safely improved."""
+        pa, pb = self._prose_for_overlap(claude_body), self._prose_for_overlap(out)
+        spans, wb_raw, _ = self._residual_spans(pa, pb)
+        vmap = verdicts or {}
+        hot = []
+        for st, en in spans:
+            words = wb_raw[st:en]
+            key = " ".join(words).lower()
+            if len(self._discretionary_words(words, brand, (extracted or {}).get("atoms"), vmap.get(key))) >= 5:
+                hot.append(" ".join(words))
+        if not hot:
+            return None
+        keep_whole = [x.lower() for x in (extracted or {}).get("verbatim_sentences", [])]
+        cands = []
+        for sent in self._split_sentences_with_pos(out):
+            if sent.lower() in keep_whole or _CRITICAL_DIRECTIVE_RE.search(sent):
+                continue                                   # never touch a critical directive
+            if any(h.lower() in " ".join(re.findall(r"\w+", sent)).lower() for h in hot):
+                if out.count(sent) == 1:                    # splice only on a unique match
+                    cands.append(sent)
+            if len(cands) >= 12:
+                break
+        if not cands:
+            return None
+        numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(cands))
+        try:
+            got = self.writer.call_text(
+                "Recast each numbered sentence COMPLETELY in different words — different structure, "
+                "different connectives, different sentence openers. Share no run of more than 4 consecutive "
+                "words with the original.\n"
+                "KEEP EXACT: every [S#] marker, every number/price/date with its unit, every product, brand or "
+                "company name, every code, and the exact scope of every negation.\n"
+                "Return ONLY the rewritten sentences, numbered the same way, same count, one per line.\n\n"
+                + numbered, max_tokens=2000, temperature=1.0, timeout=timeout)
+        except Exception as e:
+            print(f"[writer] residual polish failed ({e})", flush=True)
+            return None
+        lines = [re.sub(r"^\s*\d+[.)]\s*", "", l).strip() for l in (got or "").split("\n") if l.strip()]
+        if len(lines) != len(cands):
+            print(f"[writer] residual polish: count mismatch ({len(lines)} vs {len(cands)}) — discarded",
+                  flush=True)
+            return None
+        body, applied = out, 0
+        for orig, rep in zip(cands, lines):
+            if not rep or rep == orig:
+                continue
+            ok, _missing = self._facts_preserved(orig, rep, brand)
+            if not ok:
+                continue                                   # dropped a fact → keep the original sentence
+            body = body.replace(orig, rep, 1)
+            applied += 1
+        print(f"[writer] residual polish: {applied}/{len(cands)} sentences reworded", flush=True)
+        return body if applied else None
+
+    def _verify_facts_semantic(self, claude_body, out, brand=None, timeout=600):
+        """FU172 Change 6 — the FINAL check, and the counterweight that makes the extra rewriting freedom
+        safe. The deterministic gate only checks a fact TOKEN still APPEARS, so it cannot see 'once weekly'
+        → 'once daily', a flipped negation, a price re-attached to the wrong brand, a dropped condition, or
+        a hardened hedge. Claude compares original vs rewrite and flags meaning changes; flagged sentences
+        are sent back to the writer (max 2 rounds) and any still-flagged sentence is REVERTED to Claude's
+        original wording — correct facts beat a cleaner strip. Returns (body, n_reverted, verified_bool)."""
+        if os.environ.get("WRITER_FACT_VERIFY", "1") == "0":
+            return out, 0, False
+        body, reverted = out, 0
+        for _round in range(2):
+            try:
+                res = self.claude.call(
+                    "Compare the REWRITE against the ORIGINAL. Report ONLY sentences where a FACT changed "
+                    "meaning — a value or its unit, a PRICING structure (which figure is the intro vs the "
+                    "ongoing price, the billing cadence, what the price covers, whose price it is), which "
+                    "entity a fact belongs to, the scope of a negation, a dropped condition or exception, "
+                    "hardened hedging, a date, or an identifier/code. Wording changes that preserve meaning "
+                    "are CORRECT and must NOT be reported.\n"
+                    'Return JSON ONLY: {"issues": [{"original": "...", "rewritten": "...", '
+                    '"problem": "..."}]}\n\n'
+                    f"ORIGINAL:\n{claude_body[:12000]}\n\nREWRITE:\n{body[:12000]}",
+                    max_tokens=2000, temperature=0)
+            except Exception as e:
+                print(f"[writer] fact verification failed ({e}) — token-gated body kept", flush=True)
+                return body, reverted, False
+            if not isinstance(res, dict):
+                return body, reverted, False
+            issues = [i for i in (res.get("issues") or []) if isinstance(i, dict)
+                      and str(i.get("rewritten") or "").strip() and str(i.get("original") or "").strip()]
+            if not issues:
+                print(f"[writer] fact verification: clean ({reverted} reverted)", flush=True)
+                return body, reverted, True
+            print(f"[writer] fact verification: {len(issues)} issue(s) — repair round {_round + 1}",
+                  flush=True)
+            fixed = 0
+            for it in issues[:12]:
+                bad, orig, why = str(it["rewritten"]).strip(), str(it["original"]).strip(), \
+                    str(it.get("problem") or "")
+                if bad not in body:
+                    continue
+                rep = None
+                try:
+                    rep = self.writer.call_text(
+                        "Rewrite this sentence in your own words, but fix the factual error described.\n"
+                        f"PROBLEM: {why}\nMUST MATCH THIS FACT EXACTLY: {orig}\n"
+                        "Keep every [S#] marker. Return ONLY the corrected sentence.\n\n"
+                        f"SENTENCE: {bad}", max_tokens=600, temperature=0.7, timeout=timeout)
+                except Exception:
+                    rep = None
+                rep = (rep or "").strip().split("\n")[0].strip()
+                if rep and self._facts_preserved(orig, rep, brand)[0]:
+                    body = body.replace(bad, rep, 1)
+                    fixed += 1
+                else:
+                    body = body.replace(bad, orig, 1)      # revert to Claude's original — facts win
+                    reverted += 1
+            if not fixed:
+                break
+        print(f"[writer] fact verification: finished with {reverted} sentence(s) reverted", flush=True)
+        return body, reverted, True
+
+    # ── FU172 Change 0/0b: the INTELLIGENT protect-list (extract → classify → verify) ─────────────
+    @staticmethod
+    def _atom_shape_ok(span):
+        """Deterministic PRECISION guard against over-protection. An atom must look like a VALUE, CODE or
+        NAME — not category wording. "compounding pharmacies" / "weight loss program" / "project management
+        platform" are rejected; "503B", "2.5 mg", "3.9% APR", "SOC 2", "Ryan Haight Online Pharmacy Consumer
+        Protection Act" and a whole pricing structure are kept. Vertical-neutral."""
+        ws = (span or "").split()
+        if not (1 <= len(ws) <= 14):
+            return False
+        has_digit = any(re.search(r"\d", w) for w in ws)
+        caps = sum(1 for w in ws if re.match(r"[A-Z]", w))
+        marked = "®" in span or "™" in span
+        # A SINGLE capitalised token is ambiguous — "LillyDirect"/"PeterMD" are names, but "Reputable" is
+        # just sentence-initial prose. Internal capitalisation (or ALLCAPS) is the discriminator.
+        named = any(re.search(r"[a-z][A-Z]", w) or re.fullmatch(r"[A-Z]{2,}\d*", w) for w in ws)
+        if not (has_digit or caps >= 2 or marked or named):
+            return False
+        if len(ws) > 8 and not has_digit:      # long spans allowed only as value/pricing structures
+            return False
+        return True
+
+    def _extract_protected_facts(self, claude_body, brand=None):
+        """FU172 Change 0 — run FIRST: ask Claude for the spans that must survive verbatim, then VERIFY them
+        deterministically. Strict in BOTH directions: protecting too little risks a wrong fact; protecting
+        too much leaves text the rewriter won't touch, which RAISES the residual. Returns
+        {"atoms": [...], "verbatim_sentences": [...]}; never raises (→ {} on any failure = regex-only path)."""
+        if os.environ.get("WRITER_FACT_EXTRACT", "1") == "0" or not (claude_body or "").strip():
+            return {}
+        cat = ((brand or {}).get("category") or "").strip()
+        ctx = ((brand or {}).get("context") or "").strip()[:400]
+        try:
+            res = self.claude.call(
+                "You are protecting an article before it is REWRITTEN word-for-word by another model.\n"
+                "List ONLY the spans that must survive VERBATIM because rewording them would make a FACT "
+                "WRONG.\n\n"
+                f"THE BRAND'S DOMAIN: {cat or 'unknown'}. {ctx}\n\n"
+                "APPLY THIS SINGLE TEST to every candidate: 'if this were reworded, would a fact become "
+                "WRONG?' If no, DO NOT list it.\n"
+                "INCLUDE (whatever fits this domain): exact values with their units; PRICES AS A WHOLE "
+                "STRUCTURE (e.g. an intro price, the ongoing price, the billing cadence and what it covers "
+                "belong together in ONE span — the relationship is the fact, not just the figures); dates; "
+                "numeric thresholds; product / brand / company names; statute, regulation and standard "
+                "names or codes; certifications; identifiers.\n"
+                "Cross-domain examples so you do not assume a vertical: a seat count and 'SOC 2' for "
+                "software; an APR and its term for lending; a statute name and jurisdiction for legal; a "
+                "dose and a regulation code for healthcare; a part number and a tolerance for manufacturing.\n"
+                "EXCLUDE category wording that can be freely reworded (e.g. 'compounding pharmacies', "
+                "'weight loss program', 'project management platform', 'flexible pricing').\n"
+                "USE THE SHORTEST SPAN that carries the fact — a long span needlessly locks the prose "
+                "around it.\n"
+                "Also return up to 8 WHOLE sentences that cannot be safely reworded at all because their "
+                "meaning turns on scope: a contraindication, a dosing schedule, a safety negation, a "
+                "regulatory obligation, an eligibility rule, a licence restriction, or quoted/reported "
+                "regulator wording.\n\n"
+                'Return JSON ONLY: {"atoms": ["..."], "verbatim_sentences": ["..."]}\n\n'
+                f"ARTICLE:\n{claude_body[:14000]}", max_tokens=2000, temperature=0)
+        except Exception as e:
+            print(f"[writer] fact extraction failed ({e}) — regex-only path", flush=True)
+            return {}
+        if not isinstance(res, dict):
+            return {}
+        low = (claude_body or "").lower()
+        atoms, rejected = [], 0
+        for a in (res.get("atoms") or [])[:200]:
+            a = str(a or "").strip()
+            if not a or a.lower() not in low:          # anti-hallucination: must exist in the body
+                continue
+            if not self._atom_shape_ok(a):             # anti-over-protection: generic wording rejected
+                rejected += 1
+                continue
+            atoms.append(a)
+        sents = [str(x or "").strip() for x in (res.get("verbatim_sentences") or [])[:8]]
+        sents = [x for x in sents if x and x.lower() in low and _CRITICAL_DIRECTIVE_RE.search(x)]
+        # RECALL audit — anything the regex floor catches but the model missed is added back.
+        missed = 0
+        for tok in set(re.findall(r"\b\d+[A-Za-z]\b|\b[A-Z]{3,}\d*\b", claude_body or "")) | \
+                set(m.group(0) for m in _LOADBEARING_NUM_RE.finditer(claude_body or "")):
+            tok = tok.strip()
+            if tok and not any(tok.lower() in a.lower() for a in atoms):
+                atoms.append(tok)
+                missed += 1
+        # MASS cap — the list may never lock more than ~25% of the body (longest dropped first).
+        body_words = max(1, len(re.findall(r"\w+", claude_body or "")))
+        cap = float(os.environ.get("WRITER_FACT_MASS_CAP", "0.25"))
+        atoms.sort(key=lambda a: -len(a.split()))
+        kept, used = [], 0
+        for a in atoms:
+            w = len(a.split())
+            if (used + w) / body_words > cap:
+                continue
+            kept.append(a)
+            used += w
+        print(f"[writer] facts: {len(kept)} atoms + {len(sents)} verbatim sentences, locking "
+              f"{used / body_words:.1%} of the body (model missed {missed} → restored, "
+              f"rejected {rejected} generic)", flush=True)
+        return {"atoms": kept, "verbatim_sentences": sents}
+
+    def _classify_spans(self, spans, brand=None, extracted=None):
+        """FU172 Change 0b/2 — Claude labels each surviving span fact-bearing / discretionary / structural.
+        BOUNDED TRUST (the anti-gaming core): a verdict that makes the score STRICTER (→ discretionary) is
+        always applied; a verdict that makes it more LENIENT (→ fact-bearing/structural) is accepted ONLY
+        when the span is backed by the VERIFIED protect-list. So the classifier can never inflate a grade by
+        asserting that ordinary prose is a fact. Returns {span_lower: verdict}; {} on any failure."""
+        if os.environ.get("WRITER_FACT_EXTRACT", "1") == "0" or not spans:
+            return {}
+        ex = [a.lower() for a in (extracted or {}).get("atoms", [])]
+        bt = self._brand_tokens(brand)
+        try:
+            res = self.claude.call(
+                "Each line below is a phrase that survived UNCHANGED when an article was rewritten.\n"
+                "Label each: 'fact' (rewording it would make something WRONG — a value, name, code, date, "
+                "statute, certification or identifier), 'structural' (a heading or section label), or "
+                "'generic' (ordinary category wording that could have been freely reworded).\n"
+                "Be strict: prefer 'generic' unless rewording would genuinely break a fact.\n"
+                'Return JSON ONLY: {"verdicts": [{"span": "...", "class": "fact|generic|structural"}]}\n\n'
+                + "\n".join(f"- {sp}" for sp in spans[:60]), max_tokens=2000, temperature=0)
+        except Exception as e:
+            print(f"[writer] span classification failed ({e}) — mechanical rules only", flush=True)
+            return {}
+        if not isinstance(res, dict):
+            return {}
+        out, promoted, unprotected = {}, 0, 0
+        for v in (res.get("verdicts") or []):
+            sp = str(v.get("span") or "").strip()
+            cl = str(v.get("class") or "").strip().lower()
+            if not sp:
+                continue
+            key = " ".join(re.findall(r"\w+", sp)).lower()
+            if cl == "generic":                       # STRICTER → always accepted, no evidence needed
+                out[key] = "discretionary"
+                unprotected += 1
+            elif cl in ("fact", "structural"):        # LENIENT → must be backed by verified evidence
+                backed = any(a in sp.lower() or sp.lower() in a for a in ex) or \
+                    any(w.lower() in bt for w in re.findall(r"\w+", sp))
+                if backed:
+                    out[key] = "fact-bearing" if cl == "fact" else "structural"
+                    promoted += 1
+        print(f"[writer] classifier: {unprotected} unprotected, {promoted} promoted (evidence-backed)",
+              flush=True)
+        return out
+
     @staticmethod
     def _restore_headings(orig_heads, rewritten_body):
         """FU154: replace the rewrite's heading lines positionally with the ORIGINAL headings — so a
@@ -4448,6 +4855,13 @@ Return JSON only:
             cited = set(re.findall(r"\[S\d+\]", claude_body))          # what Claude actually cited
             heads = [l.strip() for l in claude_body.splitlines() if l.lstrip().startswith("#")]
             n_ev = len(self._evidence_blocks or [])
+            # FU172 Change 0 — the INTELLIGENT protect-list, computed BEFORE any rewriting and cached.
+            _extracted = article.get("writer_facts")
+            if _extracted is None and self.writer_mode == "rewrite":
+                _extracted = self._extract_protected_facts(claude_body, brand)
+                article["writer_facts"] = _extracted
+            _extracted = _extracted or {}
+            _atoms = _extracted.get("atoms") or []
 
             def _build_prompt(aggressive=False):
                 harder = ("\n\nIMPORTANT: a previous attempt reused too much of the original wording. "
@@ -4527,6 +4941,12 @@ Return JSON only:
                     "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
                     "the paragraph text UNDER the headings;\n"
                     "- every number, dose, %, price, date, and product/drug/brand name;\n"
+                    + (("- THESE EXACT SPANS, character-for-character (this is the authoritative list — "
+                        "everything NOT on it is yours to recast freely):\n"
+                        + "".join(f"    • {a}\n" for a in _atoms[:120])) if _atoms else "")
+                    + (("- KEEP THESE SENTENCES WORD-FOR-WORD (their meaning turns on exact scope):\n"
+                        + "".join(f"    • {x}\n" for x in (_extracted.get("verbatim_sentences") or [])))
+                       if _extracted.get("verbatim_sentences") else "") +
                     "- every NEGATION and clinical DIRECTIVE that carries meaning — 'not', 'no', 'contraindicated', "
                     "'may not', 'required', 'only', 'not FDA-approved', 'not a controlled substance' — keep these "
                     "words and their scope EXACT (moving or dropping one flips the meaning);\n"
@@ -4578,7 +4998,7 @@ Return JSON only:
                 # FU168: fact-integrity gate — a rewrite that dropped/altered any load-bearing fact token
                 # (number/dose/price, FDA/MTC/MEN2/503A…, ®-name, brand/competitor name) is UNSAFE → reject
                 # (so aggressive rewording of factual sentences can't silently change a clinical fact).
-                ok_f, missing_f = self._facts_preserved(claude_body, out, brand)
+                ok_f, missing_f = self._facts_preserved(claude_body, out, brand, _atoms)
                 if not ok_f:
                     return False, f"dropped facts {missing_f[:5]}"
                 return True, ""
@@ -4624,7 +5044,7 @@ Return JSON only:
                 # FU167: strip invisible-char carriers, then MEASURE the watermark-removal level
                 # (n=5 discretionary-prose overlap + longest-shared-run + grade).
                 out, _inv = self._strip_invisible_chars(out)
-                rep = self._watermark_removal_report(claude_body, out)
+                rep = self._watermark_removal_report(claude_body, out, brand, _atoms)
                 # keep the attempt with the LOWEST (overlap, longest_run) — never just the last one.
                 if best is None or (rep["n5_prose_overlap"], rep.get("residual_share", 1.0)) < \
                         (best_rep["n5_prose_overlap"], best_rep.get("residual_share", 1.0)):
@@ -4677,7 +5097,7 @@ Return JSON only:
                         ok_s, why_s = _valid(sec_out)
                         if ok_s:
                             sec_out, _ = self._strip_invisible_chars(sec_out)
-                            rep_s = self._watermark_removal_report(claude_body, sec_out)
+                            rep_s = self._watermark_removal_report(claude_body, sec_out, brand, _atoms)
                             print(f"[writer] section-chunked pass: n5-overlap {rep_s['n5_prose_overlap']:.2f} "
                                   f"longest-run {rep_s['longest_shared_run']} grade={rep_s['grade']}", flush=True)
                             if (rep_s["n5_prose_overlap"], rep_s.get("residual_share", 1.0)) < \
@@ -4688,35 +5108,102 @@ Return JSON only:
                 except Exception as _e:
                     print(f"[writer] section-chunked pass failed: {_e}", flush=True)
 
+            # ── FU172: classify the ACTUAL surviving spans, polish the discretionary residual, then
+            # verify the facts semantically. Each stage keeps its result ONLY if it is genuinely better,
+            # and any failure leaves the previous body untouched.
+            _verdicts, _reverted, _verified = {}, 0, False
+            if best and self.writer_mode == "rewrite":
+                try:
+                    _pa = self._prose_for_overlap(claude_body)
+                    _pb = self._prose_for_overlap(best)
+                    _sp, _wraw, _ = self._residual_spans(_pa, _pb)
+                    _texts = [" ".join(_wraw[a:b]) for a, b in _sp if b - a >= 5]
+                    _verdicts = self._classify_spans(_texts, brand, _extracted)
+                    best_rep = self._watermark_removal_report(claude_body, best, brand, _atoms, _verdicts)
+                except Exception as _e:
+                    print(f"[writer] span classification skipped ({_e})", flush=True)
+                if best_rep.get("grade") != "thorough":
+                    try:
+                        _t0 = _t.time()
+                        _pol = self._residual_polish(claude_body, best, brand, _extracted, _verdicts,
+                                                     timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                        secs += _t.time() - _t0
+                        if _pol:
+                            if heads:
+                                _r = self._restore_headings(heads, _pol)
+                                _pol = _r if _r is not None else _pol
+                            ok_p, why_p = _valid(_pol)
+                            if ok_p:
+                                _pol, _ = self._strip_invisible_chars(_pol)
+                                rep_p = self._watermark_removal_report(claude_body, _pol, brand, _atoms,
+                                                                       _verdicts)
+                                if (rep_p["longest_discretionary_run"],
+                                        rep_p["residual_discretionary_share"]) < \
+                                        (best_rep["longest_discretionary_run"],
+                                         best_rep["residual_discretionary_share"]):
+                                    best, best_rep = _pol, rep_p
+                            else:
+                                print(f"[writer] residual polish rejected: {why_p}", flush=True)
+                    except Exception as _e:
+                        print(f"[writer] residual polish skipped ({_e})", flush=True)
+                try:
+                    _t0 = _t.time()
+                    _vb, _reverted, _verified = self._verify_facts_semantic(
+                        claude_body, best, brand,
+                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                    secs += _t.time() - _t0
+                    if _vb and _vb != best:
+                        ok_v, why_v = _valid(_vb)
+                        if ok_v:
+                            best = _vb
+                            best_rep = self._watermark_removal_report(claude_body, best, brand, _atoms,
+                                                                      _verdicts)
+                        else:
+                            print(f"[writer] fact-verified body rejected: {why_v}", flush=True)
+                except Exception as _e:
+                    print(f"[writer] fact verification skipped ({_e})", flush=True)
+                article["writer_secs"] = round(secs, 1)
+
             _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
             _share = best_rep.get("residual_share", 0.0)
+            _dshare = best_rep.get("residual_discretionary_share", 0.0)
+            _drun = best_rep.get("longest_discretionary_run", 0)
+            _floor = best_rep.get("detect_floor_words", 36)
             article["writer_mode_used"] = self.writer_mode
             article["writer_overlap"] = _ov
             article["writer_longest_run"] = _run
             article["writer_residual_share"] = _share
+            article["writer_residual_discretionary"] = _dshare
+            article["writer_longest_discretionary_run"] = _drun
+            article["writer_facts_verified"] = bool(_verified)
+            article["writer_facts_reverted"] = int(_reverted)
             article["writer_grade"] = _grade
-            _res = f"{_share * 100:.1f}% of the prose still verbatim, longest run {_run} words"
+            # Report BOTH axes: the raw verbatim figure (transparency) and the free-choice figure the grade
+            # actually turns on — the rest is facts/quotes/labels the rewrite is REQUIRED to keep, which
+            # carry no watermark (the mark is weak-to-absent on low-entropy factual text).
+            _res = (f"{_share * 100:.1f}% still verbatim, of which {_dshare * 100:.1f}% is free-choice prose "
+                    f"(longest free-choice run {_drun} words vs a ~{_floor}-word detection floor)")
+            _rev = f"; {_reverted} sentence(s) reverted to preserve facts" if _reverted else ""
             if _grade == "thorough":
                 _wm = ""
             elif _grade == "strong":
-                _wm = (f"watermark-strip strong, low residual (n=5 overlap {_ov:.2f}; {_res}) "
-                       f"— proxy, not detector-verifiable")
+                _wm = f"watermark-strip strong ({_res}) — proxy, not detector-verifiable{_rev}"
             else:
-                # FU171: only advise a regenerate when re-rolling can actually help (a genuinely weak
-                # strip). When the residual is a small amount of text the rewrite is REQUIRED to keep
-                # verbatim (drug/brand names, 503A/503B-style regulation codes, dosing atoms, quoted
-                # regulator language — all hard-gated by _facts_preserved), regenerating can never clear
-                # it, so say that plainly instead of sending the operator round the loop again.
-                _structural = _ov < 0.15 and _run < int(os.environ.get("WRITER_RESIDUAL_RUN_CAP", "40"))
-                _wm = (f"watermark-strip: residual is the preserved facts/quotes the rewrite must keep "
-                       f"verbatim ({_res}) — regenerating will NOT reduce it; review before publishing"
+                # Only advise a regenerate when re-rolling can actually help. When the free-choice residual
+                # is already far below the detection floor, the remainder is required-verbatim material and
+                # regenerating cannot reduce it — saying otherwise sends the operator round a loop that
+                # cannot converge (which is exactly what happened for ~19 rounds).
+                _structural = _drun < _floor and _ov < 0.15
+                _wm = (f"watermark-strip: the residual is the facts/quotes the rewrite must keep verbatim "
+                       f"({_res}) — regenerating will NOT reduce it; review before publishing{_rev}"
                        if _structural else
-                       f"watermark-strip: not fully confirmed (n=5 overlap {_ov:.2f}; {_res}) "
-                       f"— proxy; regenerate for a cleaner strip")
-            # preserve any compose-shorter note set inside the loop
+                       f"watermark-strip: not fully confirmed ({_res}) — proxy; regenerate for a cleaner "
+                       f"strip{_rev}")
             article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
             print(f"[blog_gen] writer: {self.writer_mode} {secs:.1f}s grade={_grade} "
                   f"n5_overlap={_ov:.2f} residual_share={_share:.3f} longest_run={_run} "
+                  f"discretionary={_dshare:.3f} longest_disc_run={_drun}/{_floor} "
+                  f"verified={_verified} reverted={_reverted} "
                   f"residual_sample={(best_rep.get('residual_sample') or '')[:90]!r}", flush=True)
             return best
         except Exception as e:

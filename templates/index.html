@@ -13071,19 +13071,23 @@ function _blogWriterToast(res) {
     const ov = Number(res.writer_overlap || 0);
     const run = Number(res.writer_longest_run || 0);
     const share = Number(res.writer_residual_share || 0);
-    // FU171: a residual made of facts/quotes the rewrite MUST keep verbatim can't be regenerated away
-    const structural = ov < 0.15 && run < 40;
+    const dshare = Number(res.writer_residual_discretionary || 0);
+    const drun = Number(res.writer_longest_discretionary_run || 0);
+    // FU172: the grade turns on the FREE-CHOICE residual vs the ~36-word detection floor — a residual made
+    // of facts/quotes the rewrite MUST keep verbatim carries no watermark and can't be regenerated away.
+    const structural = drun < 36 && ov < 0.15;
+    const detail = `${(share*100).toFixed(1)}% still verbatim, of which ${(dshare*100).toFixed(1)}% is free-choice prose (longest free-choice run ${drun} words vs a ~36-word detection floor)`;
     if (mode === 'fallback') {
         toast('⚠ Watermark-strip FELL BACK — the self-hosted writer failed/timed out; the watermark is NOT stripped. Regenerate.', 'error', 12000);
     } else if (grade === 'not-confirmed') {
         if (structural) {
-            toast(`Watermark-strip: prose reworded (${mode}, ${secs.toFixed(0)}s) — n=5 overlap ${(ov*100).toFixed(0)}%, ${(share*100).toFixed(1)}% still verbatim (longest run ${run} words). That residual is the facts/quotes the rewrite must keep exact — regenerating will NOT reduce it. Review before publishing.`, 'info', 12000);
+            toast(`Watermark-strip: prose reworded (${mode}, ${secs.toFixed(0)}s) — ${detail}. That residual is the facts/quotes the rewrite must keep exact — regenerating will NOT reduce it. Review before publishing.`, 'info', 12000);
         } else {
-            toast(`⚠ Watermark-strip NOT fully confirmed (${mode}, ${secs.toFixed(0)}s) — n=5 overlap ${(ov*100).toFixed(0)}%, ${(share*100).toFixed(1)}% still verbatim (longest run ${run} words). Proxy only (SynthID isn't detector-verifiable); regenerate for a cleaner strip.`, 'error', 12000);
+            toast(`⚠ Watermark-strip NOT fully confirmed (${mode}, ${secs.toFixed(0)}s) — ${detail}. Proxy only (SynthID isn't detector-verifiable); regenerate for a cleaner strip.`, 'error', 12000);
         }
     } else if (mode && grade) {
         const lvl = grade === 'thorough' ? 'thorough' : 'strong';
-        toast(`Watermark-strip: ${lvl} (${mode}, ${secs.toFixed(0)}s) — n=5 overlap ${(ov*100).toFixed(0)}%, ${(share*100).toFixed(1)}% still verbatim (longest run ${run} words) (proxy).`, 'info', 8000);
+        toast(`Watermark-strip: ${lvl} (${mode}, ${secs.toFixed(0)}s) — ${detail} (proxy).`, 'info', 8000);
     } else if (mode && secs) {
         toast(`Writer: ${secs.toFixed(0)}s (${mode})`, 'info');
     }

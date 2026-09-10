@@ -13403,6 +13403,19 @@ async function openBlog(id) {
     // FU154: watermark-free rewrite status line (overlap + any warning)
     const _rwOv = (b.rewritten_overlap != null) ? Math.round((b.rewritten_overlap || 0) * 100) : null;
     const _rwGood = (b.rewritten_overlap != null && b.rewritten_overlap < 0.15);
+    // FU179: per-surface rewrite status for the two LinkedIn cards (blog keeps its own columns).
+    const _rwMetaAll = (b.rewrites_meta && typeof b.rewrites_meta === 'object') ? b.rewrites_meta : {};
+    const _rwMeta = (sf) => {
+        const m = _rwMetaAll[sf];
+        if (!m) return 'not generated yet';
+        const bits = [];
+        if (m.overlap != null) bits.push(Math.round(m.overlap * 100) + '% overlap');
+        if (m.grade) bits.push(m.grade);
+        if (m.cost) bits.push('≈ $' + Number(m.cost).toFixed(2));
+        if (m.facts_reverted) bits.push(m.facts_reverted + ' reverted');
+        if (m.at) bits.push(String(m.at).slice(0, 10));
+        return _blogEsc(bits.join(' · ') || 'generated');
+    };
     const _rwStatus = b.rewritten_body
         ? '<div class="text-xs" style="color:' + (_rwGood ? '#4ade80' : '#fbbf24') + '">verbatim overlap '
           + (_rwOv != null ? _rwOv + '%' : '?') + (_rwGood ? ' ✓ watermark replaced' : ' ⚠ high overlap — watermark may remain')
@@ -13471,6 +13484,21 @@ async function openBlog(id) {
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;dl=1" title="Download the post as a .txt file ({link} resolved)">⬇ Download .txt</a>
                     <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_post')" title="FU143: creates a Google Doc of this LinkedIn post in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
                 </div>
+                <div class="card p-2 mt-2" style="background:#0c1a1e;border:1px solid #155e75">
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free LinkedIn post (rewritten on the self-hosted model)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs" style="color:#94a3b8">${_rwMeta('linkedin_post')}</span>
+                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_post')" title="Re-author this LinkedIn post on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button>
+                        </div>
+                    </div>
+                    <textarea id="blog-e-li-rw" rows="6" placeholder="Click Generate to produce the watermark-free version…">${_blogEsc(b.linkedin_rewritten || '')}</textarea>
+                    <div class="flex gap-2 mt-1">
+                        <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-rw')" title="Copy as clean plain text">Copy (plain text)</button>
+                        <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;use=rewritten" target="_blank" title="Open the watermark-free version">Open</a>
+                        <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;use=rewritten&amp;dl=1" title="Download the watermark-free version">⬇ Download</a>
+                    </div>
+                </div>
             </div>
             <div class="card p-2" style="background:#141026;border:1px solid #3b0764">
                 <div class="flex items-center justify-between mb-1">
@@ -13489,6 +13517,21 @@ async function openBlog(id) {
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin" target="_blank" title="Open the formatted article, then select-all + copy to paste into LinkedIn with formatting">Open formatted (for LinkedIn)</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;dl=1" title="Download the formatted article as an .html file">⬇ Download HTML</a>
                     <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_article')" title="FU143: creates a Google Doc of this LinkedIn article in your configured Drive folder (Settings → Google Drive upload)">⬆ Drive</button>
+                </div>
+                <div class="card p-2 mt-2" style="background:#0c1a1e;border:1px solid #155e75">
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free LinkedIn article (rewritten on the self-hosted model)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs" style="color:#94a3b8">${_rwMeta('linkedin_article')}</span>
+                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_article')" title="Re-author this LinkedIn article on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button>
+                        </div>
+                    </div>
+                    <textarea id="blog-e-li-article-rw" rows="14" placeholder="Click Generate to produce the watermark-free version…">${_blogEsc(b.linkedin_article_rewritten || '')}</textarea>
+                    <div class="flex gap-2 mt-1">
+                        <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article-rw')" title="Copy as clean plain text">Copy (plain text)</button>
+                        <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;use=rewritten" target="_blank" title="Open the watermark-free version">Open</a>
+                        <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;use=rewritten&amp;dl=1" title="Download the watermark-free version">⬇ Download</a>
+                    </div>
                 </div>
             </div>
             <div class="card p-2" style="background:#0c1a1e;border:1px solid #155e75">
@@ -13627,6 +13670,8 @@ async function blogSave(id) {
             geo: _v('blog-e-geo'),
             qualifier: _v('blog-e-qualifier'),
             rewritten_body: _v('blog-e-rw'),   // FU154: watermark-free version (manual edits persist)
+            linkedin_rewritten: _v('blog-e-li-rw'),                      // FU179
+            linkedin_article_rewritten: _v('blog-e-li-article-rw'),      // FU179
         }});
         toast('Saved', 'success');
         blogReload();
@@ -13737,11 +13782,17 @@ function writerWarmUp() {
     });
 }
 
-function blogGenRewrite(id) {
-    runTask(`/api/blogs/${id}/rewrite`, {}, (res) => {
+// FU179: `surface` selects WHICH text is rewritten — 'blog' (default) | 'linkedin_post' |
+// 'linkedin_article'. All three run the same fact extraction, fact + price-cadence gates, attempt
+// loop, semantic verification and grading; only the structural gates differ.
+function blogGenRewrite(id, surface) {
+    const _sf = surface || 'blog';
+    const _lbl = _sf === 'linkedin_post' ? 'LinkedIn post'
+        : (_sf === 'linkedin_article' ? 'LinkedIn article' : 'blog');
+    runTask(`/api/blogs/${id}/rewrite`, { surface: _sf }, (res) => {
         openBlog(id);
         if (res && res.ok === false) {
-            toast('Rewrite failed: ' + (res.warning || 'try again'), 'error');
+            toast('Rewrite failed (' + _lbl + '): ' + (res.warning || 'try again'), 'error');
         } else {
             const ov = (res && res.overlap != null) ? (' — ' + Math.round(res.overlap * 100) + '% overlap') : '';
             const ct = (res && res.cost != null) ? (' · ≈ $' + Number(res.cost).toFixed(2) + (res.secs ? ' (' + res.secs + 's)' : '')) : '';
@@ -13749,7 +13800,8 @@ function blogGenRewrite(id) {
             const st = (res && res.stage_secs) || {};
             const parts = Object.keys(st).filter(k => st[k]).map(k => k + ' ' + Math.round(st[k]) + 's');
             const br = parts.length ? ('\n⏱ ' + parts.join(' · ') + (res.was_cold ? '  (model was COLD — the GPU load is inside first_call)' : '  (model was warm)')) : '';
-            toast('Watermark-free version created' + ov + ct + wn + br, 'success', 14000);
+            const gr = (res && res.grade) ? (' · ' + res.grade) : '';
+            toast('Watermark-free ' + _lbl + ' created' + ov + gr + ct + wn + br, 'success', 14000);
         }
     }, 'Rewriting (watermark-free)');
 }

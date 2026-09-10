@@ -1102,6 +1102,10 @@ class Database:
             blog["quality_report"] = json.loads(blog.get("quality_report") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["quality_report"] = {}
+        try:   # FU179: per-surface rewrite telemetry {"linkedin_post": {...}, "linkedin_article": {...}}
+            blog["rewrites_meta"] = json.loads(blog.get("rewrites_meta") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["rewrites_meta"] = {}
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1158,15 +1162,17 @@ class Database:
                    "ymyl",   # FU133
                    "quality_report",   # FU151 (D)
                    "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning",   # FU154
-                   "rewritten_cost"}   # FU155
+                   "rewritten_cost",   # FU155
+                   "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta"}   # FU179
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
-            elif k in ("pending_state", "youtube_meta", "quality_report") and not isinstance(v, str):
-                v = json.dumps(v or {})   # FU79/FU80/FU151: JSON dict
+            elif k in ("pending_state", "youtube_meta", "quality_report",
+                       "rewrites_meta") and not isinstance(v, str):
+                v = json.dumps(v or {})   # FU79/FU80/FU151/FU179: JSON dict
             sets.append(f"{k} = ?")
             params.append(v)
         if not sets:
@@ -2336,7 +2342,12 @@ class Database:
                     "quality_report",
                     # FU154: on-demand watermark-free REWRITE of a finished blog (the original
                     # body_markdown is kept; this is the alternate version to hand clients).
-                    "rewritten_body", "rewritten_at", "rewritten_warning"):
+                    "rewritten_body", "rewritten_at", "rewritten_warning",
+                    # FU179: the same watermark-free rewrite for the two derived LinkedIn surfaces.
+                    # Bodies get their own columns so manual edits persist through the existing PATCH;
+                    # rewrites_meta is ONE JSON blob keyed by surface holding the telemetry the blog
+                    # keeps in columns (overlap/grade/cost/stage_secs/warning/at).
+                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

@@ -3204,7 +3204,11 @@ def api_blog_patch(blog_id):
                "youtube_persona",   # FU80
                "geo",               # FU90
                "qualifier",         # FU93
-               "meta_title")        # FU114
+               "meta_title",        # FU114
+               # FU154 fix: blogSave has always SENT rewritten_body, but it was never whitelisted —
+               # so a manual edit to the watermark-free version was silently discarded on save.
+               "rewritten_body",
+               "linkedin_rewritten", "linkedin_article_rewritten")   # FU179
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -3458,7 +3462,10 @@ def api_blog_export(blog_id):
     # user can open it and rich-text-copy it into LinkedIn's editor (which ignores raw Markdown).
     if fmt == "linkedin":
         art_title = (blog.get("linkedin_article_title") or "").strip()
-        art_body = (blog.get("linkedin_article") or "").strip()
+        # FU179: ?use=rewritten serves the watermark-free version when one exists
+        _uw = (request.args.get("use") or "").lower() == "rewritten"
+        art_body = ((blog.get("linkedin_article_rewritten") if _uw else "") or "").strip() \
+            or (blog.get("linkedin_article") or "").strip()
         if not art_body:
             return jsonify({"error": "no LinkedIn article generated yet"}), 404
         # FU81 backstop: articles generated BEFORE the persist-time substitution still carry a
@@ -3492,7 +3499,10 @@ def api_blog_export(blog_id):
     # default; ?dl=1 downloads it as a .txt. The {link} placeholder is resolved at render as a
     # backstop for posts persisted before FU81.
     if fmt == "linkedin-post":
-        post_txt = (blog.get("linkedin_text") or "").strip()
+        # FU179: ?use=rewritten serves the watermark-free version when one exists
+        _uw = (request.args.get("use") or "").lower() == "rewritten"
+        post_txt = ((blog.get("linkedin_rewritten") if _uw else "") or "").strip() \
+            or (blog.get("linkedin_text") or "").strip()
         if not post_txt:
             return jsonify({"error": "no LinkedIn post generated yet"}), 404
         post_txt = _sub_link(post_txt, _blog_link_target(blog, brand))
@@ -5974,8 +5984,23 @@ def api_blog_rewrite(blog_id):
     self-hosted open model. The original body_markdown is NEVER touched — the reworded version is
     stored in rewritten_body (regenerable). Uses REWRITE mode only (the finished blog has no live
     evidence for compose), and works whenever the writer endpoint is configured, independent of the
-    global WRITER_MODE toggle."""
+    global WRITER_MODE toggle.
+
+    FU179: `{"surface": "blog"|"linkedin_post"|"linkedin_article"}` selects WHICH text is rewritten —
+    the two derived LinkedIn surfaces get the SAME fact extraction / fact + price-cadence gates /
+    attempt loop / semantic verification / grading, over their own structure. Default "blog" is
+    byte-identical to FU154."""
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    # source column, destination column, whether the blog H1 guard applies
+    _SURFACES = {
+        "blog": ("body_markdown", "rewritten_body", True),
+        "linkedin_post": ("linkedin_text", "linkedin_rewritten", False),
+        "linkedin_article": ("linkedin_article", "linkedin_article_rewritten", False),
+    }
+    _surface = (request.get_json(silent=True) or {}).get("surface") or "blog"
+    if _surface not in _SURFACES:
+        return jsonify({"error": f"unknown surface {_surface!r}"}), 400
+    _src_col, _dst_col, _pin_h1 = _SURFACES[_surface]
 
     def task(_task_id=None):
         from generators.blog_gen import BlogGenerator
@@ -5986,9 +6011,9 @@ def api_blog_rewrite(blog_id):
             blog = bg.get_blog(blog_id)
             if not blog:
                 raise ValueError("blog not found")
-            body = blog.get("body_markdown") or ""
+            body = blog.get(_src_col) or ""
             if not body.strip():
-                raise ValueError("this blog has no body to rewrite")
+                raise ValueError(f"nothing to rewrite — generate the {_surface.replace('_', ' ')} first")
             cfg = _resolve_writer_config(bg)
             if not cfg["endpoint_url"] or not cfg["key"]:
                 raise ValueError("configure the writer endpoint + API key in Settings first")
@@ -5996,8 +6021,10 @@ def api_blog_rewrite(blog_id):
             writer = WriterClient(cfg["endpoint_url"], cfg["key"], cfg["model"])
             gen = BlogGenerator(ClaudeClient(api_key), bg, writer=writer, writer_mode="rewrite")
             article = {"body_markdown": body}
-            new_body = gen._apply_writer_pass(article, body, brand, blog.get("seed") or "")
-            new_body = gen._force_h1(new_body, blog.get("seed") or "")   # light guard (re-pin H1)
+            new_body = gen._apply_writer_pass(article, body, brand, blog.get("seed") or "",
+                                              surface=_surface)
+            if _pin_h1:   # blog only — re-pinning an H1 would corrupt either LinkedIn surface
+                new_body = gen._force_h1(new_body, blog.get("seed") or "")
             if article.get("writer_mode_used") == "fallback" or not (new_body or "").strip():
                 # The open model dropped citations / returned nothing → we did NOT get a usable
                 # rewrite. Keep the original untouched; tell the UI so it doesn't mistake the
@@ -6008,13 +6035,36 @@ def api_blog_rewrite(blog_id):
             import time as _t
             secs = float(article.get("writer_secs") or 0)
             cost = round(secs * WRITER_GPU_HOURLY / 3600.0, 4)   # FU155: rough GPU-time cost estimate
-            bg.update_blog(blog_id,
-                           rewritten_body=new_body,
-                           rewritten_overlap=article.get("writer_overlap"),
-                           rewritten_at=_t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
-                           rewritten_warning=article.get("writer_warning") or "",
-                           rewritten_cost=cost)
-            return {"blog_id": blog_id, "ok": True,
+            _now = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+            if _surface == "blog":
+                bg.update_blog(blog_id,
+                               rewritten_body=new_body,
+                               rewritten_overlap=article.get("writer_overlap"),
+                               rewritten_at=_now,
+                               rewritten_warning=article.get("writer_warning") or "",
+                               rewritten_cost=cost)
+            else:
+                # FU179: the body gets its own column (so manual edits persist through PATCH); the
+                # telemetry the blog keeps in five columns rides in ONE JSON blob keyed by surface.
+                _meta = blog.get("rewrites_meta")
+                _meta = dict(_meta) if isinstance(_meta, dict) else {}
+                _meta[_surface] = {
+                    "mode_used": article.get("writer_mode_used") or "",
+                    "overlap": article.get("writer_overlap"),
+                    "longest_run": article.get("writer_longest_run"),
+                    "residual_share": article.get("writer_residual_share"),
+                    "residual_discretionary": article.get("writer_residual_discretionary"),
+                    "grade": article.get("writer_grade") or "",
+                    "facts_verified": bool(article.get("writer_facts_verified")),
+                    "facts_reverted": int(article.get("writer_facts_reverted") or 0),
+                    "warning": article.get("writer_warning") or "",
+                    "stage_secs": article.get("writer_stage_secs") or {},
+                    "was_cold": bool(article.get("writer_was_cold")),
+                    "cost": cost, "secs": round(secs, 1), "at": _now,
+                }
+                bg.update_blog(blog_id, **{_dst_col: new_body}, rewrites_meta=_meta)
+            return {"blog_id": blog_id, "ok": True, "surface": _surface,
+                    "grade": article.get("writer_grade") or "",
                     "overlap": article.get("writer_overlap"),
                     "warning": article.get("writer_warning") or "",
                     # FU173: where the time actually went + whether the GPU was cold
@@ -6052,9 +6102,11 @@ def api_blog_upload_gdoc(blog_id):
         # FU143 — the LinkedIn surfaces upload through the same bridge (the Apps Script is
         # content-agnostic): variant = 'blog' (default) | 'linkedin_article' | 'linkedin_post'.
         variant = (data.get("variant") or "blog").strip()
+        _gw = (data.get("use") or "") == "rewritten"   # FU179: upload the watermark-free version
         if variant == "linkedin_article":
             art_title = (blog.get("linkedin_article_title") or "").strip()
-            art_body = (blog.get("linkedin_article") or "").strip()
+            art_body = ((blog.get("linkedin_article_rewritten") if _gw else "") or "").strip() \
+                or (blog.get("linkedin_article") or "").strip()
             if not art_body:
                 return jsonify({"error": "no LinkedIn article generated yet — generate it first"}), 400
             art_body = _sub_link(art_body, _blog_link_target(blog, brand))
@@ -6062,7 +6114,8 @@ def api_blog_upload_gdoc(blog_id):
             page_html = _simple_doc_html(doc_title,
                                          (f"# {art_title}\n\n{art_body}") if art_title else art_body)
         elif variant == "linkedin_post":
-            post_txt = (blog.get("linkedin_text") or "").strip()
+            post_txt = ((blog.get("linkedin_rewritten") if _gw else "") or "").strip() \
+                or (blog.get("linkedin_text") or "").strip()
             if not post_txt:
                 return jsonify({"error": "no LinkedIn post generated yet — generate it first"}), 400
             post_txt = _sub_link(post_txt, _blog_link_target(blog, brand))

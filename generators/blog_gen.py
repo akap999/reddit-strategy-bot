@@ -70,6 +70,41 @@ _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources fol
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
+# FU179 — the watermark rewrite runs on the BLOG and on the two derived LinkedIn surfaces. Everything
+# that matters (fact extraction, the fact + price-cadence gates, the attempt loop, the section pass,
+# residual polish, semantic verification, the grade) is surface-agnostic; only the PRESERVE list and the
+# structural half of `_valid` are shaped by the surface. `blog` MUST reproduce the pre-FU179 prompt and
+# gates byte-for-byte — tests/test_fu179.py asserts it against a captured baseline.
+#   label     — what to call the text in the prompt
+#   band      — (lo, hi) multipliers on the original LENGTH. A LinkedIn post has a hard fold/length
+#               contract, so the blog's 0.6-1.4 would wave through a gutted post.
+#   preserve  — surface-specific PRESERVE bullets, replacing the blog's [S#]/tables/## Sources ones
+#   plain     — plain text only (no Markdown headings may be introduced)
+#   urls/tags — hard-gate that every URL / hashtag in the original survives
+_WRITER_SURFACES = {
+    "blog": {"label": "article", "band": (0.6, 1.4), "preserve": (), "plain": False,
+             "urls": False, "tags": False},
+    "linkedin_post": {
+        "label": "LinkedIn post", "band": (0.85, 1.15), "plain": True, "urls": True, "tags": True,
+        "preserve": (
+            "- every URL exactly as written (the call-to-action link);",
+            "- every #hashtag, unchanged and in the same order;",
+            "- the OPENING SHAPE, which is what makes this post citable: LINE 1 stays a QUESTION, and "
+            "LINE 2 still gives the direct answer with the same options NAMED. Reword them, never "
+            "restructure them;",
+            "- the AGAINST-INTEREST sentence (the one naming where an alternative wins) — reworded, "
+            "never dropped;",
+            "- PLAIN TEXT only: never introduce a Markdown heading, table, or horizontal rule, and keep "
+            "the line and paragraph breaks where they are;")},
+    "linkedin_article": {
+        "label": "LinkedIn article", "band": (0.7, 1.3), "plain": False, "urls": True, "tags": True,
+        "preserve": (
+            "- every URL exactly as written (the call-to-action link);",
+            "- every #hashtag, unchanged and in the same order;",
+            "- never introduce a Markdown TABLE or a horizontal rule (---/***/___) — LinkedIn's editor "
+            "renders them as literal characters;")},
+}
+
 _FACT_RESCUE_TRIES = 3
 _FACT_VERIFY_FETCHES = int(os.environ.get("BRAND_FACT_VERIFY_FETCHES", "6"))   # FU178: cap the
                                 # operator-URL reads used to verify canonical brand facts (tier 2)
@@ -5079,8 +5114,10 @@ Return JSON only:
         sents = [x for x in sents if x and x.lower() in low and _CRITICAL_DIRECTIVE_RE.search(x)]
         # RECALL audit — anything the regex floor catches but the model missed is added back.
         missed = 0
-        for tok in set(re.findall(r"\b\d+[A-Za-z]\b|\b[A-Z]{3,}\d*\b", claude_body or "")) | \
-                set(m.group(0) for m in _LOADBEARING_NUM_RE.finditer(claude_body or "")):
+        # sorted(): set iteration order varies with PYTHONHASHSEED, which made the PRESERVE list — and
+        # therefore the whole rewrite prompt — differ between runs on identical input. Deterministic now.
+        for tok in sorted(set(re.findall(r"\b\d+[A-Za-z]\b|\b[A-Z]{3,}\d*\b", claude_body or "")) |
+                          set(m.group(0) for m in _LOADBEARING_NUM_RE.finditer(claude_body or ""))):
             tok = tok.strip()
             if tok and not any(tok.lower() in a.lower() for a in atoms):
                 atoms.append(tok)
@@ -5180,7 +5217,7 @@ Return JSON only:
             parts.append(head + ("\n" + txt if txt else ""))
         return "\n\n".join(parts)
 
-    def _apply_writer_pass(self, article, draft_body, brand, seed):
+    def _apply_writer_pass(self, article, draft_body, brand, seed, surface="blog"):
         """FU153: re-author the finished blog body on the self-hosted open model so a Claude SynthID
         watermark is replaced by the open model's tokens. Modes (self.writer_mode):
           - 'rewrite' — re-compose Claude's finished body sentence-by-sentence (preserve [S#]/facts).
@@ -5189,11 +5226,17 @@ Return JSON only:
         A QUALITY gate (length / [S#] citations / headings) FALLS BACK to the Claude body on failure;
         a WATERMARK gate (verbatim overlap) retries-then-warns but NEVER falls back (that would
         reinstate the watermark). Returns the final body_markdown. Records writer_* fields on
-        `article`. Never raises → returns the Claude body on any trouble."""
+        `article`. Never raises → returns the Claude body on any trouble.
+
+        FU179: `surface` selects the PRESERVE list + the structural gates (_WRITER_SURFACES) so the two
+        derived LinkedIn surfaces get the SAME fact machinery over their own structure. The caller still
+        passes the text as `article["body_markdown"]`; 'blog' is byte-identical to pre-FU179."""
         try:
             claude_body = article.get("body_markdown") or ""
             if not self.writer or not claude_body.strip():
                 return claude_body
+            _sf = _WRITER_SURFACES.get(surface) or _WRITER_SURFACES["blog"]
+            _is_blog = surface == "blog"
             name = (brand or {}).get("name") or "the brand"
             cited = set(re.findall(r"\[S\d+\]", claude_body))          # what Claude actually cited
             heads = [l.strip() for l in claude_body.splitlines() if l.lstrip().startswith("#")]
@@ -5299,7 +5342,8 @@ Return JSON only:
                     "- When you MUST keep an atom verbatim (see PRESERVE below), REWORD the words IMMEDIATELY "
                     "BEFORE and AFTER it — never leave the original phrasing touching a preserved atom.\n\n"
                     "PRESERVE EXACTLY (do not change, drop, move, or renumber — but reword the prose around them):\n"
-                    "- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
+                    + ("- every inline citation marker like [S1], [S2] … keep each where it supports its claim;\n"
+                       if _is_blog else "") +
                     "- EVERY heading line (starting with #, ##, or ###) — copy it CHARACTER-FOR-CHARACTER; "
                     "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
                     "the paragraph text UNDER the headings;\n"
@@ -5313,8 +5357,9 @@ Return JSON only:
                     "- every NEGATION and clinical DIRECTIVE that carries meaning — 'not', 'no', 'contraindicated', "
                     "'may not', 'required', 'only', 'not FDA-approved', 'not a controlled substance' — keep these "
                     "words and their scope EXACT (moving or dropping one flips the meaning);\n"
-                    "- every Markdown table (structure and cell values);\n"
-                    "- the '## Sources' section at the end.\n"
+                    + ("- every Markdown table (structure and cell values);\n"
+                       "- the '## Sources' section at the end.\n" if _is_blog
+                       else "".join(b + "\n" for b in _sf["preserve"])) +
                     "REWORD the wording of EVERY sentence, INCLUDING factual, regulatory, clinical and FAQ sentences "
                     "— keep the preserved items above EXACT and NEVER change a fact's meaning, a negation, a "
                     "comparison, or a clinical directive. Descriptive factual / regulatory / FAQ sentences "
@@ -5328,8 +5373,10 @@ Return JSON only:
                     "genuinely meaning-critical clinical statement — NEVER a default for a sentence that merely "
                     "sounds clinical or regulatory.\n"
                     "Meaning, facts, structure and citations stay identical; only the WORDING changes.\n"
-                    "Return ONLY the rewritten Markdown article, nothing else.\n\n"
-                    f"ARTICLE:\n{claude_body}{harder}"
+                    + ("Return ONLY the rewritten Markdown article, nothing else.\n\n" if _is_blog else
+                       f"Return ONLY the rewritten {_sf['label']}, nothing else.\n\n")
+                    + (f"ARTICLE:\n{claude_body}{harder}" if _is_blog
+                       else f"{_sf['label'].upper()}:\n{claude_body}{harder}")
                 )
 
             def _valid(out):
@@ -5348,8 +5395,30 @@ Return JSON only:
                         return False, f"not a usable article (len {len(out.strip())}, headings={has_head})"
                     return True, ""      # FU165: any real article ships (length/citations → soft warnings)
                 # rewrite mode — the output must mirror Claude's finished body
-                if not (0.6 * len(claude_body) <= len(out) <= 1.4 * len(claude_body)):
+                # FU179: the band is SURFACE-driven. A LinkedIn post has a hard fold/length contract, so
+                # the blog's 0.6-1.4 would wave through a gutted post; 'blog' keeps 0.6-1.4 exactly.
+                _lo, _hi = _sf["band"]
+                if not (_lo * len(claude_body) <= len(out) <= _hi * len(claude_body)):
                     return False, f"length {len(out)} outside band"
+                # FU179: structural survival for the derived surfaces — nothing else guards these, and
+                # each is load-bearing: the CTA URL is the only path back to the site, the hashtags are
+                # the post's distribution, and a Markdown heading in a LinkedIn post renders literally.
+                if _sf["urls"]:
+                    _u_src = set(re.findall(r"https?://[^\s)>\]]+", claude_body))
+                    _u_out = set(re.findall(r"https?://[^\s)>\]]+", out))
+                    _u_miss = sorted(_u_src - _u_out)
+                    if _u_miss:
+                        return False, f"dropped URL(s) {_u_miss[:2]}"
+                if _sf["tags"]:
+                    _t_src = re.findall(r"(?<!\w)#\w[\w-]*", claude_body)
+                    _t_out = re.findall(r"(?<!\w)#\w[\w-]*", out)
+                    if sorted(t.lower() for t in _t_src) != sorted(t.lower() for t in _t_out):
+                        return False, (f"hashtags changed ({len(_t_src)}→{len(_t_out)})")
+                if _sf["plain"]:
+                    # a heading is `#` + space; a hashtag is `#` + word — only the former is illegal here
+                    _bad = [l.strip() for l in out.splitlines() if re.match(r"\s*#{1,6}\s+\S", l)]
+                    if _bad or re.search(r"(?m)^\s*(?:\|.*\||-{3,}|\*{3,}|_{3,})\s*$", out):
+                        return False, f"Markdown structure introduced into a plain-text post {_bad[:1]}"
                 out_cited = set(re.findall(r"\[S\d+\]", out))
                 if not cited <= out_cited:
                     return False, f"dropped citations {sorted(cited - out_cited)}"

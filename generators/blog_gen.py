@@ -71,6 +71,8 @@ _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web se
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
 _FACT_RESCUE_TRIES = 3
+_FACT_VERIFY_FETCHES = int(os.environ.get("BRAND_FACT_VERIFY_FETCHES", "6"))   # FU178: cap the
+                                # operator-URL reads used to verify canonical brand facts (tier 2)
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
 _SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
                                 # (its own row previously had no rescue path at all) — separate pool so
@@ -364,6 +366,86 @@ def _kf_pricing_items(key_facts):
     return []
 
 
+def _kf_fact_items(key_facts):
+    """FU177: the operator's CANONICAL BRAND FACTS — free-form lines the blog must treat as {name}'s
+    OWN authoritative first-party facts (the non-pricing sibling of _kf_pricing_items). Stored under
+    key_facts['facts']['items'] as [{label, value, source_url, operator_set}]; a plain sentence has an
+    empty label. Tolerant on read: a bare list of strings and a legacy {key: "value"} scalar both
+    normalize, so nothing an operator (or an older save) wrote is silently dropped."""
+    kf = key_facts if isinstance(key_facts, dict) else {}
+    node = kf.get("facts")
+    raw = node.get("items") if isinstance(node, dict) else (node if isinstance(node, list) else [])
+    out = []
+    for it in (raw or []):
+        if isinstance(it, dict):
+            val = str(it.get("value") or "").strip()
+            if val:
+                out.append({"label": str(it.get("label") or "").strip(), "value": val,
+                            "source_url": str(it.get("source_url") or "").strip(),
+                            "operator_set": bool(it.get("operator_set", True))})
+        elif str(it or "").strip():
+            out.append({"label": "", "value": str(it).strip(), "source_url": "", "operator_set": True})
+    return out
+
+
+def _parse_fact_lines(text):
+    """FU177: parse the operator's "Brand facts" textarea into _kf_fact_items shape. A line is
+    FREE-FORM PROSE by default — no structure is required. Two OPTIONAL conveniences are honoured when
+    present: a trailing `| https://…` becomes that fact's source URL, and a remaining `Label | Value`
+    split labels the fact. Everything else (including a sentence that happens to contain a pipe) is
+    kept as the fact's text. Blank lines are skipped."""
+    items = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        url = parts.pop() if (len(parts) > 1 and re.match(r"^https?://", parts[-1], re.I)) else ""
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            label, value = parts[0], " | ".join(parts[1:]).strip()
+        else:
+            label, value = "", " | ".join(p for p in parts if p).strip()
+        if value:
+            items.append({"label": label, "value": value, "source_url": url, "operator_set": True})
+    return items
+
+
+_FACT_FILLER = {"the", "and", "for", "with", "from", "that", "this", "are", "was", "its", "our",
+                "all", "any", "per", "not", "does", "has", "have", "you", "your", "their", "than",
+                "only", "also", "but", "can", "will", "into", "over", "out", "off", "via"}
+
+
+def _fact_anchor_tokens(value):
+    """FU178: the tokens a page MUST contain for us to accept it as stating this fact. Deliberately
+    strict — citing the wrong page is worse than not citing at all. Anchors = tokens carrying a digit,
+    tokens that were Capitalised/UPPER in the operator's line (names, codes, acronyms), and the
+    distinctive long words (≥6 chars). Generic filler is dropped. Capped so a long sentence doesn't
+    become impossible to match."""
+    raw = re.findall(r"[A-Za-z0-9][A-Za-z0-9./%$£€-]*", value or "")
+    anchors = []
+    for w in raw:
+        lw = w.lower().strip(".,;:")
+        if len(lw) < 3 or lw in _FACT_FILLER:
+            continue
+        if re.search(r"\d", w) or w[:1].isupper() or len(lw) >= 6:
+            if lw not in anchors:
+                anchors.append(lw)
+    return anchors[:6]
+
+
+def _fact_stated_in(value, text):
+    """FU178: True when `text` (a fetched first-party page) plausibly STATES the fact — every anchor
+    token present. With no anchors at all (a very short generic line) fall back to requiring the whole
+    normalized value as a substring, which is stricter still."""
+    hay = re.sub(r"\s+", " ", (text or "").lower())
+    if not hay:
+        return False
+    anchors = _fact_anchor_tokens(value)
+    if not anchors:
+        return re.sub(r"\s+", " ", (value or "").lower()).strip() in hay
+    return all(a in hay for a in anchors)
+
+
 def _drop_nameless_when_named(items):
     """FU163: a NAMELESS general (empty-product) pricing item must never coexist with NAMED-product
     items — a catch-all price (e.g. a homepage "flexible plans … $79/mo") contradicts the specific
@@ -471,8 +553,14 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
         if val:
             lines.append((f"  - pricing ({prod}){tag}: {val}" if prod else f"  - pricing{tag}: {val}"))
     kf = key_facts if isinstance(key_facts, dict) else {}
+    # FU177: the operator's free-form CANONICAL BRAND FACTS — same authority as a locked price. No
+    # per-line [operator-set] tag here (unlike pricing, where it separates operator from auto-synced
+    # items): every line in this list is operator-supplied, and the header already says so.
+    for it in _kf_fact_items(kf):
+        lab = it.get("label") or ""
+        lines.append(f"  - {lab}: {it['value']}" if lab else f"  - {it['value']}")
     for k, v in kf.items():
-        if k == "pricing":
+        if k in ("pricing", "facts"):
             continue
         val = (v.get("value") if isinstance(v, dict) else v) or ""
         val = str(val).strip()
@@ -490,7 +578,12 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
             f"sentence, use the canonical value for THIS article's product VERBATIM — do NOT substitute a "
             f"general plan / consult / membership / base fee (e.g. a base '$X/mo plans' or a processing "
             f"fee) as {name}'s product price; an [operator-set] line is locked and overrides any priced "
-            f"page you find):\n"
+            f"page you find. A NON-pricing line is a fact about {name} the operator supplied: use it "
+            f"where it is relevant to this article, keep every value in it EXACT, and NEVER contradict "
+            f"it or hedge it as unconfirmed. CITE it ONLY when the EVIDENCE contains a page that "
+            f"actually states it — otherwise state it as {name}'s OWN POSITIONING and attribute it "
+            f"(\"{name} says it …\"); never attach a citation to a line you cannot find in the "
+            f"EVIDENCE):\n"
             + "\n".join(lines) + "\n")
 
 
@@ -3111,6 +3204,65 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                        and _cv[:12].lower() in str(b.get("text") or "").lower() for b in fresh):
                 fresh.append({"label": name, "url": _curl, "text": _ctext[:_EVIDENCE_TEXT_CAP]})
             tool_texts[name] = tool_texts.get(name, "") + " pricing price cost fee plan " + _cv.lower()
+        # FU177/FU178 — the operator's CANONICAL BRAND FACTS. A fact typed into a box is an ASSERTION,
+        # not a source, so it earns a [S#] ONLY when a real page can be shown to state it. Three tiers:
+        #   1 VERIFIED         — its anchors appear in a page we already fetched → cite THAT page.
+        #   2 OPERATOR-SOURCED — the operator gave a URL → fetch it once and verify → cite it.
+        #   3 UNVERIFIED       — neither → NO evidence block. The fact still reaches the writer via
+        #                        _canonical_facts_block and is stated as {name}'s own POSITIONING
+        #                        (attributed, uncited) — the escape verify_claims already allows for
+        #                        the subject. Minting `[S4] Acme — https://acme.com` for a sentence
+        #                        that may appear nowhere on acme.com is the failure this replaces.
+        # tool_texts is fed in ALL three tiers: it drives the dimension-rescue coverage test, which is
+        # about what the subject has already said, not about citability.
+        _fact_tiers = {"verified": 0, "operator": 0, "unverified": 0}
+        _unverified_facts, _fact_fetches = [], 0
+        for _fi in _kf_fact_items(_kf):
+            _fv = _fi["value"]
+            _fl = _fi.get("label") or ""
+            _ftext = (f"{_fl}: {_fv} (per {name}'s own site)" if _fl
+                      else f"{_fv} (per {name}'s own site)")
+            tool_texts[name] = tool_texts.get(name, "") + " " + (_fl + " " + _fv).lower()
+            # tier 1 — already-fetched first-party page that states it
+            _src = ""
+            for _blk in (getattr(self, "_evidence_blocks", None) or []):
+                _bd = _dom(_blk.get("url"))
+                if not (str(_blk.get("label") or "").strip().lower() == name.strip().lower()
+                        or (own_dom_s and _bd and (_bd == own_dom_s or _bd.endswith("." + own_dom_s)))):
+                    continue
+                if _blk.get("url") and _fact_stated_in(_fv, _blk.get("text")):
+                    _src = _blk["url"]
+                    break
+            _tier = "verified" if _src else ""
+            # tier 2 — the operator's own URL, FETCHED and checked (never cited unread)
+            _ou = (_fi.get("source_url") or "").strip()
+            if not _src and _ou and _fact_fetches < _FACT_VERIFY_FETCHES:
+                _fact_fetches += 1
+                try:
+                    if _fact_stated_in(_fv, _extract_visible_text(_fetch_homepage(_ou))):
+                        _src, _tier = _ou, "operator"
+                except Exception as _e:
+                    print(f"[blog_gen] brand-facts: could not read {_ou} ({_e})", flush=True)
+            if _src:
+                _fact_tiers[_tier] += 1
+                if not any(str(b.get("label") or "").strip().lower() == name.strip().lower()
+                           and _fv[:24].lower() in str(b.get("text") or "").lower() for b in fresh):
+                    fresh.append({"label": name, "url": _src, "text": _ftext[:_EVIDENCE_TEXT_CAP]})
+            else:
+                _fact_tiers["unverified"] += 1
+                _unverified_facts.append(f"{_fl}: {_fv}" if _fl else _fv)
+        self._facts_note = ""
+        if any(_fact_tiers.values()):
+            print(f"[blog_gen] brand-facts: {_fact_tiers['verified']} verified, "
+                  f"{_fact_tiers['operator']} operator-sourced, {_fact_tiers['unverified']} unverified",
+                  flush=True)
+            if _fact_tiers["unverified"]:
+                self._facts_note = (
+                    f"brand-facts: {_fact_tiers['unverified']} of "
+                    f"{sum(_fact_tiers.values())} canonical fact(s) could not be found on {name}'s own "
+                    f"site — stated as {name}'s positioning, NOT cited; add the page URL in Edit Brand "
+                    f"to have them cited")
+
         _op_prod_slugs = {_kf_slug(it.get("product")) for it in _op_items}
         _subj_unpriced = []
         for prod in (_products if (own_dom_s and _px) else []):   # FU162: no subject price search when OFF
@@ -3312,6 +3464,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
                 "qualifier": rqual,  # FU93: same for the qualifier
+                # FU178: canonical brand facts we could NOT find on the brand's own site — the reconcile
+                # must state these as the brand's positioning (attributed), never as a cited fact.
+                "unverified_facts": _unverified_facts,
                 "ymyl": ymyl or ""}  # FU133: vertical — reconcile rules + FU79 resume stay YMYL-aware
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
@@ -3356,6 +3511,20 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     what is evaluated, the governing tax/regulatory angle); never dilute them into a restatement of
     {name}'s own terms — each must keep multiple concrete named facts with their implications, never a
     one-line nod. {rqual}-specific FAQ entries MUST survive this rewrite."""
+
+        # FU178 — canonical brand facts the operator supplied that we could NOT find stated on {name}'s
+        # own site. They are usable (the operator vouches for them) but they are ASSERTIONS, not sources:
+        # state them as {name}'s own positioning, attributed, and never attach an [S#] to them.
+        _unv = [str(x).strip() for x in (sourcing.get("unverified_facts") or []) if str(x).strip()]
+        unverified_rules = ""
+        if _unv:
+            unverified_rules = (
+                "\n  - UNVERIFIED CANONICAL LINES (operator-supplied, NOT found on " + name +
+                "'s own site): use them where relevant, but state each as " + name + "'s OWN "
+                "POSITIONING and ATTRIBUTE it (\"" + name + " says it …\", \"According to " + name +
+                " …\") — do NOT attach an [S#] to them and do NOT present them as independently "
+                "established. Keep every value in them EXACT.\n"
+                + "".join(f"      • {x}\n" for x in _unv[:12]))
 
         # FU135 — source honesty + internal consistency (all blogs).
         honesty_rules = f"""
@@ -3511,7 +3680,7 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
+    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -5566,6 +5735,10 @@ Return JSON only:
         if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pw] if x)
+        _fn = getattr(self, "_facts_note", "")
+        if _fn:  # FU178: canonical brand facts that earned no citation (stated as positioning instead)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _fn] if x)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""

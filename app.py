@@ -2184,6 +2184,29 @@ def api_update_brand(bid):
             else:
                 kf.pop("pricing", None)   # operator cleared all pricing lines
             kf_update = json.dumps(kf)
+        # FU177: operator-set CANONICAL BRAND FACTS — free-form lines carrying the SAME authority as a
+        # locked price (rendered by _canonical_facts_block AND injected as citable subject evidence).
+        # Independent of the pricing branch above so one save can set either or both. `key_facts_facts`
+        # is the raw textarea and is AUTHORITATIVE: a line the operator deleted is removed.
+        if "key_facts_facts" in data or isinstance(data.get("key_facts_fact_items"), list):
+            from generators.blog_gen import _parse_fact_lines, _kf_fact_items
+            if kf_update is not None:
+                kf2 = json.loads(kf_update)
+            else:
+                try:
+                    kf2 = json.loads((db.get_brand(bid) or {}).get("key_facts") or "{}")
+                except Exception:
+                    kf2 = {}
+            if not isinstance(kf2, dict):
+                kf2 = {}
+            _fi_in = data.get("key_facts_fact_items")
+            _fact_items = (_kf_fact_items({"facts": {"items": _fi_in}}) if isinstance(_fi_in, list)
+                           else _parse_fact_lines(data.get("key_facts_facts") or ""))
+            if _fact_items:
+                kf2["facts"] = {"items": _fact_items}
+            else:
+                kf2.pop("facts", None)   # operator cleared every line
+            kf_update = json.dumps(kf2)
         db.update_brand(
             brand_id=bid,
             name=(data.get("name") or "").strip() or None,   # FU84: rename (exact casing followed)

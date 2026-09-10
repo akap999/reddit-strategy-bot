@@ -12960,6 +12960,7 @@ async function renderBlogs(c) {
             <div class="flex gap-2 mt-3">
                 <button class="btn btn-sm btn-secondary" onclick="blogSuggestQueries()">Suggest queries</button>
                 <button class="btn btn-sm btn-primary" onclick="blogGenerate()">Generate →</button>
+                <button class="btn btn-sm btn-secondary" onclick="blogImportModal()" title="FU180: upload a blog written elsewhere (.html / .doc / .docx / .md) — it becomes a normal blog, so the watermark-free rewrite, LinkedIn surfaces, YouTube package and exports all work on it">⬆ Import a blog</button>
             </div>
             <div id="blog-suggested" class="mt-3"></div>
         </div>
@@ -13161,6 +13162,71 @@ function _blogSubmitSources(skipAll) {
         _blogCostToast(res);
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Finishing blog');
+}
+
+// FU180 — import an EXISTING blog file as a blog row for a brand. Everything the tool does to a
+// generated blog then works on it: the watermark-free rewrite, the LinkedIn surfaces, YouTube,
+// exports, publish tracking. Every metadata field is OPTIONAL — blank ones are read from the file.
+function blogImportModal() {
+    const opts = _blogBrands.map(b => `<option value="${b.id}">${_blogEsc(b.name)}</option>`).join('');
+    const sel = document.getElementById('blog-gen-brand')?.value || '';
+    showModal(`
+        <h3 class="font-bold mb-1">Import a blog</h3>
+        <p class="text-xs text-gray-400 mb-3">Upload a blog written elsewhere — <b>.html</b>, <b>.doc</b>
+           (including this tool's own Google-Doc export), <b>.docx</b> or <b>.md</b>. Headings, tables and
+           links are preserved. Leave the fields below blank and they are detected from the file.</p>
+        <div class="space-y-2">
+            <div><label class="text-xs text-gray-400">Brand</label>
+                 <select id="blog-imp-brand" class="w-full">${opts || '<option value="">No brands</option>'}</select></div>
+            <div><label class="text-xs text-gray-400">File</label>
+                 <input type="file" id="blog-imp-file" class="w-full" accept=".html,.htm,.doc,.docx,.md,.markdown,.txt"></div>
+            <div><label class="text-xs text-gray-400">Title <span class="text-gray-600">(blank = the file's H1)</span></label>
+                 <input id="blog-imp-title" class="w-full" placeholder="detected from the file"></div>
+            <div><label class="text-xs text-gray-400">Target query / seed <span class="text-gray-600">(blank = the title — this is the prompt the page targets)</span></label>
+                 <input id="blog-imp-seed" class="w-full" placeholder="detected from the file"></div>
+            <details><summary class="text-xs text-gray-400 cursor-pointer">More metadata (optional)</summary>
+                <div class="space-y-2 mt-2">
+                    <div><label class="text-xs text-gray-400">Meta title <span class="text-gray-600">(blank = the file's &lt;title&gt;)</span></label>
+                         <input id="blog-imp-metatitle" class="w-full" placeholder="detected from the file"></div>
+                    <div><label class="text-xs text-gray-400">Meta description</label>
+                         <input id="blog-imp-metadesc" class="w-full" placeholder="detected from the file"></div>
+                    <div><label class="text-xs text-gray-400">Keywords (comma-separated)</label>
+                         <input id="blog-imp-keywords" class="w-full" placeholder="detected from the file"></div>
+                </div>
+            </details>
+        </div>
+        <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary btn-sm" onclick="blogImportSubmit()">Import</button>
+            <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
+        </div>`);
+    if (sel) { const s = document.getElementById('blog-imp-brand'); if (s) s.value = sel; }
+}
+
+async function blogImportSubmit() {
+    const file = document.getElementById('blog-imp-file')?.files?.[0];
+    const brand = document.getElementById('blog-imp-brand')?.value;
+    if (!file) { toast('Choose a file to import', 'error'); return; }
+    if (!brand) { toast('Pick a brand', 'error'); return; }
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('brand_id', brand);
+    [['title', 'blog-imp-title'], ['seed', 'blog-imp-seed'], ['meta_title', 'blog-imp-metatitle'],
+     ['meta_description', 'blog-imp-metadesc'], ['keywords', 'blog-imp-keywords']]
+        .forEach(([k, id]) => fd.append(k, (document.getElementById(id)?.value || '').trim()));
+    try {
+        const res = await fetch('/api/blogs/import', { method: 'POST', body: fd });
+        const j = await res.json();
+        if (!res.ok) { toast(j.error || 'Import failed', 'error', 10000); return; }
+        closeModal();
+        // say what came from the FILE vs what the operator typed, so a wrong auto-detect is visible
+        const auto = Object.keys(j.detected || {}).filter(k => j.detected[k]);
+        const note = auto.length ? ' · detected: ' + auto.join(', ') : '';
+        toast(`Imported "${j.title}" (${j.format}, ${j.chars.toLocaleString()} chars)${note}`, 'success', 9000);
+        await blogReload();
+        openBlog(j.blog_id);
+    } catch (e) {
+        toast('Import failed: ' + e, 'error');
+    }
 }
 
 function blogGenerate() {

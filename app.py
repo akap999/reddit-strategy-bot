@@ -2599,6 +2599,68 @@ def _ensure_brand_byline_logo(claude, db, brand):
         return brand
 
 
+@app.route("/api/blogs/import", methods=["POST"])
+def api_blog_import():
+    """FU180 — import an EXISTING blog file (HTML / .doc / .docx / Markdown) as a blog row for a
+    brand, so everything the tool does to a generated blog also works on one written elsewhere: the
+    watermark-free Qwen rewrite, the LinkedIn post + article, the YouTube package, the exports and
+    publish tracking.
+
+    Multipart: `file` + `brand_id`, plus OPTIONAL `title` / `seed` / `meta_title` /
+    `meta_description` / `keywords`. An operator value always WINS; anything left blank is detected
+    from the file (<h1> -> title, <title> -> meta_title, meta description, meta keywords; for a
+    .docx, the Heading 1 or first line). Synchronous — parsing is local and fast, no LLM."""
+    from generators.blog_import import import_blog_file, BlogImportError
+
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file uploaded"}), 400
+    try:
+        brand_id = int(request.form.get("brand_id") or 0)
+    except (TypeError, ValueError):
+        brand_id = 0
+    if not brand_id:
+        return jsonify({"error": "pick a brand for this blog"}), 400
+    try:
+        detected = import_blog_file(f.read(), f.filename or "")
+    except BlogImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:            # a malformed file must not 500
+        return jsonify({"error": f"could not read that file ({e})"}), 400
+
+    def _field(key):
+        return (request.form.get(key) or "").strip()
+
+    # operator input wins; a blank field falls back to what the file said
+    title = _field("title") or detected["title"] or (f.filename or "Imported blog").rsplit(".", 1)[0]
+    seed = _field("seed") or title           # the seed IS the target query; the H1 is the best proxy
+    meta_title = _field("meta_title") or detected["meta_title"]
+    meta_description = _field("meta_description") or detected["meta_description"]
+    kw_in = _field("keywords")
+    keywords = [k.strip() for k in kw_in.split(",") if k.strip()] if kw_in else detected["keywords"]
+
+    db = get_db()
+    try:
+        if not db.get_brand(brand_id):
+            return jsonify({"error": "brand not found"}), 404
+        blog_id = db.save_blog(brand_id, seed, title=title, meta_description=meta_description,
+                               keywords=keywords, body_markdown=detected["body_markdown"],
+                               status="draft", prompt_version="imported")
+        if meta_title:
+            db.update_blog(blog_id, meta_title=meta_title)
+    finally:
+        db.close()
+    print(f"[blog_import] blog #{blog_id} from {f.filename!r} ({detected['format']}, "
+          f"{len(detected['body_markdown'])} chars) for brand {brand_id}", flush=True)
+    return jsonify({"blog_id": blog_id, "format": detected["format"],
+                    "title": title, "meta_title": meta_title,
+                    "meta_description": meta_description, "keywords": keywords,
+                    "chars": len(detected["body_markdown"]),
+                    # which fields the FILE supplied (so the UI can say what it detected)
+                    "detected": {k: bool(detected.get(k)) for k in
+                                 ("title", "meta_title", "meta_description", "keywords")}})
+
+
 @app.route("/api/blogs/generate", methods=["POST"])
 def api_blog_generate():
     """Generate a blog (article → verify → LinkedIn) in the background. Returns a

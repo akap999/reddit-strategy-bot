@@ -131,7 +131,13 @@ _PRICE_SIGNAL_RE = re.compile(
 # → the rewrite NEVER shipped). The rewrite PROMPT + the human review-before-publish still cover those;
 # the deterministic gate protects only the numbers whose silent alteration is a real clinical/commercial error.
 _LOADBEARING_NUM_RE = re.compile(
-    r"(?:\$|€|£|USD|EUR|GBP)\s?\d[\d,]*(?:\.\d+)?"                              # currency: $149, $1,000, €2.50
+    # FU181: `\d(?:[\d,]*\d)?` — a thousands separator must be FOLLOWED BY A DIGIT. With the older
+    # greedy `\d[\d,]*` (and the decimal group optional) the match could END on a comma, so
+    # "$10,000, and" matched `$10,000,` and the SENTENCE COMMA became part of the "fact". That token
+    # was then required character-for-character, so a rewrite that correctly moved the comma failed
+    # the gate and shipped Claude's watermarked body. This is the only alternative that can terminate
+    # on the digit class — every other one below ends in a unit.
+    r"(?:\$|€|£|USD|EUR|GBP)\s?\d(?:[\d,]*\d)?(?:\.\d+)?"                        # currency: $149, $1,000, €2.50
     r"|\d[\d,]*\.\d+\s?%?"                                                       # decimal:  2.5, 6.5, 99.9%, 3.9% (dose/threshold/APR/SLA)
     # NB (FU174): a BARE-INTEGER percent ("100%", "27%") is deliberately NOT load-bearing — it is usually
     # rhetorical ("100% online", "100% of patients") and Qwen validly rewords it, which the FU169 fix
@@ -200,7 +206,11 @@ _CADENCE_PATTERNS = [
     (re.compile(r"(?:over|for|across)\s+(?:\d+|twelve|six|three|two)\s+(?:month|year|week)s?\b"
                 r"|\b\d+[-\s](?:month|year)\s+term\b", re.I), "TERM"),
 ]
-_MONEY_RE = re.compile(r"(?:\$|€|£)\s?[\d,]+(?:\.\d+)?")
+# FU181: `\d(?:[\d,]*\d)?` — see _LOADBEARING_NUM_RE. The old `[\d,]+` could both START and END on a
+# comma, so "$10,000, billed quarterly" produced the amount KEY "$10,000," while the rewrite's
+# "$10,000" keyed differently — the cadence multiset then reported a cadence the rewrite had actually
+# kept as LOST, failing _valid and shipping the watermarked body.
+_MONEY_RE = re.compile(r"(?:\$|€|£)\s?\d(?:[\d,]*\d)?(?:\.\d+)?")
 
 # FU172: function words carry no real choice in context (near-deterministic), so they are not evidence of a
 # surviving watermark. Vertical-neutral.
@@ -1380,7 +1390,7 @@ class BlogGenerator:
 
     # FU54 substance guard: section splitter (## / ### headings) + concrete-stat detector.
     _SECTION_RE = re.compile(r"(?im)^(#{2,3})[ \t]+(.+?)[ \t]*$")
-    _STAT_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+    _STAT_RE = re.compile(r"\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?")   # FU181: never end on a comma
 
     # FU55: the model narrating its OWN sourcing/editing decisions into the article — a broken comparison
     # row or an "addressed elsewhere" note. Never real content; scrubbed from the final body.
@@ -4654,16 +4664,36 @@ Return JSON only:
         literal |= set(re.findall(r"\b[A-Z]{3,}\d*\b", head))            # FDA, MTC, MEN2, HIPAA, BMI, GLP, TRT (≥3 → not US/AI)
         literal |= set(re.findall(r"\b\w+(?=®|™)", head))                # Zepbound®, Mounjaro®
         if brand:
-            for nm in [(brand.get("name") or "")] + list(brand.get("competitors") or []):
+            # FU181 — two bugs here, and they masked each other:
+            #  (a) `list(brand["competitors"])` iterated a JSON STRING as CHARACTERS (get_brand returns
+            #      dict(row) with no parsing), and every 1-char "name" was then dropped by the len>=3
+            #      filter — so competitor-name protection has never actually fired. _as_list is what the
+            #      rest of the file uses for these stored fields.
+            #  (b) the names were required in the OUTPUT unconditionally. Parsing them correctly WITHOUT
+            #      this second fix would fail every rewrite for a brand whose stored competitor list
+            #      names anyone this particular article doesn't discuss. The gate's job is to catch a
+            #      DROPPED fact, so a name only counts if Claude's body actually carries it.
+            for nm in [(brand.get("name") or "")] + _as_list(brand.get("competitors")):
                 nm = (nm or "").strip()
-                if len(nm) >= 3:
+                if len(nm) >= 3 and nm in head:
                     literal.add(nm)
         missing |= {t for t in literal if t and t not in out_s}
         # FU172: the intelligent protect-list is enforced too (union with the regex floor above).
+        # FU181: a literal miss on a DIGIT-bearing atom is retried on a normalized form (commas
+        # dropped, whitespace collapsed) — the same treatment the number path above already gets, so
+        # "$1,300" ≡ "$1300" and "2.5 mg" ≡ "2.5mg". A punctuation-only difference is not a dropped
+        # fact; a genuinely dropped one still fails, because the digits must still be there.
+        def _norm_atom(s):
+            return re.sub(r"\s+", "", (s or "").replace(",", "")).lower()
+
+        out_norm = _norm_atom(out_s)
         for sp in (extra_atoms or []):
             sp = (sp or "").strip()
-            if sp and sp.lower() not in out_s.lower():
-                missing.add(sp)
+            if not sp or sp.lower() in out_s.lower():
+                continue
+            if any(ch.isdigit() for ch in sp) and _norm_atom(sp) in out_norm:
+                continue
+            missing.add(sp)
         return (not missing), sorted(missing)
 
     @staticmethod
@@ -5049,12 +5079,27 @@ Return JSON only:
         ("starting at $149/month then $249/month billed quarterly for 60mg") made every rewrite of that
         sentence fail and fall back. The structure still matters, but it is a MEANING question, so it is
         checked by the semantic verifier (_verify_facts_semantic: intro-vs-ongoing, cadence, what it
-        covers, whose price) — while the token gate holds only the short, indivisible values."""
+        covers, whose price) — while the token gate holds only the short, indivisible values.
+
+        FU181: it ALSO skips an atom that is, in whole, a load-bearing NUMBER. Those are already
+        enforced by `_facts_preserved`'s number path — which compares the digit CORE against a
+        comma-stripped body, so "$1,300" ≡ "$1300" — whereas re-checking them here is a raw literal
+        match that can only ADD false failures (a moved comma, a reformatted amount). Protection is
+        unchanged; the redundancy that produced the FU169 / FU174 / FU181 fallbacks is what goes. The
+        atom itself stays in the PRESERVE list and the metric — only this literal gate stops re-checking
+        it. Anything with semantic content ("2.5 mg", "503B", "Zepbound®", a brand) is NOT a full
+        number match and is still enforced verbatim."""
         out = []
         for a in atoms or []:
-            a = (a or "").strip()
-            if a and len(a.split()) <= 3:
-                out.append(a)
+            # Trailing sentence punctuation is never part of a fact. Trim it here too, so an atom that
+            # reaches us from a CACHED article["writer_facts"] or straight from the model is still
+            # recognised as a plain number below (and so the literal check can't hinge on a comma).
+            a = (a or "").strip().rstrip(",.;:")
+            if not a or len(a.split()) > 3:
+                continue
+            if _LOADBEARING_NUM_RE.fullmatch(a):
+                continue        # the regex floor already gates this one, normalized
+            out.append(a)
         return out
 
     def _extract_protected_facts(self, claude_body, brand=None):
@@ -5118,7 +5163,10 @@ Return JSON only:
         # therefore the whole rewrite prompt — differ between runs on identical input. Deterministic now.
         for tok in sorted(set(re.findall(r"\b\d+[A-Za-z]\b|\b[A-Z]{3,}\d*\b", claude_body or "")) |
                           set(m.group(0) for m in _LOADBEARING_NUM_RE.finditer(claude_body or ""))):
-            tok = tok.strip()
+            # FU181: also trim TRAILING sentence punctuation. These tokens bypass _atom_shape_ok (that
+            # gate only screens model-supplied atoms), so whatever the regex hands back is enforced
+            # verbatim — a stray "," or "." riding along turns a preserved fact into a false failure.
+            tok = tok.strip().rstrip(",.;:")
             if tok and not any(tok.lower() in a.lower() for a in atoms):
                 atoms.append(tok)
                 missed += 1
@@ -5404,9 +5452,13 @@ Return JSON only:
                 # each is load-bearing: the CTA URL is the only path back to the site, the hashtags are
                 # the post's distribution, and a Markdown heading in a LinkedIn post renders literally.
                 if _sf["urls"]:
-                    _u_src = set(re.findall(r"https?://[^\s)>\]]+", claude_body))
-                    _u_out = set(re.findall(r"https?://[^\s)>\]]+", out))
-                    _u_miss = sorted(_u_src - _u_out)
+                    # FU181: trim TRAILING sentence punctuation off each captured URL. `[^\s)>\]]+`
+                    # happily eats the "." or "," that ends the sentence, so a rewrite that merely
+                    # MOVED the link mid-sentence looked like it had dropped it — the same
+                    # punctuation-in-the-token bug as the price gate, in a gate shipped a day earlier.
+                    def _urls(s):
+                        return {u.rstrip(".,;:!?") for u in re.findall(r"https?://[^\s)>\]]+", s)}
+                    _u_miss = sorted(_urls(claude_body) - _urls(out))
                     if _u_miss:
                         return False, f"dropped URL(s) {_u_miss[:2]}"
                 if _sf["tags"]:

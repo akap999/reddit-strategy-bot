@@ -389,7 +389,16 @@ def test_fu174_long_pricing_structure_is_not_enforced_verbatim():
     long_price = "starting at $149/month then $249/month billed quarterly for 60mg"
     gate = B._gate_atoms(["2.5 mg", "$149", "$249", long_price, "March 19, 2025"])
     assert long_price not in gate
-    assert gate == ["2.5 mg", "$149", "$249", "March 19, 2025"]
+    # FU181 NARROWED this: a bare load-bearing NUMBER is dropped from the literal gate too, because
+    # _facts_preserved's number path already enforces it against a comma-stripped body ("$1,300" ≡
+    # "$1300"), and re-checking it as a raw literal only added false failures (a moved sentence comma
+    # made a faithful rewrite fall back to the watermarked body). What stays is everything with
+    # semantic content — a dose with its unit, a date, a code, a name.
+    assert gate == ["2.5 mg", "March 19, 2025"]
+    # …and dropping one of those prices entirely is STILL caught, by the floor rather than the atom:
+    _ok, _missing = B._facts_preserved("Plans are $149/month, then $249/month.",
+                                       "Plans are $249/month.", None, [])
+    assert not _ok and "149" in _missing
     # …and a rewrite that recasts the sentence but keeps the values passes the gate
     ok, missing = B._facts_preserved(
         "PeterMD is starting at $149/month then $249/month billed quarterly for 60mg [S1].",
@@ -401,7 +410,9 @@ def test_fu174_long_pricing_structure_is_not_enforced_verbatim():
         "PeterMD is starting at $149/month then $249/month billed quarterly for 60mg [S1].",
         "PeterMD opens at $149/month, billed every quarter for 60mg [S1].",
         {"name": "PeterMD"}, B._gate_atoms(["$149", "$249", long_price]))
-    assert not bad_ok and "$249" in bad_missing
+    # FU181: still caught — but reported by the FLOOR as the digit core ("249") rather than the
+    # literal atom ("$249"), since a bare number is no longer double-enforced as a raw literal.
+    assert not bad_ok and any("249" in m for m in bad_missing), bad_missing
 
 
 def test_fu174_recall_audit_no_longer_restores_rhetorical_percents():

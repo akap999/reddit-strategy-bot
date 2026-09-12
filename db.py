@@ -1117,7 +1117,9 @@ class Database:
         """List blogs (newest first) + a compact platforms summary, with optional
         brand/status filters."""
         q = ("SELECT b.id, b.brand_id, b.seed, b.title, b.status, b.created_at, "
-             "b.updated_at, b.quality_report, br.name AS brand_name "   # FU151 (D): list-row score chip
+             "b.updated_at, b.quality_report, "          # FU151 (D): list-row score chip
+             "b.prompt_version, "                        # FU183: 'imported' → the list-row origin badge
+             "br.name AS brand_name "
              "FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id WHERE 1=1")
         params = []
         if brand_id is not None:

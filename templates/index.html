@@ -12976,6 +12976,13 @@ async function renderBlogs(c) {
     _blogYmylAutoDefault();
 }
 
+// FU183: was this blog UPLOADED (FU180) rather than generated? The import endpoint stamps
+// prompt_version="imported"; a regenerate that replaces the body clears it back to the real version,
+// so the badge stops claiming an origin the text no longer has.
+function _blogIsImported(b) {
+    return ((b && b.prompt_version) || '') === 'imported';
+}
+
 function _blogRow(b) {
     const chips = (b.platforms || []).filter(p => p.status === 'published')
         .map(p => `<a href="${_blogEsc(p.published_url || '#')}" target="_blank" class="badge" style="background:#0b3b2e;color:#6ee7b7" title="${_blogEsc(p.published_url||'')}">${p.platform}</a>`).join(' ')
@@ -12990,8 +12997,14 @@ function _blogRow(b) {
             qChip = ` <span class="badge" style="background:${bg}" title="Quality scorecard — open the blog for the checklist">Q ${_q.score}</span>`;
         }
     } catch (e) {}
+    // FU183: an IMPORTED blog (FU180 upload) is marked by prompt_version="imported" — worth showing,
+    // because its body was written elsewhere: it carries no [S#] evidence chain, no quality scorecard
+    // and no sourcing guarantees, so "why has this one got no sources?" has an answer at a glance.
+    const impChip = _blogIsImported(b)
+        ? ' <span class="badge" style="background:#1e2a44;color:#93c5fd" title="Uploaded from a file rather than generated — it has no sourcing/evidence chain of its own. Regenerating the article replaces it with a generated one.">⬆ imported</span>'
+        : '';
     return `<tr>
-        <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span>${qChip}<div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
+        <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span>${qChip}${impChip}<div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
         <td>${_blogEsc(b.brand_name || '—')}</td>
         <td>${b.status === 'awaiting_sources'
             ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'

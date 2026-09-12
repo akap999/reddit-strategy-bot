@@ -2858,7 +2858,7 @@ def api_blog_regenerate(blog_id):
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 
     def task(_task_id=None):
-        from generators.blog_gen import BlogGenerator
+        from generators.blog_gen import BlogGenerator, PROMPT_VERSION as _bg_prompt_version
         bg = Database(DB_PATH)
         bg.connect()
         bg.initialize()
@@ -2977,7 +2977,10 @@ def api_blog_regenerate(blog_id):
                     meta_title=a.get("meta_title", ""),   # FU114
                     keywords=a.get("keywords") or [],
                     body_markdown=body,
-                    claims_flagged=flagged)
+                    claims_flagged=flagged,
+                    # FU183: this body is now GENERATED, so drop the FU180 "imported" marker —
+                    # otherwise the badge keeps asserting an origin the text no longer has.
+                    prompt_version=_bg_prompt_version)
             elif part == "verify":
                 v = gen.verify_claims(brand, article, evidence=evidence)
                 if not v:
@@ -2992,7 +2995,8 @@ def api_blog_regenerate(blog_id):
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
                 bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(body_md),
-                               claims_flagged=flagged)
+                               claims_flagged=flagged,
+                               prompt_version=_bg_prompt_version)   # FU183: no longer "imported"
             elif part == "linkedin":
                 li = gen.generate_linkedin(brand, seed, article, geo=stored_geo)   # FU91
                 bg.update_blog(blog_id, linkedin_text=_sub_link(li or "",

@@ -1415,7 +1415,14 @@ class BlogGenerator:
            punt leaves >50% of its data cells empty — a dimension nobody documents doesn't
            belong in the comparison (the FU49 rule, now enforced in code);
         3. any isolated leftover empty cell → "—", counted into self._table_punt_note so the
-           operator sees a toast warning instead of a silently thin table."""
+           operator sees a toast warning instead of a silently thin table;
+        4. FU186 — guarantee a BLANK LINE after the last row whenever the next line is not a table
+           row. python-markdown's table extension keeps consuming NON-BLANK lines as rows, so a
+           heading (and its paragraph) emitted right after the last row is swallowed INTO the table as
+           junk cells — on a live blog that corrupted the comparison table AND hid a whole section.
+           This method already parses every table, so it knows exactly where each one ends. Fixing it
+           HERE rather than in the HTML render means the STORED markdown is correct for every consumer
+           (the Markdown export, the Drive upload, the LinkedIn surfaces), not just one renderer."""
         if not body:
             return body
         self._table_punt_note = ""
@@ -1431,7 +1438,10 @@ class BlogGenerator:
                 tbl.append(lines[i]); i += 1
             rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in tbl]
             if len(rows) < 3:
-                out.extend(tbl); continue
+                out.extend(tbl)
+                if i < len(lines) and lines[i].strip():
+                    out.append("")                 # FU186: never let the next line become a row
+                continue
             header, sep, data = rows[0], rows[1], rows[2:]
             ncols = len(header)
             # 1. strip punt clauses per data cell
@@ -1462,6 +1472,8 @@ class BlogGenerator:
                         r[ci] = "—"; leftover += 1
             for row in [header, sep] + data:
                 out.append("| " + " | ".join(row) + " |")
+            if i < len(lines) and lines[i].strip():
+                out.append("")                     # FU186: never let the next line become a row
         if dropped_cols or leftover:
             bits = []
             if dropped_cols:
@@ -4681,23 +4693,85 @@ Return JSON only:
     _AI_QUOTE_MAP = {"“": '"', "”": '"', "„": '"', "″": '"',
                      "‘": "'", "’": "'", "‚": "'", "′": "'",
                      "…": "..."}
-    # a tail this short is an appositive / afterthought, so a comma is right; a longer tail would
-    # build a run-on, so it gets a full stop instead.
-    _AI_TAIL_WORDS_MAX = 6
+    # FU186 — a tail earns a FULL STOP only when it actually OPENS AN INDEPENDENT CLAUSE. Length is
+    # not a proxy for clause-hood: the commonest long tail in this pipeline is a bolded label followed
+    # by an explanatory PHRASE in a bullet ("- **FDA-compliant procedures** — Medications obtained and
+    # distributed through approved channels"), and punctuating a phrase as a sentence ships a visible
+    # FRAGMENT. The failure directions are NOT symmetric — a comma splice is a mild wart, a wrong full
+    # stop is a fragment the reader sees — so the DEFAULT is a comma and the full stop is earned.
     _AI_CONJ = {"but", "and", "or", "so", "yet", "nor", "while", "though", "although", "because"}
+    # openers that can only begin a PHRASE: an infinitive ("to establish …"), a preposition, or an
+    # adverbial fragment. `to` covers both the infinitive and the preposition, so one entry does both.
+    _AI_NONCLAUSE_LEAD = {"to", "for", "with", "without", "from", "in", "into", "on", "at", "by", "of",
+                          "after", "before", "during", "including", "such", "based", "plus", "via",
+                          "per", "about", "under", "over", "through", "across", "between", "among",
+                          "not", "just", "only", "especially", "particularly", "even", "also", "plus"}
+    # a subject pronoun opens a clause on its own
+    _AI_CLAUSE_PRONOUN = {"it", "they", "he", "she", "we", "you", "i", "there",
+                          "this", "that", "these", "those"}
+    # a determiner opens a NOUN PHRASE, which is only a clause once a finite verb follows it
+    _AI_CLAUSE_DET = {"the", "a", "an", "most", "many", "some", "each", "all", "every", "no",
+                      "its", "his", "her", "their", "our", "your", "both", "few", "several"}
+    _AI_FINITE_VERB = {"is", "are", "was", "were", "has", "have", "had", "can", "could", "will",
+                       "would", "may", "might", "must", "should", "do", "does", "did",
+                       "isn't", "aren't", "wasn't", "weren't", "won't", "can't", "cannot",
+                       "doesn't", "don't", "didn't", "hasn't", "haven't", "hadn't"}
+    _AI_LIST_LINE_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s)")
+
+    @classmethod
+    def _ai_lowercase_ok(cls, word):
+        """A dash-as-sentence-break leaves the tail's first word CAPITALISED, so converting the dash to
+        a comma can strand a stray capital (", To establish your metabolic status"). Fixing that is
+        tidying our OWN edit, but a blanket lowercase would maul a proper noun or an acronym ("FDA",
+        "LillyDirect", "Zepbound"), so only a FUNCTION WORD — which can never be a proper noun — is
+        ever lowered. A capitalised common noun keeps its capital: a mild oddity beats a mangled name."""
+        core = word.strip("*_`\"'()[].,;:")
+        if not core or not core[:1].isupper() or not core[1:].islower():
+            return False                       # ALL-CAPS / internal capital / already lower → leave it
+        w = core.lower()
+        if w == "i":                            # never "i"
+            return False
+        return w in (cls._AI_CONJ | cls._AI_NONCLAUSE_LEAD | cls._AI_CLAUSE_DET
+                     | cls._AI_CLAUSE_PRONOUN | {"if", "when", "since", "whether", "either",
+                                                 "neither", "as", "that", "than", "then"})
     _AI_DASH_TIGHT_RE = re.compile(r"(\w+)(?:—|–|--)(\w+)")
     _AI_DASH_RE = re.compile(r"[ \t]*(?:—|–|--)[ \t]*")
 
     @classmethod
+    def _ai_tail_opens_clause(cls, words, head, line):
+        """FU186 — is the text AFTER a dash an independent clause (so a full stop is right), or a
+        PHRASE (so a comma is)? Conservative by construction: it answers False unless the opener is
+        positively clause-shaped, because the wrong answer in the True direction ships a fragment."""
+        if not words:
+            return False
+        w0 = words[0].lower().strip("*_`\"'()[]")
+        # FORCED COMMA — a label ending a bold run on a LIST line is followed by its explanation, not
+        # by a sentence. This is the exact shape that shipped broken.
+        if head.endswith("**") and cls._AI_LIST_LINE_RE.match(line):
+            return False
+        if w0 in cls._AI_CONJ or w0 in cls._AI_NONCLAUSE_LEAD:
+            return False
+        if len(w0) > 4 and w0.endswith("ing"):          # an -ing participle opens a phrase
+            return False
+        # EARNED FULL STOP
+        if w0 in cls._AI_CLAUSE_PRONOUN:
+            return True
+        if w0 in cls._AI_CLAUSE_DET:
+            return any(w.lower() in cls._AI_FINITE_VERB for w in words[1:3])
+        return False
+
+    @classmethod
     def _ai_fix_dashes(cls, line):
-        """Replace an em-dash / en-dash / `--` used as punctuation. Four cases, each unit-tested:
+        """Replace an em-dash / en-dash / `--` used as punctuation. Cases, each unit-tested:
         - TIGHT between word characters → a HYPHEN when either side carries a digit or both sides are
           capitalised, because that is a RANGE or a compound ("5–10 business days" must NEVER become
           "5, 10 business days"; "Monday–Friday" must not become "Monday, Friday"); otherwise a comma.
-        - a tail opening with a coordinating conjunction → a COMMA ("… — but only in 12 states").
-        - a SHORT tail (<= _AI_TAIL_WORDS_MAX words) → a COMMA (appositive: "the dose — 2.5 mg — is …").
-        - a LONG tail → a FULL STOP + capitalisation, since a comma there reads as a run-on.
+        - a SPACED dash between two number-bearing tokens → a HYPHEN (still a range: "9am – 5pm").
         - a dash left dangling at the end of a sentence/line → dropped.
+        - a tail that OPENS AN INDEPENDENT CLAUSE → a FULL STOP + capitalisation, since a comma there
+          reads as a run-on ("Coverage is limited — most plans will not reimburse …").
+        - EVERYTHING ELSE → a COMMA. This is the FU186 default: a phrase punctuated as a sentence is a
+          visible fragment, so the full stop has to be earned (see the constants above).
         Returns (line, n_replaced). A line with no such dash comes back BYTE-IDENTICAL."""
         n = 0
 
@@ -4734,12 +4808,15 @@ Return JSON only:
             elif _is_range:
                 line = head + "-" + tail.lstrip()
                 i = len(head) + 1
-            elif words[0].lower() in cls._AI_CONJ or len(words) <= cls._AI_TAIL_WORDS_MAX:
-                line = head + ", " + tail.lstrip()
+            elif cls._ai_tail_opens_clause(words, head, line):
+                t = tail.lstrip()
+                line = head + ". " + t[:1].upper() + t[1:]
                 i = len(head) + 2
             else:
                 t = tail.lstrip()
-                line = head + ". " + t[:1].upper() + t[1:]
+                if cls._ai_lowercase_ok(words[0]) and t[:1].isupper():
+                    t = t[:1].lower() + t[1:]
+                line = head + ", " + t
                 i = len(head) + 2
             n += 1
         return line, n
@@ -4790,11 +4867,18 @@ Return JSON only:
                 in_sources = False          # a later heading ends the Sources section
             # a source-list entry carries the code-written " — <url>" separator, so it is skipped
             # even outside a recognised `## Sources` heading (belt and braces).
-            if fence or in_sources or st.startswith("|") or re.match(r"^\s*[-*]\s*\[S\d+\]", line):
+            if fence or in_sources or re.match(r"^\s*[-*]\s*\[S\d+\]", line):
                 out.append(line)
                 continue
-            ln, k_d = self._ai_fix_dashes(line)
-            ln, k_c = self._ai_fix_decor(ln)
+            # FU186 — a TABLE row keeps its dash and decoration passes skipped (that skip is what
+            # protects the FU138 "—" punt-placeholder cell and the row's pipes), but a curly quote in
+            # a CELL carries no structural meaning, so the quote/ellipsis map still runs there.
+            _row = st.startswith("|")
+            if _row:
+                ln, k_d, k_c = line, 0, 0
+            else:
+                ln, k_d = self._ai_fix_dashes(line)
+                ln, k_c = self._ai_fix_decor(ln)
             k_q = 0
             for bad, good in self._AI_QUOTE_MAP.items():
                 if bad in ln:
@@ -4802,6 +4886,10 @@ Return JSON only:
                     ln = ln.replace(bad, good)
             if not (k_d or k_c or k_q):
                 out.append(line)            # untouched line stays BYTE-IDENTICAL
+                continue
+            if _row:
+                counts["quotes"] += k_q     # never run the prose normalisers over a row's cells
+                out.append(ln)
                 continue
             counts["dashes"] += k_d
             counts["decor"] += k_c

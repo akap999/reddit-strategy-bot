@@ -3881,7 +3881,8 @@ Return JSON only: {{"linkedin_text": "the full post text"}}"""
         res = self.claude.call(prompt, max_tokens=1500, temperature=0.8)
         if not res or not isinstance(res, dict):
             return ""
-        return (res.get("linkedin_text") or "").strip()
+        # FU185: this surface never passes through `_finalize_article`'s scrub, so strip here.
+        return self._sa((res.get("linkedin_text") or "").strip())
 
     def generate_linkedin_article(self, brand, article, persona_voice="", target_query="",
                                   manual_title="", geo=""):
@@ -4015,8 +4016,10 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
             return {}
         return {
             # FU83: a manual title is code-enforced verbatim — never trust the model alone with it.
-            "title": mt if mt else (res.get("title") or "").strip(),
-            "body_markdown": (res.get("body_markdown") or "").strip(),
+            # FU185 therefore scrubs a GENERATED headline only; an operator-typed one stays untouched,
+            # because the verbatim lock outranks the symbol strip.
+            "title": mt if mt else self._sa((res.get("title") or "").strip()),
+            "body_markdown": self._sa((res.get("body_markdown") or "").strip()),
         }
 
     # ---------------------------------------------------------------- FU80: YouTube video package
@@ -4228,11 +4231,20 @@ Return JSON only:
         }
         if dm:
             meta["duration_min"] = dm   # FU97: shown in the export checklist + prefills the UI
+        # FU185: every published YouTube field gets the symbol strip (this surface does not pass
+        # through `_finalize_article`). The description is scrubbed AFTER assembly, which also clears
+        # the em-dash our own chapter-line format emits.
+        for _k in ("cta", "thumbnail_text", "mini_answer", "pinned_comment", "demo_title"):
+            if (meta.get(_k) or "").strip():
+                meta[_k] = self._sa(meta[_k])
+        for _c in meta.get("chapters") or []:
+            if isinstance(_c, dict) and (_c.get("question") or "").strip():
+                _c["question"] = self._sa(_c["question"])
         return {
-            "title": (res.get("title") or "").strip(),
-            "script": self._youtube_scrub((res.get("script_markdown") or "").strip()),
-            "description": self._youtube_scrub(description),
-            "captions": self._youtube_scrub((res.get("captions_transcript") or "").strip()),
+            "title": self._sa((res.get("title") or "").strip()),
+            "script": self._sa(self._youtube_scrub((res.get("script_markdown") or "").strip())),
+            "description": self._sa(self._youtube_scrub(description)),
+            "captions": self._sa(self._youtube_scrub((res.get("captions_transcript") or "").strip())),
             "meta": meta,
         }
 
@@ -4649,6 +4661,171 @@ Return JSON only:
         Never alters VISIBLE text (real spaces / line breaks / emoji VS are left alone)."""
         cleaned, n = cls._INVISIBLE_RE.subn("", text or "")
         return cleaned, n
+
+    # ------------------------------------------------------ FU185: strip the obvious AI SYMBOLS
+    # Generation is NOT touched — no prompt rule, no model call. A prompt rule ("never use an
+    # em-dash") perturbs the WHOLE generation: it can shift phrasing in sentences that never had one,
+    # and the FU167 grade + every fact gate would then be judging a prompt-nudged variant instead of
+    # the real generation. So the symbols are removed MECHANICALLY from the FINISHED body, which is
+    # also why this works identically for Claude and for Qwen — both just hand back a body.
+    # A model call was considered and rejected: the rewrite prompt ALREADY says "meaning, facts,
+    # structure and citations stay identical; only the WORDING changes", and FU172/FU176/FU55 exist
+    # precisely because models violated that anyway (a dose weekly→daily, a flipped negation, a price
+    # re-attached to the wrong brand, a lost price cadence, the reconcile narrating its own edits into
+    # the article). For a punctuation-only job, code is strictly better than a model.
+    _AI_ARROWS = "→⇒➔➜⟶⇨⮕"        # → ⇒ ➔ ➜ ⟶ ⇨ ⮕
+    # NOTE: U+00B7 (·) is deliberately ABSENT — it is the code-written separator in an evidence label
+    # ("third-party · <title>"), not decoration.
+    _AI_DECOR = ("•‣▪▫●○✓✔✗✘"
+                 "★☆▸▶")                         # • ‣ ▪ ▫ ● ○ ✓ ✔ ✗ ✘ ★ ☆ ▸ ▶
+    _AI_QUOTE_MAP = {"“": '"', "”": '"', "„": '"', "″": '"',
+                     "‘": "'", "’": "'", "‚": "'", "′": "'",
+                     "…": "..."}
+    # a tail this short is an appositive / afterthought, so a comma is right; a longer tail would
+    # build a run-on, so it gets a full stop instead.
+    _AI_TAIL_WORDS_MAX = 6
+    _AI_CONJ = {"but", "and", "or", "so", "yet", "nor", "while", "though", "although", "because"}
+    _AI_DASH_TIGHT_RE = re.compile(r"(\w+)(?:—|–|--)(\w+)")
+    _AI_DASH_RE = re.compile(r"[ \t]*(?:—|–|--)[ \t]*")
+
+    @classmethod
+    def _ai_fix_dashes(cls, line):
+        """Replace an em-dash / en-dash / `--` used as punctuation. Four cases, each unit-tested:
+        - TIGHT between word characters → a HYPHEN when either side carries a digit or both sides are
+          capitalised, because that is a RANGE or a compound ("5–10 business days" must NEVER become
+          "5, 10 business days"; "Monday–Friday" must not become "Monday, Friday"); otherwise a comma.
+        - a tail opening with a coordinating conjunction → a COMMA ("… — but only in 12 states").
+        - a SHORT tail (<= _AI_TAIL_WORDS_MAX words) → a COMMA (appositive: "the dose — 2.5 mg — is …").
+        - a LONG tail → a FULL STOP + capitalisation, since a comma there reads as a run-on.
+        - a dash left dangling at the end of a sentence/line → dropped.
+        Returns (line, n_replaced). A line with no such dash comes back BYTE-IDENTICAL."""
+        n = 0
+
+        def _tight(m):
+            nonlocal n
+            n += 1
+            a, b = m.group(1), m.group(2)
+            if any(c.isdigit() for c in (a + b)) or (a[:1].isupper() and b[:1].isupper()):
+                return f"{a}-{b}"
+            return f"{a}, {b}"
+
+        line = cls._AI_DASH_TIGHT_RE.sub(_tight, line)
+        i, guard = 0, 0
+        while guard < 400:
+            guard += 1
+            m = cls._AI_DASH_RE.search(line, i)
+            if not m:
+                break
+            st, en = m.start(), m.end()
+            tail = line[en:]
+            cut = re.search(r"[.!?](?:\s|$)", tail)
+            seg = tail[:cut.start()] if cut else tail
+            words = re.findall(r"[\w$%]+", seg)
+            head = line[:st].rstrip()
+            # a SPACED dash between two number-bearing tokens is still a RANGE ("9am – 5pm",
+            # "$1,300 — $10,000") — a comma there would read as two separate values.
+            _b = re.search(r"(\S+)\s*$", line[:st])
+            _a = re.match(r"\s*(\S+)", tail)
+            _is_range = bool(_b and _a and any(c.isdigit() for c in _b.group(1))
+                             and any(c.isdigit() for c in _a.group(1)))
+            if not words:                                   # dangling before ./!/? or end of line
+                line = head + tail
+                i = len(head)
+            elif _is_range:
+                line = head + "-" + tail.lstrip()
+                i = len(head) + 1
+            elif words[0].lower() in cls._AI_CONJ or len(words) <= cls._AI_TAIL_WORDS_MAX:
+                line = head + ", " + tail.lstrip()
+                i = len(head) + 2
+            else:
+                t = tail.lstrip()
+                line = head + ". " + t[:1].upper() + t[1:]
+                i = len(head) + 2
+            n += 1
+        return line, n
+
+    @classmethod
+    def _ai_fix_decor(cls, line):
+        """Arrows and decorative bullets/checkmarks. A LEADING one is acting as a list marker, so it
+        becomes a real Markdown one (the list survives); an INLINE arrow means "leads to", so it is
+        said in words rather than dropped; inline ornament is pure decoration and goes."""
+        lead = re.match(r"^(\s*)[" + re.escape(cls._AI_ARROWS + cls._AI_DECOR) + r"]+[ \t]+", line)
+        if lead:
+            return lead.group(1) + "- " + line[lead.end():], 1
+        n = 0
+        line, k = re.subn(r"[ \t]*[" + re.escape(cls._AI_ARROWS) + r"][ \t]*", " to ", line)
+        n += k
+        line, k = re.subn(r"[ \t]*[" + re.escape(cls._AI_DECOR) + r"][ \t]*", " ", line)
+        n += k
+        return line, n
+
+    def _scrub_ai_symbols(self, text):
+        """FU185 — remove the OBVIOUS AI SYMBOLS from a finished body. Mechanical: no LLM, no network,
+        no prompt change, and it can therefore never alter a fact, a citation or the structure.
+
+        SKIPS, so it can never damage load-bearing text: fenced code blocks; any TABLE row (which is
+        what protects the FU138 "—" punt-placeholder cell); and the `## Sources` section (whose
+        " — <url>" separator is written by `_rebuild_sources` itself, not by a model).
+
+        Touches punctuation and decoration ONLY — never a digit, a letter, an [S#] marker, a heading
+        line or a table cell — so `_facts_preserved`, `_price_cadence_ok` and `_verify_facts_semantic`
+        all stay valid over the scrubbed body, and the FU181 comma-in-a-number class cannot re-open
+        (a thousands separator sits BETWEEN digits and is never a target). Idempotent: scrubbing twice
+        equals scrubbing once. Returns (text, counts)."""
+        if not text:
+            return text or "", {}
+        counts = {"dashes": 0, "decor": 0, "quotes": 0}
+        out, fence, in_sources = [], False, False
+        for line in text.splitlines():
+            st = line.strip()
+            if st.startswith("```") or st.startswith("~~~"):
+                fence = not fence
+                out.append(line)
+                continue
+            if re.match(r"(?i)^\s*#{1,6}\s*sources\b", line):
+                in_sources = True
+                out.append(line)
+                continue
+            if in_sources and re.match(r"^\s*#{1,6}\s+\S", line):
+                in_sources = False          # a later heading ends the Sources section
+            # a source-list entry carries the code-written " — <url>" separator, so it is skipped
+            # even outside a recognised `## Sources` heading (belt and braces).
+            if fence or in_sources or st.startswith("|") or re.match(r"^\s*[-*]\s*\[S\d+\]", line):
+                out.append(line)
+                continue
+            ln, k_d = self._ai_fix_dashes(line)
+            ln, k_c = self._ai_fix_decor(ln)
+            k_q = 0
+            for bad, good in self._AI_QUOTE_MAP.items():
+                if bad in ln:
+                    k_q += ln.count(bad)
+                    ln = ln.replace(bad, good)
+            if not (k_d or k_c or k_q):
+                out.append(line)            # untouched line stays BYTE-IDENTICAL
+                continue
+            counts["dashes"] += k_d
+            counts["decor"] += k_c
+            counts["quotes"] += k_q
+            # tidy only the fallout of our own edits, and never the leading indent (a nested list
+            # item's two leading spaces are structure).
+            pre = re.match(r"^[ \t]*", ln).group(0)
+            body = ln[len(pre):]
+            body = re.sub(r",[ \t]*,", ",", body)
+            body = re.sub(r",[ \t]*([.!?])", r"\1", body)
+            body = re.sub(r"[ \t]+,", ",", body)
+            body = re.sub(r"[ \t]{2,}", " ", body)
+            out.append((pre + body).rstrip() if not body.strip() else pre + body.rstrip())
+        res = "\n".join(out)
+        if text.endswith("\n") and not res.endswith("\n"):
+            res += "\n"
+        if any(counts.values()):
+            print(f"[blog_gen] ai-symbols: {counts['dashes']} dash(es), {counts['decor']} "
+                  f"decoration(s), {counts['quotes']} quote/ellipsis char(s) replaced", flush=True)
+        return res, counts
+
+    def _sa(self, text):
+        """`_scrub_ai_symbols` when only the text is wanted (the derived-surface call sites)."""
+        return self._scrub_ai_symbols(text)[0]
 
     @classmethod
     def _watermark_removal_report(cls, claude_body, out, brand=None, extracted=None, verdicts=None):
@@ -5489,6 +5666,21 @@ Return JSON only:
                     "genuinely meaning-critical clinical statement — NEVER a default for a sentence that merely "
                     "sounds clinical or regulatory.\n"
                     "Meaning, facts, structure and citations stay identical; only the WORDING changes.\n"
+                    # FU185 (Change 6) — the FOUR editorial rules the rewrite branch never carried. Each
+                    # only FORBIDS a regression; none asks the rewrite to do anything new, so they cannot
+                    # move prose quality in either direction, only narrow the band of allowed outcomes.
+                    "DO NOT REGRESS any of these while rewording:\n"
+                    "- THE PUNT BAN IS ON MEANING: never recast a stated value into 'not specified', "
+                    "'varies', 'unclear' or 'check their site'. If the original states a value, state THAT "
+                    "value.\n"
+                    "- NO SUPERLATIVE OR PROMOTIONAL ESCALATION: never strengthen a hedged statement into "
+                    "a superlative or an unqualified claim; keep the SAME confidence level the original "
+                    "had.\n"
+                    "- KEEP THE BALANCE: the 'who might prefer an alternative' element and any stated "
+                    "limitation or trade-off must SURVIVE the rewrite.\n"
+                    "- DESCRIBE SOURCES HONESTLY: never upgrade a third-party or review source into "
+                    "'independent audit' / 'independently verified' framing while rewording around its "
+                    "citation.\n"
                     + ("Return ONLY the rewritten Markdown article, nothing else.\n\n" if _is_blog else
                        f"Return ONLY the rewritten {_sf['label']}, nothing else.\n\n")
                     + (f"ARTICLE:\n{claude_body}{harder}" if _is_blog
@@ -5854,6 +6046,17 @@ Return JSON only:
         missing_stats = self._dropped_stats(draft_body, article["body_markdown"])
         if missing_stats:
             print(f"[blog_gen] substance-guard: WARNING dropped stat(s) {missing_stats}", flush=True)
+        # FU185 — strip the obvious AI SYMBOLS (em/en-dashes, arrows, decorative bullets, curly quotes,
+        # the one-char ellipsis) from the FINISHED body. Placed HERE so it covers whichever body is live
+        # — Claude's, or Qwen's when the writer pass ran above — and BEFORE `_rebuild_sources`, so the
+        # " — <url>" separators and the "—" punt-placeholder cells that `_rebuild_sources` writes
+        # AFTERWARDS are never touched. Mechanical: generation itself is completely unchanged.
+        article["body_markdown"], _n_sym = self._scrub_ai_symbols(article["body_markdown"])
+        for _mf in ("meta_description", "meta_title"):
+            if (article.get(_mf) or "").strip():
+                article[_mf] = self._sa(article[_mf])   # a meta field is published text too
+        if any(_n_sym.values()):
+            article["ai_symbols_removed"] = _n_sym
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         # FU167 (Change 6): strip invisible/zero-width/bidi carrier chars from EVERY final body (belt-and-

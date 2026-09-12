@@ -6098,6 +6098,16 @@ def api_blog_rewrite(blog_id):
                 return {"blog_id": blog_id, "ok": False,
                         "warning": article.get("writer_warning")
                         or "rewrite failed validation — original kept, no watermark-free version produced; try again"}
+            # FU185 — only NOW, on a body we are actually going to store: strip the obvious AI SYMBOLS,
+            # then run the deterministic cleanup the IN-PIPELINE rewrite already gets. `_finalize_article`
+            # runs the writer pass BEFORE `_rebuild_sources`, so a generated blog's Qwen body gets the
+            # punt scrub, the FU138 table-punt resolver and the FU55 edit-narration scrub — this endpoint
+            # called neither, and `rewritten_body` is exactly what the Drive upload and the
+            # `use=rewritten` exports hand to clients. `_rebuild_sources` is safe here: with
+            # `_evidence_blocks` empty (this task never calls `_gather_evidence`) it applies those three
+            # scrubs and returns before touching a single [S#]. Placed AFTER the fallback check so a
+            # fallback (which stores nothing) is never touched.
+            new_body = gen._rebuild_sources(gen._sa(new_body))
             import time as _t
             secs = float(article.get("writer_secs") or 0)
             cost = round(secs * WRITER_GPU_HOURLY / 3600.0, 4)   # FU155: rough GPU-time cost estimate

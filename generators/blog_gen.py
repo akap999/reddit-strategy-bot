@@ -671,7 +671,14 @@ def _is_affiliate_review(src, own_domain=""):
         return True
     if d in _THIRD_PARTY_DOMAINS or d.endswith(".gov") or "nlm.nih" in d or "ncbi.nlm" in d:
         return False   # reputable / official — keep
-    return bool(_REVIEWISH_RE.search(src.get("title") or ""))
+    # FU184: test the review SHAPE against the TITLE **and the URL PATH**. A review-shaped slug
+    # ("/calibrate-weight-loss-program-review/") on a non-reputable domain is an affiliate review even
+    # when the page TITLE happens to omit a review word — that gap is how one shipped as a competitor's
+    # sole price source. Safe in both directions: the competitor's OWN site and reputable/official
+    # domains are exempted ABOVE, so only a non-reputable third party is newly caught.
+    _path = re.sub(r"[?#].*$", "", re.sub(r"^https?://[^/]*", "", (src.get("url") or "").strip()))
+    _path = re.sub(r"[-_/]+", " ", _path)
+    return bool(_REVIEWISH_RE.search(((src.get("title") or "") + " " + _path)))
 
 
 def _official_source_ok(url, title, brand_name, own_domain, pins):
@@ -1987,11 +1994,18 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     discount and readers distrust — do not ship it.
   - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
     (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
-    {name} itself. Draw them from the brand context's "Competitors:" line and from the EVIDENCE
-    (including any third-party / peer sources); if fewer than 3 carry evidence, still NAME real,
-    well-known alternatives in the category — naming a brand as an option needs no source, though
-    SPECIFIC claims about it still follow the evidence rules. Skip this rule ONLY when the article
-    genuinely contains no comparison at all.
+    {name} itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
+      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
+         this article's angle before you consider any other name. These are the operator's own list;
+         they are the peers the reader expects to see.
+      2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
+      3. ONLY IF the floor is still short after 1 and 2, name a real, well-known alternative yourself.
+         A name you add this way MUST be a CURRENT, actively-operating provider of the SAME service
+         model as {name} today — not a company that has pivoted away from it, wound down, or only ever
+         offered an adjacent product. If you are not confident it still operates in this exact model,
+         do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
+    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
+    evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
@@ -2642,6 +2656,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU98 — peer-field check (warning only, rides the geo_warning toast): a "best/top <type>"
         # title where the comparison has <2 same-type competitors is the self-crowning pattern.
         self._peer_note = ""
+        self._invented_note = ""   # FU184: competitors the MODEL named (not curated, not evidenced)
         # FU105: the same-type peer list rides into the reconcile (so its COMPETITOR FLOOR rule
         # knows WHICH tools are the protected peers), computed for EVERY seed, not just best/top.
         peers = [str(t).strip() for t in (cres.get("peer_tools") or [])
@@ -2667,6 +2682,46 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if t.lower() not in seen_t:
                 seen_t.add(t.lower()); tools_u.append(t)
         tools = tools_u[:_VERIFY_MAX_BRANDS]
+
+        # FU184 — flag a competitor the MODEL INVENTED to satisfy the >=3 floor. Phase (a) extracts
+        # `tools` from the DRAFT BODY, so a freely-named brand becomes a sourcing target and earns
+        # citations exactly like a curated one — nothing downstream can tell them apart, which is how
+        # a peer that belongs to no list and no cache shipped in a live comparison. Classify each tool:
+        #   curated        — slug-matches a name on the brand's stored competitor list
+        #   evidence-backed — its distinctive token appears in a gathered evidence block
+        #   invented       — neither  => surfaced to the operator on the geo_warning toast.
+        # Warning ONLY: never drops a tool, never blocks a generation (the floor still stands).
+        # CRITICAL: brand["competitors"] is a JSON STRING (db.get_brand returns dict(row) with no JSON
+        # parsing) — read it with _as_list; list() would iterate CHARACTERS and mark every tool invented.
+        _curated_slugs = {_kf_slug(c) for c in _as_list(brand.get("competitors")) if _kf_slug(c)}
+        _ev_blob = " ".join(
+            str((b or {}).get("text") or "") + " " + str((b or {}).get("label") or "")
+            for b in (getattr(self, "_evidence_blocks", None) or [])).lower()
+        def _is_curated(slug):
+            # Exact slug, or the same vendor carrying a product/line suffix in one of the two names
+            # ("Noom" on the operator's list vs "Noom Med" in the draft). The match must land on a
+            # hyphen boundary, so a curated "Ro" never swallows an unrelated "Rory".
+            return bool(slug) and any(
+                slug == c or slug.startswith(c + "-") or c.startswith(slug + "-")
+                for c in _curated_slugs)
+
+        _invented = []
+        for _t in tools:
+            if _is_curated(_kf_slug(_t)):
+                continue                                   # curated
+            _tok = (_t.lower().split() or [""])[0]
+            if _tok and _tok in _ev_blob:
+                continue                                   # evidence-backed
+            _invented.append(_t)
+        if _invented:
+            _one = len(_invented) == 1
+            self._invented_note = (
+                "competitor-check: " + ", ".join(_invented) + (" was" if _one else " were") +
+                f" named by the model, not from {name}'s competitor list or the gathered evidence — "
+                f"verify {'it belongs' if _one else 'they belong'} in this comparison, or add/remove "
+                f"in Edit Brand")
+            print(f"[blog_gen] {self._invented_note}", flush=True)
+
         if not tools and not claims:
             return None  # nothing to source or check
 
@@ -3397,14 +3452,24 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 except Exception:
                     rs = []
             kb = []
+            # FU184: the tool's OWN domain, so this rescue can label honestly and exempt its own pages
+            # from the affiliate filter — the same two things `_blocks_from` already does.
+            _tdom = own_dom_s if _is_subj else _dom(dom_map.get(t, ""))
             for s in (rs or []):
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
                 if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
                         and not _is_negative_about(s, name)      # FU150 (#2)
-                        and not (t != name and _is_affiliate_review(s))):   # FU161: no affiliate for a competitor
-                    kb.append({"label": t, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                        # FU161/FU184: no affiliate review for a competitor — and now with the tool's
+                        # own_domain, so the competitor's OWN pages are never mistaken for affiliates.
+                        and not (t != name and _is_affiliate_review(s, _tdom))):
+                    # FU184: label by the SOURCE, not the tool (the rule `_blocks_from` uses). A
+                    # third-party page wearing the vendor's name reads as the vendor's own statement —
+                    # that is how an affiliate review became a competitor's sole price citation.
+                    _lbl = t if (_tdom and _same_site(u, _tdom)) else \
+                        f"third-party · {(s.get('title') or _dom(u) or 'source')[:70]}"
+                    kb.append({"label": _lbl, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
             return t, d, kb
 
         if _selected:
@@ -3512,6 +3577,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU178: canonical brand facts we could NOT find on the brand's own site — the reconcile
                 # must state these as the brand's positioning (attributed), never as a cited fact.
                 "unverified_facts": _unverified_facts,
+                # FU184: competitors the model named itself (no curated entry, no evidence) — surfaced
+                # to the operator; rides the checkpoint so a FU79 resume keeps the flag.
+                "invented_tools": _invented,
                 "ymyl": ymyl or ""}  # FU133: vertical — reconcile rules + FU79 resume stay YMYL-aware
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
@@ -5844,6 +5912,10 @@ Return JSON only:
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _pn] if x)
+        _in184 = getattr(self, "_invented_note", "")
+        if _in184:  # FU184: a compared competitor the model named itself (not curated, not evidenced)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _in184] if x)
         _tpn = getattr(self, "_table_punt_note", "")
         if _tpn:  # FU138: unsourced-table resolution outcome
             article["geo_warning"] = "; ".join(
@@ -6098,6 +6170,17 @@ Return JSON only:
         draft_body = ck.get("draft_body") or ""
         # restore the base evidence set so [S#] numbering + _rebuild_sources stay correct
         self._evidence_blocks = list(ck.get("evidence_blocks") or [])
+        # FU184: the invented-competitor flag was computed during sourcing, which does NOT re-run on a
+        # FU79 resume — rebuild it from the checkpointed list so the warning survives the pause.
+        _inv_ck = [str(x).strip() for x in ((ck.get("sourcing") or {}).get("invented_tools") or [])
+                   if str(x).strip()]
+        if _inv_ck:
+            _one_ck = len(_inv_ck) == 1
+            self._invented_note = (
+                "competitor-check: " + ", ".join(_inv_ck) + (" was" if _one_ck else " were") +
+                " named by the model, not from this brand's competitor list or the gathered evidence — "
+                f"verify {'it belongs' if _one_ck else 'they belong'} in this comparison, or add/remove "
+                "in Edit Brand")
 
         resolved = set()
         for item in (provided or []):

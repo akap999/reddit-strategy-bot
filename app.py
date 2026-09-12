@@ -6165,10 +6165,12 @@ def api_blog_upload_gdoc(blog_id):
         # content-agnostic): variant = 'blog' (default) | 'linkedin_article' | 'linkedin_post'.
         variant = (data.get("variant") or "blog").strip()
         _gw = (data.get("use") or "") == "rewritten"   # FU179: upload the watermark-free version
+        _gw_used = False   # FU182: set only when a rewrite actually EXISTED and was the one sent
         if variant == "linkedin_article":
             art_title = (blog.get("linkedin_article_title") or "").strip()
-            art_body = ((blog.get("linkedin_article_rewritten") if _gw else "") or "").strip() \
-                or (blog.get("linkedin_article") or "").strip()
+            _rw_src = ((blog.get("linkedin_article_rewritten") if _gw else "") or "").strip()
+            art_body = _rw_src or (blog.get("linkedin_article") or "").strip()
+            _gw_used = bool(_rw_src)
             if not art_body:
                 return jsonify({"error": "no LinkedIn article generated yet — generate it first"}), 400
             art_body = _sub_link(art_body, _blog_link_target(blog, brand))
@@ -6176,8 +6178,9 @@ def api_blog_upload_gdoc(blog_id):
             page_html = _simple_doc_html(doc_title,
                                          (f"# {art_title}\n\n{art_body}") if art_title else art_body)
         elif variant == "linkedin_post":
-            post_txt = ((blog.get("linkedin_rewritten") if _gw else "") or "").strip() \
-                or (blog.get("linkedin_text") or "").strip()
+            _rw_src = ((blog.get("linkedin_rewritten") if _gw else "") or "").strip()
+            post_txt = _rw_src or (blog.get("linkedin_text") or "").strip()
+            _gw_used = bool(_rw_src)
             if not post_txt:
                 return jsonify({"error": "no LinkedIn post generated yet — generate it first"}), 400
             post_txt = _sub_link(post_txt, _blog_link_target(blog, brand))
@@ -6190,7 +6193,13 @@ def api_blog_upload_gdoc(blog_id):
                          f'<title>{_html.escape(doc_title)}</title>\n</head>\n<body>\n'
                          f'{paras}\n</body></html>\n')
         else:
-            body = blog.get("body_markdown") or ""
+            # FU182: `use='rewritten'` uploads the WATERMARK-FREE body (FU154) instead of Claude's,
+            # falling back to the original when no rewrite exists yet. The two LinkedIn variants above
+            # already did this (FU179); the blog itself — the surface the operator actually hands to a
+            # client — did not, so its watermark-free version could not reach Drive at all.
+            _rw_src = ((blog.get("rewritten_body") if _gw else "") or "").strip()
+            body = _rw_src or (blog.get("body_markdown") or "")
+            _gw_used = bool(_rw_src)
             page_title = (blog.get("meta_title") or "").strip() or title
             desc = blog.get("meta_description") or ""
             published = (blog.get("created_at") or "")[:10]
@@ -6200,6 +6209,10 @@ def api_blog_upload_gdoc(blog_id):
                                          jsonld_str="", slug=slug, fmt="gdoc")
             page_html = resp.get_data(as_text=True)
             doc_title = title
+        # FU182: label the Drive doc so the two versions are distinguishable at a glance — without
+        # this you get two files with the SAME name and no way to tell which one is safe to hand over.
+        if _gw_used:
+            doc_title = f"{doc_title} (watermark-free)"
         import requests as _rq
         try:
             r = _rq.post(script_url, json={"secret": secret, "title": doc_title,

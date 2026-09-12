@@ -13397,10 +13397,16 @@ async function _blogClearCachedData(brandId) {
 
 // FU137 — one-click upload: server renders the doc HTML and posts it to the operator's
 // Apps Script bridge, which creates an editable Google Doc in the configured Drive folder.
-async function blogUploadGdoc(id, variant) {
-    toast('Uploading to Google Drive…', 'info');
+// FU182: `use` = 'rewritten' uploads the WATERMARK-FREE version of whichever surface, falling back to
+// the original when none exists. The Drive doc is then named "… (watermark-free)" so the two are
+// distinguishable — without that you get two files with the same name.
+async function blogUploadGdoc(id, variant, use) {
+    const _wm = use === 'rewritten';
+    toast(`Uploading ${_wm ? 'the watermark-free version ' : ''}to Google Drive…`, 'info');
     try {
-        const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body: { variant: variant || 'blog' } });
+        const body = { variant: variant || 'blog' };
+        if (_wm) body.use = 'rewritten';
+        const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body });
         if (res && res.ok && res.doc_url) {
             persistentToast('✓ Uploaded to Drive — opening the Google Doc…', 'success');
             window.open(res.doc_url, '_blank');
@@ -13532,6 +13538,12 @@ async function openBlog(id) {
         <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
         ${qualityPanel}
         ${pendBanner}
+        ${_blogIsImported(b) ? `<div class="text-xs p-2 mb-2" style="background:#1e2a44;color:#93c5fd;border-radius:4px">
+            ⬆ <b>Imported</b> — this body was uploaded from a file, not generated here, so it has no
+            <code>[S#]</code> evidence chain, no Sources section of its own and no quality scorecard.
+            The watermark-free rewrite, the LinkedIn surfaces, the YouTube package and every export all
+            work on it as normal. Regenerating the article replaces it with a generated one.
+        </div>` : ''}
         <div class="space-y-2" style="max-height:60vh;overflow:auto">
             <div><label class="text-xs text-gray-400">Title</label><input id="blog-e-title" value="${_blogEsc(b.title || '')}"></div>
             <div><label class="text-xs text-gray-400">Meta title <span class="text-gray-600">(SEO &lt;title&gt; tag — blank = the H1/seed is used)</span></label><input id="blog-e-metatitle" value="${_blogEsc(b.meta_title || '')}" placeholder="generated when 'Internal links + meta title' is on"></div>
@@ -13563,6 +13575,7 @@ async function openBlog(id) {
                         <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-rw')" title="Copy as clean plain text">Copy (plain text)</button>
                         <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;use=rewritten" target="_blank" title="Open the watermark-free version">Open</a>
                         <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin-post&amp;use=rewritten&amp;dl=1" title="Download the watermark-free version">⬇ Download</a>
+                        <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_post', 'rewritten')" title="FU182: create a Google Doc of the WATERMARK-FREE version in your Drive folder (named '… (watermark-free)' so it is distinguishable from the original)">⬆ Drive</button>
                     </div>
                 </div>
             </div>
@@ -13597,6 +13610,7 @@ async function openBlog(id) {
                         <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-li-article-rw')" title="Copy as clean plain text">Copy (plain text)</button>
                         <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;use=rewritten" target="_blank" title="Open the watermark-free version">Open</a>
                         <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=linkedin&amp;use=rewritten&amp;dl=1" title="Download the watermark-free version">⬇ Download</a>
+                        <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'linkedin_article', 'rewritten')" title="FU182: create a Google Doc of the WATERMARK-FREE version in your Drive folder (named '… (watermark-free)' so it is distinguishable from the original)">⬆ Drive</button>
                     </div>
                 </div>
             </div>
@@ -13617,6 +13631,7 @@ async function openBlog(id) {
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html&amp;use=rewritten" target="_blank" title="Open the formatted watermark-free version">Open formatted</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md&amp;use=rewritten" title="Download the watermark-free version as Markdown">⬇ Download MD</a>
                     <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc&amp;use=rewritten" title="Word-compatible .doc of the watermark-free version — opens as a Google Doc in Drive">⬇ Google Doc</a>
+                    <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'blog', 'rewritten')" title="FU182: create a Google Doc of the WATERMARK-FREE version in your Drive folder (named '… (watermark-free)' so it is distinguishable from the original)">⬆ Drive</button>
                 </div>
             </div>
             <div class="card p-2" style="background:#0f1a12;border:1px solid #14532d">

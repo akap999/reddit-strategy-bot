@@ -130,6 +130,39 @@ _PRICE_SIGNAL_RE = re.compile(
 # reworded "100% → all/completely" dropped an incidental "100" and killed an otherwise-perfect rewrite
 # → the rewrite NEVER shipped). The rewrite PROMPT + the human review-before-publish still cover those;
 # the deterministic gate protects only the numbers whose silent alteration is a real clinical/commercial error.
+# FU187 — a writer CAPITALISING AN ORDINARY WORD FOR EMPHASIS ("low testosterone AND a BMI over 30")
+# is not stating a fact, but the acronym harvest below reads any >=3-letter ALLCAPS token as a code
+# (FDA / MTC / MEN2 / BMI). "AND" then had to survive the rewrite CHARACTER-FOR-CHARACTER, so Qwen
+# writing a natural lowercase "and" failed every attempt and shipped Claude's WATERMARKED body with
+# `dropped facts ['AND']`. This is the same class as FU169 / FU174 / FU181: the atom layer false-failing
+# a rewrite the regex floor would pass, with the worst possible failure mode.
+#
+# The list holds ONLY function words with no plausible acronym meaning in any vertical. Deliberately
+# ABSENT and therefore still protected: MEN (Multiple Endocrine Neoplasia), ALL (acute lymphoblastic
+# leukaemia), WHO (World Health Organization), ACT, AID, CARE, HOPE — real codes in some domain.
+_EMPHASIS_CAPS = {
+    "AND", "BUT", "NOT", "THE", "FOR", "YOU", "YOUR", "ARE", "WAS", "WERE", "HAS", "HAVE", "HAD",
+    "CAN", "WILL", "WOULD", "SHOULD", "MUST", "ONLY", "EVERY", "NEVER", "ALWAYS", "BOTH", "EACH",
+    "MORE", "LESS", "MOST", "MANY", "SOME", "ANY", "WHEN", "WHAT", "HOW", "WHY", "NOW", "ALSO",
+    "JUST", "VERY", "SAME", "THAN", "THEN", "THIS", "THAT", "THESE", "THOSE", "WITH", "FROM",
+    "INTO", "THEY", "THEIR", "ONE", "TWO", "YES", "DOES", "BEFORE", "AFTER", "UNTIL", "WHILE",
+}
+
+
+def _is_emphasis_caps(token, body=""):
+    """True when an ALLCAPS token is an ordinary word shouted for emphasis rather than an acronym.
+    Two conditions, so a genuine code can never be unprotected by accident: the word is on the curated
+    function-word list AND the SAME word also appears in LOWERCASE in the author's own body. A real
+    acronym ("FDA", "MEN") fails the first test; a domain code that happens to be on the list but is
+    used only in caps fails the second."""
+    t = (token or "").strip()
+    if t.upper() not in _EMPHASIS_CAPS:
+        return False
+    if not body:
+        return True
+    return bool(re.search(r"\b%s\b" % re.escape(t.lower()), body))
+
+
 _LOADBEARING_NUM_RE = re.compile(
     # FU181: `\d(?:[\d,]*\d)?` — a thousands separator must be FOLLOWED BY A DIGIT. With the older
     # greedy `\d[\d,]*` (and the decimal group optional) the match could END on a comma, so
@@ -4994,7 +5027,9 @@ Return JSON only:
                 missing.add(core)
         literal = set()
         literal |= set(re.findall(r"\b\d+[A-Z]\b", head))                # 503A, 503B (digit-then-letter code)
-        literal |= set(re.findall(r"\b[A-Z]{3,}\d*\b", head))            # FDA, MTC, MEN2, HIPAA, BMI, GLP, TRT (≥3 → not US/AI)
+        # FU187: drop an ordinary word the author merely SHOUTED — see `_is_emphasis_caps`.
+        literal |= {t for t in re.findall(r"\b[A-Z]{3,}\d*\b", head)       # FDA, MTC, MEN2, HIPAA, BMI, GLP, TRT (≥3 → not US/AI)
+                    if not _is_emphasis_caps(t, head)}
         literal |= set(re.findall(r"\b\w+(?=®|™)", head))                # Zepbound®, Mounjaro®
         if brand:
             # FU181 — two bugs here, and they masked each other:
@@ -5310,6 +5345,8 @@ Return JSON only:
         ws = (span or "").split()
         if not (1 <= len(ws) <= 14):
             return False
+        if len(ws) == 1 and _is_emphasis_caps(ws[0]):     # FU187: "AND" is not a code
+            return False
         # FU174: "contains a digit" was too loose — it re-admitted the BARE/RHETORICAL numbers FU169
         # deliberately stopped gating ("100", "100%"), so Qwen validly rewording "100% of patients" →
         # "virtually all patients" failed every attempt and fell back. A number only counts when it is
@@ -5432,6 +5469,8 @@ Return JSON only:
                 continue
             if _LOADBEARING_NUM_RE.fullmatch(a):
                 continue        # the regex floor already gates this one, normalized
+            if _is_emphasis_caps(a):
+                continue        # FU187: an emphasis capital is never enforceable verbatim
             out.append(a)
         return out
 

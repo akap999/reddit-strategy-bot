@@ -13640,7 +13640,7 @@ async function openBlog(id) {
                 <div class="flex items-center justify-between mb-1">
                     <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free version (rewritten on the self-hosted model)</label>
                     <div class="flex items-center gap-2">
-                        <span id="writer-status" class="text-xs" style="color:#94a3b8" title="Is the self-hosted model loaded? A cold GPU spends several minutes loading ~40GB before the rewrite can start.">● checking model…</span>
+                        <span id="writer-status" class="text-xs" style="color:#94a3b8" title="Checking costs money: a probe is a request, and a request boots the GPU. Press Warm up when you actually intend to rewrite — a cold GPU spends several minutes loading ~40GB before the rewrite can start.">● model status not checked — Warm up loads it</span>
                         <button class="btn btn-sm" style="background:#0e7490;color:#cffafe" onclick="writerWarmUp()" title="Wake the GPU now so the model is loaded BEFORE you start a rewrite — pinging the endpoint is what triggers the load. Watch the dot turn green.">🔥 Warm up</button>
                         <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button>
                     </div>
@@ -13868,11 +13868,12 @@ async function writerStatus(poll) {
         if (poll && st === 'warming') setTimeout(() => writerStatus(true), 15000);
     } catch (e) { el.style.color = '#ef4444'; el.textContent = '● status unavailable'; }
 }
-// paint the dot as soon as the blog modal exists (the element only appears with the rewrite card)
-setInterval(() => {
-    const el = document.getElementById('writer-status');
-    if (el && !el.dataset.checked) { el.dataset.checked = '1'; writerStatus(false); }
-}, 1000);
+// FU190 — this used to auto-probe the moment the blog modal rendered. The probe IS a request to the
+// Modal endpoint, and a request is exactly what BOOTS a scaled-to-zero GPU, so simply OPENING A BLOG TO
+// READ IT woke an A100 and started a billing window — independent of the Settings writer mode, because
+// the on-demand rewrite card renders either way. That was the dominant line on the Modal bill: looking
+// at N blogs cost N boots. The dot is now PASSIVE; the only things that touch the endpoint are actions
+// the operator actually asked for (Warm up, Test connection, a rewrite).
 function writerWarmUp() {
     const el = document.getElementById('writer-status');
     if (el) { el.style.color = '#f59e0b'; el.textContent = '● waking the GPU…'; }

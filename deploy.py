@@ -77,11 +77,15 @@ app = modal.App("geo-writer")
     gpu=GPU,
     volumes={HF_CACHE_PATH: hf_cache},
     secrets=[modal.Secret.from_name("writer-secret")],   # provides WRITER_API_KEY in the container env
-    # FU164: 30 min (was 5). The writer pass runs ~15 min into a blog and blogs run back-to-back, so a
-    # 5-min window meant the GPU always cold-started per blog. 30 min keeps it warm BETWEEN back-to-back
-    # blogs (the app-level keep-warm ping is the primary mechanism; this is the backstop). Idle = $0 once
-    # a run goes quiet. (`modal deploy deploy.py` to apply.)
-    scaledown_window=30 * MINUTES,
+    # FU188: back to 5 min. FU164 raised this to 30 because the writer pass ran ~15 min into a blog
+    # generation and blogs ran back-to-back, so the GPU had to survive the gap BETWEEN blogs. The
+    # on-demand rewrite button has no such gap, and 30 minutes of idle A100 after every rewrite was
+    # ~90% of the Modal bill: ~4 min of actual compute bought ~34 min of billed GPU (~$2/rewrite at
+    # $2.50/hr, more once CPU+RAM are counted). A cold start costs ~$0.19 in GPU time, so you would
+    # have to eat TEN of them to match ONE 30-min idle window. Rewrites clicked within ~5 min of each
+    # other still find the model loaded; an isolated one pays a ~2-5 min load, which Settings →
+    # "🔥 Warm up" removes from the critical path. (`modal deploy deploy.py` to apply.)
+    scaledown_window=5 * MINUTES,
     timeout=30 * MINUTES,
     max_containers=1,               # one GPU is plenty for ~10 blogs/day
 )

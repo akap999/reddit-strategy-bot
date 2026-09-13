@@ -31,10 +31,17 @@ WRITER_MODE = os.environ.get("WRITER_MODE", "off")
 WRITER_ENDPOINT_URL = os.environ.get("WRITER_ENDPOINT_URL", "")  # e.g. https://<modal-app>.modal.run/v1
 WRITER_API_KEY = os.environ.get("WRITER_API_KEY", "")            # bearer token the endpoint checks
 WRITER_MODEL = os.environ.get("WRITER_MODEL", "qwen-writer")   # must match deploy.py's --served-model-name
-try:                                                            # FU155: $/hr of the writer's GPU, for a
-    WRITER_GPU_HOURLY = float(os.environ.get("WRITER_GPU_HOURLY", "3.72"))   # rough rewrite-cost estimate
-except (TypeError, ValueError):                                 # (A100-80GB on Modal ≈ $3.72/hr)
-    WRITER_GPU_HOURLY = 3.72
+# FU155: $/hr of the writer's GPU, used for the rough rewrite-cost estimate shown in the toast.
+# FU188: 3.72 -> 2.50, Modal's actual published A100-80GB rate, so the figure stops being inflated ~49%.
+# HONEST LIMIT, stated because the number reads more precise than it is: this multiplies ONLY the
+# seconds spent inside `call_text`. It excludes the cold-start load, the container's CPU + memory
+# (billed separately from the GPU), and the scaledown window the container is held for AFTER the
+# rewrite ends — which is the bulk of the real Modal bill. Treat the toast as "GPU-seconds spent
+# generating", not as what Modal charges.
+try:
+    WRITER_GPU_HOURLY = float(os.environ.get("WRITER_GPU_HOURLY", "2.50"))
+except (TypeError, ValueError):
+    WRITER_GPU_HOURLY = 2.50
 
 # --- Authentication ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "")

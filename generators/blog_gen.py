@@ -287,7 +287,16 @@ _CADENCE_PATTERNS = [
     (re.compile(r"first\s+month|initial\s+month|opening\s+month", re.I), "FIRST_MONTH"),
     (re.compile(r"one[-\s]time|single\s+payment|up[-\s]front", re.I), "ONE_TIME"),
     (re.compile(r"per\s+seat|/\s*seat\b|per\s+user|/\s*user\b|(?:each|a)\s+seat\b", re.I), "PER_SEAT"),
-    (re.compile(r"\b\d+[-\s]week\b", re.I), "N_WEEK"),
+    # FU194 — these two patterns are the SAME CONCEPT: a stated multi-unit SPAN that the amount covers.
+    # They were separate tags ("N_WEEK" vs "TERM"), so merely RESPELLING one as the other read as a lost
+    # cadence. A live rewrite failed with `$897 lost its cadence (TERM → ['N_WEEK'])` on exactly that:
+    # Claude's own body wrote it BOTH ways — "$897 per 12-week recurring subscription" (N_WEEK, x3) and
+    # "$897 for 12 weeks recurring" (TERM, x1) — so the rewrite only had to phrase the odd one out like
+    # the other three, and the watermarked body shipped. Nothing is lost by merging: neither tag ever
+    # encoded the DURATION, so "for 12 weeks" and "for 12 months" were already indistinguishable here;
+    # the digits are the number gate's job. Fifth instance of the class where a spelling difference
+    # false-fails a rewrite the meaning gate would pass (cf. FU169 / FU174 / FU181 / FU187).
+    (re.compile(r"\b\d+[-\s]week\b", re.I), "TERM"),
     # a contract TERM is part of the offer too — "$1,000 per month over 12 months" losing "over 12 months"
     # drops the total commitment (lending, SaaS annual plans, financed equipment).
     (re.compile(r"(?:over|for|across)\s+(?:\d+|twelve|six|three|two)\s+(?:month|year|week)s?\b"

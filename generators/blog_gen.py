@@ -432,6 +432,69 @@ _JOB_BOARD_DOMAINS = {
 }
 
 
+# FU192 — a chat model answers a rewrite request CONVERSATIONALLY. The section prompt already says
+# "Do NOT add a heading, a preamble, or any commentary", and a live blog still shipped
+# "Certainly. Here is the rewritten section:" INSIDE an FAQ answer. A prompt rule is not a guarantee —
+# the heading half of that same instruction is already enforced in code, and this is its missing twin.
+# Head-anchored and whole-line only, so ordinary prose can never be eaten: "Certainly." is stripped as
+# the FIRST line of a reply and kept everywhere else (it is a legitimate answer to a yes/no question,
+# which is exactly how it read in the live leak).
+_PREAMBLE_LEAD = re.compile(
+    r"^\s*(?:"
+    r"(?:certainly|sure|of course|absolutely|got it|understood|okay|ok)\s*[.!,:]?\s*$"
+    r"|(?:(?:certainly|sure|of course|absolutely)\s*[.!,]\s*)?"
+    r"(?:here(?:'s| is)|below is|this is|the following is)\b[^\n]{0,90}:\s*$"
+    r"|(?:i(?:'ve| have)\s+(?:rewritten|reworded|revised|rephrased)|as (?:requested|instructed))"
+    r"\b[^\n]{0,90}:?\s*$"
+    r")", re.IGNORECASE)
+_PREAMBLE_TAIL = re.compile(
+    r"^\s*(?:let me know\b|i hope (?:this|that) helps\b|hope (?:this|that) helps\b|"
+    r"feel free to\b)[^\n]{0,120}$", re.IGNORECASE)
+_BREAK_ONLY = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+
+
+def _strip_model_preamble(text):
+    """Drop a conversational lead-in (and its trailing sign-off) from a writer reply, plus the
+    separator a model often puts between the preamble and the content. Returns the text unchanged when
+    nothing matches, and never returns empty — if stripping would consume the whole reply, the original
+    is kept, because a damaged reply is better caught by the existing validation than silently blanked."""
+    if not (text or "").strip():
+        return text or ""
+    lines = text.split("\n")
+    i, n = 0, len(lines)
+    # Both scans are SPECULATIVE: blank lines are only consumed once the pattern after them actually
+    # matches. Committing them eagerly would trim a clean reply's own leading/trailing blank lines,
+    # which is a silent edit to text that has nothing wrong with it.
+    for _ in range(6):                                   # bounded; a real preamble is 1-2 lines
+        k = i
+        while k < n and not lines[k].strip():
+            k += 1
+        if k < n and _PREAMBLE_LEAD.match(lines[k]):
+            k += 1
+            while k < n and (not lines[k].strip() or _BREAK_ONLY.match(lines[k])):
+                k += 1
+            i = k
+            continue
+        break
+    j = n
+    for _ in range(3):
+        k = j
+        while k > i and not lines[k - 1].strip():
+            k -= 1
+        if k > i and _PREAMBLE_TAIL.match(lines[k - 1]):
+            j = k - 1
+            continue
+        break
+    if i == 0 and j == n:
+        return text                                      # nothing matched → BYTE-IDENTICAL
+    out = "\n".join(lines[i:j]).strip()
+    if not out:
+        return text
+    print(f"[blog_gen] writer-preamble: dropped {i} lead line(s) and {n - j} trailing line(s)",
+          flush=True)
+    return out
+
+
 def _is_non_evidence(src):
     """FU140: True when a search result can never serve as evidence — a hit-piece (FU93) OR a
     job listing / recruitment ad / careers page (by title pattern, job-board domain, or a
@@ -5326,7 +5389,7 @@ Return JSON only:
                                             timeout=timeout)
             except Exception:
                 got = None
-            got = (got or "").strip()
+            got = _strip_model_preamble((got or "").strip())   # FU192
             # The model is told not to emit a heading, but enforce it deterministically: we re-emit the
             # ORIGINAL heading ourselves, so any heading line the model returns would duplicate it (and a
             # reworded one would trip the heading gate). Drop heading lines the source chunk didn't have.
@@ -5427,6 +5490,7 @@ Return JSON only:
         except Exception as e:
             print(f"[writer] residual polish failed ({e})", flush=True)
             return None
+        got = _strip_model_preamble(got or "")   # FU192: a lead-in line broke the exact-count match
         lines = [re.sub(r"^\s*\d+[.)]\s*", "", l).strip() for l in (got or "").split("\n") if l.strip()]
         if len(lines) != len(cands):
             print(f"[writer] residual polish: count mismatch ({len(lines)} vs {len(cands)}) — discarded",
@@ -5503,6 +5567,7 @@ Return JSON only:
                         f"SENTENCE: {bad}", max_tokens=600, temperature=0.7, timeout=timeout)
                 except Exception:
                     rep = None
+                rep = _strip_model_preamble(rep or "") or None   # FU192
                 return (rep or "").strip().split("\n")[0].strip()
 
             if len(todo) > 1:
@@ -6142,8 +6207,9 @@ Return JSON only:
                 # FU164: a warm gen is ~2-5 min — 300s false-timed-out → fell back (wasted time +
                 # reinstated the watermark). 600s + the app-level keep-warm (base.WriterClient.warm) fixes both.
                 _timeout = int(os.environ.get("WRITER_CALL_TIMEOUT", "600"))
-                out = self.writer.call_text(_build_prompt(aggressive=(attempt > 0)),
-                                            max_tokens=9000, temperature=_temp, timeout=_timeout)
+                out = _strip_model_preamble(self.writer.call_text(
+                    _build_prompt(aggressive=(attempt > 0)),
+                    max_tokens=9000, temperature=_temp, timeout=_timeout) or "") or None   # FU192
                 _dt = _t.time() - _t0
                 secs += _dt
                 _stage["attempts"] += round(_dt, 1)

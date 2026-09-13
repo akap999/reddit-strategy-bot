@@ -451,6 +451,16 @@ _PREAMBLE_TAIL = re.compile(
     r"^\s*(?:let me know\b|i hope (?:this|that) helps\b|hope (?:this|that) helps\b|"
     r"feel free to\b)[^\n]{0,120}$", re.IGNORECASE)
 _BREAK_ONLY = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+# The same conversational tic, but INLINE at the head of the real content rather than on its own line
+# ("Certainly, and this is among the key financial aspects to consider."). It survives the line-level
+# strip because the rest of the line is genuine text. Under a question heading it also reads as an
+# ANSWER, which is why it was left alone at first — but "Certainly." is not a liftable answer, and the
+# declarative sentence after it is, so trimming makes the chunk stronger, not weaker. A leftover "and"
+# or "but" goes with it. NOTE "yes"/"no" are deliberately ABSENT: those ARE the direct answer the
+# answer-first rules ask for.
+_INTERJECTION = re.compile(
+    r"^(?:certainly|absolutely|sure|of course|indeed|definitely)\s*[.,!]\s+(?:(?:and|but|so)\s+)?"
+    r"(?=\S)", re.IGNORECASE)
 
 
 def _strip_model_preamble(text):
@@ -485,13 +495,21 @@ def _strip_model_preamble(text):
             j = k - 1
             continue
         break
-    if i == 0 and j == n:
+    # the inline tic at the head of the real content, once any preamble LINE is out of the way
+    trimmed = False
+    if i < j:
+        _cut = _INTERJECTION.sub("", lines[i], count=1)
+        if _cut != lines[i] and _cut.strip():
+            lines = list(lines)
+            lines[i] = _cut[:1].upper() + _cut[1:]
+            trimmed = True
+    if i == 0 and j == n and not trimmed:
         return text                                      # nothing matched → BYTE-IDENTICAL
     out = "\n".join(lines[i:j]).strip()
     if not out:
         return text
-    print(f"[blog_gen] writer-preamble: dropped {i} lead line(s) and {n - j} trailing line(s)",
-          flush=True)
+    print(f"[blog_gen] writer-preamble: dropped {i} lead line(s) and {n - j} trailing line(s)"
+          + (" + an inline opener" if trimmed else ""), flush=True)
     return out
 
 
@@ -5380,8 +5398,17 @@ Return JSON only:
                 "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
                 "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
                 "schedule, or a safety negation whose scope you cannot preserve while rewording.\n"
-                "Do NOT add a heading, a preamble, or any commentary. Return ONLY the rewritten section "
-                "text.\n\n"
+                "Do NOT add a heading. Return ONLY the rewritten section text.\n"
+                # FU193 — the generic "no preamble, no commentary" half of this rule lost EIGHT times
+                # across twelve live rewrites, so it is restated CONCRETELY, naming the exact shapes that
+                # shipped. Forbid-only: it cannot make the rewrite do anything new. The deterministic
+                # strip stays the guarantee; this is the layer that also covers a NOVEL wording.
+                "OUTPUT DISCIPLINE (this is PUBLISHED PROSE, not a chat reply): your FIRST character "
+                "must be the first character of the section text itself. NEVER open with an "
+                "acknowledgement (\"Certainly\", \"Sure\", \"Of course\", \"Absolutely\", \"Got it\"), NEVER "
+                "announce the work (\"Here is the rewritten section\", \"Below is the revised version\"), "
+                "NEVER put a separator line before the text, and NEVER close with an offer "
+                "(\"Let me know if…\"). A reader sees this sentence on a published page.\n\n"
                 f"SECTION TEXT:\n{src}"
             )
             try:
@@ -6049,6 +6076,13 @@ Return JSON only:
                     "genuinely meaning-critical clinical statement — NEVER a default for a sentence that merely "
                     "sounds clinical or regulatory.\n"
                     "Meaning, facts, structure and citations stay identical; only the WORDING changes.\n"
+                    # FU193 — this branch carried NO output-discipline rule at all, so a chat preamble
+                    # here would land at the very top of the article. Same forbid-only wording as the
+                    # section pass.
+                    "OUTPUT DISCIPLINE (this is PUBLISHED PROSE, not a chat reply): your FIRST character "
+                    "must be the first character of the article itself. NEVER open with an "
+                    "acknowledgement (\"Certainly\", \"Sure\", \"Of course\"), NEVER announce the work "
+                    "(\"Here is the rewritten article\"), and NEVER close with an offer.\n"
                     # FU185 (Change 6) — the FOUR editorial rules the rewrite branch never carried. Each
                     # only FORBIDS a regression; none asks the rewrite to do anything new, so they cannot
                     # move prose quality in either direction, only narrow the band of allowed outcomes.

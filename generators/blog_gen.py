@@ -105,6 +105,60 @@ _WRITER_SURFACES = {
             "renders them as literal characters;")},
 }
 
+_VERIFY_MAX_OPTIONS = 3          # FU189: generic OPTIONS are capped SEPARATELY from providers —
+                                 # one costs ~1 reference search, a provider ~13, so an option must
+                                 # never displace a provider from the _VERIFY_MAX_BRANDS budget.
+
+
+def _opt_forms(s):
+    """FU189 — every reading of an entity string that carries a parenthetical expansion:
+    "TRT (Testosterone Replacement Therapy)" -> the whole string, "TRT", and the expansion. Matching
+    on all three is what lets a short form and its spelled-out form recognise each other."""
+    s = (s or "").strip()
+    if not s:
+        return []
+    out = [s]
+    m = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", s)
+    if m:
+        out += [m.group(1).strip(), m.group(2).strip()]
+    return [x for x in out if x]
+
+
+def _named_as_option(tool, options):
+    """FU189 — did the extraction name this comparison entity as a generic OPTION (a treatment,
+    method, material, plan type, approach, technology, standard or product class) rather than a
+    PROVIDER with its own website? Exact or slug match across both parenthetical readings."""
+    forms = {f.lower() for f in _opt_forms(tool)}
+    slugs = {_kf_slug(f) for f in _opt_forms(tool) if _kf_slug(f)}
+    for o in (options or []):
+        for of in _opt_forms(o):
+            if of.lower() in forms or (_kf_slug(of) and _kf_slug(of) in slugs):
+                return True
+    return False
+
+
+def _matches_a_product(tool, products):
+    """FU189 BACKSTOP — the entity is one of the article's own PRODUCTS ("the things an official
+    label, standard or specification document would exist FOR"), which is this file's existing and
+    already vertical-neutral name for exactly this kind of thing. Token-subset either way, so
+    "TRT (Testosterone Replacement Therapy)" recognises the product "testosterone".
+
+    Used ONLY together with "no domain resolved" at the call site: on its own a token overlap could
+    misroute a real provider whose name shares a token with a product, and the extra condition costs
+    nothing because Pass 0 has already run. NOTE the inverse is deliberately NOT a classifier — a
+    small REAL vendor the model has never heard of also fails to resolve, so kind is a question about
+    the ENTITY, never about our lookup luck."""
+    for p in (products or []):
+        pt = set(_product_tokens(p))
+        if not pt:
+            continue
+        for f in _opt_forms(tool):
+            ft = set(_product_tokens(f))
+            if ft and (ft <= pt or pt <= ft):
+                return True
+    return False
+
+
 _FACT_RESCUE_TRIES = 3
 _FACT_VERIFY_FETCHES = int(os.environ.get("BRAND_FACT_VERIFY_FETCHES", "6"))   # FU178: cap the
                                 # operator-URL reads used to verify canonical brand facts (tier 2)
@@ -2671,6 +2725,14 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
   - PEER_TOOLS (FU98): the subset of TOOLS that are the SAME TYPE of entity the article's title asks
     for (competing AGENCIES for a "best agencies" title, competing PLATFORMS for a platforms title) —
     a tool is NOT a peer of an agency even in the same space.
+  - GENERIC_OPTIONS (FU189): the subset of TOOLS that are NOT a company / platform / provider with
+    its OWN WEBSITE — a generic approach, method, treatment, material, plan type, technology,
+    standard or product class that a reader could choose between. The test is simply: does this
+    entity have an official site of its own that would publish its pricing and terms? A named
+    company does; a category does not. Examples across different industries: a loan TYPE compared
+    among lenders; a building MATERIAL compared among suppliers; an employment MODEL compared among
+    HR platforms; a course of TREATMENT compared among clinics; "build in-house" compared among
+    vendors. Leave EMPTY when every compared entity is a named provider.
   - DIMENSIONS: the comparison columns / attributes being compared (e.g. pricing, commercial license,
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
@@ -2693,6 +2755,7 @@ ARTICLE:
 {body[:6000]}
 
 Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["..."], "products": ["..."], "core_topic": "",
+  "generic_options": [],
   "claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
         cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
         cres = cres if isinstance(cres, dict) else {}
@@ -2721,12 +2784,25 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                  if str(t).strip() and str(t).strip().lower() != name.lower()]
         dims = [str(d).strip() for d in (cres.get("dimensions") or []) if str(d).strip()]
         claims = [c for c in (cres.get("claims") or []) if isinstance(c, dict)]
-        # de-dupe tools (case-insensitive), cap
+        # FU189: which compared entities are generic OPTIONS (no website) rather than PROVIDERS.
+        _opt_names = [str(o).strip() for o in (cres.get("generic_options") or []) if str(o).strip()]
+        # de-dupe tools (case-insensitive), then cap EACH KIND separately. A provider costs ~13
+        # searches (domain hunt + tiers + key-fact rescue), an option costs ONE reference search, so
+        # sharing a single cap let a website-less entity evict a real competitor from sourcing
+        # entirely. Recombine in the ORIGINAL order — the finalize loop and the [S#] numbering both
+        # walk `tools` in order.
         seen_t, tools_u = set(), []
         for t in tools:
             if t.lower() not in seen_t:
                 seen_t.add(t.lower()); tools_u.append(t)
-        tools = tools_u[:_VERIFY_MAX_BRANDS]
+        _prov_q = [t for t in tools_u if not _named_as_option(t, _opt_names)][:_VERIFY_MAX_BRANDS]
+        _opt_q = [t for t in tools_u if _named_as_option(t, _opt_names)][:_VERIFY_MAX_OPTIONS]
+        _keep = {t.lower() for t in _prov_q} | {t.lower() for t in _opt_q}
+        tools = [t for t in tools_u if t.lower() in _keep]
+        _options = {t.lower() for t in _opt_q}   # grows in the loop via the products backstop
+        if _options:
+            print(f"[blog_gen] entity-kind: {len(_prov_q)} provider(s), {len(_opt_q)} generic "
+                  f"option(s) ({', '.join(_opt_q)}) — options skip the vendor-site hunt", flush=True)
 
         # FU184 — flag a competitor the MODEL INVENTED to satisfy the >=3 floor. Phase (a) extracts
         # `tools` from the DRAFT BODY, so a freely-named brand becomes a sourcing target and earns
@@ -3088,7 +3164,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if str(k).strip() and dk:
                     _cached_lc[str(k).strip().lower()] = dk
         dom_map = {t: _cached_lc[t.lower()] for t in _live_tools if t.lower() in _cached_lc}
-        _need_dom = [t for t in _live_tools if t not in dom_map]
+        # FU189: a generic OPTION has no website, so there is nothing to resolve for it. Asking anyway
+        # is the first step of a ~13-search hunt that cannot succeed, and whose only "success" mode is
+        # binding an unrelated site and labelling its pages as the entity's own.
+        _need_dom = [t for t in _live_tools
+                     if t not in dom_map and t.lower() not in _options]
         if _need_dom:
             try:
                 _resolved = self._resolve_brand_domains(_need_dom, seed=seed, subject=name,
@@ -3099,6 +3179,32 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             for t in _need_dom:
                 if t.lower() in _res_lc:
                     dom_map[t] = _res_lc[t.lower()]
+        def _is_option(t):
+            """FU189 — PROVIDER (fetch its site) or generic OPTION (reference material)? The model's
+            own GENERIC_OPTIONS list decides; the products BACKSTOP only fires for an entity that ALSO
+            failed to resolve a domain, so a real provider whose name merely shares a token with a
+            product can never be misrouted."""
+            if t.lower() in _options:
+                return True
+            if not dom_map.get(t) and _matches_a_product(t, products):
+                _options.add(t.lower())
+                print(f"[blog_gen] entity-kind: {t} -> generic OPTION (matches a PRODUCT and has no "
+                      f"resolvable domain)", flush=True)
+                return True
+            return False
+
+        def _option_keep(t, blob):
+            """Keep test for an option's reference results. Tier 3 / the FU78 rescue demand the entity's
+            LITERAL full string, which no real page contains — that is WHY the vendor hunt yields zero.
+            Use the SHORTEST reading's distinctive tokens instead ("TRT" from "TRT (Testosterone
+            Replacement Therapy)", both of "term loan"), and require all of them."""
+            best = None
+            for f in _opt_forms(t):
+                toks = [x for x in _product_tokens(f) if len(x) >= 2]
+                if toks and (best is None or len(toks) < len(best)):
+                    best = toks
+            return bool(best) and all(x in blob for x in best)
+
         print(f"[blog_gen] verify+complete: pre-resolved {len(dom_map)}/{len(tools)} competitor "
               f"domain(s) (cache+batch)", flush=True)
 
@@ -3137,6 +3243,34 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 return                                     # nothing missing — no rescue spend
             dom = st["dom"]
             blocks = list(st["blocks"])
+            # FU189 — a GENERIC OPTION is not a company. The vendor hunt below (domain resolve → Tier 3
+            # → key-fact rescue) costs ~13 searches that CANNOT yield for it, spends them FIRST because
+            # a zero-block entity is priority 0, and its only "success" mode is binding an unrelated
+            # domain and labelling that site's pages as the entity's own. ONE reference search instead.
+            if _is_option(tool):
+                _want = "; ".join([d for d in dims if d.strip()][:4]) or "how it works and what it costs"
+                try:
+                    rs = self.claude.search_sources(
+                        f"{tool} in the context of {cat or 'this category'}: what it is, how it works, "
+                        f"and the specific current values for {_want} — from AUTHORITATIVE or REFERENCE "
+                        f"sources (a regulator, a standards body, manufacturer or product documentation, "
+                        f"professional or industry guidance, or a reputable independent publication), "
+                        f"NOT a vendor sales page", max_searches=1)
+                except Exception:
+                    rs = []
+                for _s in (rs or []):
+                    u, fct = (_s.get("url") or "").strip(), (_s.get("fact") or "").strip()
+                    blob = ((_s.get("title") or "") + " " + fct + " " + u).lower()
+                    if (u and fct and _option_keep(tool, blob) and not _is_non_evidence(_s)
+                            and _dom(u) not in _STALE_AGGREGATORS):
+                        blocks.append({"label": f"reference · {(_s.get('title') or _dom(u))[:70]}",
+                                       "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                st["blocks"] = blocks
+                st["t3"] = len(blocks)
+                st["option"] = True
+                print(f"[blog_gen] entity-kind: {tool} = generic OPTION -> 1 reference search, "
+                      f"{len(blocks)} block(s) kept (vendor hunt skipped)", flush=True)
+                return
             # (i) still no domain → resolve via web search, then retry the baseline
             if not dom:
                 try:
@@ -3279,7 +3413,14 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU150: the pause names the actual comparison COLUMNS the operator must supply — a
                 # zero-block tool is missing EVERY dimension — not the old static "price + license".
                 _mf = [d for d in dims if d.strip()] or _missing_facts([])
-                unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf})
+                if st.get("option"):
+                    # FU189: a generic OPTION has no page, so demanding "paste a link to its page" is
+                    # asking for something that cannot exist. The PAUSE stays (it is the ONLY way to
+                    # rescue the row — `finish_pending_blog` turns a typed fact into the TOOL-LABELED
+                    # block the reconcile needs), but the ask changes to typed facts only.
+                    unsourced.append({"tool": tool, "facts": _mf, "generic_option": True})
+                else:
+                    unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf})
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
@@ -3614,8 +3755,28 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             fresh.append({"label": f"third-party · {ttl or u}", "url": u,
                           "text": fct[:_EVIDENCE_TEXT_CAP]})
 
+        # FU189 — the FU142 dim-rescue runs AFTER the finalize loop and keeps blocks on a LOOSER
+        # first-token filter, so it can source an entity every earlier tier missed. Until now the pause
+        # was already queued for an entity that got sourced moments later. Re-check each pause item
+        # against the FINAL evidence and drop any that now has a block naming it. General: this spares
+        # ordinary providers a spurious pause too.
+        if unsourced:
+            _blob = " ".join(((f.get("label") or "") + " " + (f.get("text") or "") + " "
+                              + (f.get("url") or "")) for f in fresh).lower()
+            _kept = []
+            for _u in unsourced:
+                _t = str(_u.get("tool") or "").strip()
+                _toks = [x for x in _product_tokens(_t) if len(x) >= 3]
+                if _t and _toks and all(x in _blob for x in _toks) and not _u.get("ymyl_official"):
+                    print(f"[blog_gen] verify+complete: {_t} was sourced by the dim-rescue after all "
+                          f"— dropping it from the pause list", flush=True)
+                    continue
+                _kept.append(_u)
+            unsourced = _kept
+
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
+                "options": sorted(_options),   # FU189: the non-vendor entities, for the reconcile
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
                 "qualifier": rqual,  # FU93: same for the qualifier
@@ -3636,6 +3797,28 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         cat = sourcing.get("cat") or ""
         tools = sourcing.get("tools") or []
         peers = sourcing.get("peers") or []   # FU105: protected same-type competitors
+        _opts = sourcing.get("options") or []  # FU189: entities that are approaches, not vendors
+        _optnames = [t for t in tools if t.lower() in {str(o).lower() for o in _opts}]
+        # FU189 — three EXISTING rules below would delete a generic option's row, all keyed on the
+        # absence of a VENDOR-labelled block: the no-tool-specific-fresh-fact drop, EVERY KEPT ROW
+        # FULLY FILLED, and the competitor-price rule that demands the vendor's own site. An option has
+        # no vendor page and never will, so those rules have to be told it is exempt — otherwise fixing
+        # the pause would simply trade it for a silently missing row. Emitted ONLY when the comparison
+        # actually contains one, so an all-provider blog's prompt is byte-identical to before.
+        _opt_line, _opt_rules = "", ""
+        if _optnames:
+            _opt_line = ("\nGENERIC OPTIONS (approaches/categories, NOT companies — see the GENERIC "
+                         f"OPTIONS rule): {json.dumps(_optnames, ensure_ascii=False)}")
+            _opt_rules = (
+                "\n  - GENERIC OPTIONS (hard rule): the entities listed under GENERIC OPTIONS are "
+                "approaches, methods, materials, plan types or product classes — NOT companies. They "
+                "have NO vendor website and none is expected, so the rules above about a tool's OWN "
+                "site do NOT apply to them. Fill their cells from the FRESH FACTS labelled "
+                "'reference ·', 'official ·' or 'third-party ·' that NAME them, citing the [S#]. "
+                "NEVER remove a generic option's row for lacking a vendor page or a tool-labelled "
+                "block, and never demand its 'pricing page'. If a specific cell genuinely has no "
+                "sourced value, follow the normal punt rules for that CELL — never drop the row.")
+
         dims = sourcing.get("dims") or []
         claims = sourcing.get("claims") or []
         fresh = sourcing.get("fresh") or []
@@ -3838,12 +4021,12 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}
+    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
-PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}

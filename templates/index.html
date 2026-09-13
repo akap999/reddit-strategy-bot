@@ -13135,12 +13135,21 @@ function blogProvideSourcesModal(blogId, missing) {
     const rows = missing.map((m, i) => {
         const dom = (m.dom || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const hint = dom ? ` — try <a href="https://${_blogEsc(dom)}/pricing" target="_blank" class="underline">${_blogEsc(dom)}/pricing</a>` : '';
+        // FU189 — a GENERIC OPTION (a treatment, loan type, material, employment model, "build
+        // in-house") is not a company and has no page, so asking for a link is asking for something
+        // that cannot exist. Same row, same submit path, different ask: typed facts only.
+        const isOpt = !!m.generic_option;
+        const ask = isOpt
+            ? `No public reference found for <b>${_blogEsc(m.tool)}</b> — it's an option, not a company, so there's no page to link. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Type the facts below to keep it in the comparison.`
+            : `Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.`;
+        const urlInput = isOpt ? '' :
+            `<input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">`;
         return `
         <div class="border border-gray-700 rounded p-2 mb-2">
-            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}</div>
-            <div class="text-xs text-gray-400 mb-2">Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.</div>
-            <input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">
-            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"></textarea>
+            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}</div>
+            <div class="text-xs text-gray-400 mb-2">${ask}</div>
+            ${urlInput}
+            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
             <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
                 <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop it from the comparison
             </label>
@@ -13148,7 +13157,7 @@ function blogProvideSourcesModal(blogId, missing) {
     }).join('');
     showModal(`<div style="max-width:640px">
         <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">Generation paused — needs a source</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each tool below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
+        <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each entry below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
         ${rows}
         <div class="flex gap-2 justify-end mt-3">
             <button class="btn btn-sm btn-secondary" onclick="_blogSubmitSources(true)">Skip all &amp; finish now</button>

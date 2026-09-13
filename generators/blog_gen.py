@@ -5081,6 +5081,14 @@ Return JSON only:
                 continue
             if in_sources and re.match(r"^\s*#{1,6}\s+\S", line):
                 in_sources = False          # a later heading ends the Sources section
+            # FU191 — a line that is ONLY a thematic break ("---") is Markdown STRUCTURE, not a dash
+            # used as punctuation. `_AI_DASH_RE` matched the "--" inside it and left a bare "-", which
+            # renders as a stray hyphen paragraph instead of a horizontal rule: 11 of them shipped on a
+            # live blog, and one leaked into a FAQ answer in the structured data (the `_parse_faq_pairs`
+            # cut is keyed on "---", so degrading it also disabled that cut).
+            if re.match(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", line):
+                out.append(line)
+                continue
             # a source-list entry carries the code-written " — <url>" separator, so it is skipped
             # even outside a recognised `## Sources` heading (belt and braces).
             if fence or in_sources or re.match(r"^\s*[-*]\s*\[S\d+\]", line):

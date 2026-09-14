@@ -2007,25 +2007,39 @@ extractable answer), still under 160 chars.
                      f"a past event (a founding date, a past ruling).\n")
         # FU90/FU135 — sibling context: differentiation AND cluster-consistent positioning.
         # Accepts bare title strings (legacy) or {title, meta_description} digests.
-        sibs = []
+        # FU197: the caller now supplies PUBLISHED siblings only, each carrying the live URL, so a
+        # reference can always be checked against a page that really exists.
+        sibs, _sib_urls = [], set()
         for t in (sibling_titles or [])[:10]:
             if isinstance(t, dict):
                 _ttl = str(t.get("title") or "").strip()
                 _md = str(t.get("meta_description") or "").strip()[:160]
+                _su = str(t.get("url") or "").strip()
                 if _ttl:
-                    sibs.append(f"{_ttl}" + (f" — {_md}" if _md else ""))
+                    sibs.append(f"{_ttl}" + (f" — {_md}" if _md else "")
+                                + (f"\n      URL: {_su}" if _su else ""))
+                    if _su:
+                        _sib_urls.add(_su.split("?")[0].rstrip("/").lower())
             else:
                 _ttl = str(t or "").strip()
                 if _ttl:
                     sibs.append(_ttl)
+        self._sibling_urls = _sib_urls   # read by _finalize_article's self-reference check
         sibling_block = ""
         if sibs:
-            sibling_block = ("\nOTHER PAGES ALREADY PUBLISHED FOR THIS BRAND — keep the brand's "
-                             "POSITIONING, claims and pricing CONSISTENT with them (never contradict "
-                             "them), and do NOT duplicate their content: THIS page must add its own "
-                             "geography/qualifier/audience substance. Where a listed page covers a "
-                             "related sub-topic in depth, summarize briefly and defer the depth to it:\n"
-                             + "\n".join(f"  - {t}" for t in sibs) + "\n")
+            sibling_block = (f"\nOTHER PAGES OF THIS BRAND THAT ARE ALREADY LIVE (each shown with the "
+                             f"URL a reader can actually open) — keep the brand's POSITIONING, claims "
+                             f"and pricing CONSISTENT with them (never contradict them), and do NOT "
+                             f"duplicate their content: THIS page must add its own "
+                             f"geography/qualifier/audience substance.\n"
+                             + "\n".join(f"  - {t}" for t in sibs) + "\n"
+                             f"  REFERENCE RULE (hard): you may point the reader at one of the pages "
+                             f"LISTED ABOVE, and only by the exact URL shown. NEVER state or imply that "
+                             f"{name} has published a guide, article, resource or breakdown that is not "
+                             f"in that list — no \"our guide on X\", no \"{name} has published a "
+                             f"dedicated guide on ...\", no \"refer to {name}'s published guidance "
+                             f"on ...\". Any such page does not exist, and promising one sends the "
+                             f"reader and the answer engine nowhere.\n")
         prompt = f"""You are writing a FIRST-PARTY article published on {name}'s own site. The ONLY
 goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
 and CITE this page when someone asks about the seed topic, AND for that answer to name {name}.
@@ -4096,6 +4110,12 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor {name}, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - NO PHANTOM SELF-REFERENCE: never introduce OR KEEP a sentence that points the reader at another
+    {name} page which is not a live URL already present in the draft ("{name} has published a dedicated
+    guide on ...", "refer to {name}'s published guidance on ...", "see our guide on ..."). Those pages
+    are unpublished drafts — the reader and the answer engine are sent nowhere. DELETE such a sentence;
+    this is an explicit exception to PRESERVE SUBSTANCE below. A reference that already carries a real
+    Markdown link to a live page is fine and stays.
   - Never STRENGTHEN a conditioned commerce claim by dropping its condition — keep "on qualifying
     purchases" / "in most states" / "up to $N" attached EVERYWHERE the claim is restated, including the
     Quick answer.
@@ -6448,6 +6468,39 @@ Return JSON only:
             print(f"[writer] pass errored ({e}) — keeping the Claude body.", flush=True)
             return article.get("body_markdown") or ""
 
+    # FU197 — the shapes a phantom self-reference takes. Narrow on purpose: each one PROMISES a
+    # separate {name} page, which is the thing that can dangle.
+    _SELF_REF_RE = re.compile(
+        r"(?:\bpublished\s+(?:a\s+|its\s+|their\s+)?(?:dedicated\s+)?"
+        r"(?:guide|guidance|article|resource|breakdown|write-?up)"
+        r"|\bdedicated\s+guide\b|\baccompanying\s+(?:guide|article|piece)\b"
+        r"|\bcompanion\s+(?:guide|article|piece)\b"
+        r"|\bour\s+(?:[\w-]+\s+){0,2}(?:guide|article|resource|write-?up)\b"
+        r"|\brefer\s+to\s+[^.]{0,40}?(?:guide|guidance)\b)", re.I)
+
+    def _self_reference_note(self, body, brand):
+        """FU197 — flag a sentence that promises another page of this brand without linking a LIVE
+        one. Returns a note for `geo_warning`, or "" when the body is clean. Never mutates."""
+        name = ((brand or {}).get("name") or "").strip()
+        if not body or not name:
+            return ""
+        live = {u for u in (getattr(self, "_sibling_urls", None) or set())}
+        bad = []
+        for sent in re.split(r"(?<=[.!?])\s+", body):
+            if not self._SELF_REF_RE.search(sent):
+                continue
+            # only our OWN pages dangle — a third party's guide is someone else's problem
+            if name.lower() not in sent.lower() and not re.search(r"\bour\b", sent, re.I):
+                continue
+            linked = any((u.split("?")[0].rstrip("/").lower() in live)
+                         for u in re.findall(r"\]\((https?://[^)\s]+)\)", sent))
+            if not linked:
+                bad.append(" ".join(sent.split())[:90])
+        if not bad:
+            return ""
+        return (f"self-reference: {len(bad)} sentence(s) promise a {name} page that is not a published "
+                f"link — remove them or publish and link the page (e.g. \u201c{bad[0]}\u2026\u201d)")
+
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
                           ymyl=None, link_targets=None):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
@@ -6554,6 +6607,15 @@ Return JSON only:
         if _an142:  # FU142: a NON-primary product with no official source naming it
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _an142] if x)
+        # FU197 — a promise of another {name} page that carries no live link. The writer used to be
+        # handed UNPUBLISHED sibling titles and told to defer to them, so it advertised guides that
+        # exist nowhere. The prompt rules are the fix; this is the visible backstop. Warning only —
+        # the phrasings vary far too much to cut a sentence safely.
+        _srn = self._self_reference_note(article.get("body_markdown") or "", brand)
+        if _srn:
+            print(f"[blog_gen] {_srn}", flush=True)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _srn] if x)
         _pw = getattr(self, "_price_warn", "")
         if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
             article["geo_warning"] = "; ".join(

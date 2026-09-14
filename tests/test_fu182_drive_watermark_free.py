@@ -2,9 +2,13 @@
 
 The Drive bridge already carried `variant`; FU179 taught the two LinkedIn variants to honour
 `use='rewritten'`, but the BLOG — the surface actually handed to a client — still uploaded Claude's
-body, so its watermark-free version could not reach Drive at all. The doc is now NAMED
-"… (watermark-free)" when a rewrite was really sent, so two uploads of the same blog are
-distinguishable instead of colliding on one filename. $0, no network (the Apps Script POST is stubbed).
+body, so its watermark-free version could not reach Drive at all.
+
+FU197 REMOVED the "… (watermark-free)" title suffix at the operator's request: the Drive doc is now
+named with the blog title alone, and the accepted trade-off is that uploading both versions of one
+blog yields two files with the same name. What still matters — and is what these tests lock — is that
+the right BODY reaches Drive, and that asking for a rewrite that does not exist never mislabels
+Claude's body as watermark-free. $0, no network (the Apps Script POST is stubbed).
 """
 import json
 import os
@@ -82,11 +86,12 @@ def test_blog_uploads_the_rewritten_body_when_asked(env):
     assert "Claude wrote this body" not in sent["html"]
 
 
-def test_the_drive_doc_is_named_so_the_two_versions_are_distinguishable(env):
+def test_the_drive_doc_is_named_with_the_blog_title_alone(env):
+    """FU197: no "(watermark-free)" suffix — both versions upload under the plain blog title."""
     client, blog_id, path, sent = env
     _set(path, blog_id, rewritten_body=REWRITTEN)
     _upload(client, blog_id, use="rewritten")
-    assert sent["title"] == "Which Agency? (watermark-free)"
+    assert sent["title"] == "Which Agency?"
     _upload(client, blog_id)                       # the original, same blog
     assert sent["title"] == "Which Agency?"
 
@@ -114,11 +119,11 @@ def test_linkedin_post_and_article_upload_their_rewrites(env):
 
     _upload(client, blog_id, variant="linkedin_post", use="rewritten")
     assert "reworded LinkedIn post by Qwen" in sent["html"]
-    assert sent["title"].endswith("(watermark-free)")
+    assert "(watermark-free)" not in sent["title"]     # FU197
 
     _upload(client, blog_id, variant="linkedin_article", use="rewritten")
     assert "Qwen reworded article body" in sent["html"]
-    assert sent["title"] == "An Article (watermark-free)"
+    assert sent["title"] == "An Article"               # FU197
 
 
 def test_linkedin_without_use_is_unchanged(env):

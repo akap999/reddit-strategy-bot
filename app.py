@@ -2536,6 +2536,19 @@ def _reddit_status_note(status):
     }.get(status, "")
 
 
+def _blog_published_url(blog):
+    """FU197 — a blog's LIVE website URL, or "" when it was never published.
+
+    A blog row exists the moment it is generated; only a `blog_platforms` row with
+    platform='website' and a real `published_url` means a reader can actually reach it. Anything
+    without one must never be offered to the writer as a page it may reference, or the article
+    advertises a guide that exists nowhere."""
+    for pl in ((blog or {}).get("platforms") or []):
+        if pl.get("platform") == "website" and (pl.get("published_url") or "").strip():
+            return pl["published_url"].strip()
+    return ""
+
+
 def _blog_link_target(blog, brand):
     """FU81 — the URL the LinkedIn `{link}` placeholder should resolve to. A LinkedIn CTA names the
     BRAND, so the brand's own site wins; fall back to the blog's published website URL; "" when
@@ -2715,12 +2728,16 @@ def api_blog_generate():
             # FU90: sibling titles so geo variants differentiate instead of converging.
             try:
                 _sibs = bg.get_all_blogs(brand_id=brand_id)
-                sibling_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description")} for b in _sibs
-                                  if (b.get("title") or "").strip()][:10]
+                # FU197: only PUBLISHED siblings reach the prompt, each with its live URL. An
+                # unpublished draft used to be listed here and the writer would then point readers
+                # at it ("PeterMD has published a dedicated guide on ...") — a page that exists
+                # nowhere. Consistency/de-duplication still works off the published set.
+                sibling_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description"),
+                                   "url": _blog_published_url(b)} for b in _sibs
+                                  if (b.get("title") or "").strip() and _blog_published_url(b)][:10]
                 # FU114: PUBLISHED sibling-blog URLs — the cluster half of the internal-link targets.
-                sibling_links = [(b.get("title") or "", pl.get("published_url") or "")
-                                 for b in _sibs for pl in (b.get("platforms") or [])
-                                 if pl.get("platform") == "website" and (pl.get("published_url") or "").strip()][:8]
+                sibling_links = [(b.get("title") or "", _blog_published_url(b))
+                                 for b in _sibs if _blog_published_url(b)][:8]
             except Exception:
                 sibling_titles, sibling_links = [], []
             _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
@@ -2897,13 +2914,14 @@ def api_blog_regenerate(blog_id):
             sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
                 _sibs = bg.get_all_blogs(brand_id=blog.get("brand_id"))
-                sib_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description")} for b in _sibs
-                              if b.get("id") != blog_id and (b.get("title") or "").strip()][:10]
+                # FU197: published-only, with the live URL (see the generate path).
+                sib_titles = [{"title": b.get("title"), "meta_description": b.get("meta_description"),
+                               "url": _blog_published_url(b)} for b in _sibs
+                              if b.get("id") != blog_id and (b.get("title") or "").strip()
+                              and _blog_published_url(b)][:10]
                 # FU114: published sibling URLs (excluding this blog) — cluster link targets.
-                sib_links = [(b.get("title") or "", pl.get("published_url") or "")
-                             for b in _sibs if b.get("id") != blog_id
-                             for pl in (b.get("platforms") or [])
-                             if pl.get("platform") == "website" and (pl.get("published_url") or "").strip()][:8]
+                sib_links = [(b.get("title") or "", _blog_published_url(b))
+                             for b in _sibs if b.get("id") != blog_id and _blog_published_url(b)][:8]
             except Exception:
                 sib_titles = []
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, stored_reddit)
@@ -3472,6 +3490,11 @@ def _apply_gdoc_inline_styles(html_fragment):
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html_fragment, "html.parser")
+        # FU197: the operator's reference document has no section dividers, so the horizontal rules
+        # the writer emits as "---" are dropped on the DOCS surface only. The stored markdown, the
+        # Markdown export and the web HTML export keep them (FU191 still protects them there).
+        for _hr in soup.find_all("hr"):
+            _hr.decompose()
         for tag in soup.find_all(list(_GDOC_STYLES.keys())):
             base = _GDOC_STYLES.get(tag.name)
             if not base:
@@ -6312,10 +6335,10 @@ def api_blog_upload_gdoc(blog_id):
                                          jsonld_str="", slug=slug, fmt="gdoc")
             page_html = resp.get_data(as_text=True)
             doc_title = title
-        # FU182: label the Drive doc so the two versions are distinguishable at a glance — without
-        # this you get two files with the SAME name and no way to tell which one is safe to hand over.
-        if _gw_used:
-            doc_title = f"{doc_title} (watermark-free)"
+        # FU197: the Drive doc is named with the blog title alone. This drops FU182's
+        # "(watermark-free)" suffix at the operator's request — the trade-off they accepted is that
+        # uploading BOTH versions of one blog now yields two Drive files with the same name, and
+        # only the upload order tells them apart.
         import requests as _rq
         try:
             r = _rq.post(script_url, json={"secret": secret, "title": doc_title,

@@ -3408,6 +3408,91 @@ def _inline_image_data_uri(url, timeout=6, max_bytes=1_200_000):
         return ""
 
 
+# FU196 — the Google-Docs type scale, measured from the operator's reference document
+# ("Can You Take TRT and a GLP-1 at the Same Time_.pdf", a Google Doc restyled by hand and
+# exported). Manrope Regular + Bold throughout; H1 24pt, H2 18pt, H3 14pt, body 11pt. The last
+# two are already Google Docs defaults — the reference is Docs' own defaults with the font
+# swapped to Manrope and the top two heading levels raised.
+#
+# These land on the DRIVE/DOC surface only (fmt='gdoc'). The web export keeps its px-based
+# stylesheet: 11pt in a browser is unreadably small.
+_GDOC_FONT = "'Manrope',Arial,sans-serif"
+_GDOC_TEXT = "#000000"
+_GDOC_STYLES = {
+    "h1": f"font-family:{_GDOC_FONT};font-size:24pt;font-weight:700;color:{_GDOC_TEXT};"
+          f"line-height:1.2;margin:18pt 0 6pt",
+    "h2": f"font-family:{_GDOC_FONT};font-size:18pt;font-weight:700;color:{_GDOC_TEXT};"
+          f"line-height:1.2;margin:16pt 0 5pt",
+    "h3": f"font-family:{_GDOC_FONT};font-size:14pt;font-weight:700;color:{_GDOC_TEXT};"
+          f"line-height:1.2;margin:14pt 0 4pt",
+    "h4": f"font-family:{_GDOC_FONT};font-size:12pt;font-weight:700;color:{_GDOC_TEXT};"
+          f"line-height:1.2;margin:12pt 0 4pt",
+    "p":  f"font-family:{_GDOC_FONT};font-size:11pt;color:{_GDOC_TEXT};line-height:1.2;"
+          f"margin:0 0 10pt",
+    "li": f"font-family:{_GDOC_FONT};font-size:11pt;color:{_GDOC_TEXT};line-height:1.2",
+    "ul": "margin:0 0 10pt",
+    "ol": "margin:0 0 10pt",
+    "blockquote": f"font-family:{_GDOC_FONT};font-size:11pt;color:{_GDOC_TEXT};"
+                  f"margin:0 0 10pt 18pt",
+    "table": "border-collapse:collapse;width:100%;margin:0 0 10pt",
+    "th": f"border:1px solid #cccccc;padding:5pt 7pt;vertical-align:top;text-align:left;"
+          f"font-family:{_GDOC_FONT};font-size:11pt;font-weight:700;color:{_GDOC_TEXT}",
+    "td": f"border:1px solid #cccccc;padding:5pt 7pt;vertical-align:top;text-align:left;"
+          f"font-family:{_GDOC_FONT};font-size:11pt;color:{_GDOC_TEXT}",
+    # Google Docs' own link blue, so imported links look native rather than browser-default.
+    "a": "color:#1155cc;text-decoration:underline",
+}
+
+
+def _gdoc_css():
+    """FU196 — the stylesheet half of the Docs styling (what Word reads when the .doc is opened
+    locally). Drive's importer leans on the inline styles instead, so this is belt-and-braces."""
+    rules = "".join(f"{tag}{{{decls}}}" for tag, decls in _GDOC_STYLES.items())
+    return ("@page{margin:1in}"
+            f"body{{font-family:{_GDOC_FONT};font-size:11pt;color:{_GDOC_TEXT};line-height:1.2;"
+            "margin:0}" + rules)
+
+
+def _apply_gdoc_inline_styles(html_fragment):
+    """FU196 — write the Docs type scale onto every element as an INLINE style attribute.
+
+    The Drive bridge hands our HTML to Google Drive's importer (the Apps Script posts it as
+    text/html and asks for mimeType application/vnd.google-apps.document). That importer honours
+    inline character formatting far more reliably than a <style> block, and inline formatting is
+    what overrides Docs' built-in Heading 1/2/3 styles — without it every uploaded doc falls back
+    to Arial at Docs' default sizes. Headings stay real <h1>/<h2>/<h3> so the Doc keeps the
+    outline the reference document has.
+
+    Any style already on the element WINS (ours are written first, and in one style attribute the
+    later declaration of a property takes precedence). Never raises: on any failure the fragment
+    is returned untouched, mirroring how the markdown render already degrades.
+    """
+    if not html_fragment or not html_fragment.strip():
+        return html_fragment
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_fragment, "html.parser")
+        for tag in soup.find_all(list(_GDOC_STYLES.keys())):
+            base = _GDOC_STYLES.get(tag.name)
+            if not base:
+                continue
+            existing = (tag.get("style") or "").strip().strip(";")
+            tag["style"] = (base + ";" + existing) if existing else base
+        return str(soup)
+    except Exception as e:
+        print(f"[gdoc] inline-style pass skipped: {e}", flush=True)
+        return html_fragment
+
+
+def _gdoc_doc_page(page_title, inner_html):
+    """FU196 — wrap already-rendered body HTML in the Manrope/Docs-targeted page shell."""
+    import html as _html
+    inner_html = _apply_gdoc_inline_styles(inner_html)
+    return (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
+            f'<title>{_html.escape(page_title)}</title>\n<style>{_gdoc_css()}</style>\n</head>\n'
+            f'<body>\n{inner_html}\n</body></html>\n')
+
+
 def _render_blog_doc_page(blog, brand, body, page_title, desc, published, updated,
                           jsonld_str, slug, fmt):
     """FU131/FU137 — the shared html/gdoc page renderer: full byline + dates + content.
@@ -3450,7 +3535,9 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
     disclosure = ""
     dline = []
     header = ""
-    if logo:
+    # FU196: the Drive/Docs surface opens on the byline placeholder, exactly like the operator's
+    # reference document, so the brand logo is emitted for the WEB export only.
+    if logo and fmt != "gdoc":
         # Inline the logo (base64) so it renders in mobile file/email viewers that block remote
         # images; fall back to the remote URL if the fetch fails or it's too large.
         logo_src = _inline_image_data_uri(logo) or logo
@@ -3462,12 +3549,19 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
         header += f'<p class="byline"><em>{_html.escape(disclosure)}</em></p>\n'
     if dline:
         header += f'<p class="dates">{" · ".join(dline)}</p>\n'
-    css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
-           "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
-           "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
-           "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
-           ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}"
-           ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
+    if fmt == "gdoc":
+        # FU196: Docs-targeted styling — Manrope + the reference document's 24/18/14/11pt scale,
+        # written onto every element inline so Drive's importer cannot fall back to Arial.
+        css = _gdoc_css()
+        header = _apply_gdoc_inline_styles(header)
+        inner = _apply_gdoc_inline_styles(inner)
+    else:
+        css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
+               "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
+               "h1,h2,h3{line-height:1.25}table{border-collapse:collapse;width:100%}"
+               "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
+               ".byline,.dates{color:#666;font-size:.9rem;margin:.2rem 0}"
+               ".logo{margin:0 0 .6rem}.logo img{max-height:56px;width:auto}")
     head = (f'<meta charset="utf-8">\n'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
             f'<title>{_html.escape(page_title)}</title>\n'
@@ -3497,12 +3591,8 @@ def _simple_doc_html(page_title, md_src):
     except Exception:
         inner = "<pre>" + _html.escape(md_src) + "</pre>"
     inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
-    css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
-           "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
-           "h1,h2,h3{line-height:1.25}")
-    return (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
-            f'<title>{_html.escape(page_title)}</title>\n<style>{css}</style>\n</head>\n'
-            f'<body>\n{inner}\n</body></html>\n')
+    # FU196: this doc is handed to a client too, so it carries the same Manrope type scale.
+    return _gdoc_doc_page(page_title, inner)
 
 
 @app.route("/api/blogs/<int:blog_id>/export")
@@ -6203,9 +6293,8 @@ def api_blog_upload_gdoc(blog_id):
             # exactly (markdown would re-flow the paragraphs and eat the line breaks)
             paras = "\n".join(f"<p>{_html.escape(l) if l.strip() else '&nbsp;'}</p>"
                                for l in post_txt.split("\n"))
-            page_html = (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
-                         f'<title>{_html.escape(doc_title)}</title>\n</head>\n<body>\n'
-                         f'{paras}\n</body></html>\n')
+            # FU196: route it through the shared Docs shell so it matches the other two.
+            page_html = _gdoc_doc_page(doc_title, paras)
         else:
             # FU182: `use='rewritten'` uploads the WATERMARK-FREE body (FU154) instead of Claude's,
             # falling back to the original when no rewrite exists yet. The two LinkedIn variants above

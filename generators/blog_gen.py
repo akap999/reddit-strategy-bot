@@ -1101,10 +1101,25 @@ class BlogGenerator:
         if b.get("audience"):
             lines.append(f"Audience: {b['audience']}")
         for label, key in (("Use cases", "use_cases"), ("Pain points", "pain_points"),
-                           ("Features", "features"), ("Competitors", "competitors")):
+                           ("Features", "features")):
             vals = _as_list(b.get(key))
             if vals:
                 lines.append(f"{label}: {', '.join(vals)}")
+        # FU199 — the competitor line is the ONE piece of brand context that must not be the same on
+        # every article. The operator's list is brand-level by nature; when this article has a NARROWER
+        # subject, say so and offer the specialists found for it. Byte-identical when inert.
+        _comp = _as_list(b.get("competitors"))
+        _sphr = getattr(self, "_subject_phrase", "") or ""
+        _speers = getattr(self, "_subject_peers", None) or {}
+        if _sphr and (_comp or _speers):
+            if _comp:
+                lines.append(f"Competitors (the operator's brand-level list — name one ONLY if it "
+                             f"genuinely does {_sphr}): {', '.join(_comp)}")
+            if _speers:
+                lines.append(f"Specialists in {_sphr} (found for THIS article): "
+                             + ", ".join(f"{n} ({d})" for n, d in _speers.items()))
+        elif _comp:
+            lines.append(f"Competitors: {', '.join(_comp)}")
         if b.get("context"):
             lines.append(f"Context: {b['context']}")
         if b.get("learned_context"):
@@ -1132,7 +1147,8 @@ class BlogGenerator:
         return ("\n\n".join(out) + "\n\n") if out else ""
 
     # ------------------------------------------------------------ evidence sourcing
-    def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None):
+    def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None,
+                                want_subject=False):
         """Ask the model for the official homepage domain of each brand it's confident
         about. Resolves both (a) the supplied competitor `names` missing a cached domain
         AND (b) any OTHER brand/product named in the `seed`/title (e.g. "Botric vs
@@ -1160,11 +1176,33 @@ class BlogGenerator:
                    "shared by multiple companies, choose the one operating in THAT SAME space — "
                    "NOT a same-named company in an unrelated industry. Pick the domain whose "
                    "product is actually a peer of the subject.")
+        # FU199 — WHICH competitors get compared was decided at BRAND level: the operator's list is
+        # rendered identically on every article, and peer discovery asks for rivals of the FIRM. For a
+        # brand broader than one article (a full-service firm, a multi-line agency, a hospital system,
+        # a contractor with several trades) that hands the writer the wrong field entirely. This is the
+        # ONLY unconditional, non-search LLM call in the whole pre-draft path and it already receives
+        # the seed — so the subject and its specialists ride along here for free, no new call, no new
+        # search. The post-draft call site passes nothing, so its prompt is unchanged.
+        subj_ask, subj_schema = "", ""
+        if want_subject:
+            subj_ask = (
+                "\n\nALSO return two things about the ARTICLE ITSELF:\n"
+                '  "subject" — the specific offering / practice area / product line THIS article is '
+                'about, as a SHORT noun phrase (2-6 words, no brand names, no "best"/"top"). It is '
+                "usually NARROWER than the category above: a provider that does many things writes one "
+                "article about ONE of them. Return the category itself when the provider genuinely "
+                "does only that one thing.\n"
+                '  "peers" — 3-5 REAL, currently-operating providers that SPECIALISE in that subject '
+                "(not merely in the wider category), each with its bare domain. Exclude the subject "
+                "itself. Omit any you are not confident still operates in that exact space — a shorter "
+                "honest list beats a plausible-sounding wrong peer. Return {} when the subject IS the "
+                "category and the names above already cover the field.")
+            subj_schema = ', "subject": "", "peers": {"Name": "domain.com"}'
         prompt = ("For each brand/product below, give its official homepage domain (bare, "
                   "no https://, no path). Include ONLY ones you are confident about; omit "
-                  "the rest.\n" + body + ctx +
-                  '\n\nReturn JSON only: {"domains": {"Name": "domain.com"}}')
-        res = self.claude.call(prompt, max_tokens=400, temperature=0)
+                  "the rest.\n" + body + ctx + subj_ask +
+                  '\n\nReturn JSON only: {"domains": {"Name": "domain.com"}' + subj_schema + '}')
+        res = self.claude.call(prompt, max_tokens=(700 if want_subject else 400), temperature=0)
         dm = (res or {}).get("domains") if isinstance(res, dict) else None
         out = {}
         if isinstance(dm, dict):
@@ -1172,6 +1210,24 @@ class BlogGenerator:
                 d = re.sub(r"^https?://", "", str(d or "").strip().lower()).rstrip("/").split("/")[0]
                 if str(n).strip() and d:
                     out[str(n).strip()] = d
+        if want_subject:
+            # INERT GATE (the same test FU198 uses): keep the subject ONLY when it contributes a token
+            # the category does not already carry. For a single-line brand it does not, so nothing
+            # downstream activates and every prompt is byte-identical to before.
+            _sp = re.sub(r"\s+", " ", str((res or {}).get("subject") or "").strip())[:80]
+            _cat_toks = set(_product_tokens(subject_category))
+            self._subject_phrase = _sp if (_sp and [t for t in _product_tokens(_sp)
+                                                    if t not in _cat_toks]) else ""
+            _peers, _pr = {}, ((res or {}).get("peers") if isinstance(res, dict) else None)
+            if self._subject_phrase and isinstance(_pr, dict):
+                for n, d in _pr.items():
+                    n = str(n or "").strip()
+                    d = re.sub(r"^https?://", "", str(d or "").strip().lower()).rstrip("/").split("/")[0]
+                    if n and d and n.lower() != (subject or "").strip().lower():
+                        _peers[n] = d
+            self._subject_peers = _peers
+            print(f"[blog_gen] subject-peers: subject={self._subject_phrase!r} "
+                  f"specialists={list(_peers)}", flush=True)
         return out
 
     def _gather_independent_sources(self, subject, competitors, seed, category, own_domains):
@@ -1220,7 +1276,12 @@ class BlogGenerator:
         # FU98 — peer discovery, SUBJECT only: the writer needs REAL same-type competitors to
         # name (the model defaults to famous SaaS tools it already knows). One brief, ~2 searches.
         if (subject or "").strip():
-            pbrief = (f'Find the DIRECT COMPETITORS of "{subject}"' + (f' ({cat})' if cat else "")
+            # FU199: `seed` was in scope here and unused, so this hunted rivals of the FIRM. Aim it at
+            # the article's subject when there is one, or a multi-line brand gets the wrong field.
+            _psub = getattr(self, "_subject_phrase", "") or ""
+            pbrief = (f'Find the DIRECT COMPETITORS of "{subject}"'
+                      + (f' for {_psub} specifically (providers that actually do {_psub}, not its '
+                         f'wider {cat or "category"})' if _psub else (f' ({cat})' if cat else ""))
                       + '. Return AT LEAST 3 (ideally 3-5) distinct real competing providers of the '
                         "SAME TYPE serving the same market — each competitor's NAME, its OWN website "
                         "URL, and one concrete fact about it. NOT the brand's own site; no 'best of' "
@@ -1322,7 +1383,8 @@ class BlogGenerator:
         # a same-named company in a different industry isn't picked.
         to_resolve = [c for c in comp_names if (c not in cached) or _in_seed(c)]
         resolved = self._resolve_brand_domains(
-            to_resolve, seed=seed, subject=subject, subject_category=b.get("category"))
+            to_resolve, seed=seed, subject=subject, subject_category=b.get("category"),
+            want_subject=True)   # FU199: learn the article's subject + its specialists here
         # Web-search-backed resolution for seed-named comparison brands: the training-
         # knowledge resolver tends to pick the famous SAME-NAME domain (e.g. profound.com)
         # for a niche brand; a live search finds the actual peer site (tryprofound.com).
@@ -2064,6 +2126,17 @@ extractable answer), still under 160 chars.
                      f"title, headings, or forward-looking copy MUST be the current year — never "
                      f"date the page with an earlier year unless the sentence is explicitly about "
                      f"a past event (a founding date, a past ruling).\n")
+        # FU199 — subject fit decides WHO is compared, not position on the operator's list. Empty
+        # (and so byte-identical) unless this article's subject is narrower than the brand's category.
+        _sfit_p = getattr(self, "_subject_phrase", "") or ""
+        _sfit = ""
+        if _sfit_p:
+            _sfit = (f"    SUBJECT FIT OVERRIDES LIST POSITION: this article is about {_sfit_p}, so at "
+                     f"EVERY step above a name qualifies ONLY if it genuinely does {_sfit_p}. Do NOT "
+                     f"name a curated competitor that has no standing in {_sfit_p} merely because it "
+                     f"is on the operator's list — a real specialist in {_sfit_p} (including one under "
+                     f"\"Specialists in …\" in the brand context) outranks it. A comparison of "
+                     f"providers that do not do {_sfit_p} answers nobody's question.\n")
         # FU90/FU135 — sibling context: differentiation AND cluster-consistent positioning.
         # Accepts bare title strings (legacy) or {title, meta_description} digests.
         # FU197: the caller now supplies PUBLISHED siblings only, each carrying the live URL, so a
@@ -2283,7 +2356,7 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
          model as {name} today — not a company that has pivoted away from it, wound down, or only ever
          offered an adjacent product. If you are not confident it still operates in this exact model,
          do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
-    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
+{_sfit}    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
     evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
@@ -3037,10 +3110,13 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 slug == c or slug.startswith(c + "-") or c.startswith(slug + "-")
                 for c in _curated_slugs)
 
+        # FU199: a specialist the system itself found for this article's subject came from a system
+        # call, not from thin air — flagging it as invented would be noise.
+        _peer_slugs = {_kf_slug(n) for n in (getattr(self, "_subject_peers", None) or {}) if _kf_slug(n)}
         _invented = []
         for _t in tools:
-            if _is_curated(_kf_slug(_t)):
-                continue                                   # curated
+            if _is_curated(_kf_slug(_t)) or _kf_slug(_t) in _peer_slugs:
+                continue                                   # curated, or a found subject specialist
             _tok = (_t.lower().split() or [""])[0]
             if _tok and _tok in _ev_blob:
                 continue                                   # evidence-backed

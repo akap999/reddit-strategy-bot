@@ -687,6 +687,59 @@ _PRODUCT_FILLER = {"the", "and", "for", "with", "its", "their", "together", "com
                    "plan", "plans", "price", "pricing", "cost", "costs", "buy", "get", "best", "shop"}
 
 
+# FU198 — a credential page that is not about the ARTICLE'S subject is not evidence for its
+# comparison. When a brand's category is broader than one article (a full-service firm, a multi-line
+# agency, a hospital system, a contractor with several trades), competitor searches anchored on the
+# CATEGORY return standing in some other part of the business; the comparison then fills up with it,
+# which pads the source list AND hides that a competitor may not do the article's subject at all.
+_CREDENTIAL_SHAPE_RE = re.compile(
+    r"\brank(?:ing|ings|ed)?\b|\btier\s*\d|\bband\s*\d|\baward(?:s|ed)?\b|\btop\s+\d"
+    r"|\bbest\s+\d|\bleague\s+table\b|\bprofile\b|\bdirectory\b|\brated\b", re.I)
+
+# Page classes that evidence no practice at ALL, however reputable the host: graduate / trainee
+# recruitment material ("what it's like to train here" is not a practice ranking) and general
+# encyclopedias. Wikipedia sits in _THIRD_PARTY_DOMAINS, so without this it counts as reputable
+# corroboration for a capability claim.
+_NON_CAPABILITY_PATH_RE = re.compile(
+    r"\b(?:student|students|graduate|graduates|trainee|trainees|careers?|recruitment|internship)\b",
+    re.I)
+_NON_CAPABILITY_HOST_RE = re.compile(
+    r"student|graduate|trainee|careers|recruitment|internship", re.I)
+
+
+def _split_url(u):
+    """(host, space-separated path) for the shape tests below."""
+    u = (u or "").strip()
+    return _norm_domain(u), re.sub(r"[-_/]+", " ", re.sub(r"[?#].*$", "", re.sub(r"^https?://[^/]*", "", u)))
+
+
+def _is_non_capability_source(src):
+    """FU198: True for a recruitment/encyclopedia page — never evidence that an option DOES a thing."""
+    if not isinstance(src, dict):
+        return False
+    host, path = _split_url(src.get("url"))
+    if host.endswith("wikipedia.org") or host.endswith("wikimedia.org"):
+        return True
+    # the host is matched as a SUBSTRING (a concatenated host like "chambersstudent.co.uk" has no
+    # word boundary), the path with word boundaries so an ordinary /careers-page slug is not over-read
+    return bool(_NON_CAPABILITY_HOST_RE.search(host) or _NON_CAPABILITY_PATH_RE.search(path))
+
+
+def _is_offtopic_credential(src, subject_tokens):
+    """FU198: True when a result is CREDENTIAL-shaped (ranking / tier / award / directory profile)
+    but carries NONE of the article subject's distinctive tokens — standing in a different practice
+    area, product line or service line. Vertical-neutral: the shape is generic and the tokens are
+    derived per article. INERT when no subject tokens were derived, so it can never fire by default."""
+    if not subject_tokens or not isinstance(src, dict):
+        return False
+    title = src.get("title") or ""
+    _host, path = _split_url(src.get("url"))
+    if not _CREDENTIAL_SHAPE_RE.search(title + " " + path):
+        return False
+    blob = (title + " " + (src.get("url") or "") + " " + (src.get("fact") or "")).lower()
+    return not any(t in blob for t in subject_tokens)
+
+
 def _product_tokens(s):
     """FU156: a product name's distinctive tokens for matching a URL path / title / fact — generic
     filler dropped (so 'tirzepatide program' doesn't match every /program/ page). Mirrors the FU142
@@ -1651,8 +1704,14 @@ class BlogGenerator:
                 out.append("| " + " | ".join(row) + " |")
             if i < len(lines) and lines[i].strip():
                 out.append("")                     # FU186: never let the next line become a row
-        if dropped_cols or leftover:
+        # FU198: the permitted "No … found in public sources" cell is honest, not a punt — but the
+        # operator should still see how many of them shipped, because it measures how thin the field
+        # really was for this subject.
+        _nofact = len(re.findall(r"No [^|\n]{1,70} found in public sources", "\n".join(out), re.I))
+        if dropped_cols or leftover or _nofact:
             bits = []
+            if _nofact:
+                bits.append(f"{_nofact} cell(s) had no subject-specific fact")
             if dropped_cols:
                 bits.append(f"dropped {dropped_cols} unsourced column(s)")
             if leftover:
@@ -2134,6 +2193,23 @@ backbone below is still mandatory in every case):
   - otherwise → the default question-and-answer structure below.
 Pick exactly ONE dominant block. The dominant block MUST itself be extractable — a real Markdown
 numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
+
+SUBSTANCE BEFORE CREDENTIALS (FU198 — what makes the page worth citing):
+  - FIRST identify the defining MECHANICS of this article's subject: the decisions, procedures, rules,
+    constraints and trade-offs that actually DETERMINE the outcome for someone dealing with it. Then
+    make those mechanics the MAJORITY of the article's substance.
+  - Rankings, awards, accreditations, office counts, team size and years in business are COMMODITY
+    content — every competitor can list them, and an answer engine gains nothing by citing them. They
+    may support a recommendation; they must NEVER stand in PLACE of a mechanic, and a section that is
+    only credentials is a wasted section.
+  - This is vertical-neutral — the mechanics are whatever genuinely governs THIS subject. Across
+    industries they look like: the procedural rule that decides which forum or authority hears a
+    matter and what happens if you act late; the migration, integration or data constraint that
+    decides which platform actually fits; the eligibility, monitoring or aftercare rule that decides
+    who qualifies and what happens next; the permitting, sequencing or lead-time constraint that
+    decides what a job really costs. Work out the equivalent for this subject and cover it concretely.
+  - A mechanic is covered when the page says what it IS, what it CHANGES about the reader's decision,
+    and what the reader should DO about it — not merely that it exists.
 
 GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
 {geo_line}{qual_line}{ymyl_line}{year_line}  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
@@ -2854,17 +2930,48 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
     QUALIFIER (financing, leasing, tax treatment, …), the authority is the one governing THAT mechanism
     in the target market (e.g. IRS Section 179 for US equipment-financing write-offs). Empty if the
     article has no such external authority.
+  - SUBJECT (FU198): the specific offering / practice area / product line THIS article is about, as a
+    SHORT noun phrase (2-6 words, no brand names, no "best"/"top"). It is usually NARROWER than the
+    brand's own category above — a full-service provider writes one article about ONE of the things it
+    does. Examples across industries: "international family law" for a full-service law firm; "payroll
+    integration" for a multi-module HR platform; "bathroom remodeling" for a general contractor.
+  - CORE_MECHANICS (FU198): the 3-6 defining MECHANICS of that subject — the decisions, procedures,
+    rules or constraints that actually DETERMINE the outcome for someone dealing with it, as short
+    noun phrases. Derive them from the SUBJECT ITSELF and from what a practitioner would say defines
+    it, INDEPENDENTLY of whether this draft happens to cover them (they are used to check the draft,
+    so listing only what the draft covers defeats the purpose). Credentials, rankings, awards and
+    company attributes are NEVER mechanics.
 
 ARTICLE:
 {body[:6000]}
 
 Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["..."], "products": ["..."], "core_topic": "",
+  "subject": "", "core_mechanics": ["..."],
   "generic_options": [],
   "claims": [{{"brand": "", "dimension": "", "claim": "", "value": ""}}]}}"""
         cres = self.claude.call(claim_prompt, max_tokens=1500, temperature=0.2)
         cres = cres if isinstance(cres, dict) else {}
         core_topic = str(cres.get("core_topic") or "").strip()
         products = [str(p).strip() for p in (cres.get("products") or []) if str(p).strip()]
+        # FU198 — the article's SUBJECT (narrower than the brand category) + the mechanics that
+        # define it. Both ride the SAME extraction call, so this costs nothing.
+        _subject_x = str(cres.get("subject") or "").strip()
+        self._core_mechanics = [str(m).strip() for m in (cres.get("core_mechanics") or [])
+                                if str(m).strip()][:6]
+        # FU198 — the SUBJECT anchor. Every competitor brief below was scoped to `cat` (a BRAND-level
+        # field, identical for every article) or to nothing but the tool name, so for a brand broader
+        # than one article the searches asked the wrong question and the comparison filled up with
+        # off-topic credentials. INERT BY CONSTRUCTION: when the subject contributes no token that
+        # `cat` does not already carry, `_subj_brief` is "" and every brief is byte-identical.
+        _subject = _subject_x or re.sub(r"\s*[—–-]\s*.*$", "", core_topic).strip()
+        _subject = re.sub(r"\s+", " ", _subject)[:80].strip()
+        _cat_toks = set(_product_tokens(cat))
+        _subj_toks = [t for t in _product_tokens(_subject) if t not in _cat_toks]
+        _subj_brief = (f"; specifically their {_subject} work — any ranking, credential or documented "
+                       f"capability IN {_subject}, NOT standing in their other practice/product areas"
+                       if (_subj_toks and _subject) else "")
+        if _subj_brief:
+            print(f"[blog_gen] subject-scope: competitor briefs anchored on '{_subject}'", flush=True)
         # FU98 — peer-field check (warning only, rides the geo_warning toast): a "best/top <type>"
         # title where the comparison has <2 same-type competitors is the self-crowning pattern.
         self._peer_note = ""
@@ -2996,11 +3103,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
             elif _is_subject_review({"title": ttl, "fact": fct}, name) \
                     or _is_negative_about({"title": ttl, "fact": fct}, name) \
-                    or _is_affiliate_review({"title": ttl, "url": u}):   # FU161: affiliate/SEO review
+                    or _is_affiliate_review({"title": ttl, "url": u}) \
+                    or _is_non_capability_source({"title": ttl, "url": u}) \
+                    or _is_offtopic_credential({"title": ttl, "url": u, "fact": fct}, _subj_toks):
                 # FU150 (#2/#3): a demoted core-topic source that is a REVIEW OF or NEGATIVE about the
                 # subject — or a low-quality affiliate review (FU161) — never becomes a third-party block.
-                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name} or "
-                      f"affiliate — dropped", flush=True)
+                # FU198: nor a recruitment/encyclopedia page, nor a credential from a different
+                # practice/product area — this DEMOTION path was the last way an off-subject ranking
+                # could still reach the evidence after the competitor tiers had rejected it.
+                print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name}, "
+                      f"affiliate, non-capability or off-subject — dropped", flush=True)
             elif not ymyl:
                 fresh.append({"label": f"third-party · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
@@ -3066,7 +3178,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                        + (f"pricing and plans; " if _px else "")   # FU162: no price ask when pricing is OFF
                        + f"commercial / license / eligibility / contract terms as "
                        f"applicable; the key capabilities and differentiators for "
-                       f"{cat or 'this product/service'}; who it's best for" + geo_brief + qual_brief)
+                       f"{cat or 'this product/service'}; who it's best for"
+                       + _subj_brief + geo_brief + qual_brief)   # FU198: subject-scoped
         # FU150 — TWO-PASS competitor sourcing so NO competitor is starved to zero purely by loop
         # position (the mass-pause root cause: the first 1-2 competitors used to burn the whole shared
         # web-search budget on Tier3+rescue, leaving later competitors with `_over_budget()`=True on
@@ -3098,6 +3211,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # + official always survive) so the vendor's own price / reputable coverage is used.
                 if not _same_site(s.get("url") or "", dom) and _is_affiliate_review(s, _dom(dom)):
                     print(f"[blog_gen] source-hygiene: dropped affiliate review "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                # FU198: a recruitment/encyclopedia page evidences no capability, and a credential
+                # from a DIFFERENT practice/product area is not evidence for THIS comparison.
+                if _is_non_capability_source(s):
+                    print(f"[blog_gen] source-hygiene: dropped non-capability source "
+                          f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                if _is_offtopic_credential(s, _subj_toks):
+                    print(f"[blog_gen] source-hygiene: dropped off-subject credential "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
                     continue
                 u = (s.get("url") or "").strip()
@@ -3157,7 +3280,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     + f"{tool}: " + ("pricing and plans, " if _px else "")   # FU162: no price ask when OFF
                     + f"commercial-use / licensing / royalty-free terms, key capabilities"
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
-                    + (f", {rqual} terms/options offered" if rqual else ""),   # FU93
+                    + (f", {rqual} terms/options offered" if rqual else "")   # FU93
+                    + _subj_brief,   # FU198: the article's subject, not the brand's whole category
                     max_searches=2, allowed_domains=[_dd], first_party=True)   # FU55
             except Exception:
                 pin = []
@@ -3412,7 +3536,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         + f"{tool} ({cat}) official " + ("pricing and plans, " if _px else "")
                         + f"commercial-use / licensing / "
                         f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
-                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)", max_searches=2)
+                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)"
+                        + _subj_brief, max_searches=2)   # FU198: subject-scoped
                 except Exception:
                     br = []
                 own = [s for s in (br or []) if _same_site(s.get("url"), dom)]
@@ -3434,7 +3559,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if "license" in miss:
                     wants.append("commercial-use / license / key terms — is commercial use allowed, "
                                  "what's included or restricted, and the contract/usage terms")
-                brief = f"{tool}: {'; '.join(wants) or 'pricing and key terms'} — the exact, current facts"
+                # FU198: this was the loosest brief in the file — tool name and nothing else.
+                brief = (f"{tool}: {'; '.join(wants) or 'pricing and key terms'} — the exact, current "
+                         f"facts" + _subj_brief)
                 rescue_tries += 1
                 try:
                     rsc = self.claude.search_sources(brief, max_searches=2)
@@ -3737,7 +3864,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 try:
                     rs = self.claude.search_sources(
                         f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
-                        f"reputable source (not a hit-piece or 'brands to avoid' roundup)",
+                        f"reputable source (not a hit-piece or 'brands to avoid' roundup)"
+                        + _subj_brief,   # FU198: subject-scoped
                         max_searches=1)
                 except Exception:
                     rs = []
@@ -3751,6 +3879,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
                 if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
                         and not _is_negative_about(s, name)      # FU150 (#2)
+                        # FU198: this branch bypasses _blocks_from entirely, so it needs the same gate
+                        and not _is_non_capability_source(s)
+                        and not _is_offtopic_credential(s, _subj_toks)
                         # FU161/FU184: no affiliate review for a competitor — and now with the tool's
                         # own_domain, so the competitor's OWN pages are never mistaken for affiliates.
                         and not (t != name and _is_affiliate_review(s, _tdom))):
@@ -3840,6 +3971,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 continue
             if _is_affiliate_review(c):   # FU161: drop low-quality affiliate/SEO reviews
                 print(f"[blog_gen] source-hygiene: dropped affiliate review "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
+            # FU198: corroboration is the THIRD competitor-evidence path (after _blocks_from and the
+            # dim-rescue), so it needs the same two gates or an off-subject credential walks in here.
+            if _is_non_capability_source(c):
+                print(f"[blog_gen] source-hygiene: dropped non-capability source "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
+            if _is_offtopic_credential(c, _subj_toks):
+                print(f"[blog_gen] source-hygiene: dropped off-subject credential "
                       f"'{(c.get('title') or '')[:70]}'", flush=True)
                 continue
             u = (c.get("url") or "").strip()
@@ -4023,6 +4164,15 @@ COMPLETE and every stated fact is sourced:
     comparison). You MAY note it in AT MOST ONE neutral clause (e.g. "Runway is video-only, not a music
     generator") — NEVER a dedicated "Note on <tool>" blockquote or an FAQ entry about it. Do NOT use an
     off-category tool as a foil to disparage-and-pivot to {name}.
+  - RELEVANCE BEFORE COMPLETENESS (hard rule): a comparison cell may ONLY carry a fact about the
+    SUBJECT of this article. A credential, ranking or capability from a DIFFERENT practice area,
+    product line or service line of that option is NOT a substitute and must never be used to fill a
+    cell — it misdescribes the option and hides whether it does the subject at all. When an option has
+    no fact about the subject for a cell, write EXACTLY: "No <what was sought> found in public
+    sources" (e.g. "No international family law ranking found in public sources"). That line
+    attributes the absence to the SEARCH — NEVER write that the option lacks the credential, which
+    would be an unverified negative about a third party. It is the ONE permitted not-found phrasing:
+    every other data-unavailable wording is still banned by the punt rules below.
   - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
     it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
     claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
@@ -4069,7 +4219,9 @@ COMPLETE and every stated fact is sourced:
     with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
     TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
     cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
-    specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
+    specifics (plan names, prices, terms). A tool whose only cells would be the "No … found in public
+    sources" line is genuinely unevidenced for this subject — keep its row with those lines rather than
+    padding it with off-subject facts. If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
     from the table — do NOT generalize a policy article or another tool's values to fill it.
   - Do NOT reduce the number of comparison dimensions/columns — KEEP them all, and add a dimension if the
     facts support a useful one.
@@ -4096,6 +4248,8 @@ COMPLETE and every stated fact is sourced:
     per sourcing rules", "has no tool-specific fresh fact", or is "addressed elsewhere / not a direct
     comparison row". When you drop a tool's row, just delete it — never leave a placeholder row or note that
     explains the removal. The reader must never see your rationale.
+  - A cell carrying the "No … found in public sources" line COUNTS AS FILLED for the rule below — do
+    NOT drop a row, and do NOT drop a column, because a cell carries it.
   - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
     facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
     that tool's whole row — never ship a kept row with a blank or "—" cell.
@@ -4103,6 +4257,10 @@ COMPLETE and every stated fact is sourced:
     loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
     ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
     honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
+  - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
+    subject's MECHANICS (the rules, procedures and constraints that determine the outcome). Never
+    trade a mechanic for more rankings, awards or accreditations — those are commodity content and
+    must not grow at the expense of substance.
   - NO COMPETITOR-JAB: do NOT add or keep any FAQ entry or "Note on <competitor>" blockquote whose function
     is to disparage a competitor and pivot to {name}. Comparisons must be factual, not a takedown. NEVER
     build a body claim on a competitor's review-site AGGREGATE star score (Trustpilot, Reviews.io, etc.) —
@@ -6616,6 +6774,24 @@ Return JSON only:
             print(f"[blog_gen] {_srn}", flush=True)
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), _srn] if x)
+        # FU198 — mechanics coverage. The extracted mechanics are derived from the SUBJECT, not from
+        # the draft, so an absent one means the page really did skip it. Warning only.
+        _mech = [m for m in (getattr(self, "_core_mechanics", None) or []) if str(m).strip()]
+        if _mech:
+            _blow = (article.get("body_markdown") or "").lower()
+            _missing = []
+            for _m in _mech:
+                _mt = [t for t in _product_tokens(_m) if len(t) >= 4]
+                # covered when MOST of the mechanic's distinctive words appear somewhere in the body
+                if _mt and sum(1 for t in _mt if t in _blow) < max(1, (len(_mt) + 1) // 2):
+                    _missing.append(str(_m).strip())
+            if _missing and len(_missing) > len(_mech) / 2:
+                _mnote = ("mechanics-check: the page is credential-led — it does not cover "
+                          + "; ".join(_missing[:3])
+                          + (f" (+{len(_missing) - 3} more)" if len(_missing) > 3 else ""))
+                print(f"[blog_gen] {_mnote}", flush=True)
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _mnote] if x)
         _pw = getattr(self, "_price_warn", "")
         if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
             article["geo_warning"] = "; ".join(

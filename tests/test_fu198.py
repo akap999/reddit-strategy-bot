@@ -150,13 +150,20 @@ def _tbl(cell):
             f"| Taylor Wessing | {cell} | 16 offices [S4] |\n")
 
 
-def test_the_honest_cell_survives_and_keeps_its_column():
+def test_the_honest_cell_is_now_stripped_like_any_other_punt():
+    """FU200 REVERSES FU198's carve-out.
+
+    The operator had already banned data-unavailable wording four times
+    (FU47/FU49/FU138); the sentinel I introduced in FU198 contradicted that
+    standing rule and produced a table that was 32% "not found in public
+    sources". The gap is resolved STRUCTURALLY now, never verbally.
+    """
     gen = BlogGenerator(StubClaude(), db=None)
     out = gen._resolve_table_punts(_tbl(SENT))
-    assert "Key Rankings" in out, "the column must not be dropped"
-    assert out.count(SENT) == 2
-    assert gen._scrub_punts(out).count(SENT) == 2
-    assert "no subject-specific fact" in (gen._table_punt_note or "")
+    assert SENT not in out, "the sentinel must be stripped, not preserved"
+    assert "found in public sources" not in out
+    # the column it occupied is unsourced for a majority of rows, so it drops
+    assert "Key Rankings" not in out
 
 
 def test_the_banned_phrasing_is_still_stripped_and_still_drops_the_column():
@@ -167,13 +174,15 @@ def test_the_banned_phrasing_is_still_stripped_and_still_drops_the_column():
     assert "Key Rankings" not in out
 
 
-def test_the_reconcile_tells_the_model_to_use_the_honest_cell():
+def test_the_reconcile_no_longer_permits_a_not_found_cell():
+    """The relevance half of the rule STAYS; the permitted wording is gone."""
     src = open("generators/blog_gen.py", encoding="utf-8").read()
     i = src.index("def _reconcile_and_finish")
     block = src[i:src.index("\n    def ", i + 10)]
-    assert "RELEVANCE BEFORE COMPLETENESS" in block
-    assert "found in public sources" in block
-    assert "COUNTS AS FILLED" in block
+    assert "RELEVANCE BEFORE COMPLETENESS" in block, "an off-subject credential is still never a substitute"
+    assert "found in public sources" not in block, "no permitted not-found wording"
+    assert "COUNTS AS FILLED" not in block, "a punt can no longer protect its own column"
+    assert "LEAVE THE CELL EMPTY" in block
 
 
 # ── Change 4: the page must be led by the subject's mechanics ─────────────────────────────────

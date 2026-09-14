@@ -162,6 +162,10 @@ def _matches_a_product(tool, products):
 _FACT_RESCUE_TRIES = 3
 _FACT_VERIFY_FETCHES = int(os.environ.get("BRAND_FACT_VERIFY_FETCHES", "6"))   # FU178: cap the
                                 # operator-URL reads used to verify canonical brand facts (tier 2)
+# FU200 — a comparison table has to be readable. Without a cap the writer turned the article's own
+# selection criteria into columns and added more, shipping an 11-column matrix whose rows ran to ~1,400
+# characters. Excludes the first (name) column.
+_DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
 _SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
                                 # (its own row previously had no rescue path at all) — separate pool so
@@ -1658,7 +1662,11 @@ class BlogGenerator:
         r"\bdata\s+not\s+(?:present|available|found)\b|"
         r"\binformation\s+not\s+(?:found|available)\b|"
         r"\bunclear\s+from\b|\bunknown\b|\bn/?a\b|\btbd\b|"
-        r"\bnot\s+publicly\s+documented\b|\bvaries?\s+by\s+plan\b",
+        r"\bnot\s+publicly\s+documented\b|\bvaries?\s+by\s+plan\b|"
+        # FU200: the "No <x> found in public sources" line FU198 briefly permitted. It was my own
+        # exception to this ban and it filled a third of a shipped table, so it is stripped like any
+        # other punt — a regenerate cleans an existing body without a migration.
+        r"\bno\s+[^|\n]{1,70}?\s+found\s+in\s+public\s+sources\b",
         re.IGNORECASE)
 
     _PUNT_CELL_RE = re.compile(
@@ -1752,6 +1760,18 @@ class BlogGenerator:
                 empty = sum(1 for v in vals if not v.strip() or v.strip() in ("—", "-"))
                 if data and empty > len(data) / 2:
                     drop.add(ci)
+            # FU200: cap the width, keeping the best-evidenced dimensions. A Source column is never
+            # dropped (it is exempt above and re-added here), and the first column is never touched.
+            _keep = [ci for ci in range(1, ncols) if ci not in drop]
+            if len(_keep) > _DIM_CAP:
+                def _filled(ci):
+                    return sum(1 for r in data
+                               if ci < len(r) and r[ci].strip() and r[ci].strip() not in ("—", "-"))
+                _src = [ci for ci in _keep if re.search(r"source", header[ci], re.I)]
+                _rank = sorted((ci for ci in _keep if ci not in _src),
+                               key=lambda ci: (-_filled(ci), ci))
+                _survive = set(_src) | set(_rank[:max(0, _DIM_CAP - len(_src))])
+                drop |= {ci for ci in _keep if ci not in _survive}
             if drop:
                 dropped_cols += len(drop)
                 header = [c for ci, c in enumerate(header) if ci not in drop]
@@ -1766,14 +1786,8 @@ class BlogGenerator:
                 out.append("| " + " | ".join(row) + " |")
             if i < len(lines) and lines[i].strip():
                 out.append("")                     # FU186: never let the next line become a row
-        # FU198: the permitted "No … found in public sources" cell is honest, not a punt — but the
-        # operator should still see how many of them shipped, because it measures how thin the field
-        # really was for this subject.
-        _nofact = len(re.findall(r"No [^|\n]{1,70} found in public sources", "\n".join(out), re.I))
-        if dropped_cols or leftover or _nofact:
+        if dropped_cols or leftover:
             bits = []
-            if _nofact:
-                bits.append(f"{_nofact} cell(s) had no subject-specific fact")
             if dropped_cols:
                 bits.append(f"dropped {dropped_cols} unsourced column(s)")
             if leftover:
@@ -1924,7 +1938,20 @@ class BlogGenerator:
         render = used + forced
         if not render:
             return body   # nothing valid cited and no community block — leave the body untouched
-        remap = {old: i + 1 for i, old in enumerate(render)}
+        # FU200 — two evidence blocks can hold the SAME page (a Chambers profile reached by two
+        # different briefs), and the article then cites it as two numbers. Collapse on the normalised
+        # URL: the later index re-points at the earlier number and gets no Sources line of its own.
+        remap, render_out, _byurl = {}, [], {}
+        for old in render:
+            _u = (blocks[old - 1].get("url") or "").strip().split("?")[0].rstrip("/").lower()
+            if _u and _u in _byurl:
+                remap[old] = _byurl[_u]
+                continue
+            render_out.append(old)
+            remap[old] = len(render_out)
+            if _u:
+                _byurl[_u] = len(render_out)
+        render = render_out
         prose = re.sub(r"\[S(\d+)\]",
                        lambda m: (f"[S{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else ""),
                        prose)
@@ -4244,11 +4271,11 @@ COMPLETE and every stated fact is sourced:
     SUBJECT of this article. A credential, ranking or capability from a DIFFERENT practice area,
     product line or service line of that option is NOT a substitute and must never be used to fill a
     cell — it misdescribes the option and hides whether it does the subject at all. When an option has
-    no fact about the subject for a cell, write EXACTLY: "No <what was sought> found in public
-    sources" (e.g. "No international family law ranking found in public sources"). That line
-    attributes the absence to the SEARCH — NEVER write that the option lacks the credential, which
-    would be an unverified negative about a third party. It is the ONE permitted not-found phrasing:
-    every other data-unavailable wording is still banned by the punt rules below.
+    no fact about the subject for a cell, LEAVE THE CELL EMPTY and let the dimension rules below
+    resolve it STRUCTURALLY. Do NOT write a sentence explaining the absence — "not found in public
+    sources", "no ranking identified", "not disclosed" and every relative of theirs are punts in ANY
+    wording and are banned (see THE PUNT BAN IS ON MEANING below). A column the field cannot answer is
+    removed, not annotated.
   - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
     it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
     claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
@@ -4295,12 +4322,14 @@ COMPLETE and every stated fact is sourced:
     with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
     TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
     cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
-    specifics (plan names, prices, terms). A tool whose only cells would be the "No … found in public
-    sources" line is genuinely unevidenced for this subject — keep its row with those lines rather than
-    padding it with off-subject facts. If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
+    specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
     from the table — do NOT generalize a policy article or another tool's values to fill it.
-  - Do NOT reduce the number of comparison dimensions/columns — KEEP them all, and add a dimension if the
-    facts support a useful one.
+  - CHOOSE THE DIMENSIONS THE FIELD CAN ANSWER, and keep the table READABLE: at most {_DIM_CAP}
+    comparison columns besides the first (name) column. Keep only dimensions MOST of the compared
+    options actually have a sourced value for — a column that two thirds of the field cannot answer is
+    not a comparison, it is a column of absence, and it reads as a verdict on the options that are
+    blank. Prefer fewer, better-evidenced dimensions over a wide matrix; the selection criteria in the
+    PROSE are the page's substance and do NOT each need to become a column.
   - CORRECT any value the fresh facts contradict; CONFIRM supported ones (add the [S#]).
   - THE PUNT BAN IS ON MEANING, NOT WORDING: any phrasing meaning "this data is not available /
     specified / disclosed" ("Not specified in sourced facts", "data not present", …) is a punt.
@@ -4324,8 +4353,6 @@ COMPLETE and every stated fact is sourced:
     per sourcing rules", "has no tool-specific fresh fact", or is "addressed elsewhere / not a direct
     comparison row". When you drop a tool's row, just delete it — never leave a placeholder row or note that
     explains the removal. The reader must never see your rationale.
-  - A cell carrying the "No … found in public sources" line COUNTS AS FILLED for the rule below — do
-    NOT drop a row, and do NOT drop a column, because a cell carries it.
   - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
     facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
     that tool's whole row — never ship a kept row with a blank or "—" cell.

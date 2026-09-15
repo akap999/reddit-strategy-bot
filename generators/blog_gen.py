@@ -179,6 +179,9 @@ _VF_LINKPROMISE_RE = re.compile(
 # NBSP + the exotic spaces `_strip_invisible_chars` deliberately leaves alone (it removes ZERO-WIDTH
 # characters; these are visible-width spaces). They survive into the Google Doc and break wrapping.
 _VF_NBSP_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+# FU203 — a YouTube chapter timestamp: MM:SS, M:SS or H:MM:SS. Nothing validated these
+# before, so a model timing a 90-second script out to 5:00 shipped broken chapters.
+_YT_TS_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$")
 
 def scrub_markdown_formatting(body):
     """Deterministic FORMATTING repair of the FINISHED body. Every rule below was confirmed against
@@ -4858,6 +4861,105 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         # scheme OPTIONAL — a bare "reddit.com/r/…" reference is just as much a recorded pointer.
         return re.sub(r"(?:https?://)?(?:www\.|old\.|np\.|m\.)?reddit\.com/\S+", "", text)
 
+    @staticmethod
+    def _fmt_min(dm):
+        """FU203 — render a (now fractional) target duration for humans: 2.0 -> "2", 1.5 -> "1.5".
+        Without this a 1.5-minute target printed as "1.5 minutes" in one place and "1" in another."""
+        try:
+            f = float(dm or 0)
+        except (TypeError, ValueError):
+            return "0"
+        return str(int(round(f))) if abs(f - round(f)) < 1e-9 else f"{f:g}"
+
+    @staticmethod
+    def _parse_ts(ts):
+        """FU203 — "MM:SS" / "M:SS" / "H:MM:SS" -> seconds; None when it is not a timestamp."""
+        m = _YT_TS_RE.match((ts or "").strip())
+        if not m:
+            return None
+        h, mm, ss = m.group(1), m.group(2), m.group(3)
+        if int(ss) > 59:
+            return None
+        return int(mm) * 60 + int(ss) + (int(h) * 3600 if h else 0)
+
+    @staticmethod
+    def _fmt_ts(sec):
+        """FU203 — seconds -> the MM:SS shape the chapter list and YouTube both expect."""
+        sec = max(0, int(round(sec)))
+        return f"{sec // 60:02d}:{sec % 60:02d}"
+
+    @classmethod
+    def _normalise_chapters(cls, chapters, dm):
+        """FU203 — the first validation `chapters[].ts` has ever had. It is read RAW with a "00:00"
+        fallback in three independent places (the pasted description, the export doc, the modal), so a
+        model that timed the chapters for a different runtime shipped broken chapters to the client.
+
+        Drops an entry with no question (junk the description already skips) and, where the rest of the
+        list is sound, an unparseable or non-monotonic one. When the model clearly timed the script for
+        a DIFFERENT runtime (any `ts` past the target) or nothing survives, EVERY question-bearing
+        chapter is re-spread evenly across the target instead — its in-range estimates are no more
+        trustworthy than its out-of-range ones, and re-timing a chapter beats losing it. A well-formed,
+        monotonic, in-range list is returned UNCHANGED (idempotent), and `dm == 0` (model-decided
+        length) is a no-op because there is no target to check against."""
+        items = [c for c in (chapters or [])
+                 if isinstance(c, dict) and (c.get("question") or "").strip()]
+        try:
+            total = int(round(float(dm or 0) * 60))
+        except (TypeError, ValueError):
+            total = 0
+        if total <= 0 or not items:
+            return chapters
+
+        def _spread(entries):
+            n = max(1, len(entries))
+            step = total / float(n)
+            out = []
+            for i, c in enumerate(entries):
+                c = dict(c)
+                c["ts"] = cls._fmt_ts(min(i * step, max(0, total - 1)))
+                out.append(c)
+            return out
+
+        kept, last, over, dropped = [], -1, False, False
+        for c in items:
+            sec = cls._parse_ts(c.get("ts"))
+            if sec is not None and sec > total:
+                over = True
+            if sec is None or sec <= last or sec > total:
+                dropped = True
+                continue
+            kept.append(c)
+            last = sec
+        if over or not kept:
+            # The model timed the script for a DIFFERENT runtime (or produced nothing usable), so its
+            # in-range estimates are no more trustworthy than its out-of-range ones — re-time every
+            # chapter rather than drop the ones that happen to fall outside. Nothing is ever lost.
+            return _spread(items)
+        if not dropped and len(items) == len(chapters or []):
+            return chapters          # already correct — hand back the exact list we were given
+        return kept
+
+    @classmethod
+    def _script_length_note(cls, script, dm):
+        """FU203 — `words = dm * 145` is written INTO the prompt and was never checked against the
+        output, so "about 2 minutes" was model-trust with no signal. Count the SPOKEN words (stage
+        directions, headings and markdown are not spoken) and report when the script is outside
+        ~0.6-1.4x its budget. Returns "" when it is fine, or `dm` is 0. WARNING ONLY — never rewrites."""
+        try:
+            budget = int(round(float(dm or 0) * 145))
+        except (TypeError, ValueError):
+            budget = 0
+        if budget <= 0 or not (script or "").strip():
+            return ""
+        txt = re.sub(r"\[[^\]]{0,120}\]", " ", script)         # [B-roll: ...] / [S1] — not spoken
+        txt = re.sub(r"(?m)^\s{0,3}#{1,6}\s+.*$", " ", txt)     # segment headings — not spoken
+        txt = re.sub(r"[*_`>#|]+", " ", txt)
+        words = len([w for w in txt.split() if any(ch.isalnum() for ch in w)])
+        if 0.6 * budget <= words <= 1.4 * budget:
+            return ""
+        return (f"the script runs ~{words / 145.0:.1f} min ({words} words) against a "
+                f"{cls._fmt_min(dm)} min target (~{budget} words)")
+
     def generate_youtube_script(self, brand, article, persona_voice="", disclosure="",
                                 target_query="", variant="question", geo="", duration_min=0):
         """FU80 — turn a saved blog into a full YouTube video PACKAGE (script + title + description +
@@ -4918,22 +5020,55 @@ Return JSON only: {{"title": "the article headline", "body_markdown": "the full 
         # FU97 — operator-set target duration. 0 = today's model-decided length (byte-identical
         # prompt + token cap). Length is a WORD BUDGET only: the package's mandatory structure is
         # explicitly non-negotiable, so a short target compresses segments, never the purpose.
+        # FU203 — FLOAT, clamped 0.5-30, so 1.5 minutes is expressible (it used to `int()` to 1).
         try:
-            dm = max(0, min(30, int(duration_min or 0)))
+            dm = float(duration_min or 0)
         except (TypeError, ValueError):
-            dm = 0
+            dm = 0.0
+        dm = 0.0 if dm <= 0 else max(0.5, min(30.0, dm))
         duration_rule = ""
         if dm:
-            words = dm * 145   # ~conversational YouTube pace
+            words = int(round(dm * 145))   # ~conversational YouTube pace
+            _dmtxt = self._fmt_min(dm)
             duration_rule = (
-                f"\n  - TARGET LENGTH: about {dm} minute{'s' if dm != 1 else ''} spoken "
+                f"\n  - TARGET LENGTH: about {_dmtxt} minute{'' if _dmtxt == '1' else 's'} spoken "
                 f"≈ {words} words (±10%) for `script_markdown` — plan the SEGMENT COUNT to fit. "
                 f"NON-NEGOTIABLE AT ANY LENGTH (compress by using FEWER/LEANER segments and less "
                 f"elaboration, NEVER by dropping these): the answer-first opening, the spoken "
                 f"target-prompt language + section-transition questions, the claims discipline, "
-                f"and the honest-tradeoffs segment. For 3 minutes or less use the tightest viable "
-                f"structure: answer → one comparison segment → tradeoffs → CTA. Spread the "
-                f"`chapters` ts estimates realistically across ~{dm} minutes. "
+                f"and the honest-tradeoffs segment. ")
+            if dm <= 3:
+                # FU203 — a real SHORT-FORM STRUCTURE, not one sentence. The old clause said only
+                # what to DROP, so the model compressed by removing content (a named option, a figure)
+                # and shrank the DESCRIPTION-support fields — which is the half an engine indexes.
+                _t = int(round(dm * 60))
+                _b = [self._fmt_ts(_t * f) for f in (0.0, 0.10, 0.4167, 0.6667, 0.875, 1.0)]
+                duration_rule += (
+                    f"SHORT-FORM BEAT SHEET for this {_dmtxt}-minute cut — five beats, each opening "
+                    f"with a spoken transition question (those transitions ARE the chapters):\n"
+                    f"      * {_b[0]}-{_b[1]} THE LIFTABLE CHUNK — speak the exact target query, then "
+                    f"the direct answer with the options NAMED, before any intro or branding.\n"
+                    f"      * {_b[1]}-{_b[2]} THE COMPARISON — name each compared option and the ONE "
+                    f"differentiator that decides it, with the blog's actual figure. No throat-clearing, "
+                    f"no restatement.\n"
+                    f"      * {_b[2]}-{_b[3]} HONEST TRADEOFFS — where a competitor wins, and one of "
+                    f"{name}'s own limits.\n"
+                    f"      * {_b[3]}-{_b[4]} THE RECOMMENDATION — and who should choose otherwise.\n"
+                    f"      * {_b[4]}-{_b[5]} CTA + the blog link.\n"
+                    f"    DENSITY, NOT OMISSION: compress by cutting hedging, restatement and "
+                    f"throat-clearing — NEVER by dropping a named option, a figure, a price or a "
+                    f"tradeoff. A short script is MORE specific per second than a long one, never vaguer. "
+                    f"THE DESCRIPTION SUPPORT IS NOT COMPRESSED: `mini_answer` stays 2-3 full sentences, "
+                    f"`tags` stays 10-15, `captions_transcript` stays complete, and `pinned_comment` keeps "
+                    f"its source URLs — the runtime shrinks; the indexed text does not. "
+                    f"CHAPTER COUNT: 3-5 chapters for a cut this short (8 chapters on a short video is "
+                    f"noise), every `ts` inside {_b[5]}. ")
+            else:
+                duration_rule += (
+                    f"For 3 minutes or less use the tightest viable structure: answer → one "
+                    f"comparison segment → tradeoffs → CTA. ")
+            duration_rule += (
+                f"Spread the `chapters` ts estimates realistically across ~{_dmtxt} minutes. "
                 f"`captions_transcript` still covers the FULL spoken script.")
 
         prompt = f"""{presenter}Turn the SOURCE BLOG below into a YouTube video PACKAGE for {name}.
@@ -5004,7 +5139,17 @@ Return JSON only:
         if not res or not isinstance(res, dict) or not (res.get("script_markdown") or "").strip():
             return {}
         chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
+        # FU203 — validate the chapter timestamps BEFORE the description is assembled from them:
+        # the description, the export doc and the modal all read this one stored list, so fixing it
+        # here fixes all three. No-op when `dm` is 0 (no target to check against).
+        _chap_in = chapters
+        chapters = self._normalise_chapters(chapters, dm)
+        if chapters is not _chap_in:
+            print(f"[blog_gen] youtube: chapter timestamps corrected for a "
+                  f"{self._fmt_min(dm)} min target ({len(_chap_in)} in, {len(chapters)} out)",
+                  flush=True)
         mini_answer = (res.get("mini_answer") or "").strip()
+        script_txt = self._sa(self._youtube_scrub((res.get("script_markdown") or "").strip()))
         description = self._assemble_youtube_description(mini_answer, chapters, "{link}", disc)
         # FU82 — pinned comment: the LLM's useful line (reddit-scrubbed; vendor source URLs allowed)
         # + the blog link + the disclosure REPEATED — the most-read text after the description.
@@ -5034,6 +5179,11 @@ Return JSON only:
         }
         if dm:
             meta["duration_min"] = dm   # FU97: shown in the export checklist + prefills the UI
+            # FU203 — did the script actually hit its budget? Warning only; never rewrites.
+            _len_note = self._script_length_note(script_txt, dm)
+            if _len_note:
+                meta["length_warning"] = _len_note
+                print(f"[blog_gen] youtube: length-check — {_len_note}", flush=True)
         # FU185: every published YouTube field gets the symbol strip (this surface does not pass
         # through `_finalize_article`). The description is scrubbed AFTER assembly, which also clears
         # the em-dash our own chapter-line format emits.
@@ -5045,7 +5195,7 @@ Return JSON only:
                 _c["question"] = self._sa(_c["question"])
         return {
             "title": self._sa((res.get("title") or "").strip()),
-            "script": self._sa(self._youtube_scrub((res.get("script_markdown") or "").strip())),
+            "script": script_txt,
             "description": self._sa(self._youtube_scrub(description)),
             "captions": self._sa(self._youtube_scrub((res.get("captions_transcript") or "").strip())),
             "meta": meta,

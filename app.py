@@ -3347,9 +3347,10 @@ def api_blog_youtube_script(blog_id):
     if variant not in ("question", "demo"):
         variant = "question"
     try:   # FU97: operator-set target length in minutes (0/blank/garbage = model-decided, as today)
-        duration_min = max(0, min(30, int(data.get("duration_min") or 0)))
+        duration_min = float(data.get("duration_min") or 0)   # FU203: FLOAT — 1.5 used to int() to 1
     except (TypeError, ValueError):
-        duration_min = 0
+        duration_min = 0.0
+    duration_min = 0.0 if duration_min <= 0 else max(0.5, min(30.0, duration_min))
     api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 
     def task(_task_id=None):
@@ -4041,16 +4042,28 @@ def api_blog_export(blog_id):
             md_src += f"\n## Pinned comment (post + pin after upload)\n\n{pinned}\n"
         if yt_tags:
             md_src += "\n## Tags\n\n" + ", ".join(yt_tags) + "\n"
-        if pinned or yt_tags or yt_category:
+        _yt_dur = yt_meta.get("duration_min")   # FU97: guarded — old packages have no key
+        try:                                    # FU203: fractional — 1.5 must not print as "1"
+            _dnum = float(_yt_dur or 0)
+        except (TypeError, ValueError):
+            _dnum = 0.0
+        _dtxt = ("" if _dnum <= 0 else
+                 str(int(round(_dnum))) if abs(_dnum - round(_dnum)) < 1e-9 else f"{_dnum:g}")
+        # FU203: the deterministic length check — warning only, the operator decides.
+        _len_warn = (yt_meta.get("length_warning") or "").strip()
+        # FU203: the checklist also carries the target length + length warning, so it renders for a
+        # package that has one even when FU82's pinned/tags/category are all absent.
+        if pinned or yt_tags or yt_category or _dtxt or _len_warn:
             # {link} resolution check — computed at render; auto-flips to ✓ once the blog's website
             # URL is published (the _fill above substitutes it everywhere).
             unresolved = sum((s or "").count("{link}") for s in (yt_desc, pinned, cta))
             link_line = (f"⚠ {unresolved} unresolved {{link}} placeholder(s) — publish the blog's "
                          f"website URL (or paste the link) before upload"
                          if unresolved else "✓ all links resolved")
-            _yt_dur = yt_meta.get("duration_min")   # FU97: guarded — old packages have no key
-            _dur_line = (f"- [ ] Target length: ~{int(_yt_dur)} min (the script was written to this "
-                         f"budget)\n" if _yt_dur else "")
+            _dur_line = (f"- [ ] Target length: ~{_dtxt} min (the script was written to this "
+                         f"budget)\n" if _dtxt else "")
+            if _len_warn:
+                _dur_line += f"- [ ] \u26a0 Length check: {_len_warn} — regenerate if that matters\n"
             md_src += ("\n## Upload settings & checklist\n\n"
                        + _dur_line +
                        f"- [ ] Links: {link_line}\n"

@@ -13513,6 +13513,7 @@ async function openBlog(id) {
     const _ytMeta = b.youtube_meta || {};
     const _ytVariant = _ytMeta.variant || 'question';
     const _ytDuration = _ytMeta.duration_min || '';   // FU97: prefill the target-length input
+    const _ytLenWarn = _blogEsc(_ytMeta.length_warning || '');   // FU203: deterministic length check
     const _ytChapters = (_ytMeta.chapters || []).map(c => `${_blogEsc(c.ts || '00:00')} — ${_blogEsc(c.question || '')}`).join('<br>');
     const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
     const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
@@ -13720,7 +13721,7 @@ async function openBlog(id) {
                             <option value="question"${_ytVariant === 'question' ? ' selected' : ''}>Same question</option>
                             <option value="demo"${_ytVariant === 'demo' ? ' selected' : ''}>How-to / demo</option>
                         </select>
-                        <input id="blog-e-yt-duration" type="number" min="1" max="30" value="${_ytDuration}" placeholder="min" class="text-xs" style="width:52px" title="Target length in minutes (optional — blank = auto). The script is written to this budget; the mandatory structure (answer-first, prompt language, claims parity, honest tradeoffs) is never cut to fit.">
+                        <input id="blog-e-yt-duration" type="number" min="0.5" max="30" step="0.5" value="${_ytDuration}" placeholder="min" class="text-xs" style="width:56px" title="Target length in minutes (optional — blank = auto). 1.5 and 2.5 are allowed. At 3 minutes or less the script follows a five-beat short-form structure; the mandatory parts (answer-first, prompt language, claims parity, honest tradeoffs) and the description/tags/captions are never cut to fit.">
                         <button class="btn btn-sm" style="background:#14532d;color:#bbf7d0" onclick="blogGenYouTube(${id})">✨ Generate YouTube package</button>
                     </div>
                 </div>
@@ -13736,6 +13737,7 @@ async function openBlog(id) {
                 <label class="text-xs text-gray-400 mt-1">Captions transcript (upload as a transcript — YouTube auto-syncs timing)</label>
                 <textarea id="blog-e-yt-captions" rows="6">${_blogEsc(b.youtube_captions || '')}</textarea>
                 ${_ytChapters ? `<div class="text-xs text-gray-400 mt-2">Chapters<div class="text-gray-300 mt-1">${_ytChapters}</div></div>` : ''}
+                ${_ytLenWarn ? `<div class="text-xs mt-2" style="color:#fbbf24">⚠ ${_ytLenWarn} — regenerate if that matters</div>` : ''}
                 ${_ytShots ? `<div class="text-xs text-gray-400 mt-2">Shot list (demonstrate what's demonstrable)<ul class="list-disc ml-4 text-gray-300 mt-1">${_ytShots}</ul></div>` : ''}
                 ${_ytThumb ? `<div class="text-xs text-gray-400 mt-2">Thumbnail text: <span class="text-gray-300">${_ytThumb}</span></div>` : ''}
                 ${_ytCta ? `<div class="text-xs text-gray-400 mt-1">End-screen CTA: <span class="text-gray-300">${_ytCta}</span></div>` : ''}
@@ -13981,7 +13983,7 @@ function _youtubePersonaPick() {
 function blogGenYouTube(id) {
     const persona = (document.getElementById('blog-e-yt-persona')?.value || '').trim();
     const variant = (document.getElementById('blog-e-yt-variant')?.value || 'question');
-    const duration_min = parseInt(document.getElementById('blog-e-yt-duration')?.value) || 0;   // FU97
+    const duration_min = parseFloat(document.getElementById('blog-e-yt-duration')?.value) || 0;   // FU97 / FU203: fractional (1.5)
     runTask(`/api/blogs/${id}/youtube-script`, { persona, variant, duration_min }, (res) => {
         openBlog(id);
         _blogCostToast(res);

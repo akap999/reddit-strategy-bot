@@ -165,6 +165,210 @@ _FACT_VERIFY_FETCHES = int(os.environ.get("BRAND_FACT_VERIFY_FETCHES", "6"))   #
 # FU200 — a comparison table has to be readable. Without a cap the writer turned the article's own
 # selection criteria into columns and added more, shipping an 11-column matrix whose rows ran to ~1,400
 # characters. Excludes the first (name) column.
+_VF_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+_VF_RULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_VF_SOURCES_RE = re.compile(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b")
+_VF_TABLE_RE = re.compile(r"^[ \t]*\|")
+_VF_HEAD_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+\S")   # a REAL heading — the space rules out a #hashtag line
+# FU202 — a sentence that PROMISES a page. With no link in the same sentence it is a dead end for the
+# reader and a dangling reference for an answer engine.
+_VF_LINKPROMISE_RE = re.compile(
+    r"(?i)\b(?:click here|read more|learn more|linked below|linked above|more here|see below for|"
+    r"(?:see|read|check out|explore)\s+(?:our|the|my|this)\s+"
+    r"(?:guide|article|post|page|resource|write-?up|breakdown|comparison))\b")
+# NBSP + the exotic spaces `_strip_invisible_chars` deliberately leaves alone (it removes ZERO-WIDTH
+# characters; these are visible-width spaces). They survive into the Google Doc and break wrapping.
+_VF_NBSP_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+
+def scrub_markdown_formatting(body):
+    """Deterministic FORMATTING repair of the FINISHED body. Every rule below was confirmed against
+        python-markdown before being included — a defect that renders correctly is NOT 'fixed', and is
+        applied (if at all) only as a labelled cosmetic NORMALISATION.
+
+        RENDER DEFECTS — the markdown is wrong on the page without these:
+          1. a list directly under a paragraph collapses into one <p> with literal '- item'
+             (`_normalize_md_lists` fixed this at EXPORT time only; the STORED markdown kept the defect,
+             so the .md export / gdoc upload / CMS paste all shipped it). Fixed at the source now.
+          2. '---' directly under a paragraph is parsed as a setext H2 — it EATS the paragraph into a
+             heading and the divider disappears.
+          3. an odd number of '**' on a line renders the asterisks literally.
+          6. a TABLE directly under a paragraph is swallowed into that paragraph (verified: the whole
+             table renders as literal '| A | B |' text), and a block directly AFTER the last row is
+             eaten as another table ROW (a following '## Heading' becomes a <td> — the FU186 defect).
+          7. a bullet / number with NO space after the marker ('-item', '1.item') renders as a plain
+             paragraph, not a list.
+          8. a nested list indented 1-3 spaces renders as a SIBLING, not a child; python-markdown needs
+             a multiple of 4.
+
+        COSMETIC NORMALISATION — render-identical, applied so the stored markdown is clean for the .md
+        export, the Google Doc and a CMS paste:
+          4. whitespace-only lines, and runs of 3+ blank lines.
+          5. mixed bullet markers normalised to the dominant one.
+          9. a blank line before a heading / blockquote / code fence that follows a paragraph.
+         10. trailing whitespace: 1 space stripped, 2+ normalised to exactly 2 (markdown's hard line
+             break, which must SURVIVE), and exactly one newline at the end of the body.
+         11. non-breaking and other exotic spaces → a normal space (`_strip_invisible_chars` removes
+             zero-width characters but leaves these, and they break line wrapping in Google Docs);
+             runs of 3+ mid-line spaces collapsed; a space before , . ; : ! ? removed.
+
+        NOT touched, deliberately: a heading directly under a paragraph RENDERS correctly (so 9 is
+        cosmetic, never sold as a fix); '##Heading' with no space also renders correctly, and "fixing"
+        it would turn a '#hashtag' line into an H1 — the exact FU197 defect — so it is never touched.
+        SKIPPED entirely: fenced code blocks, and the `## Sources` section (its ' — <url>' separators are
+        deliberate em-dashes written by `_rebuild_sources`, and a source title containing '*' would
+        false-positive rule 3).
+
+        Returns (body, fixes) — fixes is a list of {kind, detail}. Idempotent."""
+
+    text = body or ""
+    if not text.strip():
+        return text, []
+    lines, out, fixes = text.split("\n"), [], []
+    in_fence = in_sources = False
+    # bullet marker census (outside fences) so we normalise TO the dominant style
+    marks = {}
+    _f = _s = False
+    for ln in lines:
+        st = ln.lstrip()
+        if _VF_SOURCES_RE.match(ln):
+            _s = True
+        if _s:
+            continue
+        if st.startswith("```") or st.startswith("~~~"):
+            _f = not _f
+            continue
+        if _f:
+            continue
+        m = re.match(r"^\s*([-*+])\s+", ln)
+        if m:
+            marks[m.group(1)] = marks.get(m.group(1), 0) + 1
+    dominant = max(marks, key=lambda k: (marks[k], k == "-")) if marks else "-"
+
+    def _seen(kind, detail):
+        if not any(f["kind"] == kind for f in fixes):
+            fixes.append({"kind": kind, "detail": detail})
+
+    for ln in lines:
+        st = ln.lstrip()
+        # Once the code-generated `## Sources` section starts, everything below is passthrough.
+        if _VF_SOURCES_RE.match(ln):
+            in_sources = True
+        if in_sources:
+            out.append(ln)
+            continue
+        if st.startswith("```") or st.startswith("~~~"):
+            if not in_fence and out and out[-1].strip() and not _VF_TABLE_RE.match(out[-1]):
+                out.append("")               # 9: blank line before an opening fence
+                _seen("block-spacing", "blank line inserted before a code fence that followed a paragraph")
+            in_fence = not in_fence
+            out.append(ln)
+            continue
+        if in_fence:
+            out.append(ln)
+            continue
+        if ln.strip() == "" and ln != "":
+            ln = ""                                     # 4: whitespace-only line
+        prev = out[-1] if out else ""
+        if ln.strip():
+            # 9: cosmetic — a paragraph glued directly under a heading (renders correctly either way)
+            if prev.strip() and _VF_HEAD_RE.match(prev):
+                out.append("")
+                prev = ""
+                _seen("block-spacing", "blank line inserted after a heading (cosmetic — it already "
+                                       "rendered correctly)")
+            # 7: a marker with no space after it is not a list at all
+            _ns = re.match(r"^(\s*)([-*+])(?=[^\s*_-])", ln) or re.match(r"^(\s*)(\d+[.)])(?=\S)", ln)
+            if _ns and not _VF_RULE_RE.match(ln):
+                ln = _ns.group(1) + _ns.group(2) + " " + ln[_ns.end():]
+                _seen("marker-space", f"a missing space after the list marker '{_ns.group(2)}' was "
+                                      "inserted (the line was rendering as a paragraph)")
+            # 6: a table needs a blank line when the line above is prose
+            if _VF_TABLE_RE.match(ln) and prev.strip() and not _VF_TABLE_RE.match(prev):
+                out.append("")
+                _seen("table-spacing", "blank line inserted before a table that followed a paragraph "
+                                       "(the whole table was rendering as literal text)")
+            # 6 (the FU186 shape): a block right after the last table row is eaten as another row
+            elif not _VF_TABLE_RE.match(ln) and _VF_TABLE_RE.match(prev):
+                out.append("")
+                _seen("table-spacing", "blank line inserted after a table (the line below it was "
+                                       "rendering as another table row)")
+            # 1: a list needs a blank line when the line above is prose (not blank, not a list item)
+            elif _VF_LIST_RE.match(ln) and prev.strip() and not _VF_LIST_RE.match(prev):
+                out.append("")
+                _seen("list-spacing", "blank line inserted before a list that followed a paragraph "
+                                      "(it was rendering as one run-on paragraph)")
+            # 2: a rule under prose becomes a setext H2 and swallows the paragraph
+            elif _VF_RULE_RE.match(ln) and prev.strip() and not _VF_RULE_RE.match(prev):
+                out.append("")
+                _seen("thematic-break", "blank line inserted before '---' (it was turning the line "
+                                        "above into a heading and losing the divider)")
+            # 9: cosmetic — a heading or blockquote glued to the paragraph above it
+            elif (re.match(r"^#{1,6}\s", st) or st.startswith(">")) and prev.strip() \
+                    and not prev.lstrip().startswith(">"):
+                out.append("")
+                _seen("block-spacing", "blank line inserted before a heading or quote that followed a "
+                                       "paragraph (cosmetic — it already rendered correctly)")
+            # 8: a nested list item needs an indent that is a multiple of 4 to nest at all
+            _ind = re.match(r"^( +)(?:[-*+]|\d+[.)])\s", ln)
+            if _ind and _VF_LIST_RE.match(prev or ""):
+                n = len(_ind.group(1))
+                want = max(1, int(n / 4 + 0.5)) * 4
+                if n != want:
+                    ln = " " * want + ln[n:]
+                    _seen("list-indent", f"a nested list item indented {n} space(s) was re-indented to "
+                                         f"{want} (it was rendering as a sibling, not a child)")
+            # 5: bullet marker consistency
+            mm = re.match(r"^(\s*)([-*+])(\s+)", ln)
+            if mm and mm.group(2) != dominant:
+                ln = mm.group(1) + dominant + mm.group(3) + ln[mm.end():]
+                _seen("bullet-marker", f"list marker '{mm.group(2)}' normalised to '{dominant}'")
+            # 3: unclosed bold
+            if ln.count("**") % 2:
+                ln = ln + "**"
+                _seen("unclosed-bold", "an unclosed '**' was closed (it was rendering literally)")
+            # 11: exotic spaces / mid-line space runs / a space before punctuation
+            _pre = ln
+            ln = _VF_NBSP_RE.sub(" ", ln)
+            if ln != _pre:
+                _seen("exotic-space", "a non-breaking or other exotic space was converted to a normal "
+                                      "space (it breaks line wrapping in the Google Doc)")
+            if not _VF_TABLE_RE.match(ln):
+                _lead = len(ln) - len(ln.lstrip(" "))
+                _head, _body = ln[:_lead], ln[_lead:]
+                _b2 = re.sub(r"(?<=\S)   +(?=\S)", " ", _body)
+                _b2 = re.sub(r"(?<=\w) +([,.;:!?])(?= |$)", r"\1", _b2)
+                if _b2 != _body:
+                    ln = _head + _b2
+                    _seen("spacing", "stray spacing inside a line was tidied (a run of spaces, or a "
+                                     "space before punctuation)")
+            # 10: trailing whitespace — 2+ is a hard line break and must survive as exactly 2
+            _t = len(ln) - len(ln.rstrip(" \t"))
+            if _t:
+                _nl = ln.rstrip(" \t") + ("  " if _t >= 2 else "")
+                if _nl != ln:
+                    ln = _nl
+                    _seen("trailing-space", "trailing whitespace normalised (a markdown hard line break "
+                                            "is kept as exactly two spaces)")
+        out.append(ln)
+
+    # 4: collapse a run of 2+ blank lines to ONE separator. Applied to the text BEFORE the Sources
+    # heading only, and via a regex so the head/tail boundary is never disturbed (an earlier
+    # line-based version ate the blank line that precedes `## Sources`).
+    joined = "\n".join(out)
+    _cut = _VF_SOURCES_RE.search(joined)
+    _h, _t = (joined[:_cut.start()], joined[_cut.start():]) if _cut else (joined, "")
+    _h2, _n = re.subn(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", _h)
+    if _n:
+        fixes.append({"kind": "blank-lines",
+                      "detail": f"collapsed {_n} run(s) of repeated blank lines"})
+    res = _h2 + _t
+    # 10: exactly one trailing newline
+    _r2 = res.rstrip("\n") + "\n" if res.strip() else res
+    if _r2 != res and not any(f["kind"] == "trailing-space" for f in fixes):
+        fixes.append({"kind": "trailing-space", "detail": "the body now ends with a single newline"})
+    return _r2, fixes
+
+
 _DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
 _SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
@@ -7059,6 +7263,12 @@ Return JSON only:
                     print(f"[blog_gen] {_pbnote}", flush=True)
                     article["geo_warning"] = "; ".join(
                         x for x in [article.get("geo_warning", ""), _pbnote] if x)
+        # FU201/FU202 — FINAL verification: repair formatting + the mechanically safe content
+        # defects, flag the rest, keep BOTH versions. Placed here so the body is FINAL (Sources
+        # rebuilt, table columns resolved) and so the LinkedIn adaptation below reads the fixed body.
+        _vrep = self._verify_final_article(brand, article)
+        if _vrep:
+            article["verify_report"] = _vrep
         article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU151 (D): deterministic quality scorecard (structure/meta/links + folded warnings), persisted.
@@ -7071,6 +7281,487 @@ Return JSON only:
         article["gen_cost"] = round(self.claude.usage_cost(), 4)
         article["gen_usage"] = dict(self.claude._usage)
         return article
+
+    # ──────────────────────── FU201/FU202: final-output verification ────────────────────────
+    # Three stages, deliberately different in what each is allowed to do:
+    #   _verify_format_fix     — FORMATTING + SPACING. Mechanical, meaning-preserving, AUTO-APPLIED.
+    #                            Free on every generation (no LLM). See `scrub_markdown_formatting`.
+    #   _verify_consistency    — price / brand / citation / structure / link / duplicate.
+    #                            FLAGGED ONLY, also free: each needs a FACT decision, not an edit.
+    #   _verify_content        — FU202: ONE Claude call reading the WHOLE article. Auto-fixes the
+    #                            mechanically safe classes (`_VF_FIXABLE`) through the six repair
+    #                            gates, flags the rest, and returns an editorial assessment.
+    # The auto-fix / flag split is decided in CODE, never by the `kind` the model happens to write.
+    # Anything a repair touches is kept in BOTH versions (`article["body_pre_verify"]`).
+    _VF_LIST_RE, _VF_RULE_RE, _VF_SOURCES_RE = _VF_LIST_RE, _VF_RULE_RE, _VF_SOURCES_RE
+
+    def _verify_format_fix(self, body):
+        """Instance delegate for `scrub_markdown_formatting` (module-level so the app's
+        Drive-upload and export render paths can reuse it without a generator)."""
+        return scrub_markdown_formatting(body)
+
+    _VF_MONEY_RE = re.compile(r"(?:\$|€|£)\s?\d[\d,]*(?:\.\d+)?")
+
+    def _verify_consistency(self, brand, article):
+        """Deterministic CONSISTENCY checks over the finished body. FLAG ONLY — never edits, because every
+        one of these needs a FACT decision, not a mechanical repair (the operator's "flag the rest").
+        Free: no LLM, no network. Returns a list of {kind, problem, detail}."""
+        body = article.get("body_markdown") or ""
+        name = ((brand or {}).get("name") or "").strip()
+        issues = []
+        if not body.strip():
+            return issues
+
+        cut = self._VF_SOURCES_RE.search(body)
+        prose = body[:cut.start()] if cut else body        # Sources is code-generated — never flag it
+
+        # ── price collision (the FU163 failure: meta said $647, the table said $29, the schema $79) ──
+        def _money(t):
+            return {m.group(0).replace(" ", "") for m in self._VF_MONEY_RE.finditer(t or "")}
+        surfaces = {"meta description": _money(article.get("meta_description") or "")}
+        _qa = re.search(r"(?is)^#{1,4}[ \t]*(?:quick answer|short answer|tl;?dr)\b(.*?)(?=\n#{1,4}\s|\Z)",
+                        prose, re.M)
+        if _qa:
+            surfaces["quick answer"] = _money(_qa.group(1))
+        if name:
+            for ln in prose.splitlines():
+                if ln.startswith("|") and re.search(re.escape(name), ln, re.I):
+                    surfaces["comparison table"] = _money(ln)
+                    break
+        seen = {k: v for k, v in surfaces.items() if v}
+        allp = set().union(*seen.values()) if seen else set()
+        if len(seen) > 1 and len(allp) > 1:
+            issues.append({"kind": "price", "problem": "the same brand carries different prices on "
+                           "different surfaces — one of them is wrong",
+                           "detail": "; ".join(f"{k}: {', '.join(sorted(v))}" for k, v in seen.items())})
+        # canonical price (Edit Brand → Canonical pricing) is the authority when set — FU158
+        try:
+            _canon = {str(i.get("value") or "") for i in _kf_pricing_items((brand or {}).get("key_facts"))
+                      if i.get("value")}
+        except Exception:
+            _canon = set()
+        _cm = set().union(*[_money(v) for v in _canon]) if _canon else set()
+        if _cm and allp and not (allp & _cm):
+            issues.append({"kind": "price", "problem": "no price in the article matches the canonical "
+                           "price set in Edit Brand",
+                           "detail": f"canonical: {', '.join(sorted(_cm))} · article: {', '.join(sorted(allp))}"})
+
+        # ── brand casing (FU84: "Outsail" vs "OutSail") — flagged, never auto-corrected, because a
+        #    quoted source title may legitimately spell it differently.
+        if name and len(name) > 2:
+            bad = {m.group(0) for m in re.finditer(re.escape(name), prose, re.I)
+                   if m.group(0) != name and not re.match(r"https?://", prose[max(0, m.start() - 8):m.start()])}
+            if bad:
+                issues.append({"kind": "brand", "problem": f"the brand name is spelled inconsistently — "
+                               f"it should be '{name}' everywhere",
+                               "detail": "also found: " + ", ".join(sorted(bad))})
+
+        # ── citations ──
+        blocks = getattr(self, "_evidence_blocks", None) or []
+        if blocks:
+            orphan = sorted({int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", prose)
+                             if int(m.group(1)) > len(blocks)})
+            if orphan:
+                issues.append({"kind": "citation", "problem": "a citation points at a source that does "
+                               "not exist — the claim will lose its source",
+                               "detail": ", ".join(f"[S{i}]" for i in orphan)})
+        for ln in prose.splitlines():
+            if re.match(r"^\s*#{1,6}\s", ln) and re.search(r"\[S\d+\]", ln):
+                issues.append({"kind": "citation", "problem": "a citation marker is inside a heading",
+                               "detail": ln.strip()[:90]})
+                break
+
+        # ── structure ──
+        h1 = len(re.findall(r"(?m)^#\s+\S", prose))
+        if h1 != 1:
+            issues.append({"kind": "structure", "problem": f"the article has {h1} H1 headings (expected 1)",
+                           "detail": ""})
+        _seen_h2 = False
+        for ln in prose.splitlines():
+            if re.match(r"^##\s+\S", ln):
+                _seen_h2 = True
+            elif re.match(r"^###\s+\S", ln) and not _seen_h2:
+                issues.append({"kind": "structure", "problem": "an H3 appears before any H2",
+                               "detail": ln.strip()[:90]})
+                break
+        # An EMPTY SECTION — a heading immediately followed by another at the SAME or SHALLOWER level.
+        # Going DEEPER (H1 → H2, H2 → H3) is ordinary nesting and must not be flagged: this pipeline
+        # always emits the H1 seed straight into "## Quick answer".
+        _prev_head, _prev_lvl, _empty = None, 0, []
+        for ln in prose.splitlines():
+            m = re.match(r"^(#{1,6})\s*(.*)$", ln)
+            if m:
+                lvl = len(m.group(1))
+                if not m.group(2).strip():
+                    _empty.append(ln.strip() or m.group(1))
+                if _prev_head is not None and lvl <= _prev_lvl:
+                    issues.append({"kind": "structure", "problem": "a section heading with no content "
+                                   "under it", "detail": f"{_prev_head} → {ln.strip()[:60]}"})
+                _prev_head, _prev_lvl = ln.strip()[:60], lvl
+            elif ln.strip():
+                _prev_head, _prev_lvl = None, 0
+        if _empty:
+            issues.append({"kind": "structure", "problem": "an empty heading", "detail": ", ".join(_empty[:3])})
+        if prose.count("```") % 2:
+            issues.append({"kind": "structure", "problem": "an unclosed code fence", "detail": ""})
+        for m in re.finditer(r"\[\s*\]\([^)]*\)|\[[^\]]*\]\(\s*\)", prose):
+            issues.append({"kind": "structure", "problem": "an empty markdown link",
+                           "detail": m.group(0)[:60]})
+            break
+
+        # ── FU202 heading-level JUMP (H2 → H4) — the outline pane in the Google Doc renders it as a
+        #    missing level, and an answer engine reads the hierarchy to decide what answers what.
+        _lvl = 0
+        for ln in prose.splitlines():
+            m = re.match(r"^(#{1,6})\s+\S", ln)
+            if m:
+                n = len(m.group(1))
+                if _lvl and n > _lvl + 1:
+                    issues.append({"kind": "structure", "problem": f"a heading level is skipped "
+                                   f"(H{_lvl} straight to H{n})", "detail": ln.strip()[:90]})
+                    break
+                _lvl = n
+
+        # ── FU202 LINKS — the operator's "missing links". A promise of a page with nothing to click is
+        #    the damaging one; a href that is not a URL/anchor/relative path silently 404s on the CMS.
+        for m in re.finditer(r"\]\(\s*([^)\s]+)", prose):
+            u = m.group(1)
+            if not re.match(r"^(?:https?://|mailto:|#|/|\.{1,2}/)", u):
+                issues.append({"kind": "link", "problem": "a link points at something that is not a URL "
+                               "— it will break when the article is published",
+                               "detail": u[:80]})
+                break
+        for _sent in re.split(r"(?<=[.!?])\s+", re.sub(r"(?m)^\s*\|.*$", "", prose)):
+            if "](" in _sent or "<http" in _sent:
+                continue
+            if _VF_LINKPROMISE_RE.search(_sent):
+                issues.append({"kind": "link", "problem": "the article points the reader at a page but "
+                               "gives no link — either link it or drop the promise",
+                               "detail": " ".join(_sent.split())[:110]})
+                break
+
+        # ── FU202 REPEATED CONTENT — the same sentence written twice reads as padding and costs the
+        #    page its credibility. Table rows are excluded (a repeated cell is normal).
+        _sent_seen, _dupe = {}, None
+        _flat = re.sub(r"(?m)^\s*(?:\||#{1,6}\s).*$", "", prose)
+        for _sent in re.split(r"(?<=[.!?])\s+", _flat):
+            _k = " ".join(re.sub(r"\[S\d+\]", "", _sent).split()).strip().lower()
+            if len(_k) < 45:
+                continue
+            if _k in _sent_seen:
+                _dupe = " ".join(_sent.split())[:110]
+                break
+            _sent_seen[_k] = True
+        if _dupe:
+            issues.append({"kind": "duplicate", "problem": "the same sentence appears twice in the "
+                           "article", "detail": _dupe})
+
+        # ── ragged table row (a missing CELL needs a fact, so REPORT it, never reshape) ──
+        rows, hdr = [], None
+        for ln in prose.splitlines():
+            if ln.strip().startswith("|"):
+                n = ln.count("|")
+                if hdr is None:
+                    hdr = n
+                elif not re.match(r"^\s*\|[\s:|-]+\|\s*$", ln) and n != hdr:
+                    rows.append(ln.strip()[:70])
+            else:
+                hdr = None
+        if rows:
+            issues.append({"kind": "table", "problem": "a table row has a different number of columns "
+                           "than its header — it will render broken",
+                           "detail": rows[0]})
+        return issues
+
+    def _verify_final_article(self, brand, article):
+        """FU201/FU202 — the AUTOMATIC verification layer. Runs on the FINISHED body at the very end of
+        `_finalize_article`, in three stages:
+          1. FORMATTING — mechanical, meaning-preserving, AUTO-APPLIED. Free, no LLM (see
+             `scrub_markdown_formatting`; spacing, tables, list markers/indent, stray whitespace).
+          2. CONSISTENCY — price / brand / citation / structure / link / duplicate. FLAGGED ONLY, free.
+          3. CONTENT (FU202) — ONE Claude call that reads the WHOLE article, auto-fixes the mechanically
+             safe classes (`_VF_FIXABLE`) through the same six repair gates, flags the rest, and returns
+             an editorial assessment.
+
+        Slot: AFTER `_rebuild_sources`, because `_resolve_table_punts` runs inside it and DROPS columns —
+        a column-count check before that would judge a table about to change. After a PROSE repair the
+        method re-runs `_rebuild_sources` itself (exactly as the manual endpoint does), because that one
+        call re-applies the punt scrub, the table resolver, the edit-narration scrub and the contiguous
+        [S#] renumber to whatever the repair changed.
+
+        BOTH VERSIONS ARE KEPT: when anything was applied, the pre-verification body is stored on
+        `article["body_pre_verify"]`, so nothing the pass changed is ever lost.
+
+        Never raises. Returns the report and mutates article["body_markdown"]."""
+        if os.environ.get("BLOG_VERIFY_FINAL", "1") == "0":
+            return {}
+        try:
+            pre = article.get("body_markdown") or ""
+            body = pre
+            fixed, fixes = self._verify_format_fix(body)
+            if fixed != body:
+                body = fixed
+                article["body_markdown"] = body
+            issues = self._verify_consistency(brand, article)
+            report = {"fixed": fixes, "issues": issues,
+                      "n_fixed": len(fixes), "n_flagged": len(issues)}
+
+            # ── FU202: the paid content read. Auto-fixes on EVERY generation (the operator's decision),
+            #    still gated so it can be turned off without disabling the free half.
+            applied, skipped, assessment, content = [], [], {}, []
+            if self.claude is not None and os.environ.get("BLOG_VERIFY_SEMANTIC", "1") != "0":
+                content, assessment = self._verify_content(brand, body)
+                # The auto-fix / flag split is decided HERE, not by the kind the model wrote.
+                fixable = [i for i in content if i.get("kind") in self._VF_FIXABLE and i.get("fix")]
+                flagged = [i for i in content if i not in fixable]
+                if fixable:
+                    body, applied, skipped = self._verify_apply_repairs(body, fixable, brand,
+                                                                        repair="claude")
+                if applied:
+                    # the repair rewrote prose — re-apply the downstream guards, then re-tidy formatting
+                    body = self._rebuild_sources(self._sa(body))
+                    body, _refix = self._verify_format_fix(body)
+                    fixes = fixes + _refix
+                    article["body_markdown"] = body
+                for f in flagged:
+                    issues.append({"kind": f.get("kind") or "content",
+                                   "problem": f.get("problem") or "",
+                                   "detail": (f.get("quote") or "")[:110]})
+                report.update({"applied": applied, "skipped": skipped,
+                               "n_applied": len(applied), "n_skipped": len(skipped)})
+                if assessment:
+                    report["assessment"] = assessment
+                report["issues"], report["n_flagged"] = issues, len(issues)
+                report["fixed"], report["n_fixed"] = fixes, len(fixes)
+
+            # BOTH VERSIONS — only stored when the pass actually changed something.
+            if (article.get("body_markdown") or "") != pre:
+                article["body_pre_verify"] = pre
+
+            if fixes:
+                _k = {}
+                for f in fixes:
+                    _k[f["kind"]] = _k.get(f["kind"], 0) + 1
+                print("[blog_gen] verify: fixed " + ", ".join(f"{v}× {k}" for k, v in sorted(_k.items())),
+                      flush=True)
+            if applied or skipped:
+                print(f"[blog_gen] verify: content repairs {len(applied)} applied, {len(skipped)} refused"
+                      + (f" · editorial {assessment.get('score')}" if assessment.get("score") is not None
+                         else ""), flush=True)
+            if issues:
+                print(f"[blog_gen] verify: {len(issues)} issue(s) flagged — "
+                      + "; ".join(sorted({i["kind"] for i in issues})), flush=True)
+                # surface on the existing toast channel so it is seen at generation time, not at review
+                _vn = ("verify-check: " + "; ".join(i["problem"] for i in issues[:3])
+                       + (f" (+{len(issues) - 3} more)" if len(issues) > 3 else ""))
+                article["geo_warning"] = "; ".join(
+                    x for x in [article.get("geo_warning", ""), _vn] if x)
+            return report
+        except Exception as e:
+            print(f"[blog_gen] verify skipped: {e}", flush=True)
+            return {"failed": str(e)}
+
+    _VF_BANNED_CHARS = "\u2014\u2013\u2018\u2019\u201c\u201d\u2026"
+
+    # FU202 — which content defects may be AUTO-FIXED and which are only ever FLAGGED. Enforced in CODE,
+    # never by trusting the `kind` the model happens to write. A repair is mechanical only when it can be
+    # made by rewriting ONE sentence with what is already on the page; a missing link, a duplicated
+    # section, a thin section or a claim its source cannot carry needs a FACT or a restructure, so
+    # "repairing" it means inventing something.
+    _VF_FIXABLE = frozenset({"contradiction", "price", "brand", "typo", "readability"})
+    _VF_FLAG_ONLY = frozenset({"link", "duplicate", "structure", "claim", "thin"})
+    _VF_CHUNK = int(os.environ.get("BLOG_VERIFY_CHUNK", "25000"))
+
+    def _verify_chunks(self, body):
+        """Split the finished body for the content read so NOTHING is skipped (the FU201 prompt saw only
+        the first 14,000 characters). Splits on `##` boundaries and accumulates up to `_VF_CHUNK`, so every
+        chunk is a contiguous SUBSTRING of the body and a returned `quote` still matches verbatim."""
+        text = body or ""
+        if len(text) <= self._VF_CHUNK:
+            return [text] if text.strip() else []
+        parts = re.split(r"(?m)(?=^#{2,3}[ \t]+\S)", text)
+        chunks, cur = [], ""
+        for p in parts:
+            if cur and len(cur) + len(p) > self._VF_CHUNK:
+                chunks.append(cur)
+                cur = p
+            else:
+                cur += p
+        if cur.strip():
+            chunks.append(cur)
+        return chunks
+
+    def _verify_content(self, brand, body):
+        """FU202 — the CONTENT read. Goes over the ENTIRE finished article (chunked, so nothing past the
+        old 14k cap is skipped) and returns `(issues, assessment)`:
+          issues     — [{kind, quote, problem, fix}], `quote` a verbatim span, `fix` the correction.
+          assessment — the editorial read {score, verdict, strengths, weaknesses}, REPORTED beside the
+                       deterministic `_quality_report` score and never merged into it.
+        ONE Claude call per chunk (one call for a normal-length article). Never raises → ([], {}).
+
+        Deliberately NOT asked for (the operator's "skip the sources url check for now"): whether a cited
+        [S#] actually supports its claim, and whether the same page is listed twice under two URLs."""
+        name = ((brand or {}).get("name") or "").strip()
+        try:
+            _canon = "; ".join(f"{i.get('product') or 'general'}: {i.get('value')}"
+                               for i in _kf_pricing_items((brand or {}).get("key_facts")) if i.get("value"))
+        except Exception:
+            _canon = ""
+        chunks = self._verify_chunks(body)
+        if not chunks:
+            return [], {}
+        issues, assessments = [], []
+        for n, chunk in enumerate(chunks):
+            part = (f"\nThis is part {n + 1} of {len(chunks)} of the article; judge only what is here.\n"
+                    if len(chunks) > 1 else "")
+            try:
+                res = self.claude.call(
+                    "You are proof-checking a FINISHED published article for a brand. Read ALL of it. "
+                    "Report ONLY real defects — a stylistic preference is NOT a defect.\n"
+                    "LOOK FOR:\n"
+                    "- contradiction: the article contradicting itself (a claim one section makes that the "
+                    "comparison table, the Quick answer or the FAQ contradicts).\n"
+                    "- price: a price or figure stated inconsistently.\n"
+                    "- brand: the brand described or named inconsistently.\n"
+                    "- typo: a spelling or grammar error, a wrong word, a broken sentence.\n"
+                    "- readability: a garbled or unreadable sentence.\n"
+                    "- duplicate: the same sentence or the same claim written twice.\n"
+                    "- link: the article points the reader at a page ('see our guide', 'linked below', "
+                    "'read more') but gives no link.\n"
+                    "- thin: a section that is one sentence of filler, or a question heading whose first "
+                    "sentence does not answer it.\n"
+                    "Do NOT report anything about whether a [S#] source supports its claim, and do NOT "
+                    "report duplicate sources — those are out of scope for this pass.\n"
+                    "RULES FOR YOUR FIXES — a fix breaking any of these will be discarded:\n"
+                    "- NEVER write that something is unavailable, not found, not specified, not disclosed or "
+                    "not public. That wording is banned in this publication; if a fact is missing the "
+                    "sentence must simply not claim it.\n"
+                    "- Keep every [S#] citation marker exactly as it appears in the quote — never add, "
+                    "remove or renumber one.\n"
+                    "- Never change the H1 title, the italic byline/disclosure lines, or the ## Sources "
+                    "section.\n"
+                    "- Fix ONLY from what is already in the article or the canonical facts below. Never "
+                    "introduce a new fact, figure or name.\n"
+                    "- Use plain ASCII punctuation: no em-dash, en-dash, curly quotes or ellipsis character.\n"
+                    "- For `duplicate`, `link` and `thin` leave `fix` empty — they are reported, not fixed.\n"
+                    "ALSO return an editorial ASSESSMENT of this article as a whole: does it answer the "
+                    "question it sets out to, is it specific rather than generic, is it balanced about the "
+                    "brand, and does it read as though a person wrote it. Score it 0-100 and be honest — a "
+                    "competent but unremarkable article is a 70.\n"
+                    f"BRAND: {name}\n" + (f"CANONICAL PRICING (authoritative): {_canon}\n" if _canon else "") +
+                    part +
+                    '\nReturn JSON ONLY: {"issues": [{"kind": "contradiction|price|brand|typo|readability|'
+                    'duplicate|link|thin", "quote": "<the exact sentence from the article>", '
+                    '"problem": "<what is wrong>", "fix": "<the corrected sentence, or \\"\\">"}], '
+                    '"assessment": {"score": 0-100, "verdict": "<one sentence>", '
+                    '"strengths": ["..."], "weaknesses": ["..."]}}\n\nARTICLE:\n' + chunk,
+                    max_tokens=3000, temperature=0)
+            except Exception as e:
+                print(f"[blog_gen] verify-content failed ({e})", flush=True)
+                continue
+            if not isinstance(res, dict):
+                continue
+            for i in (res.get("issues") or []):
+                if isinstance(i, dict) and str(i.get("quote") or "").strip():
+                    issues.append({"kind": str(i.get("kind") or "content").strip().lower(),
+                                   "quote": str(i["quote"]).strip(),
+                                   "problem": str(i.get("problem") or "").strip(),
+                                   "fix": str(i.get("fix") or "").strip()})
+            a = res.get("assessment")
+            if isinstance(a, dict):
+                assessments.append(a)
+        return issues, self._merge_assessments(assessments)
+
+    @staticmethod
+    def _merge_assessments(assessments):
+        """One assessment per chunk → one for the article. Scores averaged, lists merged and deduped."""
+        vals = []
+        for a in assessments:
+            try:
+                vals.append(max(0, min(100, int(float(a.get("score"))))))
+            except Exception:
+                pass
+        if not assessments:
+            return {}
+        def _lst(key):
+            seen, out = set(), []
+            for a in assessments:
+                for x in (a.get(key) or [])[:6]:
+                    t = str(x).strip()
+                    if t and t.lower() not in seen:
+                        seen.add(t.lower())
+                        out.append(t)
+            return out[:5]
+        verdict = next((str(a.get("verdict")).strip() for a in assessments if str(a.get("verdict") or "").strip()), "")
+        out = {"verdict": verdict, "strengths": _lst("strengths"), "weaknesses": _lst("weaknesses")}
+        if vals:
+            out["score"] = round(sum(vals) / len(vals))
+        return out
+    def _verify_repair_gate(self, body, quote, fix, brand):
+        """Every reason a PROSE repair is refused. Returns "" when the repair may be applied, else the
+        reason it was skipped. These six exist because they are exactly what the guards that run after a
+        repair CANNOT undo (an added em-dash, a reworded H1, a DROPPED citation, a lost fact, an edited
+        byline). A punt is caught here too so it is REPORTED rather than silently scrubbed later."""
+        if body.count(quote) != 1:
+            return "the sentence was not found exactly once in the article"
+        if re.findall(r"\[S\d+\]", quote) != re.findall(r"\[S\d+\]", fix):
+            return "the fix changed the [S#] citations"
+        cut = self._VF_SOURCES_RE.search(body)
+        if cut and body.index(quote) >= cut.start():
+            return "the sentence is inside the ## Sources section (rebuilt from evidence, never edited)"
+        _line = quote.splitlines()[0].strip()
+        if _line.startswith("# "):
+            return "the sentence is the H1 title (pinned to the seed)"
+        if _line.startswith("*") and _line.endswith("*") and len(_line) > 2:
+            return "the sentence is the byline / disclosure line"
+        if self._PUNT_MEANING_RE.search(fix) or self._PUNT_CELL_RE.search(fix):
+            return "the fix says a fact is unavailable — that wording is banned"
+        if any(c in fix for c in self._VF_BANNED_CHARS):
+            return "the fix reintroduced an em-dash / curly quote / ellipsis"
+        ok, missing = self._facts_preserved(quote, fix, brand)
+        if not ok:
+            return f"the fix dropped {', '.join(missing[:3])}"
+        return ""
+
+    def _verify_apply_repairs(self, body, issues, brand, repair="claude", timeout=600):
+        """Apply the gated repairs. repair="claude" trusts the issue's own `fix`; repair="writer" sends the
+        sentence to the self-hosted model instead — the operator's "check with claude but correct it using
+        qwen" — reusing the `_verify_facts_semantic` repair shape. A refused repair leaves the ORIGINAL
+        span untouched and is reported. Returns (body, applied, skipped)."""
+        applied, skipped = [], []
+        todo = [i for i in issues if body.count(i["quote"]) == 1]
+        reps = {}
+        if repair == "writer" and self.writer is not None and todo:
+            def _one(it):
+                try:
+                    r = self.writer.call_text(
+                        "Rewrite this sentence to fix the problem described. Keep every [S#] marker, "
+                        "every number and every name exactly. Never say a fact is unavailable. Use plain "
+                        "ASCII punctuation.\n"
+                        f"PROBLEM: {it['problem']}\nReturn ONLY the corrected sentence.\n\n"
+                        f"SENTENCE: {it['quote']}", max_tokens=600, temperature=0.7, timeout=timeout)
+                except Exception:
+                    r = None
+                return (_strip_model_preamble(r or "") or "").strip().split("\n")[0].strip()
+            if len(todo) > 1:
+                with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(todo))) as _ex:
+                    for it, r in zip(todo, _ex.map(_one, todo)):
+                        reps[id(it)] = r
+            else:
+                reps[id(todo[0])] = _one(todo[0])
+        for it in issues:
+            fix = reps.get(id(it)) or it.get("fix") or ""
+            rec = {"kind": it.get("kind"), "problem": it.get("problem"), "quote": it["quote"][:160]}
+            if not fix:
+                skipped.append({**rec, "reason": "the model returned no correction"})
+                continue
+            why = self._verify_repair_gate(body, it["quote"], fix, brand)
+            if why:
+                skipped.append({**rec, "reason": why})
+                continue
+            body = body.replace(it["quote"], fix, 1)
+            applied.append({**rec, "fix": fix[:160]})
+        return body, applied, skipped
 
     def _quality_report(self, article, brand, link_targets=None):
         """FU151 (D): deterministic quality scorecard — STRUCTURE (Quick answer / question-headings /
@@ -7102,6 +7793,10 @@ Return JSON only:
         add("meta_title", "Meta title present, ≤60 chars", bool(_mt) and len(_mt) <= 60, f"{len(_mt)} chars")
         add("meta_desc", "Meta description present, ≤160 chars",
             bool(_md) and len(_md) <= 160, f"{len(_md)} chars")
+        # FU201: deliberately NOT added as a scored check. The pass already folds a `verify-check:` note
+        # into `geo_warning`, which this method re-splits into `warnings` and docks 5 points for — exactly
+        # how the other ~11 `*-check:` warnings behave. Adding a check here too would dock the SAME defect
+        # twice. The full detail renders in the modal's Verification block from `quality_report.verify`.
         # INTERNAL-LINK HONESTY (only when internal linking was on): every emitted internal link must be
         # one of the FU114 verified targets. No network.
         if link_targets:

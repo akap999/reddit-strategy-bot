@@ -1165,7 +1165,8 @@ class Database:
                    "quality_report",   # FU151 (D)
                    "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning",   # FU154
                    "rewritten_cost",   # FU155
-                   "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta"}   # FU179
+                   "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",   # FU179
+                   "body_pre_verify"}   # FU202: the body before the verification pass edited it
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
@@ -2349,7 +2350,11 @@ class Database:
                     # Bodies get their own columns so manual edits persist through the existing PATCH;
                     # rewrites_meta is ONE JSON blob keyed by surface holding the telemetry the blog
                     # keeps in columns (overlap/grade/cost/stage_secs/warning/at).
-                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta"):
+                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",
+                    # FU202: the body as it stood BEFORE the verification pass edited it. Written
+                    # ONLY when the pass actually changed something, so both versions survive and
+                    # nothing an auto-repair touched is ever lost.
+                    "body_pre_verify"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

@@ -46,6 +46,7 @@ from generators.base import ClaudeClient, WriterClient
 from generators.subreddit_gen import SubredditGenerator
 from generators.post_gen import PostGenerator
 from generators.comment_gen import CommentGenerator
+from generators.blog_gen import scrub_markdown_formatting   # FU201
 
 # ---------------------------------------------------------------------------
 # Guard against REDDIT_PROXY_URL being set to a FORWARD proxy by mistake.
@@ -2829,6 +2830,10 @@ def api_blog_generate():
             _qr = blog.get("quality_report") or {}   # FU151 (D): persist + return the quality scorecard
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
+            # FU202: keep BOTH versions — the body as it stood before the verification pass edited it.
+            # Written only when the pass actually changed something, so an untouched blog stores nothing.
+            if blog.get("body_pre_verify"):
+                bg.update_blog(blog_id, body_pre_verify=blog["body_pre_verify"])
             # FU164/167: persist the self-hosted writer-pass duration + outcome + watermark-removal LEVEL
             if blog.get("writer_secs") or blog.get("writer_mode_used"):
                 bg.update_blog(blog_id, writer_secs=(blog.get("writer_secs") or 0),
@@ -2954,6 +2959,9 @@ def api_blog_regenerate(blog_id):
                     linkedin_text=_sub_link(fresh.get("linkedin_text", ""),
                                             _blog_link_target(blog, brand)),   # FU81
                     claims_flagged=fresh.get("claims_flagged") or [])
+                # FU202: both versions. Always written (to "" when this run changed nothing) so a
+                # regenerate can never leave the PREVIOUS run's snapshot beside a new body.
+                bg.update_blog(blog_id, body_pre_verify=(fresh.get("body_pre_verify") or ""))
                 # FU84: fill a BLANK stored disclosure from the fresh generation (never clobber an edit).
                 if not (blog.get("disclosure") or "").strip() and (fresh.get("disclosure") or "").strip():
                     bg.update_blog(blog_id, disclosure=fresh["disclosure"].strip())
@@ -3087,6 +3095,113 @@ def api_blog_check_links(blog_id):
         finally:
             bg.close()
     return jsonify({"task_id": start_task("blog_check_links", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>/verify", methods=["POST"])
+def api_blog_verify(blog_id):
+    """FU201 — the MANUAL half of the verification layer. Body:
+    {"surface": "blog"|"linkedin_post"|"linkedin_article", "use": "original"|"rewritten"}.
+
+    `use="original"` checks `body_markdown` and CLAUDE writes the repairs.
+    `use="rewritten"` checks the stored rewrite and QWEN writes them — the operator's "check the same
+    thing using claude but correct it using qwen".
+
+    Unlike the automatic pass (which is deterministic, free, and runs inside `_finalize_article`), this
+    one spends a Claude call to read the article semantically and then REPAIRS prose — so every repair
+    goes through `_verify_repair_gate` and a refused repair leaves the original untouched and is
+    reported."""
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    _COLS = {
+        "blog": ("body_markdown", "rewritten_body", True),
+        "linkedin_post": ("linkedin_text", "linkedin_rewritten", False),
+        "linkedin_article": ("linkedin_article", "linkedin_article_rewritten", False),
+    }
+    _data = request.get_json(silent=True) or {}
+    _surface = _data.get("surface") or "blog"
+    _use = _data.get("use") or "original"
+    if _surface not in _COLS:
+        return jsonify({"error": f"unknown surface {_surface!r}"}), 400
+    if _use not in ("original", "rewritten"):
+        return jsonify({"error": f"unknown use {_use!r}"}), 400
+    _orig_col, _rw_col, _pin_h1 = _COLS[_surface]
+    _col = _orig_col if _use == "original" else _rw_col
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator
+        import time as _t
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            body = blog.get(_col) or ""
+            if not body.strip():
+                raise ValueError(f"nothing to verify — generate the "
+                                 f"{_surface.replace('_', ' ')} {_use} first")
+            brand = bg.get_brand(blog.get("brand_id")) or {}
+            writer = None
+            if _use == "rewritten":
+                cfg = _resolve_writer_config(bg)
+                if not cfg["endpoint_url"] or not cfg["key"]:
+                    raise ValueError("configure the writer endpoint + API key in Settings first "
+                                     "(the rewrite is repaired on the self-hosted model)")
+                writer = WriterClient(cfg["endpoint_url"], cfg["key"], cfg["model"])
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()
+            gen = BlogGenerator(claude, bg, writer=writer,
+                                writer_mode="rewrite" if writer else "off")
+            article = {"body_markdown": body,
+                       "meta_description": blog.get("meta_description") or ""}
+
+            # 1. deterministic: formatting REPAIRED, consistency FLAGGED (identical to the auto pass)
+            body, fmt_fixes = gen._verify_format_fix(body)
+            article["body_markdown"] = body
+            flags = gen._verify_consistency(brand, article)
+            # 2. content: Claude READS the whole article; Claude or Qwen writes the repairs, gated.
+            #    FU202 — the same code-side split as the automatic pass: only the mechanically safe
+            #    kinds are ever repaired, everything else is reported beside the deterministic flags.
+            issues, assessment = gen._verify_content(brand, body)
+            _fixable = [i for i in issues if i.get("kind") in gen._VF_FIXABLE and i.get("fix")]
+            for i in issues:
+                if i not in _fixable:
+                    flags.append({"kind": i.get("kind") or "content",
+                                  "problem": i.get("problem") or "",
+                                  "detail": (i.get("quote") or "")[:110]})
+            body, applied, skipped = gen._verify_apply_repairs(
+                body, _fixable, brand, repair=("writer" if _use == "rewritten" else "claude"))
+            # 3. the guards this path does not get for free (it runs OUTSIDE _finalize_article):
+            #    _rebuild_sources re-applies the punt scrub, the table resolver, the edit-narration
+            #    scrub and the contiguous-[S#] renumber over whatever the repairs changed.
+            body = gen._rebuild_sources(gen._sa(body))
+            if _pin_h1:
+                body = gen._force_h1(body, blog.get("seed") or "")
+
+            report = {"at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                      "use": _use, "repaired_by": "qwen" if _use == "rewritten" else "claude",
+                      "fixed": fmt_fixes, "flagged": flags,
+                      "applied": applied, "skipped": skipped,
+                      "n_fixed": len(fmt_fixes), "n_flagged": len(flags),
+                      "n_applied": len(applied), "n_skipped": len(skipped)}
+            if assessment:
+                report["assessment"] = assessment   # FU202: the overall quality read
+            if _use == "original":
+                qr = blog.get("quality_report") if isinstance(blog.get("quality_report"), dict) else {}
+                qr = dict(qr or {})
+                qr["verify"] = report
+                bg.update_blog(blog_id, **{_col: body}, quality_report=qr)
+            else:
+                _meta = blog.get("rewrites_meta")
+                _meta = dict(_meta) if isinstance(_meta, dict) else {}
+                _entry = dict(_meta.get(_surface) or {})
+                _entry["verify"] = report
+                _meta[_surface] = _entry
+                bg.update_blog(blog_id, **{_col: body}, rewrites_meta=_meta)
+            return {"blog_id": blog_id, "ok": True, **report,
+                    "cost": round(claude.usage_cost(), 4)}
+        finally:
+            bg.close()
+    return jsonify({"task_id": start_task("blog_verify", task, pass_task_id=True)})
 
 @app.route("/api/blogs/<int:blog_id>/provide-sources", methods=["POST"])
 def api_blog_provide_sources(blog_id):
@@ -3507,10 +3622,169 @@ def _apply_gdoc_inline_styles(html_fragment):
         return html_fragment
 
 
-def _gdoc_doc_page(page_title, inner_html):
-    """FU196 — wrap already-rendered body HTML in the Manrope/Docs-targeted page shell."""
+# FU202 — the reference formatting becomes a GUARANTEE that repairs itself.
+#
+# `_apply_gdoc_inline_styles` ends "Never raises: on any failure the fragment is returned untouched",
+# and its own docstring states the consequence: without those inline styles "every uploaded doc falls
+# back to Arial at Docs' default sizes". Nothing verified the styling landed, so there were two SILENT
+# paths to a broken client deliverable:
+#   * bs4 unavailable or the parse throws → zero inline styles → Arial at Docs' defaults;
+#   * the markdown render throws → the whole body becomes one <pre> block: no headings (so no Docs
+#     outline pane), no table, no type scale. `pre` is not even in _GDOC_STYLES.
+# The operator's rule is "it should never fail", so this NEVER refuses an upload — it re-renders,
+# re-styles with a dependency-free regex pass, and reports how much it had to rescue.
+_GDOC_PRE_PAT = r"\A\s*<pre>(.*)</pre>\s*\Z"
+
+
+def _gdoc_minimal_html(md_src):
+    """Dependency-free markdown → HTML for the total-loss path (the markdown library itself failed).
+    Covers what the reference document is actually made of: headings, paragraphs, lists and the
+    comparison TABLE. Shipping one <pre> block instead would lose the Docs outline pane and the table,
+    which is exactly the "overall structure" the operator asked to be maintained."""
+    import re
+    import html as _html
+    out, rows, lst = [], [], None
+
+    def _flush_list():
+        nonlocal lst
+        if lst:
+            tag = lst[0]
+            out.append(f"<{tag}>" + "".join(f"<li>{i}</li>" for i in lst[1]) + f"</{tag}>")
+            lst = None
+
+    def _flush_table():
+        nonlocal rows
+        if not rows:
+            return
+        hdr, body_rows = rows[0], [r for r in rows[1:] if not re.match(r"^[\s|:-]+$", "|".join(r))]
+        out.append("<table><thead><tr>" + "".join(f"<th>{c}</th>" for c in hdr) + "</tr></thead><tbody>"
+                   + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in body_rows)
+                   + "</tbody></table>")
+        rows = []
+
+    def _inline(t):
+        t = _html.escape(t)
+        t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+        t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', t)
+        t = re.sub(r"&lt;(https?://[^&\s]+)&gt;", r'<a href="\1">\1</a>', t)
+        return t
+
+    para = []
+    for ln in (md_src or "").split("\n"):
+        st = ln.strip()
+        if st.startswith("|"):
+            _flush_list()
+            if para:
+                out.append("<p>" + _inline(" ".join(para)) + "</p>")
+                para = []
+            rows.append([c.strip() for c in st.strip("|").split("|")])
+            continue
+        _flush_table()
+        m = re.match(r"^(#{1,6})\s+(.*)$", st)
+        if m:
+            _flush_list()
+            if para:
+                out.append("<p>" + _inline(" ".join(para)) + "</p>")
+                para = []
+            n = len(m.group(1))
+            out.append(f"<h{n}>{_inline(m.group(2))}</h{n}>")
+            continue
+        m = re.match(r"^(?:[-*+]|(\d+)[.)])\s+(.*)$", st)
+        if m:
+            if para:
+                out.append("<p>" + _inline(" ".join(para)) + "</p>")
+                para = []
+            tag = "ol" if m.group(1) else "ul"
+            if not lst or lst[0] != tag:
+                _flush_list()
+                lst = (tag, [])
+            lst[1].append(_inline(m.group(2)))
+            continue
+        _flush_list()
+        if not st:
+            if para:
+                out.append("<p>" + _inline(" ".join(para)) + "</p>")
+                para = []
+            continue
+        para.append(st)
+    _flush_list()
+    _flush_table()
+    if para:
+        out.append("<p>" + _inline(" ".join(para)) + "</p>")
+    return "\n".join(out)
+
+
+def _gdoc_regex_style(fragment):
+    """Apply `_GDOC_STYLES` with NO dependency on bs4 — the fallback that covers the bs4-failure path.
+    Mirrors `_apply_gdoc_inline_styles`' semantics: our declarations are written FIRST so any style
+    already on the element still wins. Returns (fragment, n_elements_styled)."""
+    import re
+    n = 0
+    frag = fragment or ""
+    for tag, base in _GDOC_STYLES.items():
+        def _fix(m, _base=base):
+            nonlocal n
+            attrs = m.group(2) or ""
+            sm = re.search(r'style\s*=\s*"([^"]*)"', attrs, re.I)
+            if sm:
+                if sm.group(1).strip().startswith(_base):
+                    return m.group(0)                       # already carries the spec, exactly
+                merged = _base + ";" + sm.group(1).strip().strip(";")
+                attrs = attrs[:sm.start()] + f'style="{merged}"' + attrs[sm.end():]
+            else:
+                attrs = attrs + f' style="{_base}"'
+            n += 1
+            return f"<{m.group(1)}{attrs}>"
+        frag = re.sub(rf"<({re.escape(tag)})(?=[\s/>])([^>]*)>", _fix, frag, flags=re.I)
+    return frag, n
+
+
+def _gdoc_enforce_format(fragment, md_src=""):
+    """Verify the reference spec landed on this fragment and REPAIR whatever did not — font, the
+    24/18/14/11pt scale, the paragraph/heading MARGINS that give the Doc its rhythm, the table borders,
+    and real <h1>/<h2>/<h3> tags so the Docs outline pane still works. Never raises, never refuses:
+    an upload must not fail because of formatting. Returns (fragment, repairs)."""
+    import re
+    frag, repairs = fragment or "", 0
+    try:
+        # 1. total loss — the markdown render died and the whole body is one <pre> block.
+        m = re.match(_GDOC_PRE_PAT, frag, re.S)
+        if m:
+            import html as _html
+            src = md_src or _html.unescape(m.group(1))
+            rebuilt = ""
+            try:
+                import markdown as _md
+                rebuilt = _md.markdown(_linkify_md_urls(_normalize_md_lists(
+                    _escape_md_hashtag_lines(scrub_markdown_formatting(src)[0]))),
+                    extensions=["tables", "fenced_code"])
+            except Exception:
+                rebuilt = ""
+            if not rebuilt.strip():
+                rebuilt = _gdoc_minimal_html(src)
+            if rebuilt.strip():
+                frag = rebuilt
+                repairs += 1
+                print("[gdoc] format-guard: the body had collapsed to one <pre> block — re-rendered "
+                      "with real headings, lists and tables", flush=True)
+        # 2/3. verify the spec, and style anything that is missing it.
+        frag, n = _gdoc_regex_style(frag)
+        repairs += n
+        if n:
+            print(f"[gdoc] format-guard: {n} element(s) were missing the Manrope/type-scale spec "
+                  "(the doc would have opened in Arial at Docs' defaults) — applied", flush=True)
+    except Exception as e:                                  # never fail an upload over formatting
+        print(f"[gdoc] format-guard skipped: {e}", flush=True)
+        return fragment, 0
+    return frag, repairs
+
+
+def _gdoc_doc_page(page_title, inner_html, md_src=""):
+    """FU196 — wrap already-rendered body HTML in the Manrope/Docs-targeted page shell.
+    FU202: the styling is then VERIFIED and repaired — it can no longer fail silently."""
     import html as _html
     inner_html = _apply_gdoc_inline_styles(inner_html)
+    inner_html = _gdoc_enforce_format(inner_html, md_src)[0]
     return (f'<!doctype html>\n<html lang="en"><head>\n<meta charset="utf-8">\n'
             f'<title>{_html.escape(page_title)}</title>\n<style>{_gdoc_css()}</style>\n</head>\n'
             f'<body>\n{inner_html}\n</body></html>\n')
@@ -3525,6 +3799,12 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
     import html as _html
     try:
         import markdown as _md
+        # FU201: repair markdown FORMATTING before rendering. `_normalize_md_lists` only ever
+        # covered LISTS; a "---" under a paragraph silently becomes a setext H2 (eating the
+        # paragraph into a heading) and an unclosed "**" renders literally — both would ship
+        # straight into the client's Google Doc. Applying it HERE also cleans bodies stored
+        # before FU201 (notably the Qwen rewrite) with no GPU re-run.
+        body = scrub_markdown_formatting(body)[0]
         inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(body))),
                              extensions=["tables", "fenced_code"])
     except Exception:
@@ -3578,6 +3858,12 @@ def _render_blog_doc_page(blog, brand, body, page_title, desc, published, update
         css = _gdoc_css()
         header = _apply_gdoc_inline_styles(header)
         inner = _apply_gdoc_inline_styles(inner)
+        # FU202: verify the spec actually landed and repair what did not. Covers BOTH silent paths —
+        # a bs4 failure (no inline styles at all) and a markdown-render failure (one <pre> block).
+        header = _gdoc_enforce_format(header)[0]
+        inner, _gfix = _gdoc_enforce_format(inner, body)
+        if _gfix:
+            print(f"[gdoc] format-guard: rescued {_gfix} formatting problem(s) in {slug}", flush=True)
     else:
         css = ("body{max-width:740px;margin:2rem auto;padding:0 1rem;"
                "font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}"
@@ -3609,13 +3895,13 @@ def _simple_doc_html(page_title, md_src):
     import html as _html
     try:
         import markdown as _md
-        inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
+        inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(scrub_markdown_formatting(md_src)[0]))),
                              extensions=["tables", "fenced_code"])
     except Exception:
         inner = "<pre>" + _html.escape(md_src) + "</pre>"
     inner = inner.replace("<a href=", '<a target="_blank" rel="noopener" href=')
     # FU196: this doc is handed to a client too, so it carries the same Manrope type scale.
-    return _gdoc_doc_page(page_title, inner)
+    return _gdoc_doc_page(page_title, inner, md_src)
 
 
 @app.route("/api/blogs/<int:blog_id>/export")
@@ -3653,7 +3939,7 @@ def api_blog_export(blog_id):
         md_src = (f"# {art_title}\n\n{art_body}") if art_title else art_body
         try:
             import markdown as _md
-            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(scrub_markdown_formatting(md_src)[0]))),
                                  extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(md_src) + "</pre>"
@@ -3778,7 +4064,7 @@ def api_blog_export(blog_id):
                        "do not flip it on\n")
         try:
             import markdown as _md
-            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(md_src))),
+            inner = _md.markdown(_linkify_md_urls(_normalize_md_lists(_escape_md_hashtag_lines(scrub_markdown_formatting(md_src)[0]))),
                                  extensions=["tables", "fenced_code"])
         except Exception:
             inner = "<pre>" + _html.escape(md_src) + "</pre>"
@@ -6221,6 +6507,16 @@ def api_blog_rewrite(blog_id):
             # scrubs and returns before touching a single [S#]. Placed AFTER the fallback check so a
             # fallback (which stores nothing) is never touched.
             new_body = gen._rebuild_sources(gen._sa(new_body))
+            # FU201: the on-demand rewrite never passes through `_finalize_article`, so the
+            # QWEN body — the one the Drive upload hands to a client — was the ONE body that
+            # never got the formatting repair. Fix it at the SOURCE too (FU186: the stored
+            # markdown must be correct for every consumer, not just the HTML render). The
+            # LinkedIn POST is deliberate plain-text lines, not markdown, so it is left alone.
+            if _surface != "linkedin_post":
+                new_body, _vfx = scrub_markdown_formatting(new_body)
+                if _vfx:
+                    print(f"[blog_gen] verify: {len(_vfx)} formatting fix(es) on the "
+                          f"{_surface} rewrite", flush=True)
             import time as _t
             secs = float(article.get("writer_secs") or 0)
             cost = round(secs * WRITER_GPU_HOURLY / 3600.0, 4)   # FU155: rough GPU-time cost estimate

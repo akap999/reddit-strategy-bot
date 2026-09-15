@@ -13119,6 +13119,29 @@ function blogCheckLinks(id) {
     }, 'Checking links');
 }
 
+// FU201 — manual verification. Claude READS the article and finds real defects; the repairs are
+// written by Claude on the original and by QWEN on the watermark-free rewrite. Every repair is gated
+// (citations, numbers, names, banned wording, the H1 / byline / Sources), and a refused one leaves the
+// original sentence alone and is reported.
+function blogVerify(id, surface, use) {
+    surface = surface || 'blog'; use = use || 'original';
+    const who = (use === 'rewritten') ? 'Qwen' : 'Claude';
+    runTask('/api/blogs/' + id + '/verify', { surface: surface, use: use }, (res) => {
+        if (res && res.ok) {
+            const bits = [];
+            if (res.n_fixed)   bits.push(`${res.n_fixed} formatting fix(es)`);
+            if (res.n_applied) bits.push(`${res.n_applied} repaired by ${who}`);
+            if (res.n_skipped) bits.push(`${res.n_skipped} left alone`);
+            if (res.n_flagged) bits.push(`${res.n_flagged} flagged`);
+            const ct = (typeof res.cost === 'number' && res.cost) ? ` \u00b7 $${res.cost.toFixed(2)}` : '';
+            toast(bits.length ? ('Verified \u2014 ' + bits.join(' \u00b7 ') + ct)
+                              : ('Verified \u2014 nothing to fix' + ct),
+                  (res.n_flagged || res.n_skipped) ? 'error' : 'success', 12000);
+        }
+        openBlog(id);
+    }, 'Verifying with ' + (use === 'rewritten' ? 'Claude, repairing with Qwen' : 'Claude'));
+}
+
 // FU79 — generation PAUSED: the model couldn't source a tool after all retries. Ask for a link/fact
 // per missing tool (or skip → drop it), then finish via /api/blogs/<id>/provide-sources.
 function _blogFactLabel(facts) {
@@ -13539,7 +13562,7 @@ async function openBlog(id) {
     // the actual flagged claims (before hidden behind a count), and the on-demand link-rot result.
     const qr = b.quality_report || {};
     let qualityPanel = '';
-    if (qr && (qr.checks || qr.warnings || qr.link_check)) {
+    if (qr && (qr.checks || qr.warnings || qr.link_check || qr.verify)) {
         const chk = (qr.checks || []).map(c =>
             `<div>${c.ok ? '✅' : '⚠️'} ${_blogEsc(c.label)}${c.detail ? ` <span class="text-gray-500">(${_blogEsc(c.detail)})</span>` : ''}</div>`).join('');
         const warns = (qr.warnings || []).map(w => `<div class="text-amber-400">⚠ ${_blogEsc(w)}</div>`).join('');
@@ -13551,9 +13574,42 @@ async function openBlog(id) {
             const d = qr.link_check.dead || 0;
             lc = `<div class="${d ? 'text-red-400' : 'text-emerald-400'}">${d ? `⚠ ${d} dead link(s) of ${qr.link_check.checked}` : `✓ all ${qr.link_check.checked} links OK`}${(qr.link_check.results || []).filter(r => !r.ok).map(r => `<div class="text-gray-500 pl-3">${r.status || 'err'} — ${_blogEsc(r.url)}</div>`).join('')}</div>`;
         }
+        // FU201: what the final verification fixed automatically, and what it could only flag.
+        let vfy = '', _edScore = null;
+        const _v = qr.verify || (b.verify_report || null);
+        if (_v) {
+            const _row = (cls, txt) => `<div class="${cls}">${_blogEsc(txt)}</div>`;
+            const _fx = (_v.fixed || []).map(f => _row('text-emerald-400', '\u2713 ' + (f.detail || f.kind)));
+            const _fl = (_v.flagged || _v.issues || []).map(i =>
+                _row('text-amber-400', '\u26a0 ' + (i.problem || '') + (i.detail ? ' \u2014 ' + i.detail : '')));
+            const _ap = (_v.applied || []).map(a =>
+                _row('text-emerald-400', '\u2713 repaired (' + (a.kind || '') + '): ' + (a.problem || '')));
+            const _sk = (_v.skipped || []).map(x =>
+                _row('text-gray-400', '\u21b7 left alone \u2014 ' + (x.reason || '')));
+            const _by = _v.repaired_by ? ` <span class="text-gray-500">(repaired by ${_blogEsc(_v.repaired_by)})</span>` : '';
+            // FU202: the editorial read of the finished article. Reported BESIDE the deterministic
+            // structure score above, never merged into it — that one has to stay reproducible.
+            const _as = _v.assessment || null;
+            let _asHtml = '';
+            if (_as) {
+                if (typeof _as.score === 'number') _edScore = _as.score;
+                const _pts = (arr, mark, cls) => (arr || []).slice(0, 5)
+                    .map(t => _row(cls, mark + ' ' + t)).join('');
+                _asHtml = (_as.verdict ? _row('text-gray-300 mt-1', _as.verdict) : '')
+                    + _pts(_as.strengths, '+', 'text-emerald-400')
+                    + _pts(_as.weaknesses, '\u2212', 'text-amber-400');
+            }
+            vfy = `<div class="mt-1"><span class="font-bold">Verification</span>${_by}</div>`
+                + _fx.join('') + _ap.join('') + _fl.join('') + _sk.join('') + _asHtml;
+        }
+        // FU202: BOTH versions are kept — the body as it stood before the pass edited it. Shown
+        // read-only so the operator can see exactly what an auto-repair changed.
+        if (b.body_pre_verify) {
+            vfy += `<details class="mt-1"><summary class="cursor-pointer text-gray-400">Show the version before verification</summary><pre class="mt-1 text-gray-400" style="white-space:pre-wrap;max-height:240px;overflow:auto">${_blogEsc(b.body_pre_verify)}</pre></details>`;
+        }
         const score = (typeof qr.score === 'number') ? qr.score : null;
         const scoreCls = score == null ? 'text-gray-400' : (score >= 80 ? 'text-emerald-400' : (score >= 60 ? 'text-amber-400' : 'text-red-400'));
-        qualityPanel = `<details class="mb-2 text-xs" style="background:#0f0f16;border-radius:6px;padding:6px"><summary class="cursor-pointer"><span class="${scoreCls} font-bold">Quality${score == null ? '' : ' ' + score + '/100'}</span> <span class="text-gray-500">— structure / meta / links checklist</span> <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="event.preventDefault();blogCheckLinks(${id})">Check links</button></summary><div class="mt-2 space-y-1">${chk}${warns ? '<div class="mt-1">' + warns + '</div>' : ''}${lc ? '<div class="mt-1">' + lc + '</div>' : ''}${claimsList}</div></details>`;
+        qualityPanel = `<details class="mb-2 text-xs" style="background:#0f0f16;border-radius:6px;padding:6px"><summary class="cursor-pointer"><span class="${scoreCls} font-bold">Quality${score == null ? '' : ' ' + score + '/100'}</span>${_edScore == null ? '' : ' <span class="text-gray-400">\u00b7 editorial ' + _edScore + '/100</span>'} <span class="text-gray-500">— structure / meta / links checklist</span> <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="event.preventDefault();blogCheckLinks(${id})">Check links</button> <button class="btn btn-sm btn-secondary" title="Claude re-reads the whole article — contradictions, price and brand inconsistencies, typos, duplicated claims, promises of a link with no link — and fixes what it safely can. A repair that would drop a citation, a number or a name is refused and reported, never silently applied." onclick="event.preventDefault();blogVerify(${id}, 'blog', 'original')">Verify</button></summary><div class="mt-2 space-y-1">${chk}${warns ? '<div class="mt-1">' + warns + '</div>' : ''}${lc ? '<div class="mt-1">' + lc + '</div>' : ''}${vfy}${claimsList}</div></details>`;
     }
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
@@ -13589,7 +13645,7 @@ async function openBlog(id) {
                         <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free LinkedIn post (rewritten on the self-hosted model)</label>
                         <div class="flex items-center gap-2">
                             <span class="text-xs" style="color:#94a3b8">${_rwMeta('linkedin_post')}</span>
-                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_post')" title="Re-author this LinkedIn post on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button>
+                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_post')" title="Re-author this LinkedIn post on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button> <button class="btn btn-sm btn-secondary" title="Claude re-reads this rewritten version — contradictions, price and brand inconsistencies, typos, duplicated claims, missing links — then QWEN writes the corrections. Every repair must keep the citations, numbers and names; one that does not is left alone and reported." onclick="blogVerify(${id}, 'linkedin_post', 'rewritten')">✓ Verify &amp; fix</button>
                         </div>
                     </div>
                     <textarea id="blog-e-li-rw" rows="6" placeholder="Click Generate to produce the watermark-free version…">${_blogEsc(b.linkedin_rewritten || '')}</textarea>
@@ -13624,7 +13680,7 @@ async function openBlog(id) {
                         <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free LinkedIn article (rewritten on the self-hosted model)</label>
                         <div class="flex items-center gap-2">
                             <span class="text-xs" style="color:#94a3b8">${_rwMeta('linkedin_article')}</span>
-                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_article')" title="Re-author this LinkedIn article on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button>
+                            <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id}, 'linkedin_article')" title="Re-author this LinkedIn article on your self-hosted open model — same facts, same structure, different wording. The original above is never touched.">✍ Generate / Regenerate</button> <button class="btn btn-sm btn-secondary" title="Claude re-reads this rewritten version — contradictions, price and brand inconsistencies, typos, duplicated claims, missing links — then QWEN writes the corrections. Every repair must keep the citations, numbers and names; one that does not is left alone and reported." onclick="blogVerify(${id}, 'linkedin_article', 'rewritten')">✓ Verify &amp; fix</button>
                         </div>
                     </div>
                     <textarea id="blog-e-li-article-rw" rows="14" placeholder="Click Generate to produce the watermark-free version…">${_blogEsc(b.linkedin_article_rewritten || '')}</textarea>
@@ -13642,7 +13698,7 @@ async function openBlog(id) {
                     <div class="flex items-center gap-2">
                         <span id="writer-status" class="text-xs" style="color:#94a3b8" title="Checking costs money: a probe is a request, and a request boots the GPU. Press Warm up when you actually intend to rewrite — a cold GPU spends several minutes loading ~40GB before the rewrite can start.">● model status not checked — Warm up loads it</span>
                         <button class="btn btn-sm" style="background:#0e7490;color:#cffafe" onclick="writerWarmUp()" title="Wake the GPU now so the model is loaded BEFORE you start a rewrite — pinging the endpoint is what triggers the load. Watch the dot turn green.">🔥 Warm up</button>
-                        <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button>
+                        <button class="btn btn-sm" style="background:#155e75;color:#cffafe" onclick="blogGenRewrite(${id})" title="Re-compose this finished article on your self-hosted open model so a Claude watermark is replaced. The original above is never touched.">✍ Generate / Regenerate</button> <button class="btn btn-sm btn-secondary" title="Claude re-reads this rewritten version — contradictions, price and brand inconsistencies, typos, duplicated claims, missing links — then QWEN writes the corrections. Every repair must keep the citations, numbers and names; one that does not is left alone and reported." onclick="blogVerify(${id}, 'blog', 'rewritten')">✓ Verify &amp; fix</button>
                     </div>
                 </div>
                 <div class="text-xs text-gray-400 mb-1">The original blog is always kept. This is a reworded, watermark-free copy to hand clients — same facts, citations &amp; structure, different wording. Needs the writer endpoint configured in Settings (Content writer card).</div>

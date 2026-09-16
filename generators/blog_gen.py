@@ -7460,11 +7460,17 @@ Return JSON only:
                 f"link — remove them or publish and link the page (e.g. \u201c{bad[0]}\u2026\u201d)")
 
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
-                          ymyl=None, link_targets=None):
+                          ymyl=None, link_targets=None, with_linkedin=True):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
         geo-check — a WARNING (never a block) when a geo page barely mentions its geography. FU151 (D):
-        also computes the deterministic quality scorecard. Mutates + returns `article`."""
+        also computes the deterministic quality scorecard. Mutates + returns `article`.
+
+        FU205 (R1): `with_linkedin=False` runs the entire guard set and every check but SKIPS the
+        LinkedIn adaptation. That is what lets `regenerate part=article` / `part=verify` — which
+        hand-rolled a partial subset and so silently lost the sections their own rewrites dropped —
+        reach this one composition without also regenerating a surface the operator did not ask for
+        (`part=linkedin` exists for that) and without paying for the extra call."""
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
@@ -7780,7 +7786,8 @@ Return JSON only:
         _vrep = self._verify_final_article(brand, article)
         if _vrep:
             article["verify_report"] = _vrep
-        article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
+        if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring
+            article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
         # FU151 (D): deterministic quality scorecard (structure/meta/links + folded warnings), persisted.
         try:

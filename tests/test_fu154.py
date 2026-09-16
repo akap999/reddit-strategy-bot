@@ -185,8 +185,13 @@ def test_rewritten_columns_migrate_and_roundtrip():
                        rewritten_at="2026-09-07T00:00:00Z", rewritten_warning="",
                        rewritten_cost=0.03)
         blog = db.get_blog(bid)
-        assert blog["body_markdown"] == "orig body"      # original never touched
-        assert blog["rewritten_body"] == "new body"
+        # FU205 (R1): every blog write now passes through the shared guard set, and
+        # `scrub_markdown_formatting` normalises a stored body to exactly one trailing newline. The
+        # guarantee this test exists for — the ORIGINAL body is never replaced by the rewrite — is
+        # unchanged; only the trailing whitespace is normalised.
+        assert blog["body_markdown"].strip() == "orig body"   # original never touched
+        assert blog["body_markdown"] == "orig body\n"        # …and normalised, not rewritten
+        assert blog["rewritten_body"] == "new body\n"   # FU205 (R1): same trailing-newline normalisation
         assert abs((blog["rewritten_overlap"] or 0) - 0.04) < 1e-6
         assert abs((blog["rewritten_cost"] or 0) - 0.03) < 1e-6   # FU155
         assert blog["rewritten_at"] == "2026-09-07T00:00:00Z"

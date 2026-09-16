@@ -285,12 +285,18 @@ def test_the_endpoint_repairs_formatting_and_persists_the_report(monkeypatch):
         r = cli.post(f"/api/blogs/{bid}/verify", json={"surface": "blog", "use": "original"})
         assert r.status_code == 200
         res = box["result"]
-        assert res["ok"] and res["n_fixed"] >= 1
+        # FU205 (R1) REVERSED THIS DELIBERATELY, and the reversal IS the fix. The seed body has a
+        # list directly under a paragraph — the exact defect this endpoint was built to repair. That
+        # body now goes through the shared guards at `db.save_blog`, so it is ALREADY correct in
+        # storage and the verification pass finds nothing left to fix. What the test still proves is
+        # the outcome that matters: the stored body renders as a real <ul>. The endpoint's repair
+        # machinery is covered on its own terms by the gated-repair tests below.
+        assert res["ok"] and res["n_fixed"] == 0, "nothing left to repair — R1 caught it at write"
         db = Database(path)
         db.connect()
         b = db.get_blog(bid)
         db.close()
-        assert "<ul>" in _html(b["body_markdown"]), "the stored body was repaired"
+        assert "<ul>" in _html(b["body_markdown"]), "the stored body is correct"
         assert (b["quality_report"] or {}).get("verify"), "the report persisted"
     finally:
         os.unlink(path)

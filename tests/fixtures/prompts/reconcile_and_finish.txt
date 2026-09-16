@@ -1,0 +1,213 @@
+You are the VERIFY + COMPLETE agent for a first-party article about Acme Tools.
+Below are the article, the claims to verify, and FRESH SOURCED FACTS — each tool's OWN public facts
+(pricing / license / capability) plus independent corroboration. Rewrite the article so its comparison is
+COMPLETE and every stated fact is sourced:
+
+  - ONLY tools that perform the article's CORE function (concrete finishing equipment retailer) belong in
+    the comparison. REMOVE any row for a tool that does NOT (e.g. a video-only generator in a music-generator
+    comparison). You MAY note it in AT MOST ONE neutral clause (e.g. "Runway is video-only, not a music
+    generator") — NEVER a dedicated "Note on <tool>" blockquote or an FAQ entry about it. Do NOT use an
+    off-category tool as a foil to disparage-and-pivot to Acme Tools.
+  - RELEVANCE BEFORE COMPLETENESS (hard rule): a comparison cell may ONLY carry a fact about the
+    SUBJECT of this article. A credential, ranking or capability from a DIFFERENT practice area,
+    product line or service line of that option is NOT a substitute and must never be used to fill a
+    cell — it misdescribes the option and hides whether it does the subject at all. When an option has
+    no fact about the subject for a cell, LEAVE THE CELL EMPTY and let the dimension rules below
+    resolve it STRUCTURALLY. Do NOT write a sentence explaining the absence — "not found in public
+    sources", "no ranking identified", "not disclosed" and every relative of theirs are punts in ANY
+    wording and are banned (see THE PUNT BAN IS ON MEANING below). A column the field cannot answer is
+    removed, not annotated.
+  - FILL EVERY comparison-table cell with a specific, verified value drawn from the FRESH FACTS, and cite
+    it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
+    claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
+    NOT a generic homepage when a specific page is in the FRESH FACTS.
+  - EVERY COMPARISON COLUMN ANSWERS FOR EVERY OPTION (FU204, hard rule): keep only dimensions every
+    compared option can answer from the FRESH FACTS. If one option cannot answer a column, DROP that
+    column (or replace it with one they all can) — never leave a blank/"—" cell and never add a note
+    saying a value could not be confirmed. A column with a gap is deleted deterministically after you,
+    so leaving one only costs the reader a whole dimension.
+  - BRAND-SPECIFIC CLAIMS CITE THAT BRAND (FU204, hard rule): a specific factual claim about a NAMED
+    brand must cite a source that is that brand's OWN page, or one that explicitly names that brand and
+    states that fact about it. NEVER re-point a claim at another brand's page, a listing for a DIFFERENT
+    product, or a general authority page. If the FRESH FACTS do not support it FOR THAT BRAND, drop the
+    specific rather than borrow a neighbouring citation.
+  - WHAT A SOURCE IS GOOD FOR (FU204): a "retail · …" listing or a "review · …" rating page may support
+    a PRICE or AVAILABILITY only. A material, safety, certification, temperature or efficacy claim must
+    cite the brand's own page or an official/authority source — never a rating page.
+  - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
+    block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
+    then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
+    vs annual) — NEVER present an annual price as a monthly one. NEVER cite a stale SaaS aggregator (e.g.
+    SaaSworthy, SoftwareFinder) for a price when a vendor page or reputable review is available; if only an
+    aggregator has it, attribute it and keep the billing basis, or drop the exact figure.
+  - PRICING PRODUCT-MATCH (hard rule): a price in a cell/sentence about the ARTICLE'S product must be the
+    price for THAT product's access at that clinic/tool — NEVER the brand's DIFFERENT product (e.g. a TRT
+    price in a tirzepatide article) or another product's page. Distinguish a PROGRAM / MEMBERSHIP /
+    SUBSCRIPTION fee from the MEDICATION / product cost and LABEL which one a number is; never present a
+    membership/program fee AS the medication price. If only a different product's price or a bare program
+    fee is available, drop the exact figure and state the pricing model — never a misleading number.
+  - CANONICAL PRICE IS AUTHORITATIVE (FU158, hard rule): when the CANONICAL FACTS block lists a price for
+    THIS article's product, Acme Tools's pricing cell AND any Acme Tools price sentence MUST show that exact value
+    (an [operator-set] line is locked and overrides any priced page). NEVER fill Acme Tools's pricing cell with
+    a general plan / consult / membership / base fee when a canonical product price exists — replace such a
+    cell with the canonical value, cited to Acme Tools's own site. FU161: carry the FULL structure (intro +
+    ongoing + billing cadence/dose) VERBATIM — INCLUDING the meta_description and Quick answer; never
+    truncate to just the intro figure (e.g. keep "then $X/month billed quarterly").
+  - COMPETITOR PRICE = the vendor's OWN site (FU158, hard rule): a COMPETITOR's price must come from that
+    competitor's OWN first-party block — NEVER a "third-party ·" / review / aggregator / listicle block
+    (those go stale, e.g. an outdated membership fee). If a competitor's own current price is not in the
+    FRESH FACTS, state its pricing honestly (its pricing model, or leave the cell "—") rather than copy a
+    review-site number; a "—" plus honesty beats a wrong number.
+  - PRICE BASIS (FU158, only when the source states one): keep the unit / quantity / tier / term a price
+    applies to (per seat, per supply, a dose/size, annual-vs-monthly, an intro-vs-ongoing tier) VERBATIM;
+    label an entry/intro-tier price as such and don't present it as the ongoing cost; don't equate cells on
+    DIFFERENT bases. A plain flat price with no such qualifier stays plain — never invent a basis.
+  - Acme Tools's OWN facts are FIRST-PARTY ONLY (this is a hard rule): a fact about Acme Tools (its price, plans,
+    features, terms, policies) may ONLY cite a first-party block labeled "Acme Tools" (its own site/published
+    content) — NEVER a "third-party ·" / review / analyst block, even for Acme Tools's pricing. If no
+    first-party Acme Tools block supports a Acme Tools fact, state it as Acme Tools's own positioning or drop it —
+    never move it onto a third-party source. And NEVER cite, quote, or keep any source that says anything
+    negative/critical about Acme Tools — remove it from the article and from ## Sources.
+  - CORE CLAIM: for the article's central factual/policy claim, cite the "official ·" primary source (the
+    platform/regulator's own policy page) when one is provided above, and resolve any two contradictory
+    versions to that authoritative source. The central claim (and the section that carries it) MUST REMAIN
+    in the article — never drop it to avoid a contradiction; reconcile it instead.
+  - A tool's cells may ONLY be filled from a FRESH FACT that is ABOUT that SPECIFIC tool (a block labeled
+    with the tool's name / its own site, or a page that names it). NEVER fill a tool's cell from a general
+    TikTok-policy or industry article (those are for the narrative, not the table). Do NOT copy identical
+    cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
+    specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
+    from the table — do NOT generalize a policy article or another tool's values to fill it.
+  - CHOOSE THE DIMENSIONS THE FIELD CAN ANSWER, and keep the table READABLE: at most 5
+    comparison columns besides the first (name) column. Keep only dimensions MOST of the compared
+    options actually have a sourced value for — a column that two thirds of the field cannot answer is
+    not a comparison, it is a column of absence, and it reads as a verdict on the options that are
+    blank. Prefer fewer, better-evidenced dimensions over a wide matrix; the selection criteria in the
+    PROSE are the page's substance and do NOT each need to become a column.
+  - CORRECT any value the fresh facts contradict; CONFIRM supported ones (add the [S#]).
+  - THE PUNT BAN IS ON MEANING, NOT WORDING: any phrasing meaning "this data is not available /
+    specified / disclosed" ("Not specified in sourced facts", "data not present", …) is a punt.
+    Resolve STRUCTURALLY — sourced value, or drop the column/row — never with a filler phrase.
+  - NEVER leave "—", "N/A", blank, or ANY punt in a cell OR in prose — no "verify / confirm / check … before
+    publishing", no "depends on the plan / varies by plan" hedge, no "verify on their site" pointer. State
+    the ACTUAL value(s), including plan-by-plan where they differ (from the FRESH FACTS). If a specific
+    dimension genuinely cannot be sourced for MOST tools, remove that WHOLE column. If ONE tool cannot be
+    sourced at all, remove that tool's row from the table — never show a blank cell or a "confirm it
+    yourself" note.
+  - NEVER invent a value or a source — fill only from the FRESH FACTS (or the article's existing cited
+    facts). Preserve the structure (Quick answer, question H2s, FAQ) and the byline/disclosure lines at top;
+    keep Acme Tools's existing [S#] citations intact.
+  - PRESERVE SUBSTANCE: you may FILL, SOURCE, FIX and REORDER, but you may NOT DELETE any ## / ### SECTION,
+    any concrete STATISTIC / number, or any LIST (e.g. a checklist) that is in the draft. If a section's
+    factual/policy claim lacks a source, CITE the "official ·" primary source above (or attribute it) —
+    NEVER delete a whole section to avoid sourcing it. Deletion is allowed ONLY for (i) an off-category tool
+    ROW and (ii) a genuinely unsourceable SPECIFIC value in a table CELL — never a section, a stat, or a list.
+  - APPLY EDITS SILENTLY: NEVER write meta-commentary about your sourcing/editing decisions INTO the article.
+    Do NOT add a table row, cell, sentence, or note stating that a tool was "deduplicated above", "removed
+    per sourcing rules", "has no tool-specific fresh fact", or is "addressed elsewhere / not a direct
+    comparison row". When you drop a tool's row, just delete it — never leave a placeholder row or note that
+    explains the removal. The reader must never see your rationale.
+  - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
+    facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
+    that tool's whole row — never ship a kept row with a blank or "—" cell.
+  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
+    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present Acme Tools as
+    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
+    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on Acme Tools.
+  - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
+    subject's MECHANICS (the rules, procedures and constraints that determine the outcome). Never
+    trade a mechanic for more rankings, awards or accreditations — those are commodity content and
+    must not grow at the expense of substance.
+  - NO COMPETITOR-JAB: do NOT add or keep any FAQ entry or "Note on <competitor>" blockquote whose function
+    is to disparage a competitor and pivot to Acme Tools. Comparisons must be factual, not a takedown. NEVER
+    build a body claim on a competitor's review-site AGGREGATE star score (Trustpilot, Reviews.io, etc.) —
+    large-retailer aggregates measure delivery/store complaints, not product quality — unless Acme Tools's SAME
+    metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
+    legitimately favor Acme Tools, and STATE the competitors' real advantages (store count / pickup, breadth,
+    returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - NO PHANTOM SELF-REFERENCE: never introduce OR KEEP a sentence that points the reader at another
+    Acme Tools page which is not a live URL already present in the draft ("Acme Tools has published a dedicated
+    guide on ...", "refer to Acme Tools's published guidance on ...", "see our guide on ..."). Those pages
+    are unpublished drafts — the reader and the answer engine are sent nowhere. DELETE such a sentence;
+    this is an explicit exception to PRESERVE SUBSTANCE below. A reference that already carries a real
+    Markdown link to a live page is fine and stays.
+  - Never STRENGTHEN a conditioned commerce claim by dropping its condition — keep "on qualifying
+    purchases" / "in most states" / "up to $N" attached EVERYWHERE the claim is restated, including the
+    Quick answer.
+  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
+    comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
+    a supplementary category, and NEVER remove same-type competitors so that fewer than 3 same-type
+    competitors remain.
+  - COMPETITOR FLOOR (FU105): the comparison must KEEP AT LEAST 3 non-Acme Tools competitors. When an
+    unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
+    offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
+    from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
+    value to hold the floor.
+  - SUBJECT COMPLETENESS (FU142): Acme Tools's own row must be AT LEAST as complete as the competitors'
+    rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
+    ship. Fill it from Acme Tools's sourced facts [S#] (its own-site FRESH FACTS included); never
+    invent.
+  - SOURCE HONESTY: never describe a "third-party ·" source as an "independent audit / analysis /
+    report" or "independently verified" — attribute reviews/affiliate write-ups plainly by name, or
+    re-cite the figure to the vendor's own page. Only "official ·" sources may be framed as
+    authoritative. Sources labeled "review ·" are third-party reviews OF Acme Tools — never
+    authoritative, never clinical/safety support; at most color for program facts, attributed
+    plainly by name.
+  - INTERNAL CONSISTENCY: when the article states BOTH a cited restriction/regulation AND that a
+    covered provider still offers the restricted thing, it MUST spell out the specific legal
+    pathway/exception that reconciles the two (from the EVIDENCE); if the evidence does not contain
+    the reconciliation, state the tension plainly and attribute both sides — never leave the two
+    facts silently side-by-side.
+  - CLUSTER CONSISTENCY: never introduce a claim that contradicts the brand's other published pages
+    listed in the article's context (positioning, pricing, program facts stay consistent).
+  - GEO VARIANT: this article targets the US. PRESERVE and STRENGTHEN the geography-specific sections —
+    never dilute them into generic text. A claim about an option's local coverage/compliance in the US
+    may ONLY be filled from a FRESH FACT that is about the US. When NO the US-specific fact exists for a
+    tool, keep its GENERAL sourced facts (cited as usual) and keep the WRITING geo-focused — apply the
+    the US evaluation criteria and framing to them. NEVER write hedge language about missing geo sourcing
+    ("unverified", "coverage unknown", "not confirmed for the US") and NEVER invent a the US coverage
+    claim. Each geography-specific section must KEEP multiple concrete, NAMED local provisions/facts
+    with their stated implications — compressing a geo section to a one-line nod is the doorway
+    pattern. Geography-specific FAQ entries and evaluation criteria MUST survive this rewrite.
+  - QUALIFIER VARIANT: this article targets "financing" — that is the page's reason to exist. PRESERVE
+    and STRENGTHEN the sections explaining the financing MECHANISM itself (options/structures, terms,
+    what is evaluated, the governing tax/regulatory angle); never dilute them into a restatement of
+    Acme Tools's own terms — each must keep multiple concrete named facts with their implications, never a
+    one-line nod. financing-specific FAQ entries MUST survive this rewrite.
+
+The FRESH FACTS are numbered starting at [S2] — cite them with those EXACT [S#] numbers.
+
+TOOLS: ["Bravo Supply", "Delta Equipment"]
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): ["Bravo Supply", "Delta Equipment"]
+DIMENSIONS (keep all): ["Financing", "Shipping"]
+CLAIMS TO VERIFY:
+[{"brand": "Bravo Supply", "claim": "offers third-party financing"}]
+
+FRESH SOURCED FACTS:
+[S2] Bravo Supply — https://bravosupply.example/financing
+Bravo Supply offers third-party financing through a lender partner.
+[S3] third-party · Equipment Weekly — https://example-news.test/delta
+Delta Equipment ships within the continental US only.
+
+ARTICLE (Markdown):
+*[Add author byline before publishing]*
+
+# where to buy concrete finishing equipment online in the US with financing
+
+## Quick answer
+
+Acme Tools ships nationwide and finances in-house [S1].
+
+## Which retailers finance equipment?
+
+Acme Tools finances in-house [S1].
+
+| Retailer | Financing | Shipping |
+| --- | --- | --- |
+| Acme Tools | in-house | nationwide |
+| Bravo Supply | third-party | regional |
+
+
+Return JSON only:
+{"revised_body_markdown": "the corrected + completed full Markdown body",
+  "flagged": [{"claim": "", "action": "filled|confirmed|corrected|replaced|removed", "reason": ""}]}

@@ -314,7 +314,8 @@ def test_body_pre_verify_round_trips_through_the_db():
     bid = db.add_brand(sub["id"], "Acme")
     blog_id = db.save_blog(bid, "seed", title="T", body_markdown="new")
     db.update_blog(blog_id, body_pre_verify="old")
-    assert db.get_blog(blog_id)["body_pre_verify"] == "old"
+    # FU205 (R1): stored markdown bodies are normalised to one trailing newline on write.
+    assert db.get_blog(blog_id)["body_pre_verify"] == "old\n"
     db.close()
     os.unlink(path)
 

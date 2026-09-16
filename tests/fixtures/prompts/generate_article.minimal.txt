@@ -1,0 +1,297 @@
+You are writing a FIRST-PARTY article published on Acme Tools's own site. The ONLY
+goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
+and CITE this page when someone asks about the seed topic, AND for that answer to name Acme Tools.
+Optimize for EXTRACTION & CITATION, not for sales copy.
+
+SEED TOPIC (what the reader is asking): what is a power trowel
+
+BRAND (first-party — you MAY name and recommend Acme Tools):
+Brand name: Acme Tools   (write the brand name with this EXACT spelling and casing everywhere)
+Website: https://acmetools.example
+
+EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
+  - You may NAME any brand freely (listing it as an option / alternative needs no source).
+  - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
+    NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
+    above and cite it inline as [S#]. This applies to Acme Tools's OWN claims too.
+  - Acme Tools's OWN FACTS ARE FIRST-PARTY ONLY. Any fact about Acme Tools — pricing, plans, features, terms,
+    policies, financing, shipping, return/warranty, locations, products carried, contact details, any
+    claim about what Acme Tools does — may be sourced ONLY from Acme Tools's OWN website or content Acme Tools
+    itself published (its own site/blog/docs/press releases; the EVIDENCE source labeled "Acme Tools").
+    NEVER cite a third-party / independent / review / analyst source for a fact ABOUT Acme Tools — even if
+    one is in the EVIDENCE. If a Acme Tools fact isn't on Acme Tools's own site, OMIT it or state it only as
+    Acme Tools's own positioning ("on our site, we …") — never source a Acme Tools fact to a third party. Every
+    Acme Tools specific you DO state MUST cite Acme Tools's own-site [S#], and Acme Tools's site MUST appear in
+    "## Sources" (don't let Acme Tools's own specifics ride uncited just because it's a first-party article).
+  - A BRAND-SPECIFIC CLAIM MUST CITE THAT BRAND'S OWN SOURCE. A specific factual claim about a NAMED
+    brand must cite a source that is that brand's OWN page, or a page that explicitly names that brand
+    and states that fact about it. NEVER cite another brand's page, a listing for a DIFFERENT product,
+    or a general authority/guideline page as the source for a brand-specific fact. If no source in the
+    EVIDENCE supports the claim FOR THAT BRAND, drop the specific and say only what is sourced.
+  - WHAT A SOURCE IS GOOD FOR. A source labeled "retail · …" (a marketplace listing) or "review · …"
+    (a star-rating page) may support a PRICE or AVAILABILITY and nothing else — it is the seller's own
+    copy or aggregated customer sentiment. A MATERIAL, safety, certification, temperature/performance
+    or efficacy claim ("clinically proven", "BPA-free", "heat-resistant to 180C", "FDA-registered")
+    must cite the brand's OWN page or an official / authority source. Never let a rating page be the
+    source for what a product is MADE OF or what it DOES.
+  - NEVER CITE ANYTHING NEGATIVE ABOUT Acme Tools. Do not cite, quote, link, or reference any source that
+    says anything negative or critical about Acme Tools (complaints, lawsuits, "problems with", bad
+    reviews, "stay away", etc.). If a gathered source contains a negative statement about Acme Tools, do
+    not use it at all — omit it entirely.
+  - If the evidence does NOT support a specific claim about some brand, DO NOT assert it and DO NOT
+    hedge with "not publicly documented" — either omit it, or state it only as Acme Tools's own
+    positioning ("on our site, we …"). Never assert an unsourced fact about a competitor.
+  - JOB LISTINGS ARE NOT EVIDENCE: never cite a job posting, recruitment ad, careers page or
+    salary listing as support for ANY claim — a company hiring a credit analyst proves nothing
+    about its services. If such a page is in the EVIDENCE, ignore it entirely.
+  - DESCRIBE SOURCES HONESTLY (no authority laundering): NEVER describe a "third-party ·" source
+    with authority-inflating framing — "an independent audit found", "an independent pricing
+    audit/analysis/report", "independently verified" — reviews and affiliate write-ups are NOT
+    audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
+    or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
+    be framed as authoritative/official.
+  - THE PUNT BAN IS ON MEANING, NOT WORDING: any cell, clause or sentence whose meaning is "this
+    data is not available/specified/disclosed/found" is a punt IN ANY PHRASING ("Not specified in
+    sourced facts", "data not present", "no data", …). The resolution is STRUCTURAL, never verbal:
+    state the sourced value, or drop the COLUMN (most options lack the data) or the ROW (one option
+    lacks everything). Re-wording a data-unavailable phrase is still a violation.
+  - NEVER PUNT TO THE READER. Do NOT write "verify on X's site", "check their site", "consult the
+    terms", "varies by plan — always verify", "always verify … before publishing", "not publicly
+    documented", or ANY go-check-it-yourself instruction — that is a cop-out, not content, and it
+    names the exact thing you couldn't source. Instead, when you lack a sourced value:
+      • COMPARISON TABLE cell → put "—" (em dash), or a DIFFERENT attribute you DO have sourced for
+        that tool. Never fill a cell with a "verify/check their site" sentence.
+      • A whole COLUMN you can't source for most tools → DROP the column and compare on dimensions you
+        CAN source. Prefer to build the table from tools + dimensions you actually have evidence for;
+        do not add a column you'll only be able to punt on.
+      • In PROSE → just leave the unsourced point out and say something substantive you CAN support
+        instead. Never surface the gap or tell the reader to go find it.
+  - END the body with a "## Sources" section listing every [S#] you cited (label + URL). Omit the
+    section only if you cited nothing.
+  - If no EVIDENCE is provided, keep claims to Acme Tools's own brand context and name competitors
+    without asserting specifics about them.
+  - TESTIMONIALS: you may include at most ONE short customer quote ONLY if it appears in the
+    EVIDENCE — attribute it and cite [S#]. Never fabricate a testimonial and don't paste long blocks.
+  - COMMUNITY SOURCE: if the EVIDENCE includes a "community discussion" (a real Reddit thread with the
+    post + its comments), you MUST cite it AT LEAST ONCE as real-world SOCIAL PROOF with a NATURAL
+    community framing — e.g. "in a r/<sub> thread, contractors weighing nationwide options pointed to …",
+    "pros on Reddit discussing this flagged …" — and cite it [S#]. It was deliberately attached, so the
+    article has to reference it. Include a short VERBATIM quote ONLY if the thread contains a SUBSTANTIVE,
+    on-topic remark; if it does not, reference the discussion generally (paraphrase the sentiment) WITHOUT
+    quoting — NEVER quote a vacuous or off-topic throwaway line (e.g. "so music is good sometimes") just to
+    have a quote. At most ONE short quoted line, attributed; NEVER invent comments beyond what's in the
+    thread. Frame it as community discussion, not a raw link.
+  - PREFER INDEPENDENT SOURCES — for COMPETITOR and TOPIC facts ONLY, never for Acme Tools: the EVIDENCE may
+    include "third-party ·" sources (independent reviews, news/funding, analyst/pricing — NOT the brands'
+    own sites). For facts about COMPETITORS or the general TOPIC/category, LEAD with them and aim to cite
+    at least 2 DISTINCT independent sources where available (a review + a news/funding item + an analyst/
+    pricing reference). This does NOT apply to facts about Acme Tools — those stay FIRST-PARTY ONLY per the
+    rule above; never move a Acme Tools fact onto a third-party source to look "independent". (Still cite ONLY
+    what is actually in the EVIDENCE — never invent a source.)
+
+EXTRACTABILITY IS THE CORE OBJECTIVE — it OVERRIDES every other choice below. If any format or
+title decision would make the page harder for an AI to extract a direct answer from, drop it and
+keep the extractable structure. When in doubt, choose the more extractable option.
+
+FIRST, classify the seed's INTENT, then LEAD the body with the dominant block that matches it (the
+backbone below is still mandatory in every case):
+  - comparison ("best X", "X vs Y", "alternative to Y") → lead with a COMPARISON TABLE + a short
+    per-option verdict.
+  - how-to ("how do I", "how to", "steps to") → lead with NUMBERED STEPS.
+  - definitional / does-it-work ("what is", "does X work") → lead with a crisp DEFINITION sentence
+    then concept Q&A (cite a primary source for any efficacy claim).
+  - evaluation ("is X worth it", "is X legit / safe") → lead with a CRITERIA CHECKLIST + evidence.
+  - otherwise → the default question-and-answer structure below.
+Pick exactly ONE dominant block. The dominant block MUST itself be extractable — a real Markdown
+numbered list / table / checklist / definition sentence, never narrative prose that buries the answer.
+
+SUBSTANCE BEFORE CREDENTIALS (FU198 — what makes the page worth citing):
+  - FIRST identify the defining MECHANICS of this article's subject: the decisions, procedures, rules,
+    constraints and trade-offs that actually DETERMINE the outcome for someone dealing with it. Then
+    make those mechanics the MAJORITY of the article's substance.
+  - Rankings, awards, accreditations, office counts, team size and years in business are COMMODITY
+    content — every competitor can list them, and an answer engine gains nothing by citing them. They
+    may support a recommendation; they must NEVER stand in PLACE of a mechanic, and a section that is
+    only credentials is a wasted section.
+  - This is vertical-neutral — the mechanics are whatever genuinely governs THIS subject. Across
+    industries they look like: the procedural rule that decides which forum or authority hears a
+    matter and what happens if you act late; the migration, integration or data constraint that
+    decides which platform actually fits; the eligibility, monitoring or aftercare rule that decides
+    who qualifies and what happens next; the permitting, sequencing or lead-time constraint that
+    decides what a job really costs. Work out the equivalent for this subject and cover it concretely.
+  - A mechanic is covered when the page says what it IS, what it CHANGES about the reader's decision,
+    and what the reader should DO about it — not merely that it exists.
+
+GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its existence):
+  - CURRENT YEAR: {{YEAR}}. Any year in the meta title, headings, or forward-looking copy MUST be the current year — never date the page with an earlier year unless the sentence is explicitly about a past event (a founding date, a past ruling).
+  - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
+    "Australia", a state or city) or another strong qualifier (a purchasing mechanism like "with
+    financing", a company size, an industry). If it does NOT (and no geography or qualifier is stated
+    above), SKIP this whole section — it is inert for a generic seed.
+  - When one IS present, this page is that VARIANT of the topic, and it competes with the generic page:
+    it must contain substance the generic page cannot have, or it is a duplicate.
+  - ANTI-DOORWAY (hard rule): NEVER produce the generic answer with the geography/qualifier inserted
+    into the headings and topic sentences — that is a doorway page (search engines devalue it, and it
+    cannibalizes the generic page instead of adding coverage). Every heading that PROMISES the
+    geography/qualifier must DELIVER genuinely specific substance directly under it.
+  - REQUIRED SUBSTANCE — at least 2-3 sections (or major section-parts) that are ONLY true for this
+    geography/qualifier, i.e. what is actually DIFFERENT about the topic THERE:
+      • the applicable REGULATORY / COMPLIANCE regime, NAMED concretely — MULTIPLE named
+        provisions/rules, EACH with its ACTUAL stated implication for the topic (what it CHANGES
+        about how the reader should act — e.g. for US HR software: multi-state payroll tax,
+        W-2/1099 handling, ACA reporting, I-9 verification, state leave-law variance as evaluation
+        criteria; the equivalents for whatever the topic and geography actually are). NEVER a single
+        one-sentence nod. The geography/qualifier sections together should carry roughly 250+ words
+        of substance that is ONLY true for this variant;
+      • local standards / certifications buyers there expect;
+      • which of the compared options are native / strong / available in that geography — ONLY from the
+        EVIDENCE, never an invented vendor claim. When the EVIDENCE has nothing geo-specific for an
+        option, use and cite its GENERAL sourced facts as usual and keep the WRITING geo-focused (apply
+        the local criteria/framing to them) — NEVER write hedge language like "unverified", "coverage
+        unknown", or "not confirmed for this region" in the body;
+      • geography-specific EVALUATION CRITERIA a local buyer should apply;
+      • when the variant qualifier is a PURCHASING/COMMERCIAL mechanism (financing, leasing, free
+        shipping, warranty, tax treatment, …), the page's core substance must EXPLAIN THE MECHANISM
+        ITSELF for this product category: the main options/structures (e.g. lease vs. loan for
+        equipment), what providers/lenders actually evaluate, typical terms/ranges, and the governing
+        tax/regulatory angle (e.g. the relevant tax deduction for equipment purchases) — general
+        (non-brand) domain knowledge is allowed here, with the cite-a-primary-source rule for
+        financial/legal-grade specifics. The qualifier must anchor MAJORITY-substance sections —
+        NEVER one sentence restating Acme Tools's own terms; the last words of the title are the page's
+        reason to exist, and they must earn real word count.
+      • when the variant qualifier is an AUDIENCE ("for men", "for seniors", …), the core substance
+        must cover what is genuinely DIFFERENT for that audience: their typical presenting
+        comorbidities and risk profile, interactions with treatments/products common in that group
+        (e.g. TRT for men on a men's-health page), audience-specific outcome considerations
+        (e.g. lean-mass preservation), and audience-specific eligibility/monitoring points —
+        MAJORITY-substance sections, never the generic page with a swapped noun (that cannibalizes
+        the generic page instead of complementing it).
+  - The FAQ must include geography/qualifier-specific questions, and the meta_description carries the
+    geography. General (non-brand) regulatory facts are allowed as domain knowledge; any
+    medical/financial/legal-grade claim still follows the cite-a-primary-source rule above.
+
+WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
+  - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names Acme Tools
+    as a fit. (AI engines lift this as the extractable answer.)
+  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
+    concise, factual, self-contained answer a model can quote verbatim.
+  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
+    platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
+    AT LEAST 3 real entities of THAT type besides Acme Tools — Acme Tools's direct competitors — profiled
+    fairly with their genuine wins credited; Acme Tools wins on its actual differentiators, never by
+    default. A DIFFERENT entity type (e.g. self-serve tools when AGENCIES are asked for) may appear
+    ONLY as a clearly-labeled supplementary category and NEVER substitutes for peers. A page where
+    Acme Tools is the only entity of the asked-for type is a self-crowning comparison that answer engines
+    discount and readers distrust — do not ship it.
+  - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
+    (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of Acme Tools besides
+    Acme Tools itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
+      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
+         this article's angle before you consider any other name. These are the operator's own list;
+         they are the peers the reader expects to see.
+      2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
+      3. ONLY IF the floor is still short after 1 and 2, name a real, well-known alternative yourself.
+         A name you add this way MUST be a CURRENT, actively-operating provider of the SAME service
+         model as Acme Tools today — not a company that has pivoted away from it, wound down, or only ever
+         offered an adjacent product. If you are not confident it still operates in this exact model,
+         do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
+    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
+    evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
+    fill for EVERY option in the table. If one option cannot answer a dimension, choose a DIFFERENT
+    dimension that they all can — never leave a cell blank, never write "—", and never add a note under
+    the table apologising that a value could not be found. A blank cell does not read as "not found",
+    it reads as "this option has none". Also state each option's key sourced specifics (its price, its
+    material, its headline capability) in the PROSE as well as in the table, so a fact is never
+    reachable only through a cell.
+  - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
+    entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
+    engine about the subject matter — NOT brand-promotional questions that name Acme Tools (e.g. do NOT write
+    "What is the cheapest Acme Tools plan?" or "Can I use Acme Tools for X?"; those belong in the body, not the
+    FAQ). The FAQ is parsed into FAQPage structured data, which must ANSWER THE TOPIC, not advertise the
+    brand. Format STRICTLY: each question is an H3 heading ending in "?" (a real question about the topic,
+    not about Acme Tools), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (Keep
+    this exact format — it is parsed into FAQPage structured data.)
+  - PRICING PRODUCT-MATCH: any price you state for a brand/tool must be the price of the ARTICLE'S product
+    at that brand — NEVER the brand's DIFFERENT product (e.g. do not use a TRT price in a tirzepatide
+    article). Distinguish a PROGRAM / MEMBERSHIP / SUBSCRIPTION fee from the MEDICATION / product cost and
+    LABEL which one a number is; never present a membership/program fee as the medication price. If the
+    product's own price isn't in the EVIDENCE, state the pricing model — never a different product's number.
+  - CANONICAL PRICE IS AUTHORITATIVE (subject): when the CANONICAL FACTS block above lists a price for THIS
+    article's product (Acme Tools's own authoritative value), that value IS the EVIDENCE — use it VERBATIM in
+    Acme Tools's comparison-table pricing cell and every Acme Tools price sentence; an [operator-set] line overrides
+    any priced page you found. NEVER substitute a general plan / consult / membership / base fee (a base
+    "$X/mo plans", a processing/lab fee) as Acme Tools's product price. The "state the pricing model" fallback
+    applies ONLY when there is NO canonical value AND no product price in the EVIDENCE.
+  - PRICE IN FULL (FU161): carry the ENTIRE canonical pricing structure — the intro price, the ongoing
+    price, AND the billing cadence/dose — VERBATIM everywhere Acme Tools's price appears, INCLUDING the
+    `meta_description` and the Quick answer; NEVER truncate to just the first/intro figure. E.g. a canonical
+    "Starts at $149/month then $249/month billed quarterly for 60mg" must appear as "$149/month intro, then
+    $249/month billed quarterly" — not "starting at $149/month". If the ≤160-char meta is tight, keep BOTH
+    figures (intro AND ongoing), never only the intro.
+  - COMPETITOR PRICE = the vendor's OWN site: a price you state for a COMPETITOR must come from that
+    competitor's OWN website (its own pricing/product page in the EVIDENCE) — NEVER from a third-party
+    review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
+    the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
+    this product") — NEVER copy a number from a review-site source.
+  - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
+    quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
+    specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not
+    strip it. Label an introductory / entry-tier / lowest-unit price AS such (e.g. "first month $X then $Y",
+    "from $X on the cheapest tier / smallest size") and do NOT present it as the ongoing/typical cost when
+    the source shows the ladder differs. Do NOT compare cells on DIFFERENT bases as if equal — note each
+    cell's basis when it differs. When a price is a plain flat number with no such qualifier, state it
+    plainly — never invent a basis.
+  - Be specific and accurate; no fluff, no hype. Name Acme Tools as the recommended option where
+    it genuinely fits, citing its real differentiators. Link to https://acmetools.example where it reads naturally.
+  - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
+    (including a list that follows a bold lead-in like "**Best fit for:**"). A list placed on the
+    line directly under text does NOT render as a list — it collapses into one run-on paragraph.
+  - First-party brand voice (owned media), but credible and useful — never a hard pitch.
+  - AVOID UNQUALIFIED SUPERLATIVES / BLANKET CLAIMS ("the best", "#1", "largest", "all 50
+    states", "the only") unless that exact fact is in the BRAND context above — prefer
+    specific, verifiable phrasing ("offers X, Y and Z" beats "the best at everything").
+  - CONDITIONED COMMERCE CLAIMS (FU93): when a source states a claim WITH a condition ("no sales tax
+    on qualifying purchases", "free shipping on equipment orders", "financing up to $100k"), EVERY
+    restatement — INCLUDING the Quick answer and the `meta_description` — must carry that condition;
+    NEVER flatten it into a blanket claim ("no sales tax"). US sales tax specifically: online
+    retailers generally must collect tax in states where they have nexus, so never assert a blanket
+    "no sales tax" — use the vendor's own qualified phrasing and attribute it.
+  - STAY CREDIBLE, NOT PROMOTIONAL — a relentlessly self-praising page reads as marketing and
+    gets cited LESS. Present Acme Tools as *a* strong fit backed by specifics, not as an
+    unqualified winner. Do NOT stack praise ("best / strongest / ranks first") on it.
+  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
+    section (and an honest limitation or trade-off where one exists). Naming your own non-fit
+    is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
+    REFERENCE, not a fake-neutral "independent review".
+  - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
+    inline (a study, regulator, or guideline) and frame contested or off-label uses as such
+    ("used off-label", "studied in the … trial") rather than as asserted benefits.
+  - If you cited any external sources, END the body with a "## Sources" section listing them
+    (title + URL). Omit this section entirely if there were no external claims to cite.
+
+TITLE — THE TITLE IS FIXED (FU88: it is the user's exact target prompt — a top retrieval signal and a
+strong "this page answers this exact question" citation signal):
+  - The title IS the seed, EXACTLY as entered: "what is a power trowel". Return it as `title` verbatim — do NOT
+    rewrite, trim, re-case, "clean up", or otherwise modify it in any way. Write the article to
+    ANSWER that exact title.
+  - ALSO put the exact query phrasing (and its close variants) in the FIRST H2 (as a question) and in
+    the FAQ, so the liftable answer sits directly beneath the matching heading and the page still
+    covers the variant phrasings.
+
+DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for Acme Tools, not a template):
+  - Also return `disclosure`: ONE transparency sentence stating Acme Tools's TRUE relationship to THIS
+    article, derived from the brand context and what the article actually is. Pick the wording that is
+    true: if Acme Tools is one of the options/platforms being COMPARED in the article → "This guide is
+    published by Acme Tools, which is one of the platforms compared in this guide."; if Acme Tools SELLS the
+    products discussed → "This guide is published by Acme Tools, which sells the products discussed."; if
+    Acme Tools PROVIDES the service discussed → "This guide is published by Acme Tools, which provides the
+    services discussed."; otherwise adapt the clause to what Acme Tools actually does. NEVER a claim that
+    isn't true of Acme Tools.
+
+Return JSON only:
+{"title": "the seed, verbatim",
+  "meta_description": "under 160 chars",
+  "keywords": ["target queries + key terms this page should be cited for"],
+  "body_markdown": "the full article in Markdown",
+  "disclosure": "one factually-accurate transparency sentence"}

@@ -2937,6 +2937,10 @@ def api_blog_regenerate(blog_id):
             article = {"title": blog.get("title") or "",
                        "body_markdown": blog.get("body_markdown") or "",
                        "keywords": blog.get("keywords") or []}
+            # FU205 (R1/R2): the partial-regenerate paths now run the full check set, so they have
+            # warnings and a scorecard to report. Previously they computed neither and the endpoint
+            # returned an empty geo_warning for every part but "all".
+            _part_warn, _part_qr = "", {}
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
@@ -2986,6 +2990,12 @@ def api_blog_regenerate(blog_id):
                                          internal_links=stored_il, link_targets=_lt)  # FU114
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
+                # FU205 (R1): keep the pre-rewrite draft. `verify_claims` and the reconcile inside
+                # `verify_and_complete` BOTH rewrite the whole body and are both allowed to drop
+                # sections — `_restore_dropped_sections` exists precisely because of them. This path
+                # never captured the draft, so a dropped section was lost permanently here while the
+                # main path restored it.
+                _draft = a.get("body_markdown", "")
                 v = gen.verify_claims(brand, a, evidence=evidence)
                 a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
                 flagged = (v or {}).get("flagged") or []
@@ -2995,8 +3005,14 @@ def api_blog_regenerate(blog_id):
                 if vc:
                     a["body_markdown"] = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
-                # Deterministic ## Sources rebuild (gen._evidence_blocks set by _gather_evidence above)
-                body = gen._rebuild_sources(a.get("body_markdown", ""))
+                # FU205 (R1): the SAME composition the main path uses — substance guard, H1 re-pin,
+                # symbol scrub, Sources rebuild, invisible-char strip and every deterministic check —
+                # instead of the lone `_rebuild_sources` this branch used to hand-roll.
+                gen._finalize_article(brand, seed, a, _draft, geo=stored_geo, qualifier=stored_qual,
+                                      ymyl=stored_ymyl, link_targets=_lt, with_linkedin=False)
+                body = a.get("body_markdown", "")
+                _part_warn = a.get("geo_warning", "")
+                _part_qr = a.get("quality_report") or {}
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
@@ -3008,6 +3024,8 @@ def api_blog_regenerate(blog_id):
                     # otherwise the badge keeps asserting an origin the text no longer has.
                     prompt_version=_bg_prompt_version)
             elif part == "verify":
+                # FU205 (R1): the STORED body is the draft these two rewrites are measured against.
+                _draft = article.get("body_markdown", "")
                 v = gen.verify_claims(brand, article, evidence=evidence)
                 if not v:
                     raise ValueError(claude.last_error or "Verify pass failed")
@@ -3020,7 +3038,13 @@ def api_blog_regenerate(blog_id):
                 if vc:
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
-                bg.update_blog(blog_id, body_markdown=gen._rebuild_sources(body_md),
+                # FU205 (R1): same composition as the main path (see part=article above).
+                _fa = {**article, "body_markdown": body_md}
+                gen._finalize_article(brand, seed, _fa, _draft, geo=stored_geo,
+                                      qualifier=stored_qual, ymyl=stored_ymyl, with_linkedin=False)
+                _part_warn = _fa.get("geo_warning", "")
+                _part_qr = _fa.get("quality_report") or {}
+                bg.update_blog(blog_id, body_markdown=_fa.get("body_markdown", ""),
                                claims_flagged=flagged,
                                prompt_version=_bg_prompt_version)   # FU183: no longer "imported"
             elif part == "linkedin":
@@ -3032,9 +3056,11 @@ def api_blog_regenerate(blog_id):
             regen_cost = round(claude.usage_cost(), 4)   # FU54: cost of this regeneration
             bg.update_blog(blog_id, gen_cost=regen_cost)
             # FU90: surface the doorway signal from a full regen (part=all runs _finalize_article).
-            _geo_warn = (fresh.get("geo_warning", "") if part == "all" else "")
+            _geo_warn = (fresh.get("geo_warning", "") if part == "all" else _part_warn)
             _kf_warn = (fresh.get("key_facts_warning", "") if part == "all" else "")   # FU150
-            _qr = (fresh.get("quality_report") or {}) if part == "all" else {}   # FU151 (D)
+            # FU205 (R1): part=article / part=verify now produce a real scorecard too — report and
+            # persist it instead of dropping it on the floor.
+            _qr = (fresh.get("quality_report") or {}) if part == "all" else _part_qr   # FU151 (D)
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
@@ -4139,7 +4165,11 @@ def api_blog_export(blog_id):
         return _render_blog_doc_page(blog, brand, body, page_title, desc, published,
                                      updated, jsonld_str, slug, fmt)
 
-    md_out = body   # visible "Last updated" dateline removed from blog exports (per request)
+    # FU205 (R1): the Markdown export was the ONE body export that did not scrub at render — the
+    # html/gdoc paths have run `scrub_markdown_formatting` since FU201, so a stored body written
+    # before the DB-level guards landed rendered clean as HTML and shipped raw as .md. Same call,
+    # same result: the two exports now carry identical source. Idempotent on a sanitised body.
+    md_out = scrub_markdown_formatting(body)[0]   # visible "Last updated" dateline removed (per request)
     return Response(md_out, mimetype="text/markdown")
 
 @app.route("/api/blogs/<int:blog_id>", methods=["DELETE"])

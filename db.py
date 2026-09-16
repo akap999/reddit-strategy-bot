@@ -6,6 +6,29 @@ import os
 import re
 from datetime import datetime, timedelta
 
+# FU205 (R1) — ONE guard composition, every write path. The blog guards live in the generator, but
+# the generator is reached by only 2 of the 11 paths that write a blog body. The two DB functions
+# below ARE reached by all of them, so the guards are applied here. Imported lazily inside the helper
+# so db.py keeps importing no generator at module load (it never has) and so an import failure
+# degrades to a no-op rather than breaking persistence.
+_BLOG_SANITIZE = os.environ.get("BLOG_SANITIZE_ON_WRITE", "1") != "0"
+
+
+def _sanitize_blog_fields(fields, where=""):
+    """Run the shared context-free blog guards over a {column: value} dict. Never raises; on ANY
+    failure the values are returned untouched — a save must never fail because a scrub did."""
+    if not _BLOG_SANITIZE or not isinstance(fields, dict) or not fields:
+        return fields
+    try:
+        from generators.body_sanitize import sanitize_fields
+        out, changed = sanitize_fields(fields)
+        if changed:
+            print(f"[db] blog-sanitize ({where}): cleaned {', '.join(sorted(changed))}", flush=True)
+        return out
+    except Exception as exc:
+        print(f"[db] blog-sanitize skipped ({where}): {exc}", flush=True)
+        return fields
+
 
 class Database:
     def __init__(self, db_path):
@@ -1040,7 +1063,20 @@ class Database:
         fields are optional per-blog overrides of the brand byline. `reddit_status` records the
         attached-thread fetch outcome (ok/empty/failed/bad_url/skipped) for UI visibility.
         `deep_verify` records whether the independent verify agent was requested (reused on regenerate).
-        `gen_cost` is the real $ cost of the generation (FU54). Returns id."""
+        `gen_cost` is the real $ cost of the generation (FU54). Returns id.
+
+        FU205 (R1): every body/prose/meta value is passed through the ONE shared guard set
+        (`generators.body_sanitize`) on its way in. This is one of the two DB write choke points, so
+        covering it here covers import, the FU79 paused body, and any future write path by
+        construction — not by remembering to call the guards. Idempotent, so a generation that already
+        finalised is unaffected."""
+        _s = _sanitize_blog_fields({
+            "body_markdown": body_markdown, "linkedin_text": linkedin_text,
+            "meta_description": meta_description,
+        }, where="save_blog")
+        body_markdown = _s["body_markdown"]
+        linkedin_text = _s["linkedin_text"]
+        meta_description = _s["meta_description"]
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
@@ -1167,6 +1203,11 @@ class Database:
                    "rewritten_cost",   # FU155
                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",   # FU179
                    "body_pre_verify"}   # FU202: the body before the verification pass edited it
+        # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
+        # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
+        # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
+        # and everything that follows, without each one remembering to call the guards.
+        fields = _sanitize_blog_fields(fields, where="update_blog")
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:

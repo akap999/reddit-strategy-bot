@@ -1,0 +1,124 @@
+Fact-check a FIRST-PARTY article about Acme Tools against the brand context + evidence below.
+Accuracy is what keeps the page citable by AI engines.
+
+BRAND CONTEXT (source of truth for Acme Tools's own claims):
+Brand name: Acme Tools   (write the brand name with this EXACT spelling and casing everywhere)
+Website: https://acmetools.example
+Category: concrete finishing equipment retailer
+Audience: independent finishing contractors in the US
+Use cases: buying a power trowel, financing a mixer
+Pain points: long lead times, opaque financing terms
+Features: nationwide shipping, in-house financing
+Competitors: Bravo Supply, Delta Equipment
+Context: Acme Tools sells concrete finishing equipment direct to contractors.
+Learned context: Ships to all 50 states; financing handled in-house.
+
+EVIDENCE (admissible support for claims — cite as [S#]):
+[S1] Acme Tools — https://acmetools.example/pricing
+Power trowels start at $1,300; financing available in-house.
+
+[S2] third-party · Contractor Review — https://example-review.test/acme
+Acme ships nationwide within five business days.
+
+
+ARTICLE (Markdown):
+*[Add author byline before publishing]*
+
+# where to buy concrete finishing equipment online in the US with financing
+
+## Quick answer
+
+Acme Tools ships nationwide and finances in-house [S1].
+
+## Which retailers finance equipment?
+
+Acme Tools finances in-house [S1].
+
+| Retailer | Financing | Shipping |
+| --- | --- | --- |
+| Acme Tools | in-house | nationwide |
+| Bravo Supply | third-party | regional |
+
+
+PRESERVE any byline / disclosure italic lines at the very top verbatim.
+
+Find SPECIFIC factual claims (numbers, features, model names, guarantees, prices) that
+are NOT supported by the brand context OR the EVIDENCE. Rewrite the body to soft-hedge or remove each
+unsupported claim while keeping it useful and well-structured. Do NOT touch general,
+non-brand-specific advice, and keep the GEO structure (Quick answer, question headings, FAQ).
+
+EVIDENCE GATE (the top weakness reviewers flag — apply to EVERY named brand, not just in comparisons):
+  - Any specific claim about ANY named brand — features, pricing, numbers, "does / does NOT do X",
+    superiority ("stronger / more complete / better") — must be backed by the EVIDENCE and cite [S#].
+  - If a claim has no supporting evidence: DROP it, soften to a name-only mention, or (for Acme Tools
+    only) reframe as Acme Tools's own positioning. NEVER keep an unsourced competitor claim and NEVER
+    use "not publicly documented" hedging.
+  - REMOVE READER-DIRECTED PUNTS: strip every "verify on X's site / check their site / consult the
+    terms / varies by plan — always verify / always verify … before publishing / not publicly
+    documented" phrasing. Replace a punt TABLE cell with "—" (or a sourced attribute); DELETE a punt
+    sentence in prose (don't leave the reader a go-find-it-yourself instruction, and never name the
+    exact fact you couldn't source). These MUST appear in `flagged`.
+  - Ensure the "## Sources" section lists every [S#] cited.
+
+SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
+  - The "Quick answer" block (it gets cited verbatim — every claim in it must be supported).
+  - Every NUMBER / STATISTIC / review count / price / "X+ markers" — if not in the brand
+    context, hedge it ("per Acme Tools's site"), attribute it, or remove the figure.
+  - A CLAIM CITED TO THE WRONG BRAND'S SOURCE (FU204): a sentence that names ONE brand but cites a
+    source belonging to a DIFFERENT brand, a listing for another product, or a general authority page
+    (e.g. "Tommee Tippee is a best seller on tommeetippee.com [S8]" where S8 is a paediatric guideline,
+    or brand A's price cited to brand B's site). Re-cite it to that brand's own source, or drop the
+    specific. These MUST appear in `flagged`.
+  - A MATERIAL / SAFETY / EFFICACY CLAIM RESTING ON A RATING OR RETAIL PAGE (FU204): "clinically
+    proven", "BPA-free", a temperature or shatter rating, a certification — cited only to a
+    "review · " star-rating page or a "retail · " marketplace listing. Re-cite to the brand's own page
+    or an official source, or drop the claim. A rating page evidences sentiment, never a spec.
+  - PRICING PRODUCT-MATCH: a price in a cell/sentence about the article's product that is actually a
+    DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
+    presented AS the medication price — fix it (use the product's own price), label the fee type, or drop
+    the figure and state the pricing model. These MUST appear in `flagged`.
+  - CANONICAL / OPERATOR PRICE OVERRIDDEN: Acme Tools's pricing cell/sentence showing a value OTHER than the
+    CANONICAL Acme Tools FACTS value for THIS article's product (e.g. a general "$X/mo plans" or a
+    processing/lab fee where a canonical product price exists) — replace it with the canonical value.
+  - CANONICAL PRICE TRUNCATED (FU161): a Acme Tools price (incl. the meta_description / Quick answer) that shows
+    only the intro figure while the canonical value has a "then $X/month billed …" ongoing tail — restore
+    the FULL structure (intro + ongoing + cadence).
+  - COMPETITOR PRICE FROM A REVIEW SOURCE: a competitor's price cited to a third-party review / aggregator /
+    listicle rather than the competitor's OWN site — re-cite to the vendor's own page, or if its own current
+    price isn't in the EVIDENCE, state its pricing honestly (never a review-site number). These MUST appear
+    in `flagged`.
+  - PRICE MISSING ITS BASIS: a price whose source states a unit / quantity / tier / term (per seat, per
+    supply, a dose/size, annual-vs-monthly, an intro-vs-ongoing tier) but the article dropped it, or an
+    entry/intro-tier price presented as the ongoing cost — restore the basis / label the tier.
+  - CERTIFICATIONS / accreditations (e.g. "LegitScript certified") — keep ONLY if in context.
+  - SUPERLATIVES & BLANKET-COVERAGE claims ("largest", "best", "#1", "the only", "all 50
+    states") — drop or qualify unless explicitly supported by the context.
+  - COMPETITOR-NEGATIVE claims (asserting a NAMED competitor lacks a feature) — never assert a
+    bald negative about a named third party; soften to a Acme Tools-strength framing or
+    date/attribute it ("as of publication").
+  - CLINICAL/REGULATORY CLAIMS (contraindications, boxed warnings, diagnostic thresholds, dosing or
+    monitoring standards) cited to a VENDOR/AFFILIATE/REVIEW source — re-cite to an "official ·" source
+    in the EVIDENCE, or generalize + attribute ("per the prescribing information"); never leave a
+    clinical fact resting on a marketing page.
+  - A "third-party ·" (review/affiliate) source DESCRIBED with authority-inflating framing
+    ("independent audit/analysis/report", "independently verified") — rewrite to plain attribution
+    by name, or re-cite the figure to the vendor's own page.
+  - TWO CITED FACTS IN TENSION (a rule that appears to prohibit X + a claim that X is offered) with
+    no explained pathway/exception — reconcile them from the evidence, or surface the tension
+    plainly with both attributions.
+  - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
+    remove them, or balance with Acme Tools's SAME metric cited alongside (FU93).
+  - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
+    condition ("on qualifying purchases", "in most states") — restore the condition (FU93).
+  - A FACT ABOUT Acme Tools cited to a THIRD-PARTY / review / analyst source (FU150 #3): Acme Tools's own facts
+    (its price, plans, features, terms) are FIRST-PARTY ONLY — re-cite to Acme Tools's own-site [S#], or if
+    there is none, reframe as Acme Tools's positioning or drop it. Never let a Acme Tools fact rest on a third
+    party.
+  - ANY source or citation that speaks NEGATIVELY about Acme Tools (FU150 #2) — complaints/lawsuit/"stay
+    away"/"problems with"/bad-review pages: remove it entirely from the body AND ## Sources; never cite
+    or quote a page critical of Acme Tools.
+Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
+
+Return JSON only:
+{"revised_body_markdown": "the corrected full Markdown body",
+  "flagged": [{"claim": "the unsupported claim", "reason": "why it isn't supported"}]}

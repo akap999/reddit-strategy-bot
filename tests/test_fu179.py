@@ -269,7 +269,9 @@ def test_manual_edits_to_every_rewritten_body_persist_through_patch():
             "linkedin_article_rewritten": "edited article"})
         assert r.status_code == 200
         b = _get(path, bid)
-        assert b["rewritten_body"] == "edited blog"
+        # FU205 (R1): the PATCH path now runs the shared guards, which normalise a stored markdown
+        # body to exactly one trailing newline. The manual edit still persists verbatim otherwise.
+        assert b["rewritten_body"] == "edited blog\n"
         assert b["linkedin_rewritten"] == "edited post"
         assert b["linkedin_article_rewritten"] == "edited article"
     finally:

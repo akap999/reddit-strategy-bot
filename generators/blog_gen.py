@@ -60,12 +60,41 @@ _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
 # allowed_domains so discovered sources are third-party (these inherently exclude the
 # brands' own sites). Review sites + mainstream tech press.
 _THIRD_PARTY_DOMAINS = [
-    "g2.com", "capterra.com", "trustpilot.com", "getapp.com", "trustradius.com",
+    "g2.com", "capterra.com", "getapp.com", "trustradius.com",
     "softwareadvice.com", "producthunt.com", "gartner.com", "forrester.com",
     "techcrunch.com", "theverge.com", "forbes.com", "businessinsider.com",
     "reuters.com", "crunchbase.com", "wikipedia.org",
     "usnews.com", "health.usnews.com",   # FU161: U.S. News — a reputable review source (preferred over affiliates)
 ]
+# FU204 — this list was assembled for SaaS (G2 / Capterra / Gartner), where a listing carries editorial
+# research. `trustpilot.com` rode along and, because membership here EXEMPTS a domain from
+# `_is_affiliate_review`, a Trustpilot RATING page became "reputable" evidence — on a shipped
+# baby-bottle blog two of them were the sole source for "borosilicate glass, heat and thermal
+# shock-resistant". A star rating is aggregated customer sentiment: real, but never evidence for a
+# material, a safety certification or an efficacy claim. Same for a marketplace listing, which is the
+# seller's own marketing copy: fine for a PRICE or availability, not for a spec.
+_RATING_AGGREGATORS = {
+    "trustpilot.com", "sitejabber.com", "reviews.io", "reviewcentre.com", "resellerratings.com",
+}
+_RETAIL_LISTINGS = {
+    "amazon.com", "amazon.co.uk", "walmart.com", "target.com", "ebay.com", "etsy.com",
+    "babylist.com", "chewy.com", "wayfair.com", "bestbuy.com", "costco.com", "samsclub.com",
+}
+
+
+def _source_class(url):
+    """FU204 — the class of a third-party page, so the writer and the checks can both SEE what a
+    citation actually rests on. "" for an ordinary/reputable page."""
+    d = _norm_domain(url or "")
+    if not d:
+        return ""
+    for dom in _RATING_AGGREGATORS:
+        if d == dom or d.endswith("." + dom):
+            return "review"
+    for dom in _RETAIL_LISTINGS:
+        if d == dom or d.endswith("." + dom):
+            return "retail"
+    return ""
 _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources folded in (was 8 — cost)
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
@@ -170,6 +199,12 @@ _VF_RULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 _VF_SOURCES_RE = re.compile(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b")
 _VF_TABLE_RE = re.compile(r"^[ \t]*\|")
 _VF_HEAD_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+\S")   # a REAL heading — the space rules out a #hashtag line
+# FU204 — a line that is a COMPLETE emphasis run (`*…*`), not a list item. FU152 prepends
+# `*[Add author byline before publishing]*` to EVERY article and FU84 adds `*Reviewed by …*` /
+# `*Disclosure: …*`, so the FU202 marker-space rule was rewriting the first line of every blog into
+# a bullet (`- [Add author byline before publishing]*`). `[` is not in that rule's excluded set, so
+# the OPENING asterisk of an italic line read as a bullet missing its space.
+_VF_EMPH_LINE_RE = re.compile(r"^\s*\*(?!\*).*\*\s*$")
 # FU202 — a sentence that PROMISES a page. With no link in the same sentence it is a dead end for the
 # reader and a dangling reference for an answer engine.
 _VF_LINKPROMISE_RE = re.compile(
@@ -281,7 +316,14 @@ def scrub_markdown_formatting(body):
                                        "rendered correctly)")
             # 7: a marker with no space after it is not a list at all
             _ns = re.match(r"^(\s*)([-*+])(?=[^\s*_-])", ln) or re.match(r"^(\s*)(\d+[.)])(?=\S)", ln)
-            if _ns and not _VF_RULE_RE.match(ln):
+            # FU204: an ITALIC line is not a bullet. A `*` marker whose line is a complete emphasis
+            # run with an EVEN number of asterisks opened emphasis, not a list — skip the rule. That
+            # protects the FU152 byline placeholder and the FU84 reviewer/disclosure lines, which are
+            # prepended to every article, while a genuine `*item` (odd count, no closing `*`) is still
+            # fixed. `-`/`+`/`1.` markers are untouched.
+            _emph = (_ns and _ns.group(2) == "*" and _VF_EMPH_LINE_RE.match(ln)
+                     and ln.count("*") % 2 == 0)
+            if _ns and not _VF_RULE_RE.match(ln) and not _emph:
                 ln = _ns.group(1) + _ns.group(2) + " " + ln[_ns.end():]
                 _seen("marker-space", f"a missing space after the list marker '{_ns.group(2)}' was "
                                       "inserted (the line was rendering as a paragraph)")
@@ -327,8 +369,17 @@ def scrub_markdown_formatting(body):
                 _seen("bullet-marker", f"list marker '{mm.group(2)}' normalised to '{dominant}'")
             # 3: unclosed bold
             if ln.count("**") % 2:
-                ln = ln + "**"
-                _seen("unclosed-bold", "an unclosed '**' was closed (it was rendering literally)")
+                # FU204: an odd count is NOT always an unclosed run. A line carrying a balanced pair
+                # PLUS a stray trailing marker ("Some **bold** text**") was given another one, making
+                # "****" — four literal asterisks on the page. A trailing marker opened nothing, so
+                # drop it; only a marker with content after it is genuinely unclosed.
+                if ln.rstrip().endswith("**"):
+                    ln = ln.rstrip()[:-2].rstrip()
+                    _seen("unclosed-bold", "a stray trailing '**' that opened nothing was removed "
+                                           "(closing it would have rendered '****' literally)")
+                else:
+                    ln = ln + "**"
+                    _seen("unclosed-bold", "an unclosed '**' was closed (it was rendering literally)")
             # 11: exotic spaces / mid-line space runs / a space before punctuation
             _pre = ln
             ln = _VF_NBSP_RE.sub(" ", ln)
@@ -1110,6 +1161,10 @@ def _is_affiliate_review(src, own_domain=""):
         return False   # the competitor's own site is never 'affiliate'
     if d in _STALE_AGGREGATORS:
         return True
+    # FU204: a star-RATING page is aggregated customer sentiment, not evidence for a product fact.
+    # It used to be exempt here purely because trustpilot.com sat in the SaaS-era reputable list.
+    if _source_class(src.get("url") or "") == "review":
+        return True
     if d in _THIRD_PARTY_DOMAINS or d.endswith(".gov") or "nlm.nih" in d or "ncbi.nlm" in d:
         return False   # reputable / official — keep
     # FU184: test the review SHAPE against the TITLE **and the URL PATH**. A review-shaped slug
@@ -1481,7 +1536,7 @@ class BlogGenerator:
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append({"label": f"third-party · {s.get('title') or url}",
+                out.append({"label": f"{_source_class(url) or 'third-party'} · {s.get('title') or url}",
                             "url": url, "text": fact[:_EVIDENCE_TEXT_CAP]})
 
         # FU98 — peer discovery, SUBJECT only: the writer needs REAL same-type competitors to
@@ -1873,7 +1928,32 @@ class BlogGenerator:
         # FU200: the "No <x> found in public sources" line FU198 briefly permitted. It was my own
         # exception to this ban and it filled a third of a shipped table, so it is stripped like any
         # other punt — a regenerate cleans an existing body without a migration.
-        r"\bno\s+[^|\n]{1,70}?\s+found\s+in\s+public\s+sources\b",
+        r"\bno\s+[^|\n]{1,70}?\s+found\s+in\s+public\s+sources\b|"
+        # FU204: the two phrasings a shipped blog used under its comparison table. "not retrievable"
+        # is a RESEARCH-PROCESS word — it never appears in legitimate consumer prose, only when the
+        # writer is narrating its own failed lookup.
+        r"\bnot\s+retrievable\b|"
+        r"\bcould\s+not\s+(?:be\s+)?(?:confirm|verif|retriev|sourc)(?:e[ds]?|ied|y)?\b",
+        re.IGNORECASE)
+
+    # FU204 — the PROSE half. `_PUNT_MEANING_RE` above governs table CELLS and already matched
+    # "prices are not confirmed from a first-party source in the available evidence"; the sentence
+    # still shipped because `_PUNT_SENT_RE` (the prose dropper) requires `not confirmed` IMMEDIATELY
+    # followed by "in (the) sourced/available …" and the real sentence wedges five words in between.
+    # This is deliberately NOT a blanket reuse of `_PUNT_MEANING_RE`: that pattern contains `unknown`
+    # and `n/a`, which are legitimate consumer prose ("the cause of colic is unknown") — fine to strip
+    # from a cell, wrong to delete a whole sentence for. So a generic "not <verb>" only counts as a
+    # punt when a SOURCING-context word sits within ~70 chars of it; the research-process phrases
+    # stand alone.
+    _PUNT_PROSE_RE = re.compile(
+        r"\bnot\s+(?:specified|disclosed|stated|provided|listed|available|published|documented|"
+        r"confirmed|verified|found)\b[^.\n]{0,70}?\b(?:evidence|sources?|sourced|cited|public|"
+        r"publicly|first[- ]party|available)\b|"
+        r"\b(?:evidence|sources?|public|publicly|first[- ]party)\b[^.\n]{0,70}?\bnot\s+"
+        r"(?:specified|disclosed|stated|provided|listed|available|published|documented|confirmed|"
+        r"verified|found)\b|"
+        r"\bnot\s+retrievable\b|"
+        r"\bcould\s+not\s+(?:be\s+)?(?:confirm|verif|retriev|sourc)(?:e[ds]?|ied|y)?\b",
         re.IGNORECASE)
 
     _PUNT_CELL_RE = re.compile(
@@ -1914,15 +1994,59 @@ class BlogGenerator:
         r"addressed\s+in\s+the\s+.{0,40}?section\b.{0,30}?rather\s+than",
         re.IGNORECASE)
 
+    # ── FU204 Change 6 — ONE price predicate, used by BOTH the ask and the re-check ───────────────
+    # The FU161 flag-and-ask queued "current price" for a competitor with no confirmed price, and
+    # FU189's re-check then deleted it, because that re-check asks "is this ENTITY sourced?" — always
+    # true for a price-only item, which is by definition about a tool we DID source and are missing one
+    # FACT from. Reproduced on the shipped blog: tool "Tommee Tippee", tokens ['tommee','tippee'], its
+    # own cited block in the evidence → item dropped → the operator was never asked. Sharing the
+    # predicate is what keeps the queue site and the re-check site from drifting apart again.
+    @staticmethod
+    def _blocks_naming(tool, blocks):
+        """The evidence blocks that belong to `tool` — its own labelled blocks, plus any block whose
+        text/url names it (the dim-rescue keeps those under a `third-party ·` label)."""
+        _t = (tool or "").strip().lower()
+        _toks = [x for x in _product_tokens(tool or "") if len(x) >= 3]
+        out = []
+        for b in (blocks or []):
+            lbl = (b.get("label") or "").lower()
+            blob = (lbl + " " + (b.get("text") or "") + " " + (b.get("url") or "")).lower()
+            if (_t and _t in lbl) or (_toks and all(x in blob for x in _toks)):
+                out.append(b)
+        return out
+
+    @staticmethod
+    def _has_confirmed_price(blocks, dom):
+        """True when one of `blocks` carries a price AND comes from the tool's OWN site or a
+        reputable third-party domain — an affiliate/retail price does not count as confirmed."""
+        dd = _norm_domain(dom or "")
+        for b in (blocks or []):
+            if not _PRICE_SIGNAL_RE.search(b.get("text") or ""):
+                continue
+            du = _norm_domain(b.get("url") or "")
+            if (dd and du and (du == dd or du.endswith("." + dd))) or du in _THIRD_PARTY_DOMAINS:
+                return True
+        return False
+
     def _resolve_table_punts(self, body):
         """FU138 — STRUCTURAL resolution of data-unavailable table cells, in any phrasing:
         1. per cell, strip punt CLAUSES (";"/" — " separated) and keep any real remainder
            ("Not specified in sourced facts; billed separately [S7]" → "billed separately [S7]");
-        2. DROP a whole column (never the first/name column, never a Source column) when the
-           punt leaves >50% of its data cells empty — a dimension nobody documents doesn't
-           belong in the comparison (the FU49 rule, now enforced in code);
-        3. any isolated leftover empty cell → "—", counted into self._table_punt_note so the
-           operator sees a toast warning instead of a silently thin table;
+        2. DROP a whole column (never the first/name column, never a Source column) when ANY of its
+           data cells is empty — FU204, the operator's rule: a comparison column answers for EVERY
+           option or it does not exist. A blank cell does not read as "not found", it reads as "this
+           product has none", which is worse than omitting the dimension. Measured on the two real
+           tables in the repo: the Thyseed bottles table comes back 4x6 and the FU200 Osbornes table
+           4x5, both 100% filled — the rule is strict but does not collapse a real comparison. It is
+           also the LAST resort: the FU161 price ask (FU204 Change 6) asks the operator for the
+           missing value FIRST, and this drop is what happens when they skip;
+        2b. COLLAPSE GUARD — if that leaves ZERO comparison dimensions, drop the table BLOCK entirely
+           and say so in the note. A name-only one-column table is broken output; the per-option prose
+           carries the comparison instead;
+        3. any leftover empty cell → "—". After (2) this is unreachable for a data column; it stays
+           live for the one deliberate exception, an exempt Source column (provenance is not a
+           comparison dimension, so it is never traded away). Counted into self._table_punt_note so
+           the operator sees a toast warning instead of a silently thin table;
         4. FU186 — guarantee a BLANK LINE after the last row whenever the next line is not a table
            row. python-markdown's table extension keeps consuming NON-BLANK lines as rows, so a
            heading (and its paragraph) emitted right after the last row is swallowed INTO the table as
@@ -1935,7 +2059,7 @@ class BlogGenerator:
         self._table_punt_note = ""
         lines = body.split("\n")
         # locate contiguous table blocks
-        out, i, dropped_cols, leftover = [], 0, 0, 0
+        out, i, dropped_cols, leftover, collapsed = [], 0, 0, 0, 0
         while i < len(lines):
             if not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
                 out.append(lines[i]); i += 1
@@ -1958,14 +2082,14 @@ class BlogGenerator:
                     kept = [p for p in parts if p and not self._PUNT_MEANING_RE.search(p)
                             and not self._PUNT_CELL_RE.match(p)]
                     r[ci] = "; ".join(kept).strip(" ;")
-            # 2. drop mostly-empty columns (skip col 0 and any Source column)
+            # 2. drop ANY column with an empty cell (skip col 0 and any Source column)
             drop = set()
             for ci in range(1, ncols):
                 if re.search(r"source", header[ci], re.I):
                     continue
                 vals = [r[ci] if ci < len(r) else "" for r in data]
                 empty = sum(1 for v in vals if not v.strip() or v.strip() in ("—", "-"))
-                if data and empty > len(data) / 2:
+                if data and empty:          # FU204: one gap is enough — see the docstring
                     drop.add(ci)
             # FU200: cap the width, keeping the best-evidenced dimensions. A Source column is never
             # dropped (it is exempt above and re-added here), and the first column is never touched.
@@ -1979,6 +2103,17 @@ class BlogGenerator:
                                key=lambda ci: (-_filled(ci), ci))
                 _survive = set(_src) | set(_rank[:max(0, _DIM_CAP - len(_src))])
                 drop |= {ci for ci in _keep if ci not in _survive}
+            # FU204 (2b) — COLLAPSE GUARD. With the any-empty rule a table whose every dimension has
+            # a gap would come back as a name column alone (plus an exempt Source column), which is
+            # broken output, not a comparison. Drop the whole block and say so; the per-option prose
+            # carries it. Neither real fixture reaches this — it is a floor, not a path.
+            _dims_left = [ci for ci in range(1, ncols)
+                          if ci not in drop and not re.search(r"source", header[ci], re.I)]
+            if not _dims_left:
+                collapsed += 1
+                if i < len(lines) and lines[i].strip():
+                    out.append("")             # FU186: the next block must not glue to what is above
+                continue                       # emit no rows at all for this table
             if drop:
                 dropped_cols += len(drop)
                 header = [c for ci, c in enumerate(header) if ci not in drop]
@@ -1993,10 +2128,12 @@ class BlogGenerator:
                 out.append("| " + " | ".join(row) + " |")
             if i < len(lines) and lines[i].strip():
                 out.append("")                     # FU186: never let the next line become a row
-        if dropped_cols or leftover:
+        if dropped_cols or leftover or collapsed:
             bits = []
             if dropped_cols:
                 bits.append(f"dropped {dropped_cols} unsourced column(s)")
+            if collapsed:
+                bits.append(f"removed {collapsed} table(s) with no dimension the whole field could answer")
             if leftover:
                 bits.append(f"{leftover} cell(s) still unsourced")
             self._table_punt_note = ("comparison table: " + ", ".join(bits)
@@ -2026,6 +2163,11 @@ class BlogGenerator:
         body = "\n".join(lines)
         body = self._PUNT_SENT_RE.sub(" ", body)          # drop pure go-verify-yourself sentences
         body = self._PUNT_URL_SENT_RE.sub(" ", body)      # FU78: URL-bearing "see <site> for pricing" pointers
+        # FU204: drop a whole SENTENCE that narrates our own failed lookup ("prices are not confirmed
+        # from a first-party source in the available evidence", "… was not retrievable"). Same
+        # sentence-shaped sub `_scrub_meta` already uses for edit-narration.
+        body = re.sub(r"[^.\n]*(?:" + self._PUNT_PROSE_RE.pattern + r")[^.\n]*\.", " ", body,
+                      flags=re.IGNORECASE)
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
@@ -2430,6 +2572,17 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     {name}'s own positioning ("on our site, we …") — never source a {name} fact to a third party. Every
     {name} specific you DO state MUST cite {name}'s own-site [S#], and {name}'s site MUST appear in
     "## Sources" (don't let {name}'s own specifics ride uncited just because it's a first-party article).
+  - A BRAND-SPECIFIC CLAIM MUST CITE THAT BRAND'S OWN SOURCE. A specific factual claim about a NAMED
+    brand must cite a source that is that brand's OWN page, or a page that explicitly names that brand
+    and states that fact about it. NEVER cite another brand's page, a listing for a DIFFERENT product,
+    or a general authority/guideline page as the source for a brand-specific fact. If no source in the
+    EVIDENCE supports the claim FOR THAT BRAND, drop the specific and say only what is sourced.
+  - WHAT A SOURCE IS GOOD FOR. A source labeled "retail · …" (a marketplace listing) or "review · …"
+    (a star-rating page) may support a PRICE or AVAILABILITY and nothing else — it is the seller's own
+    copy or aggregated customer sentiment. A MATERIAL, safety, certification, temperature/performance
+    or efficacy claim ("clinically proven", "BPA-free", "heat-resistant to 180C", "FDA-registered")
+    must cite the brand's OWN page or an official / authority source. Never let a rating page be the
+    source for what a product is MADE OF or what it DOES.
   - NEVER CITE ANYTHING NEGATIVE ABOUT {name}. Do not cite, quote, link, or reference any source that
     says anything negative or critical about {name} (complaints, lawsuits, "problems with", bad
     reviews, "stay away", etc.). If a gathered source contains a negative statement about {name}, do
@@ -2592,6 +2745,13 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
          do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
 {_sfit}    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
     evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
+    fill for EVERY option in the table. If one option cannot answer a dimension, choose a DIFFERENT
+    dimension that they all can — never leave a cell blank, never write "—", and never add a note under
+    the table apologising that a value could not be found. A blank cell does not read as "not found",
+    it reads as "this option has none". Also state each option's key sourced specifics (its price, its
+    material, its headline capability) in the PROSE as well as in the table, so a fact is never
+    reachable only through a cell.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
@@ -2759,6 +2919,15 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - The "Quick answer" block (it gets cited verbatim — every claim in it must be supported).
   - Every NUMBER / STATISTIC / review count / price / "X+ markers" — if not in the brand
     context, hedge it ("per {name}'s site"), attribute it, or remove the figure.
+  - A CLAIM CITED TO THE WRONG BRAND'S SOURCE (FU204): a sentence that names ONE brand but cites a
+    source belonging to a DIFFERENT brand, a listing for another product, or a general authority page
+    (e.g. "Tommee Tippee is a best seller on tommeetippee.com [S8]" where S8 is a paediatric guideline,
+    or brand A's price cited to brand B's site). Re-cite it to that brand's own source, or drop the
+    specific. These MUST appear in `flagged`.
+  - A MATERIAL / SAFETY / EFFICACY CLAIM RESTING ON A RATING OR RETAIL PAGE (FU204): "clinically
+    proven", "BPA-free", a temperature or shatter rating, a certification — cited only to a
+    "review · " star-rating page or a "retail · " marketplace listing. Re-cite to the brand's own page
+    or an official source, or drop the claim. A rating page evidences sentiment, never a spec.
   - PRICING PRODUCT-MATCH: a price in a cell/sentence about the article's product that is actually a
     DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
     presented AS the medication price — fix it (use the product's own price), label the fee type, or drop
@@ -3424,7 +3593,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name}, "
                       f"affiliate, non-capability or off-subject — dropped", flush=True)
             elif not ymyl:
-                fresh.append({"label": f"third-party · {ttl or u}", "url": u,
+                fresh.append({"label": f"{_source_class(u) or 'third-party'} · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
             else:
                 print(f"[blog_gen] c2: '{(ttl or u)[:70]}' failed official validation — "
@@ -3540,7 +3709,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     continue
                 seen_.add(key)
                 label = tool if _same_site(u, dom) else \
-                    f"third-party · {(s.get('title') or _dom(u) or 'review')}"
+                    f"{_source_class(u) or 'third-party'} · {(s.get('title') or _dom(u) or 'review')}"
                 out_.append({"label": label, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
                 if len(out_) >= cap:
                     break
@@ -3939,13 +4108,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU161: when the article compares PRICING and this competitor has NO price from its OWN
                 # site OR a reputable source (only affiliate-dropped / nothing), FLAG-AND-ASK the operator
                 # (the FU79 pause) rather than ship an honest/blank cell — user decision.
-                if _px and not st.get("cached") and any(_PRICE_DIM_RE.search(d or "") for d in dims):
-                    _has_price = any(
-                        _PRICE_SIGNAL_RE.search(b.get("text") or "")
-                        and (_same_site(b.get("url") or "", st.get("dom") or "")
-                             or _dom(b.get("url")) in _THIRD_PARTY_DOMAINS)
-                        for b in blocks)
-                    if not _has_price:
+                # FU204 (6b): the `not st.get("cached")` gate is GONE. A competitor whose facts came
+                # from the FU151 45-day cache could never trigger the ask, so on the SECOND blog for a
+                # brand the question silently stopped being asked. The check is pure inspection of
+                # blocks already in hand (the FU157 rationale) — it costs nothing to run on them too.
+                if _px and any(_PRICE_DIM_RE.search(d or "") for d in dims):
+                    if not self._has_confirmed_price(blocks, st.get("dom")):
                         unsourced.append({"tool": tool, "dom": st.get("dom") or "",
                                           "facts": ["current price"], "price_only": True})
                         print(f"[blog_gen] price-check: {tool} has no confirmed own-site/reputable price "
@@ -4199,7 +4367,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     # third-party page wearing the vendor's name reads as the vendor's own statement —
                     # that is how an affiliate review became a competitor's sole price citation.
                     _lbl = t if (_tdom and _same_site(u, _tdom)) else \
-                        f"third-party · {(s.get('title') or _dom(u) or 'source')[:70]}"
+                        f"{_source_class(u) or 'third-party'} · {(s.get('title') or _dom(u) or 'source')[:70]}"
                     kb.append({"label": _lbl, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
             return t, d, kb
 
@@ -4307,7 +4475,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 fresh.append({"label": f"review · {ttl or u}", "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
                 continue
-            fresh.append({"label": f"third-party · {ttl or u}", "url": u,
+            fresh.append({"label": f"{_source_class(u) or 'third-party'} · {ttl or u}", "url": u,
                           "text": fct[:_EVIDENCE_TEXT_CAP]})
 
         # FU189 — the FU142 dim-rescue runs AFTER the finalize loop and keeps blocks on a LOOSER
@@ -4321,6 +4489,17 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             _kept = []
             for _u in unsourced:
                 _t = str(_u.get("tool") or "").strip()
+                # FU204 (6a): a FACT-specific pause must be re-tested on that FACT, not on whether the
+                # entity is sourced at all. The entity-level test below is always true for a price-only
+                # item (we found the brand; we are missing its price), so it deleted every price ask
+                # ever queued. Re-run the SAME predicate that created the item instead.
+                if _u.get("price_only"):
+                    if self._has_confirmed_price(self._blocks_naming(_t, fresh), _u.get("dom")):
+                        print(f"[blog_gen] price-check: {_t} picked up a confirmed price after all "
+                              f"— dropping it from the pause list", flush=True)
+                        continue
+                    _kept.append(_u)
+                    continue
                 _toks = [x for x in _product_tokens(_t) if len(x) >= 3]
                 if _t and _toks and all(x in _blob for x in _toks) and not _u.get("ymyl_official"):
                     print(f"[blog_gen] verify+complete: {_t} was sourced by the dim-rescue after all "
@@ -4329,6 +4508,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 _kept.append(_u)
             unsourced = _kept
 
+        # FU204: the compared brand names, stashed for the citation-attribution check in
+        # `_finalize_article` (which runs later and has no access to the extraction). Mirrors how
+        # `_peer_note` / `_invented_note` / `_price_warn` already ride the instance.
+        self._article_tools = [str(t).strip() for t in (tools or []) if str(t).strip()]
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
                 "options": sorted(_options),   # FU189: the non-vendor entities, for the reconcile
@@ -4487,6 +4670,19 @@ COMPLETE and every stated fact is sourced:
     it with that source's [S#]. Do this for EVERY tool and EVERY dimension. Cite the SPECIFIC page for each
     claim: a pricing claim → the pricing page's [S#], a license claim → the terms/license page's [S#] —
     NOT a generic homepage when a specific page is in the FRESH FACTS.
+  - EVERY COMPARISON COLUMN ANSWERS FOR EVERY OPTION (FU204, hard rule): keep only dimensions every
+    compared option can answer from the FRESH FACTS. If one option cannot answer a column, DROP that
+    column (or replace it with one they all can) — never leave a blank/"—" cell and never add a note
+    saying a value could not be confirmed. A column with a gap is deleted deterministically after you,
+    so leaving one only costs the reader a whole dimension.
+  - BRAND-SPECIFIC CLAIMS CITE THAT BRAND (FU204, hard rule): a specific factual claim about a NAMED
+    brand must cite a source that is that brand's OWN page, or one that explicitly names that brand and
+    states that fact about it. NEVER re-point a claim at another brand's page, a listing for a DIFFERENT
+    product, or a general authority page. If the FRESH FACTS do not support it FOR THAT BRAND, drop the
+    specific rather than borrow a neighbouring citation.
+  - WHAT A SOURCE IS GOOD FOR (FU204): a "retail · …" listing or a "review · …" rating page may support
+    a PRICE or AVAILABILITY only. A material, safety, certification, temperature or efficacy claim must
+    cite the brand's own page or an official/authority source — never a rating page.
   - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
     block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
     then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
@@ -7093,6 +7289,153 @@ Return JSON only:
         r"|\bour\s+(?:[\w-]+\s+){0,2}(?:guide|article|resource|write-?up)\b"
         r"|\brefer\s+to\s+[^.]{0,40}?(?:guide|guidance)\b)", re.I)
 
+    # ── FU204 Change 2/3 — deterministic citation checks (warning only, never rewrite) ────────────
+    # A shipped baby-bottle blog cited "clinically proven to reduce colic" to an Amazon listing,
+    # "borosilicate glass, heat and thermal shock-resistant" to two Trustpilot RATING pages, and a
+    # Nanobebe price to Tommee Tippee's site. `_rebuild_sources` cannot see any of it — it maps each
+    # marker to blocks[old-1] and rewrites the markers AND the Sources list from the same map, so the
+    # text and the list can never disagree. The model simply attached the wrong block, and nothing
+    # checked that a sentence naming brand X cites a source belonging to X.
+    _SPEC_CLAIM_RE = re.compile(
+        r"clinically\s+proven|\bBPA[\s-]?free\b|\bphthalate[\s-]?free\b|heat[\s-]?resist|"
+        r"thermal\s+shock|shatter(?:proof|[\s-]?resistant)|\bsterilis|\bsteriliz|"
+        r"\d{2,3}\s*°?\s*[CF]\b|\bcertified\b|\bcertification\b|\bFDA\b|\bLFGB\b|\bEN\s?14350\b|"
+        r"\bdishwasher[\s-]?safe\b|\bmicrowave[\s-]?safe\b|\bmedical[\s-]?grade\b|\btested\s+to\b",
+        re.IGNORECASE)
+    _BARE_DOMAIN_RE = re.compile(
+        r"\b([a-z0-9][a-z0-9-]{1,40}\.(?:com|co\.uk|net|org|io|ai|shop|store))\b", re.IGNORECASE)
+
+    @staticmethod
+    def _prose_sentences(body):
+        """Sentences from PROSE only — table rows, headings and the Sources list carry citations that
+        are structural, not claims."""
+        out = []
+        in_src = False
+        for ln in (body or "").split("\n"):
+            st = ln.strip()
+            if _VF_SOURCES_RE.match(ln):
+                in_src = True
+            elif _VF_HEAD_RE.match(ln):
+                in_src = False
+            if in_src or not st or st.startswith("|") or st.startswith("#") or st.startswith(">"):
+                continue
+            for sent in re.split(r"(?<=[.!?])\s+", st):
+                if sent.strip():
+                    out.append(sent.strip())
+        return out
+
+    @staticmethod
+    def _blocks_from_sources(body, fallback):
+        """FU204 — the `[S#]` → source map as the READER sees it. Both checks run AFTER
+        `_rebuild_sources`, which renumbers every marker by first appearance, so indexing into the
+        un-renumbered `self._evidence_blocks` names the WRONG source (caught by an end-to-end smoke:
+        a sentence citing Tommee Tippee was reported as citing amazon.com). The rebuilt `## Sources`
+        list is authoritative and self-consistent with the body; fall back to the raw blocks only when
+        a body has no Sources section (a mid-pipeline call)."""
+        sec = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", body or "", maxsplit=1)
+        if len(sec) < 2:
+            return list(fallback or [])
+        found = {}
+        for m in re.finditer(r"^\s*[-*]\s*\[S(\d+)\]\s*(.*?)\s*(?:—|--)\s*<?(\S+?)>?\s*$",
+                             sec[1], re.M):
+            found[int(m.group(1))] = {"label": m.group(2), "url": m.group(3), "text": ""}
+        if not found:
+            return list(fallback or [])
+        return [found.get(i + 1, {"label": "", "url": "", "text": ""}) for i in range(max(found))]
+
+    def _citation_attribution_check(self, body, blocks, brand, tools):
+        """FU204 Change 2 — a sentence that names exactly ONE brand (or one bare domain) but whose
+        cited blocks all belong to somebody else. Warning only: a false positive costs one line of
+        toast, and rewriting a citation automatically could silently relabel a real source."""
+        blocks = self._blocks_from_sources(body, blocks)
+        if not body or not blocks:
+            return ""
+        subj = ((brand or {}).get("name") or "").strip()
+        names = [n for n in ([subj] + [str(t).strip() for t in (tools or [])]) if n]
+        if len(names) < 2:
+            return ""
+        # brand -> the domain(s) we resolved for it
+        doms = {}
+        if subj and (brand or {}).get("domain_url"):
+            doms[subj.lower()] = _norm_domain(brand.get("domain_url") or "")
+        _cd = (brand or {}).get("competitor_domains")
+        if isinstance(_cd, str):
+            try:
+                _cd = json.loads(_cd or "{}")
+            except Exception:
+                _cd = {}
+        for k, v in (_cd or {}).items():
+            doms[str(k).strip().lower()] = _norm_domain(str(v or ""))
+
+        def _belongs(blk, nm):
+            """Does this evidence block belong to / explicitly name brand `nm`?"""
+            toks = [x for x in _product_tokens(nm) if len(x) >= 3]
+            if not toks:
+                return True                       # can't tell → never flag
+            d = _norm_domain(blk.get("url") or "")
+            bd = doms.get(nm.lower()) or ""
+            if bd and d and (d == bd or d.endswith("." + bd)):
+                return True
+            hay = ((blk.get("label") or "") + " " + (blk.get("url") or "") + " "
+                   + (blk.get("text") or "")).lower()
+            return all(t in hay for t in toks)
+
+        hits = []
+        for sent in self._prose_sentences(body):
+            idxs = [int(x) for x in re.findall(r"\[S(\d+)\]", sent)]
+            if not idxs:
+                continue
+            low = sent.lower()
+            named = {n for n in names if re.search(r"\b" + re.escape(n.lower()) + r"\b", low)}
+            # A brand and its OWN domain are one entity, not two — "Tommee Tippee … on
+            # tommeetippee.com [S8]" must still be checkable (that sentence cited a paediatric
+            # guideline). Only an UNRELATED bare domain counts as a separate entity.
+            _ds = set()
+            for d in self._BARE_DOMAIN_RE.findall(sent):
+                _dl = d.lower().replace("-", "")
+                if any(all(t in _dl for t in _product_tokens(n)) for n in named if _product_tokens(n)):
+                    continue
+                _ds.add(d)
+            named |= _ds
+            if len(named) != 1:
+                continue                          # 0 or 2+ brands → ambiguous, never flag
+            nm = next(iter(named))
+            cited = [blocks[i - 1] for i in idxs if 1 <= i <= len(blocks)]
+            if cited and not any(_belongs(b, nm) for b in cited):
+                where = ", ".join(sorted({_norm_domain(b.get("url") or "") or (b.get("label") or "?")
+                                          for b in cited}))
+                hits.append(f'"{sent[:60].strip()}…" names {nm} but cites {where}')
+            if len(hits) >= 4:
+                break
+        if not hits:
+            return ""
+        return "citation-check: " + "; ".join(hits) + " — re-cite to that brand's own source or drop the specific"
+
+    def _source_class_check(self, body, blocks):
+        """FU204 Change 3 — a material / safety / certification / efficacy claim whose ONLY citations
+        are `review ·` (star ratings) or `retail ·` (marketplace listings). Those evidence sentiment
+        and price, never what a product is made of or what it does."""
+        blocks = self._blocks_from_sources(body, blocks)
+        if not body or not blocks:
+            return ""
+        hits = []
+        for sent in self._prose_sentences(body):
+            if not self._SPEC_CLAIM_RE.search(sent):
+                continue
+            idxs = [int(x) for x in re.findall(r"\[S(\d+)\]", sent)]
+            cited = [blocks[i - 1] for i in idxs if 1 <= i <= len(blocks)]
+            if not cited:
+                continue
+            klass = {_source_class(b.get("url") or "") for b in cited}
+            if klass and klass <= {"review", "retail"}:
+                hits.append(f'"{sent[:60].strip()}…" rests only on a {"/".join(sorted(klass))} source')
+            if len(hits) >= 4:
+                break
+        if not hits:
+            return ""
+        return ("source-class: " + "; ".join(hits)
+                + " — a rating or marketplace page evidences sentiment or price, not a spec")
+
     def _self_reference_note(self, body, brand):
         """FU197 — flag a sentence that promises another page of this brand without linking a LIVE
         one. Returns a note for `geo_warning`, or "" when the body is clean. Never mutates."""
@@ -7226,6 +7569,24 @@ Return JSON only:
         # handed UNPUBLISHED sibling titles and told to defer to them, so it advertised guides that
         # exist nowhere. The prompt rules are the fix; this is the visible backstop. Warning only —
         # the phrasings vary far too much to cut a sentence safely.
+        # FU204 — the two citation checks. Warning only; they never rewrite a marker, because a
+        # deterministic re-cite would silently relabel a real source. Between them they catch the
+        # wrong-ENTITY case (a Nanobebe price cited to Tommee Tippee) and the wrong-SOURCE-CLASS case
+        # (borosilicate glass cited to a Trustpilot rating). A same-brand WRONG-PRODUCT page (a PPSU
+        # claim cited to that brand's GLASS page) is caught by neither — recorded, not claimed.
+        _cab = self._citation_attribution_check(article.get("body_markdown") or "",
+                                                getattr(self, "_evidence_blocks", None) or [],
+                                                brand, getattr(self, "_article_tools", None) or [])
+        if _cab:
+            print(f"[blog_gen] {_cab}", flush=True)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _cab] if x)
+        _scc = self._source_class_check(article.get("body_markdown") or "",
+                                        getattr(self, "_evidence_blocks", None) or [])
+        if _scc:
+            print(f"[blog_gen] {_scc}", flush=True)
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), _scc] if x)
         _srn = self._self_reference_note(article.get("body_markdown") or "", brand)
         if _srn:
             print(f"[blog_gen] {_srn}", flush=True)
@@ -7988,6 +8349,9 @@ Return JSON only:
         self._evidence_blocks = list(ck.get("evidence_blocks") or [])
         # FU184: the invented-competitor flag was computed during sourcing, which does NOT re-run on a
         # FU79 resume — rebuild it from the checkpointed list so the warning survives the pause.
+        # FU204: same reason — the citation-attribution check needs the compared brand names, and
+        # sourcing does not re-run on a resume, so rebuild them from the checkpoint.
+        self._article_tools = [str(x).strip() for x in (sourcing.get("tools") or []) if str(x).strip()]
         _inv_ck = [str(x).strip() for x in ((ck.get("sourcing") or {}).get("invented_tools") or [])
                    if str(x).strip()]
         if _inv_ck:

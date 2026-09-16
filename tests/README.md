@@ -40,3 +40,31 @@ python3 -m pytest tests/ -q
 
 **Rule:** only do a live gen AFTER `python3 -m pytest tests/` is green — the suite, not a paid generation,
 is the regression gate.
+
+## Standing rule (FU204): assert against a REAL exported body, not only a hand-written string
+
+FU204 shipped four defects through a green 588-test suite. The reason was the same every time: the
+tests measured what the author imagined the body looked like, not what the pipeline produces.
+
+- FU202's `marker-space` rule had **28 tests**, all over synthetic inputs (`-item`, `1.item`). Not one
+  ran the formatter over a real article body — every one of which begins with FU152's
+  `*[Add author byline before publishing]*`. The rule rewrote that byline into a bullet on **every blog**
+  and the suite never noticed.
+- FU185's table fixture was built around the old ">50% empty" column rule, so it silently encoded a
+  threshold rather than a guarantee.
+- `v9_blog.html` was committed by FU54 as a permanent golden anchor and then never added to, so every
+  later round verified itself against fixtures written by whoever wrote the code under test.
+
+**So: every formatting, scrub, citation or table rule must be asserted against a real exported body.**
+The anchors are `tests/fixtures/v9_blog.html` and `tests/fixtures/thyseed_blog.html` (see
+`test_v9_fixture.py`, `test_fu204_golden.py`). Add to them; do not let them go stale.
+
+The specific traps a synthetic fixture will not contain:
+
+1. **Every article starts with an italic line.** FU152 prepends the byline placeholder, and FU84 can add
+   `*Reviewed by …*` and `*Disclosure: …*`. Any rule that reads a leading `*` must be tested against them.
+2. **A new rule reverses old fixtures on purpose.** When it does, update the assertion WITH a comment
+   saying which guarantee changed and where the old one is still covered — never loosen it to pass.
+3. **Demonstrate the ordering.** A regression test must FAIL on the code as it was and PASS after. Prove
+   it (`git stash` the source changes, run the new test, restore) rather than asserting it. FU204's
+   suite went 21 failed / 4 passed → 25 passed.

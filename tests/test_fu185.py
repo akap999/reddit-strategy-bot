@@ -158,7 +158,12 @@ def test_idempotent():
 
 # --- call-site coverage --------------------------------------------------------------------------
 
-# NOTE the table shape: TWO data rows with one real value, so FU138's punt resolver KEEPS the column
+# NOTE the table shape: TWO data rows, one of them an unsourced "—" cell. FU138's punt resolver used
+# to KEEP that column (it only dropped a column >50% empty). FU204 made the rule absolute — a
+# comparison column answers for EVERY option or it does not exist — so the whole one-dimension table
+# is now removed here. The guarantee THIS file exists for (the AI-symbol scrub must not touch a dash
+# inside a table row) is asserted directly against `_scrub_ai_symbols` in
+# test_table_row_keeps_its_punt_placeholder_cell above, and is unaffected.
 # (a column blank in >50% of rows is correctly dropped by that resolver, which is pre-FU185 behaviour).
 DIRTY = ("# Seed\n\n## Quick answer\nAcme ships fast — and costs less [S1].\n\n"
          "| Tool | Price |\n|---|---|\n| Acme | $149/mo |\n| Ro | — |\n\n"
@@ -172,8 +177,10 @@ def test_finalize_article_scrubs_the_body_and_the_meta_fields():
            "meta_title": "Acme — the fit", "keywords": [], "body_markdown": DIRTY}
     out = gen._finalize_article(BRAND, "seed", art, DIRTY)
     body = out["body_markdown"]
-    assert "—" not in body.split("## Sources")[0].replace("| Ro | — |", "")   # prose clean
-    assert "| Ro | — |" in body                       # the punt-placeholder CELL survives
+    assert "—" not in body.split("## Sources")[0]                          # prose clean
+    # FU204: the punt cell is no longer shipped at all — its column had a gap, so the column (and with
+    # it this single-dimension table) is gone. A blank comparison cell never reaches a reader.
+    assert "| Ro | — |" not in body
     assert "Acme ships fast, and costs less [S1]." in body
     assert "..." in body and "“" not in body and "”" not in body
     assert "—" not in out["meta_description"] and "—" not in out["meta_title"]

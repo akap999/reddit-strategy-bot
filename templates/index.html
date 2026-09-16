@@ -13162,19 +13162,24 @@ function blogProvideSourcesModal(blogId, missing) {
         // in-house") is not a company and has no page, so asking for a link is asking for something
         // that cannot exist. Same row, same submit path, different ask: typed facts only.
         const isOpt = !!m.generic_option;
+        // FU204 (6c) — a PRICE-ONLY ask is not "couldn't find public info". We found the brand and
+        // cited it; we are missing ONE number, and saying otherwise made the ask look wrong and vague.
+        const isPrice = !!m.price_only;
         const ask = isOpt
             ? `No public reference found for <b>${_blogEsc(m.tool)}</b> — it's an option, not a company, so there's no page to link. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Type the facts below to keep it in the comparison.`
+            : isPrice
+            ? `Found <b>${_blogEsc(m.tool)}</b>, but couldn't confirm its <b>current price</b> from its own site or a reputable source${hint}. Paste a product/pricing link, or type the price below. Skip it and the price column is dropped from the comparison (a blank cell is never shipped).`
             : `Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.`;
         const urlInput = isOpt ? '' :
             `<input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">`;
         return `
         <div class="border border-gray-700 rounded p-2 mb-2">
-            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}</div>
+            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}${isPrice ? ' <span class="text-xs font-normal text-gray-500">(price only — everything else is sourced)</span>' : ''}</div>
             <div class="text-xs text-gray-400 mb-2">${ask}</div>
             ${urlInput}
-            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
+            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : isPrice ? "…or type the price, e.g. '$24.99 for the 2-pack'" : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
             <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
-                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop it from the comparison
+                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — ${isPrice ? 'drop the price column' : 'drop it from the comparison'}
             </label>
         </div>`;
     }).join('');

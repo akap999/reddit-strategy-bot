@@ -57,9 +57,16 @@ def test_every_sentinel_cell_is_stripped():
 
 
 def test_the_table_comes_back_within_the_dimension_cap():
+    """FU204 changed the rule under this test, deliberately. FU200 dropped a column >50% empty and the
+    cap then trimmed the survivors to _DIM_CAP, so the answer was exactly _DIM_CAP + 1. The operator's
+    rule is now absolute — a comparison column answers for EVERY firm or it does not exist — so the
+    binding constraint is emptiness, not the cap, and the table comes back NARROWER than the cap with
+    every cell filled. The cap still holds as a ceiling; it is simply no longer what bites here."""
     out = _cols(_resolve(_table()))
-    assert len(out) == _DIM_CAP + 1, "first column + at most _DIM_CAP dimensions"
+    assert 1 < len(out) <= _DIM_CAP + 1, "first column + at most _DIM_CAP dimensions"
     assert len(out) < 11
+    rows = [[c.strip() for c in r.strip().strip("|").split("|")] for r in _rows(_resolve(_table()))]
+    assert all(c and c not in ("—", "-") for r in rows for c in r), "no cell may be empty (FU204)"
 
 
 def test_no_row_is_lost_and_withers_still_appears():
@@ -68,13 +75,16 @@ def test_no_row_is_lost_and_withers_still_appears():
     assert "Withers" in out, "the worst-sourced firm (7/10 unsourced) survives"
 
 
-def test_the_surviving_dimensions_are_the_best_evidenced_ones():
+def test_the_surviving_dimensions_are_the_ones_the_whole_field_can_answer():
+    """FU204: "best-evidenced" is now "answerable by EVERY firm". Hague Convention expertise moves from
+    KEPT to DROPPED — one firm of five cannot answer it, and a blank cell in that column reads as "this
+    firm has no Hague expertise", which is worse than not running the column at all."""
     out = _cols(_resolve(_table()))
     assert out[0].strip().lower() in ("firm", "firm ")
-    for kept in ("Legal 500", "Hague", "Jurisdiction"):
+    for kept in ("Legal 500", "Jurisdiction", "HNW"):
         assert any(kept.lower() in c.lower() for c in out), kept
-    # the three columns a majority of the field could not answer are gone
-    for dropped in ("IAFL", "dual-qualified", "surrogacy"):
+    # every column with ANY gap is gone — the three majority-empty ones AND Hague (1 of 5 empty)
+    for dropped in ("IAFL", "dual-qualified", "surrogacy", "Hague"):
         assert not any(dropped.lower() in c.lower() for c in out), dropped
 
 

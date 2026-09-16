@@ -1347,6 +1347,24 @@ class BlogGenerator:
         self.writer = writer
         self.writer_mode = (writer_mode or "off")
         self._evidence_blocks = []   # set by _gather_evidence; read by _rebuild_sources
+        # FU205 (R4) — the deterministic checks' notes, initialised EXPLICITLY. Every one is read
+        # with `getattr(self, ..., default)` in `_finalize_article`, so an absent attribute silently
+        # evaluates to "clean" instead of failing loudly. On the FU79 resume path — a fresh instance
+        # where sourcing does NOT re-run — that meant peer-check, official-source gap,
+        # mechanics-check, the subject-price warning and brand-facts reported clean on every paused
+        # blog, while `self-reference` read an empty `_sibling_urls` and so false-positived on every
+        # matching sentence. They are carried through the pause checkpoint now (see
+        # `_check_notes` / `finish_pending_blog`); declaring them here is what makes that state
+        # visible rather than implied.
+        self._peer_note = ""          # FU98: "best/top <type>" page with <2 same-type competitors
+        self._auth_note = ""          # FU142: a non-primary product with no official source
+        self._facts_note = ""         # FU178: the canonical-fact verification tier tally
+        self._price_warn = ""         # FU161: the subject's price could not be confirmed
+        self._invented_note = ""      # FU184: a competitor the model named itself
+        self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
+        self._core_mechanics = []     # FU198: the subject's defining mechanics
+        self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
+        self._article_tools = []      # FU204: the compared brand names, for the citation check
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -5615,6 +5633,7 @@ Return JSON only:
                 "checkpoint": {
                     "sourcing": sourcing,
                     "evidence_blocks": list(getattr(self, "_evidence_blocks", None) or []),
+                    "check_notes": self._check_notes(),   # FU205 (R4): the checks survive the pause
                     "article": {k: article.get(k) for k in
                                 ("title", "meta_description", "meta_title", "keywords", "body_markdown", "claims_flagged")},
                     "draft_body": draft_body,
@@ -7459,6 +7478,118 @@ Return JSON only:
         return (f"self-reference: {len(bad)} sentence(s) promise a {name} page that is not a published "
                 f"link — remove them or publish and link the page (e.g. \u201c{bad[0]}\u2026\u201d)")
 
+    # ───────────────────────── FU205 (R2): the warning channel, made legible ─────────────────────
+    _WARN_KEY_RE = re.compile(r"^[a-z][a-z0-9 -]{0,28}$")
+
+    @classmethod
+    def _warn(cls, article, note, fold_string=True, key=None):
+        """Record ONE warning as a STRUCTURED item, and on the legacy joined string.
+
+        The audit's second structural finding: 22 deterministic checks fed a single `"; "`-joined
+        string, and `_quality_report` then `.split(";")` it back apart to count and score. But four
+        of those checks (`citation-check`, `source-class`, `mechanics-check`, `verify-check`) join
+        their OWN sub-hits with `"; "` — so three real problems were counted as five, docked -25
+        instead of -15, and the operator was shown a context-free fragment ("add competitors in Edit
+        Brand or regenerate") as though it were a warning of its own.
+
+        `article["warnings"]` is now the truth: exactly one entry per check that fired, carrying its
+        own key. `article["geo_warning"]` stays exactly as it was so every existing reader — the
+        toast, the task result, the persisted scorecard — keeps working unchanged.
+        """
+        note = (note or "").strip()
+        if not note:
+            return
+        if not key:
+            key = "check"
+            if ":" in note:
+                head = note.split(":", 1)[0].strip()
+                if cls._WARN_KEY_RE.match(head):
+                    key = head
+        article.setdefault("warnings", []).append({"check": key, "detail": note})
+        if fold_string:   # `fold_string=False` records a warning that already has its OWN toast
+            article["geo_warning"] = "; ".join(
+                x for x in [article.get("geo_warning", ""), note] if x)
+
+    # ───────────────── FU205 (R7): the two properties nothing verified ─────────────────
+    # A stall is the failure mode the answer-first rule exists to prevent: heading + first sentence
+    # are lifted as ONE chunk, and a chunk that opens "The honest answer is: it depends" carries no
+    # entities and is useless as a citation. The rule has been prompt-only for the blog body since
+    # FU85 — deterministic ONLY for LinkedIn and YouTube — so the one surface it matters most on was
+    # the one surface nothing checked.
+    _STALL_RE = re.compile(
+        r"^\s*(?:the\s+)?(?:honest\s+)?answer\s+is[:,]?\s*it\s+depends"
+        r"|^\s*it\s+depends\b"
+        r"|^\s*let(?:'|\u2019)?s\s+(?:go\s+through|dive|break|take\s+a\s+look|explore)"
+        r"|^\s*let\s+us\s+(?:go\s+through|dive|break|take\s+a\s+look|explore)"
+        r"|^\s*let\s+me\s+break\s+(?:this\s+)?down"
+        r"|^\s*(?:there\s+is|there(?:'|\u2019)s)\s+no\s+(?:one|single)\s+(?:right\s+)?answer"
+        r"|^\s*(?:that|this)\s+depends\s+on\b"
+        r"|^\s*before\s+(?:we|you)\s+(?:dive|get|begin|start)"
+        r"|^\s*first[,]?\s+(?:some|a\s+little)\s+(?:context|background)",
+        re.IGNORECASE)
+
+    @classmethod
+    def _answer_first_check(cls, body):
+        """Every question-shaped heading must be ANSWERED in its own first sentence. Returns a note
+        for `geo_warning`, or "" when every question heading answers itself. Never mutates."""
+        lines = (body or "").split("\n")
+        bad = []
+        for i, ln in enumerate(lines):
+            m = re.match(r"^\s*#{2,3}\s+(.*\?)\s*$", ln)
+            if not m:
+                continue
+            first = ""
+            for nxt in lines[i + 1:]:
+                t = nxt.strip()
+                if not t:
+                    continue
+                if t.startswith("#") or t.startswith("|") or t.startswith(">"):
+                    break   # another heading / a table / a quote — no prose answer to judge
+                first = re.split(r"(?<=[.!?])\s", t, maxsplit=1)[0]
+                break
+            if first and cls._STALL_RE.search(first):
+                bad.append(m.group(1).strip()[:60])
+        if not bad:
+            return ""
+        return ("answer-first: " + str(len(bad)) + " question heading(s) open with a stall instead of "
+                "the answer (" + "; ".join(f'"{b}"' for b in bad[:3]) + ") — engines lift the heading "
+                "and its first sentence as ONE chunk, so a stall there is an uncitable chunk")
+
+    @staticmethod
+    def _byline_present_check(body):
+        """FU152 prepends a byline placeholder to EVERY article and FU204 stopped it being corrupted
+        into a bullet — but nothing ever checked it SURVIVED the two body-rewriting LLM calls. The
+        placeholder is what forces a human pass before publishing; losing it silently removes that
+        gate. Returns a note, or "" when the byline is there."""
+        head = "\n".join((body or "").split("\n")[:12])
+        if "[Add author byline before publishing]" in head:
+            return ""
+        for ln in head.split("\n"):
+            t = ln.strip()
+            if t.startswith("*") and t.endswith("*") and len(t) > 2 and not t.startswith("**"):
+                return ""   # a real byline / reviewer / disclosure italic line
+        return ("byline-check: the author byline placeholder is missing from the top of the article — "
+                "a rewrite dropped it; regenerate, or add the byline before publishing")
+
+    # FU205 (R4) — the check notes that survive a FU79 pause. Sourcing does not re-run on resume,
+    # so without this every check that depends on it silently reports clean on a resumed blog.
+    _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
+                    "_table_punt_note", "_core_mechanics", "_subject_phrase", "_subject_peers")
+
+    def _check_notes(self):
+        """JSON-safe snapshot of the deterministic checks' state, for the pause checkpoint."""
+        out = {k: getattr(self, k, None) for k in self._CHECK_NOTES}
+        out["_sibling_urls"] = sorted(getattr(self, "_sibling_urls", None) or set())
+        return {k: v for k, v in out.items() if v}
+
+    def _restore_check_notes(self, notes):
+        """Put a `_check_notes()` snapshot back on a fresh instance (the FU79 resume)."""
+        for k, v in (notes or {}).items():
+            if k == "_sibling_urls":
+                self._sibling_urls = set(v or [])
+            elif k in self._CHECK_NOTES:
+                setattr(self, k, v)
+
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
                           ymyl=None, link_targets=None, with_linkedin=True):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
@@ -7503,6 +7634,11 @@ Return JSON only:
             article["ai_symbols_removed"] = _n_sym
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
+        # FU205 (R3): `_resolve_table_punts` RESETS `self._table_punt_note` on every call, and the
+        # verification pass below re-runs `_rebuild_sources` after a prose repair. Capture the note
+        # from THIS rebuild so a column dropped here is still reported even when the second rebuild
+        # finds nothing left to drop and clears it.
+        _tpn_first = getattr(self, "_table_punt_note", "")
         # FU167 (Change 6): strip invisible/zero-width/bidi carrier chars from EVERY final body (belt-and-
         # suspenders — the invisible-CHARACTER watermark class + stray chars from any source). NOT Claude's
         # statistical mark (that's word choice), and it never alters visible text.
@@ -7510,6 +7646,21 @@ Return JSON only:
         if _n_inv:
             article["writer_invisible_removed"] = _n_inv
             print(f"[blog_gen] invisible-char sanitizer: removed {_n_inv} zero-width/bidi char(s)", flush=True)
+        # FU201/FU202 — FINAL verification: repair formatting + the mechanically safe content
+        # defects, flag the rest, keep BOTH versions.
+        #
+        # FU205 (R3): this used to run AFTER the ~20 read-only checks below, which meant every one of
+        # them judged a body this pass was about to change. Concretely: after a prose repair the pass
+        # re-runs `_rebuild_sources`, which re-runs `_resolve_table_punts` — so a table could be
+        # narrowed, or removed by the FU204 collapse guard, AFTER the competitor-count check had
+        # already passed and `_table_punt_note`'s only reader had already run. The note was rewritten
+        # and nobody read it again; the Sources-derived checks (FU133/FU141) validated a `## Sources`
+        # block that was then rebuilt. Its own slot requirement — "after `_rebuild_sources`, because
+        # `_resolve_table_punts` runs inside it and drops columns" — is still met here: the rebuild
+        # happens well above. So the checks now read the body that actually ships.
+        _vrep = self._verify_final_article(brand, article)
+        if _vrep:
+            article["verify_report"] = _vrep
         # FU90 — geo-check (soft signal, never blocks): a geo page whose BODY barely mentions its
         # geography is the doorway pattern; warn the operator immediately instead of at review.
         rgeo = (geo or "").strip() or _seed_geo(seed)
@@ -7522,7 +7673,7 @@ Return JSON only:
                 note = (f"geo-check: this page targets '{rgeo}' but the body mentions it only "
                         f"{_hits}× — possible doorway output; review the geo sections")
                 print(f"[blog_gen] {note}", flush=True)
-                article["geo_warning"] = note
+                self._warn(article, note)
         # FU93 — qualifier-check (soft signal, same channel as the geo-check so the app/UI wiring is
         # untouched): a variant page that barely mentions its own qualifier is the doorway pattern.
         # (Substance-share isn't reliably measurable in code — this only catches the near-zero case;
@@ -7540,8 +7691,7 @@ Return JSON only:
                 qnote = (f"qualifier-check: this page targets '{rqual}' but the body mentions it only "
                          f"{_qhits}× — possible doorway output; review the qualifier sections")
                 print(f"[blog_gen] {qnote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), qnote] if x)
+                self._warn(article, qnote)
         # FU93 (P3) — claim-check (warning only, deliberately narrow): an UNQUALIFIED "no sales tax"
         # in the meta description or the page opening is very likely wrong post-Wayfair (nexus states)
         # and creates checkout disputes. Never rewrites — the operator confirms the policy + regens.
@@ -7553,24 +7703,23 @@ Return JSON only:
             cnote = ("claim-check: unqualified 'no sales tax' in the meta/opening — confirm the "
                      "client's actual tax policy and qualify before publishing")
             print(f"[blog_gen] {cnote}", flush=True)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), cnote] if x)
+            self._warn(article, cnote)
         _pn = getattr(self, "_peer_note", "")
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _pn] if x)
+            self._warn(article, _pn)
         _in184 = getattr(self, "_invented_note", "")
         if _in184:  # FU184: a compared competitor the model named itself (not curated, not evidenced)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _in184] if x)
-        _tpn = getattr(self, "_table_punt_note", "")
-        if _tpn:  # FU138: unsourced-table resolution outcome
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _tpn] if x)
+            self._warn(article, _in184)
+        # FU138: unsourced-table resolution outcome. FU205 (R3): the union of BOTH rebuilds — the
+        # one above and the one the verification pass runs after a prose repair — so a drop can no
+        # longer be silently overwritten by a later, quieter pass.
+        _tpn_notes = [n for n in dict.fromkeys(
+            [_tpn_first, getattr(self, "_table_punt_note", "")]) if n]
+        for _tpn in _tpn_notes:
+            self._warn(article, _tpn)
         _an142 = getattr(self, "_auth_note", "")
         if _an142:  # FU142: a NON-primary product with no official source naming it
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _an142] if x)
+            self._warn(article, _an142)
         # FU197 — a promise of another {name} page that carries no live link. The writer used to be
         # handed UNPUBLISHED sibling titles and told to defer to them, so it advertised guides that
         # exist nowhere. The prompt rules are the fix; this is the visible backstop. Warning only —
@@ -7585,19 +7734,16 @@ Return JSON only:
                                                 brand, getattr(self, "_article_tools", None) or [])
         if _cab:
             print(f"[blog_gen] {_cab}", flush=True)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _cab] if x)
+            self._warn(article, _cab)
         _scc = self._source_class_check(article.get("body_markdown") or "",
                                         getattr(self, "_evidence_blocks", None) or [])
         if _scc:
             print(f"[blog_gen] {_scc}", flush=True)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _scc] if x)
+            self._warn(article, _scc)
         _srn = self._self_reference_note(article.get("body_markdown") or "", brand)
         if _srn:
             print(f"[blog_gen] {_srn}", flush=True)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _srn] if x)
+            self._warn(article, _srn)
         # FU198 — mechanics coverage. The extracted mechanics are derived from the SUBJECT, not from
         # the draft, so an absent one means the page really did skip it. Warning only.
         _mech = [m for m in (getattr(self, "_core_mechanics", None) or []) if str(m).strip()]
@@ -7614,16 +7760,13 @@ Return JSON only:
                           + "; ".join(_missing[:3])
                           + (f" (+{len(_missing) - 3} more)" if len(_missing) > 3 else ""))
                 print(f"[blog_gen] {_mnote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _mnote] if x)
+                self._warn(article, _mnote)
         _pw = getattr(self, "_price_warn", "")
         if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _pw] if x)
+            self._warn(article, _pw)
         _fn = getattr(self, "_facts_note", "")
         if _fn:  # FU178: canonical brand facts that earned no citation (stated as positioning instead)
-            article["geo_warning"] = "; ".join(
-                x for x in [article.get("geo_warning", ""), _fn] if x)
+            self._warn(article, _fn)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""
@@ -7641,8 +7784,7 @@ Return JSON only:
                           "'independent audit/analysis' — attribute it plainly or re-cite the "
                           "vendor's own page")
                 print(f"[blog_gen] {_lnote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _lnote] if x)
+                self._warn(article, _lnote)
         # FU133 — YMYL checks (same toast channel): (a) the body must actually CITE ≥2 official
         # sources; (b) a clinical page without a named human reviewer is skippable to AI engines —
         # loud warning, never an invented person.
@@ -7658,14 +7800,12 @@ Return JSON only:
                 _ynote = (f"YMYL ({ymyl}): only {_off_cited} official citation(s) in the body — "
                           f"clinical claims lack authoritative grounding")
                 print(f"[blog_gen] {_ynote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _ynote] if x)
+                self._warn(article, _ynote)
             if not ((brand or {}).get("reviewer_name") or "").strip():
                 _rnote = (f"YMYL ({ymyl}): no named medical reviewer — set a REAL reviewer in "
                           f"Edit Brand (never invented) so the page carries a professional byline")
                 print(f"[blog_gen] {_rnote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _rnote] if x)
+                self._warn(article, _rnote)
             if ymyl == "medical":
                 # FU135: perks in the extract zone (quick answer / meta) = gray-market signal.
                 _zone = ((article.get("meta_description") or "") + "\n" + _prose[:900])
@@ -7673,8 +7813,7 @@ Return JSON only:
                     _pnote = ("YMYL (medical): logistics perk language ('free/discreet delivery') "
                               "sits in the Quick answer/meta — move it to a logistics section")
                     print(f"[blog_gen] {_pnote}", flush=True)
-                    article["geo_warning"] = "; ".join(
-                        x for x in [article.get("geo_warning", ""), _pnote] if x)
+                    self._warn(article, _pnote)
         # FU141 — quick-answer citation guard (YMYL, warning only): the most-extracted position
         # keeps getting the worst citations. Every [S#] the Quick answer cites must map to an
         # "official ·" or first-party source — a review/affiliate citation there means the page
@@ -7693,8 +7832,7 @@ Return JSON only:
                            f"(review/affiliate) for its lead claim — re-cite to an "
                            f"official/first-party source or regenerate")
                 print(f"[blog_gen] {_qanote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _qanote] if x)
+                self._warn(article, _qanote)
         # FU141 — sources integrity (all blogs, warning only): every listed ## Sources entry must
         # carry a URL — a citation pointing at nothing (the nameless/URL-less "provided source"
         # class) must never ship silently.
@@ -7711,8 +7849,7 @@ Return JSON only:
                           f"carr{'ies' if len(_broken) == 1 else 'y'} no URL — fix the source "
                           f"entry or regenerate")
                 print(f"[blog_gen] {_snote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _snote] if x)
+                self._warn(article, _snote)
         # FU140 — stale-year bump: the model dates titles with its training-era year. Any
         # 20XX strictly before the current year in the SEO title/description is bumped to the
         # current year — unless that year appears in the SEED (an operator-chosen retrospective)
@@ -7753,8 +7890,7 @@ Return JSON only:
                 _ccnote = (f"competitor-check: comparison table has only {len(_comp_rows)} competitor "
                            f"row(s) — minimum 3 expected; add competitors in Edit Brand or regenerate")
                 print(f"[blog_gen] {_ccnote}", flush=True)
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _ccnote] if x)
+                self._warn(article, _ccnote)
             # FU142 — publisher-blank check: a SUBJECT-row cell that is empty/"—" while the SAME
             # column carries a real value in ≥1 competitor row is the inverted lopsided column —
             # the publisher looks like the only party not disclosing. Warn with the column name(s).
@@ -7778,17 +7914,74 @@ Return JSON only:
                                + " cell(s) are empty while competitors show values — provide the "
                                  "fact or regenerate (a publisher-only blank reads evasive)")
                     print(f"[blog_gen] {_pbnote}", flush=True)
-                    article["geo_warning"] = "; ".join(
-                        x for x in [article.get("geo_warning", ""), _pbnote] if x)
-        # FU201/FU202 — FINAL verification: repair formatting + the mechanically safe content
-        # defects, flag the rest, keep BOTH versions. Placed here so the body is FINAL (Sources
-        # rebuilt, table columns resolved) and so the LinkedIn adaptation below reads the fixed body.
-        _vrep = self._verify_final_article(brand, article)
-        if _vrep:
-            article["verify_report"] = _vrep
+                    self._warn(article, _pbnote)
+            # FU205 (R4) — canonical-price check. `_canonical_price_item` has claimed since FU158 to
+            # make an operator-set price "the single source of truth for the SUBJECT's pricing cell",
+            # and nothing ever called it. This is that guarantee, enforced where it can be enforced
+            # without touching generation: when the operator has set a canonical price for THIS
+            # article's product and the subject's own pricing cell shows a DIFFERENT figure, say so.
+            # FU163's three-different-prices failure — meta $647, cell $29, Offer $79 — is exactly
+            # the shape this catches, and the operator's number is the one that is right.
+            try:
+                _kf205 = json.loads((brand or {}).get("key_facts") or "{}")
+            except Exception:
+                _kf205 = {}
+            _canon205 = _canonical_price_item(_kf205, f"{seed} {article.get('title') or ''}")
+            if _canon205 and _canon205.get("operator_set") and _subj_rows:
+                _cval = str(_canon205.get("value") or "")
+                _cnum, _ = _price_amount(_cval)
+                if _cnum:
+                    _pcols = [i for i, h in enumerate(_hdr) if re.search(r"pric|cost|fee", h, re.I)]
+                    for _ci in _pcols:
+                        for _sr in _subj_rows:
+                            _cells = _cells142(_sr)
+                            if _ci >= len(_cells):
+                                continue
+                            _cell_num, _ = _price_amount(_cells[_ci])
+                            if _cell_num and _cell_num != _cnum:
+                                _cpn = (f"canonical-price: {_bname}'s {_hdr[_ci] or 'pricing'} cell "
+                                        f"shows {_cells[_ci].strip()[:40]} but the operator-set "
+                                        f"canonical price is {_cval[:60]} — the operator's value is "
+                                        f"the authority; fix the cell or update Edit Brand")
+                                print(f"[blog_gen] {_cpn}", flush=True)
+                                self._warn(article, _cpn)
+                                break
+        # FU205 (R7) — the two properties nothing verified: the answer-first guarantee that earns the
+        # citation, and that the byline the client must replace actually survived the rewrites.
+        _afn = self._answer_first_check(article.get("body_markdown") or "")
+        if _afn:
+            print(f"[blog_gen] {_afn}", flush=True)
+            self._warn(article, _afn)
+        _byn = self._byline_present_check(article.get("body_markdown") or "")
+        if _byn:
+            print(f"[blog_gen] {_byn}", flush=True)
+            self._warn(article, _byn)
+        # FU205 (R6) — budget starvation, made visible. Past the $3 ceiling `search_sources`,
+        # `fetch_site_facts` and `find_official_domain` silently return []/"" and NOTHING told the
+        # operator. Every downstream symptom (thin sources, unsourced competitors, blank cells,
+        # punts, the mass-pause) then looks like a logic bug, and has been debugged as one for ~15
+        # rounds. One boolean retires a whole class of misdiagnosis.
+        try:
+            _skipped = int(getattr(self.claude, "skipped_searches", lambda: 0)() or 0)
+        except Exception:
+            _skipped = 0
+        if _skipped:
+            _bnote = (f"budget-check: the ${_BLOG_COST_CEILING:.2f} web-search ceiling was reached — "
+                      f"{_skipped} search(es) were SKIPPED, so thin sourcing here means the tool "
+                      f"stopped looking, not that nothing exists; raise BLOG_COST_CEILING or "
+                      f"regenerate with fewer competitors")
+            print(f"[blog_gen] {_bnote}", flush=True)
+            self._warn(article, _bnote)
         if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring
             article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
         article["prompt_version"] = PROMPT_VERSION
+        # FU205 (R2): the pricing-conflict alert (FU150) was toast-only — never persisted, never folded
+        # into the warning list, so `_quality_report` could not see it and it vanished on reload.
+        # Recorded on the structured list; NOT folded into the joined string, because it already has
+        # its own toast and would otherwise be shown to the operator twice.
+        if (article.get("key_facts_warning") or "").strip():
+            self._warn(article, article["key_facts_warning"].strip(),
+                       fold_string=False, key="key-facts")
         # FU151 (D): deterministic quality scorecard (structure/meta/links + folded warnings), persisted.
         try:
             article["quality_report"] = self._quality_report(article, brand, link_targets=link_targets)
@@ -7875,13 +8068,23 @@ Return JSON only:
                                "detail": "also found: " + ", ".join(sorted(bad))})
 
         # ── citations ──
-        blocks = getattr(self, "_evidence_blocks", None) or []
-        if blocks:
+        # FU205 (R4): this check was DEAD BY CONSTRUCTION. It compared each `[S#]` against
+        # `len(self._evidence_blocks)`, but it runs AFTER `_rebuild_sources` has renumbered every
+        # marker into 1..len(render) where len(render) <= len(blocks) — so the condition could never
+        # be true and the check reported clean on every blog, forever. The question it was actually
+        # trying to answer is answerable, and now matters more: does every marker in the prose have
+        # a matching entry in the `## Sources` list the READER sees? That IS reachable on the paths
+        # R1 opened up — a hand edit, an import, the manual verify endpoint — where the body carries
+        # its own Sources list and no evidence map exists at all.
+        _srcs = self._blocks_from_sources(body, getattr(self, "_evidence_blocks", None) or [])
+        if _srcs:
             orphan = sorted({int(m.group(1)) for m in re.finditer(r"\[S(\d+)\]", prose)
-                             if int(m.group(1)) > len(blocks)})
+                             if int(m.group(1)) > len(_srcs)
+                             or not (_srcs[int(m.group(1)) - 1].get("url")
+                                     or _srcs[int(m.group(1)) - 1].get("label"))})
             if orphan:
-                issues.append({"kind": "citation", "problem": "a citation points at a source that does "
-                               "not exist — the claim will lose its source",
+                issues.append({"kind": "citation", "problem": "a citation points at a source that is "
+                               "not in the Sources list — the claim will lose its source",
                                "detail": ", ".join(f"[S{i}]" for i in orphan)})
         for ln in prose.splitlines():
             if re.match(r"^\s*#{1,6}\s", ln) and re.search(r"\[S\d+\]", ln):
@@ -8072,8 +8275,7 @@ Return JSON only:
                 # surface on the existing toast channel so it is seen at generation time, not at review
                 _vn = ("verify-check: " + "; ".join(i["problem"] for i in issues[:3])
                        + (f" (+{len(issues) - 3} more)" if len(issues) > 3 else ""))
-                article["geo_warning"] = "; ".join(
-                    x for x in [article.get("geo_warning", ""), _vn] if x)
+                self._warn(article, _vn)
             return report
         except Exception as e:
             print(f"[blog_gen] verify skipped: {e}", flush=True)
@@ -8232,8 +8434,18 @@ Return JSON only:
             return "the sentence is the H1 title (pinned to the seed)"
         if _line.startswith("*") and _line.endswith("*") and len(_line) > 2:
             return "the sentence is the byline / disclosure line"
-        if self._PUNT_MEANING_RE.search(fix) or self._PUNT_CELL_RE.search(fix):
+        # FU205 (R3): screen the fix against EVERY regex the guards downstream delete on, not just
+        # the two cell-level ones. The gate used to check `_PUNT_MEANING_RE` / `_PUNT_CELL_RE` only,
+        # so a PROSE punt — "Pricing depends on the specific plan you choose." — passed the gate, was
+        # reported to the operator as `applied`, and was then silently deleted by `_scrub_punts`,
+        # leaving a hole exactly where the defect had been. A repair that cannot survive the scrubs
+        # must be REFUSED and reported as skipped, not applied-then-erased.
+        if (self._PUNT_MEANING_RE.search(fix) or self._PUNT_CELL_RE.search(fix)
+                or self._PUNT_SENT_RE.search(fix) or self._PUNT_URL_SENT_RE.search(fix)
+                or self._PUNT_PROSE_RE.search(fix)):
             return "the fix says a fact is unavailable — that wording is banned"
+        if self._META_RE.search(fix):
+            return "the fix narrates an editing decision — that is scrubbed from the article"
         if any(c in fix for c in self._VF_BANNED_CHARS):
             return "the fix reintroduced an em-dash / curly quote / ellipsis"
         ok, missing = self._facts_preserved(quote, fix, brand)
@@ -8332,8 +8544,20 @@ Return JSON only:
                     _bad.append(u)
             add("internal_links", "Internal links are verified targets", not _bad,
                 (f"{len(_bad)} not in the verified list" if _bad else "all verified"))
-        # Fold in the existing finalize warnings (geo/qualifier/YMYL/peer/publisher-blank/source-authority/…)
-        warnings = [w.strip() for w in (article.get("geo_warning") or "").split(";") if w.strip()]
+        # Fold in the finalize warnings (geo/qualifier/YMYL/peer/publisher-blank/source-authority/…).
+        # FU205 (R2): read the STRUCTURED list when it is there — one entry per check that fired.
+        # The `.split(";")` fallback below is what this method used to do for everything, and it
+        # shredded the four checks that join their own sub-hits with "; ": three real problems were
+        # counted as five and docked -25 instead of -15, and a context-free fragment was shown to the
+        # operator as a warning in its own right. It is kept ONLY for an article dict that predates
+        # the structured list (an older stored report, a caller that builds the dict by hand).
+        _wl = article.get("warnings")
+        if isinstance(_wl, list) and _wl:
+            warnings = [str(w.get("detail") or "").strip() if isinstance(w, dict) else str(w).strip()
+                        for w in _wl]
+            warnings = [w for w in warnings if w]
+        else:
+            warnings = [w.strip() for w in (article.get("geo_warning") or "").split(";") if w.strip()]
         total = len(checks) or 1
         passed = sum(1 for c in checks if c["ok"])
         score = max(0, round(100 * passed / total) - min(len(warnings) * 5, 25))
@@ -8354,6 +8578,9 @@ Return JSON only:
         draft_body = ck.get("draft_body") or ""
         # restore the base evidence set so [S#] numbering + _rebuild_sources stay correct
         self._evidence_blocks = list(ck.get("evidence_blocks") or [])
+        # FU205 (R4): restore the deterministic checks' notes, so a RESUMED blog runs the same checks
+        # as an unpaused one instead of silently reporting clean on all of them.
+        self._restore_check_notes(ck.get("check_notes") or {})
         # FU184: the invented-competitor flag was computed during sourcing, which does NOT re-run on a
         # FU79 resume — rebuild it from the checkpointed list so the warning survives the pause.
         # FU204: same reason — the citation-attribution check needs the compared brand names, and
@@ -8698,11 +8925,20 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
     _ok_items, _ = _drop_nameless_when_named([it for it in kf_items if _offer_ok(it)])   # FU163: no nameless general Offer beside named
     # FU158: prefer the ONE item for THIS article's product (operator-set first), so a stale general /
     # other-product item can never be advertised as the price on a product-specific article.
-    _art_toks = set(_product_tokens((blog.get("seed") or "") + " " + title))
+    #
+    # FU205 (R4): that precedence is `_canonical_price_item` — a function whose docstring has always
+    # claimed it makes an operator-set price "the single source of truth for the SUBJECT's pricing
+    # cell AND the JSON-LD Offer", and which had THREE passing tests and ZERO production callers.
+    # A green suite proving a function works while the product hand-rolls the same rule beside it is
+    # exactly the failure the audit set out to close, so the rule now lives in one place.
+    _art_product = ((blog.get("seed") or "") + " " + title).strip()
+    _canon = _canonical_price_item({"pricing": {"items": _ok_items}}, _art_product)
+    _art_toks = set(_product_tokens(_art_product))
     _matched = [it for it in _ok_items
                 if _art_toks and (_art_toks & set(_product_tokens(it.get("product") or "")))]
     if _matched:
-        offers = [_mk_offer(next((it for it in _matched if it.get("operator_set")), _matched[0]))]
+        offers = [_mk_offer(_canon if _canon in _matched else
+                            next((it for it in _matched if it.get("operator_set")), _matched[0]))]
     else:
         # FU161: no product-token match (a general-topic seed like "GLP-1 programs") — when the operator
         # has set canonical pricing, emit ONLY operator-set items so a stale auto-synced general item

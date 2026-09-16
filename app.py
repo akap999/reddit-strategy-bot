@@ -2830,6 +2830,13 @@ def api_blog_generate():
             _qr = blog.get("quality_report") or {}   # FU151 (D): persist + return the quality scorecard
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
+            # FU205 (R2): the verification pass's full report was computed on EVERY generation and
+            # then discarded — no column, no writer anywhere. Store it, and store the structured
+            # warning list beside it so a reopened blog shows whole warnings, not a re-split string.
+            if blog.get("verify_report"):
+                bg.update_blog(blog_id, verify_report=blog["verify_report"])
+            if blog.get("warnings"):
+                bg.update_blog(blog_id, warnings=blog["warnings"])
             # FU202: keep BOTH versions — the body as it stood before the verification pass edited it.
             # Written only when the pass actually changed something, so an untouched blog stores nothing.
             if blog.get("body_pre_verify"):
@@ -2850,6 +2857,7 @@ def api_blog_generate():
                     "reddit_note": _reddit_status_note(reddit_status),
                     "gen_cost": blog.get("gen_cost", 0),
                     "geo_warning": blog.get("geo_warning", ""),   # FU90: doorway signal → toast
+                    "warnings": blog.get("warnings") or [],   # FU205 (R2): one entry per check that fired
                     "key_facts_warning": blog.get("key_facts_warning", ""),   # FU150: pricing-conflict toast
                     "writer_secs": blog.get("writer_secs", 0),   # FU164
                     "writer_mode_used": blog.get("writer_mode_used", ""),   # FU164 ('fallback' = watermark NOT stripped)
@@ -2940,7 +2948,7 @@ def api_blog_regenerate(blog_id):
             # FU205 (R1/R2): the partial-regenerate paths now run the full check set, so they have
             # warnings and a scorecard to report. Previously they computed neither and the endpoint
             # returned an empty geo_warning for every part but "all".
-            _part_warn, _part_qr = "", {}
+            _part_warn, _part_qr, _part_warnings, _part_vrep = "", {}, [], {}
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
@@ -3013,6 +3021,8 @@ def api_blog_regenerate(blog_id):
                 body = a.get("body_markdown", "")
                 _part_warn = a.get("geo_warning", "")
                 _part_qr = a.get("quality_report") or {}
+                _part_warnings = a.get("warnings") or []
+                _part_vrep = a.get("verify_report") or {}
                 bg.update_blog(
                     blog_id, title=a.get("title", ""),
                     meta_description=a.get("meta_description", ""),
@@ -3044,6 +3054,8 @@ def api_blog_regenerate(blog_id):
                                       qualifier=stored_qual, ymyl=stored_ymyl, with_linkedin=False)
                 _part_warn = _fa.get("geo_warning", "")
                 _part_qr = _fa.get("quality_report") or {}
+                _part_warnings = _fa.get("warnings") or []
+                _part_vrep = _fa.get("verify_report") or {}
                 bg.update_blog(blog_id, body_markdown=_fa.get("body_markdown", ""),
                                claims_flagged=flagged,
                                prompt_version=_bg_prompt_version)   # FU183: no longer "imported"
@@ -3063,9 +3075,18 @@ def api_blog_regenerate(blog_id):
             _qr = (fresh.get("quality_report") or {}) if part == "all" else _part_qr   # FU151 (D)
             if _qr:
                 bg.update_blog(blog_id, quality_report=_qr)
+            # FU205 (R2): persist the verification report + the structured warning list on every
+            # regenerate part, so a reopened blog shows what the tool actually checked.
+            _wl = (fresh.get("warnings") or []) if part == "all" else _part_warnings
+            _vrep = (fresh.get("verify_report") or {}) if part == "all" else _part_vrep
+            if _wl:
+                bg.update_blog(blog_id, warnings=_wl)
+            if _vrep:
+                bg.update_blog(blog_id, verify_report=_vrep)
             return {"blog_id": blog_id, "part": part, "reddit_status": reddit_status,
                     "reddit_note": _reddit_status_note(reddit_status), "gen_cost": regen_cost,
                     "geo_warning": _geo_warn, "key_facts_warning": _kf_warn,
+                    "warnings": _wl,   # FU205 (R2): one entry per check that fired
                     "writer_secs": (fresh.get("writer_secs", 0) if part == "all" else 0),   # FU164
                     "writer_mode_used": (fresh.get("writer_mode_used", "") if part == "all" else ""),   # FU164
                     "writer_warning": (fresh.get("writer_warning", "") if part == "all" else ""),   # FU164
@@ -3308,7 +3329,23 @@ def api_blog_provide_sources(blog_id):
                 pending_state="",   # clear the checkpoint — no longer awaiting sources
                 gen_cost=total_cost,
             )
-            return {"blog_id": blog_id, "resumed": True, "gen_cost": total_cost}
+            # FU205 (R2): a RESUMED blog runs the exact same checks as an unpaused one, and every
+            # one of them used to be thrown away here — this endpoint returned {blog_id, resumed,
+            # gen_cost} and wrote no scorecard, so the operator never saw a single warning on a blog
+            # that paused. FU204's price-ask deliberately routes MORE blogs down this path, which is
+            # what made the gap worth closing first.
+            _r_qr = art.get("quality_report") or {}
+            if _r_qr:
+                bg.update_blog(blog_id, quality_report=_r_qr)
+            if art.get("verify_report"):
+                bg.update_blog(blog_id, verify_report=art["verify_report"])
+            if art.get("warnings"):
+                bg.update_blog(blog_id, warnings=art["warnings"])
+            return {"blog_id": blog_id, "resumed": True, "gen_cost": total_cost,
+                    "geo_warning": art.get("geo_warning", ""),
+                    "warnings": art.get("warnings") or [],
+                    "key_facts_warning": art.get("key_facts_warning", ""),
+                    "quality_report": _r_qr}
         finally:
             bg.close()
 

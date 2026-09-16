@@ -31,6 +31,10 @@ class StubClaude:
     def usage_cost(self):
         return 0.0
 
+    def skipped_searches(self):
+        """FU205 (R6): how many web-search calls the cost ceiling skipped. Settable by a test."""
+        return int(getattr(self, "_skipped", 0) or 0)
+
     # --- LLM calls ---
     def call(self, prompt, max_tokens=1024, max_retries=3, temperature=None, system_prompt=None):
         self.calls.append(prompt)

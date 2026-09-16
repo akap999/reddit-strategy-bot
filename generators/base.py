@@ -507,11 +507,20 @@ class ClaudeClient:
         # web_search-backed calls (search_sources / fetch_site_facts / find_official_domain) are
         # SKIPPED, so a generation can't blow past a dollar budget. None = no cap (default).
         self._cost_ceiling = None
+        # FU205 (R6) — how many web-search calls the ceiling SKIPPED. Starvation used to be
+        # completely invisible: past the ceiling these three methods return []/"" and the caller
+        # cannot tell "nothing was found" from "we stopped looking". The downstream symptoms — thin
+        # sources, unsourced competitors, blank cells, punts, the mass-pause — are exactly the ones
+        # that have been debugged as logic bugs for ~15 rounds. FU150's own context says as much:
+        # competitors "used to burn the whole shared web-search budget… leaving later competitors
+        # with `_over_budget()`=True on every call". The ordering was fixed; the signal never was.
+        self._skipped_searches = 0
 
     def reset_usage(self):
         """Zero the usage accumulator (call at the start of a generation to cost it)."""
         with self._usage_lock:
             self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
+            self._skipped_searches = 0
 
     def set_cost_ceiling(self, dollars):
         """Cap web-search spend for this generation: once usage_cost() >= dollars, further
@@ -519,7 +528,17 @@ class ClaudeClient:
         self._cost_ceiling = dollars
 
     def _over_budget(self):
-        return self._cost_ceiling is not None and self.usage_cost() >= self._cost_ceiling
+        """True once the generation's web-search spend has hit its ceiling. COUNTS each skip, so the
+        starvation can be reported instead of silently degrading the blog (FU205 R6)."""
+        over = self._cost_ceiling is not None and self.usage_cost() >= self._cost_ceiling
+        if over:
+            with self._usage_lock:
+                self._skipped_searches += 1
+        return over
+
+    def skipped_searches(self):
+        """How many web-search calls the cost ceiling skipped during this generation. 0 = healthy."""
+        return int(getattr(self, "_skipped_searches", 0) or 0)
 
     def _track(self, message):
         """Add one API response's token + web-search usage to the accumulator. Never raises

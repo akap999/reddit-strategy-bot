@@ -1134,6 +1134,14 @@ class Database:
             blog["youtube_meta"] = json.loads(blog.get("youtube_meta") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["youtube_meta"] = {}
+        try:   # FU205 (R2): the verification pass's full report — repaired / refused / assessment
+            blog["verify_report"] = json.loads(blog.get("verify_report") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["verify_report"] = {}
+        try:   # FU205 (R2): the structured warning list behind the toast string
+            blog["warnings"] = json.loads(blog.get("warnings") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            blog["warnings"] = []
         try:   # FU151 (D): deterministic quality scorecard {score,checks,warnings}
             blog["quality_report"] = json.loads(blog.get("quality_report") or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -1202,7 +1210,9 @@ class Database:
                    "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning",   # FU154
                    "rewritten_cost",   # FU155
                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",   # FU179
-                   "body_pre_verify"}   # FU202: the body before the verification pass edited it
+                   "body_pre_verify",   # FU202: the body before the verification pass edited it
+                   "verify_report",     # FU205 (R2): computed every run, previously never stored
+                   "warnings"}          # FU205 (R2): the structured warning list behind the toast
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
         # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
@@ -1215,8 +1225,10 @@ class Database:
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
             elif k in ("pending_state", "youtube_meta", "quality_report",
-                       "rewrites_meta") and not isinstance(v, str):
-                v = json.dumps(v or {})   # FU79/FU80/FU151/FU179: JSON dict
+                       "rewrites_meta", "verify_report") and not isinstance(v, str):
+                v = json.dumps(v or {})   # FU79/FU80/FU151/FU179/FU205: JSON dict
+            elif k == "warnings" and not isinstance(v, str):
+                v = json.dumps(v or [])   # FU205 (R2): JSON list of {check, detail}
             sets.append(f"{k} = ?")
             params.append(v)
         if not sets:
@@ -2395,7 +2407,16 @@ class Database:
                     # FU202: the body as it stood BEFORE the verification pass edited it. Written
                     # ONLY when the pass actually changed something, so both versions survive and
                     # nothing an auto-repair touched is ever lost.
-                    "body_pre_verify"):
+                    "body_pre_verify",
+                    # FU205 (R2): the verification pass's full report (JSON) — what it repaired, what
+                    # it REFUSED and why, and the editorial assessment. It was computed on every
+                    # single generation and then thrown away: there was no column and no writer
+                    # anywhere, so the one record of what the tool checked never survived the run.
+                    "verify_report",
+                    # FU205 (R2): the structured warning list (JSON [{check, detail}]) behind the
+                    # single "; "-joined toast string. One entry per check that fired, so the count
+                    # and the score are right and the operator sees whole warnings, not fragments.
+                    "warnings"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()

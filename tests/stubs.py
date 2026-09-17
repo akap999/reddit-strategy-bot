@@ -10,7 +10,8 @@ responses (usually by sniffing the prompt/brief), e.g.:
 
 class StubClaude:
     def __init__(self, *, call_handler=None, search_handler=None,
-                 site_facts=None, official_domain=None, model="claude-sonnet-4-6"):
+                 site_facts=None, official_domain=None, price_handler=None,
+                 model="claude-sonnet-4-6"):
         self.model = model
         self.last_error = None
         self._usage = {"input_tokens": 0, "output_tokens": 0, "web_search_requests": 0}
@@ -18,11 +19,13 @@ class StubClaude:
         self._search_handler = search_handler
         self._site_facts = site_facts
         self._official_domain = official_domain
+        self._price_handler = price_handler   # FU213: scripts find_regular_price
         # Recorders so a test can assert what was asked.
         self.calls = []
         self.searches = []
         self.site_fact_calls = []
         self.domain_calls = []
+        self.price_calls = []   # FU213: every find_regular_price ask
 
     # --- usage accounting (mirrors the real client so cost plumbing doesn't crash) ---
     def reset_usage(self):
@@ -67,6 +70,17 @@ class StubClaude:
         if callable(self._site_facts):
             return self._site_facts(domain, brand, brief) or ""
         return ""
+
+    def find_regular_price(self, brand, subject, own_domain="", retail_domains=None,
+                           max_searches=2, url_hint=""):
+        """FU213 (4a): the model proposes price candidates + the citations that back them; the
+        CALLER decides. Returns the same {"candidates": [...], "citations": [...]} shape."""
+        self.price_calls.append({"brand": brand, "subject": subject, "own_domain": own_domain,
+                                 "retail_domains": list(retail_domains or []), "url_hint": url_hint})
+        if callable(self._price_handler):
+            r = self._price_handler(brand, subject, own_domain, url_hint)
+            return r if isinstance(r, dict) else {"candidates": [], "citations": []}
+        return {"candidates": [], "citations": []}
 
     def find_official_domain(self, brand, context=""):
         self.domain_calls.append({"brand": brand, "context": context})

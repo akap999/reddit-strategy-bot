@@ -887,6 +887,73 @@ class ClaudeClient:
             print("    web_search: returned 0 usable sources for this brief", flush=True)
         return out
 
+    def find_regular_price(self, brand, subject, own_domain="", retail_domains=None,
+                           max_searches=2, url_hint=""):
+        """FU213 (Change 4a) — find the REGULAR (non-sale) list price of `brand`'s most comparable
+        product for `subject`, pinned to the brand's OWN site plus the named retailers.
+
+        Returns {"candidates": [{url, product, price, basis, was_price}], "citations": [{title, url,
+        fact}]} — the citations carry `cited_text`, which is what lets the CALLER verify the figure
+        actually appears on the cited page instead of trusting the model. Never raises; returns
+        empty lists on any error. The model proposes; code decides (see `_accept_price_candidate`).
+
+        `url_hint` (Change 5, step 3): an exact page the operator pointed at — the search is told to
+        read THAT page, and the caller then accepts a candidate only when its url IS that page."""
+        empty = {"candidates": [], "citations": []}
+        if self._over_budget():
+            print("    find_regular_price: skipped (cost ceiling reached)", flush=True)
+            return empty
+        allowed = [d for d in ([own_domain] + list(retail_domains or [])) if d]
+        tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": int(max_searches)}
+        if allowed:
+            tool["allowed_domains"] = allowed
+        prompt = (
+            f"What does {brand} charge for its most comparable {subject} product?\n\n"
+            + (f"Read this exact page: {url_hint}\n\n" if url_hint else "")
+            + "Rules for what counts:\n"
+              "- The REGULAR list price, not a sale / deal / clearance / coupon price. If a page shows "
+              'a sale price next to a "was" / "list" / "regular" price, report the was/list/regular one '
+              'as `price` and the sale figure as `was_price`.\n'
+              "- A single unit, or the smallest pack the brand sells. State the pack/size in `basis` "
+              '(e.g. "single 9 oz bottle", "3-pack, 9 oz").\n'
+              f"- The page must be {brand}'s own site or one of the named retailers, and must actually "
+              f"show the figure. Do not infer, average or convert a price.\n"
+              "- Quote the price exactly as the page writes it (currency symbol included).\n\n"
+              "Then respond with JSON ONLY (no prose, no code fences): "
+              '{"candidates": [{"url": "...", "product": "...", "price": "$24.99", '
+              '"basis": "single 9 oz bottle", "was_price": ""}]}. '
+              "Return an empty list if no qualifying page shows a regular price."
+        )
+        try:
+            message = self.client.messages.create(
+                model=self.model, max_tokens=2000, tools=[tool],
+                messages=[{"role": "user", "content": prompt}])
+            self._track(message)
+        except Exception as e:
+            print(f"    find_regular_price error: {e}", flush=True)
+            return empty
+        text = ""
+        try:
+            for block in (message.content or []):
+                if getattr(block, "type", None) == "text":
+                    text += block.text
+        except Exception:
+            text = ""
+        cands = []
+        data, _how = _extract_json_object(text, "candidates")
+        for c in ((data or {}).get("candidates") or []):
+            if not isinstance(c, dict):
+                continue
+            cands.append({"url": str(c.get("url") or "").strip(),
+                          "product": str(c.get("product") or "").strip(),
+                          "price": str(c.get("price") or "").strip(),
+                          "basis": str(c.get("basis") or "").strip(),
+                          "was_price": str(c.get("was_price") or "").strip()})
+        cites = _web_citations(message)
+        print(f"    find_regular_price({brand}): {len(cands)} candidate(s), {len(cites)} citation(s)",
+              flush=True)
+        return {"candidates": cands, "citations": cites}
+
     def fetch_site_facts(self, domain, brand, brief, max_searches=2):
         """FIRST-PARTY fallback: pull a brand's OWN concrete facts from its OWN site via the
         server-side `web_search` tool pinned to that domain (allowed_domains=[domain]) — used

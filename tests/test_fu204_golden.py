@@ -238,7 +238,11 @@ def test_a_price_only_pause_is_not_deleted_just_because_the_brand_was_found():
     """The bug that answered the operator's question. FU161 queued "current price" for a competitor
     with no confirmed price; FU189's re-check then dropped any pause item whose brand appears in the
     evidence — always true for a price-only item, since it is BY DEFINITION about a brand we sourced
-    and are missing one fact from. So the ask was generated and deleted, every time."""
+    and are missing one fact from. So the ask was generated and deleted, every time.
+
+    FU213: the re-check now re-tests the predicate that QUEUED the item — a VERIFIED ledger price —
+    instead of "some block carries a figure"; a figure the code will not write into the cell is not
+    a price the article has."""
     gen = _gen()
     fresh = [{"label": "Tommee Tippee", "url": "https://tommeetippee.com/closer-to-nature",
               "text": "Closer to Nature bottle, anti-colic valve."},
@@ -246,22 +250,21 @@ def test_a_price_only_pause_is_not_deleted_just_because_the_brand_was_found():
               "text": "Tommee Tippee 3-pack, $24.99"}]
     named = gen._blocks_naming("Tommee Tippee", fresh)
     assert named, "the brand IS present in the evidence — that is what used to delete the ask"
-    assert gen._has_confirmed_price(named, "tommeetippee.com") is False, (
-        "a retail listing is not a confirmed price")
+    assert not (getattr(gen, "_price_ledger", None) or {}).get("Tommee Tippee"), (
+        "an un-verified retail figure is not a ledger price — the ask must survive")
 
 
 def test_the_ask_is_dropped_once_a_real_price_arrives():
     gen = _gen()
-    fresh = [{"label": "Tommee Tippee", "url": "https://tommeetippee.com/pricing", "text": "From $24.99"}]
-    assert gen._has_confirmed_price(gen._blocks_naming("Tommee Tippee", fresh), "tommeetippee.com") is True
+    gen._price_ledger = {"Tommee Tippee": {"value": "$24.99", "source": "own",
+                                           "url": "https://tommeetippee.com/pricing"}}
+    assert (gen._price_ledger or {}).get("Tommee Tippee")
 
 
-def test_a_reputable_third_party_price_counts_but_an_affiliate_one_does_not():
-    gen = _gen()
-    rep = [{"label": "third-party · Forbes", "url": "https://forbes.com/x", "text": "Nanobebe from $16.99"}]
-    aff = [{"label": "retail · Amazon", "url": "https://amazon.com/dp/B0", "text": "Nanobebe $16.99"}]
-    assert gen._has_confirmed_price(gen._blocks_naming("Nanobebe", rep), "nanobebe.com") is True
-    assert gen._has_confirmed_price(gen._blocks_naming("Nanobebe", aff), "nanobebe.com") is False
+# FU213 replaced "a reputable third-party price counts" with a verified ledger: a NAMED RETAILER's
+# listing is an acceptable price source when a citation shows the figure, and an editorial roundup
+# (Forbes) never is — the shipped export cited Dr. Brown's "$24.99 (gift box, sale)" to exactly such
+# a roundup. Both rules are tested in tests/test_fu213_citations_and_prices.py.
 
 
 def test_the_checks_read_markers_the_way_the_reader_does():

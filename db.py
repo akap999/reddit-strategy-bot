@@ -1,9 +1,12 @@
 """SQLite persistence layer for Reddit Strategy Bot."""
 
 import sqlite3
+import contextlib
 import json
 import os
+import random
 import re
+import time
 from datetime import datetime, timedelta
 
 # FU205 (R1) — ONE guard composition, every write path. The blog guards live in the generator, but
@@ -38,21 +41,81 @@ class Database:
     def connect(self):
         self.conn = sqlite3.connect(self.db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
+        # FU213: busy_timeout FIRST — `journal_mode = WAL` takes a brief EXCLUSIVE lock that
+        # SQLite refuses (SQLITE_BUSY) rather than waiting on, so two workers booting at the same
+        # moment on a fresh database had one of them raise "database is locked" before the migration
+        # lock below could even be reached. Read the mode first (a lock-free read: after the first
+        # worker switches it, WAL is persisted in the file), and treat a persistent failure as
+        # non-fatal — WAL is a performance setting, not a correctness one.
         self.conn.execute("PRAGMA busy_timeout = 5000")
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            _mode = (self.conn.execute("PRAGMA journal_mode").fetchone() or [""])[0]
+        except Exception:
+            _mode = ""
+        if str(_mode).lower() != "wal":
+            for _attempt in range(6):
+                try:
+                    self.conn.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError:
+                    time.sleep(0.15 + random.random() * 0.15)
+            else:
+                print("[db] journal_mode=WAL busy (another worker is switching it) — continuing",
+                      flush=True)
 
     def close(self):
         if self.conn:
             self.conn.close()
             self.conn = None
 
+    @contextlib.contextmanager
+    def _migration_lock(self):
+        """FU213 — two gunicorn workers booting at the same moment BOTH ran the ALTER TABLE
+        migrations; the loser hit `duplicate column name: content_context`, died, and the master
+        shut the service down (observed 17:08 UTC after the FU212 deploy). An exclusive file lock
+        beside the database serialises schema creation + migrations, so the second worker simply
+        waits and then finds every column already present.
+
+        No-op for an in-memory database (nothing is shared) and on any platform/filesystem where
+        `flock` is unavailable — a missing lock must never stop the app from booting."""
+        path = str(self.db_path or "")
+        fh = None
+        if path and path != ":memory:" and not path.startswith("file:"):
+            try:
+                import fcntl
+                fh = open(path + ".migrate.lock", "a+")
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except Exception as exc:
+                print(f"[db] migration lock unavailable ({exc}) \u2014 continuing unlocked", flush=True)
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+                fh = None
+        try:
+            yield
+        finally:
+            if fh is not None:
+                try:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
     def initialize(self):
         """Create all tables if they don't exist."""
         if not self.conn:
             self.connect()
 
-        self.conn.executescript("""
+        # FU213: schema creation + migrations run under an exclusive cross-process lock.
+        with self._migration_lock():
+            self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS subreddits (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 name            TEXT UNIQUE NOT NULL,
@@ -180,8 +243,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_blogs_status ON blogs(status);
             CREATE INDEX IF NOT EXISTS idx_blog_platforms_blog ON blog_platforms(blog_id);
         """)
-        self.conn.commit()
-        self._run_migrations()
+            self.conn.commit()
+            self._run_migrations()
 
     # --- Subreddits ---
 
@@ -304,7 +367,8 @@ class Database:
                      author_title=None, reviewer_name=None, reviewer_title=None,
                      disclosure=None, logo_url=None, known_sources=None,
                      meta_autofetched_at=None, key_facts=None, competitor_facts=None,
-                     name=None, manual_competitors=None, content_context=None):
+                     name=None, manual_competitors=None, content_context=None,
+                     price_links=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
@@ -327,6 +391,7 @@ class Database:
             "competitor_facts": competitor_facts,   # FU151 (A): per-competitor sourced-fact cache JSON
             "manual_competitors": manual_competitors,   # FU210: the operator's own — always compared
             "content_context": content_context,   # FU212: content instructions (yours + auto) JSON
+            "price_links": price_links,   # FU213: operator price-page links per compared brand JSON
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2382,6 +2447,10 @@ class Database:
             # across the brand's blogs within a TTL — cuts the ~90%-of-cost competitor re-sourcing and
             # keeps a competitor's facts consistent cluster-wide.
             "competitor_facts":  "ALTER TABLE brands ADD COLUMN competitor_facts TEXT",
+            # FU213 (Change 5): operator-pasted PRICE PAGE links per compared brand (JSON, keyed by
+            # brand slug): {slug: {name, urls: [...], updated_at}}. The blog generator reads the
+            # price straight off these pages instead of guessing it from a search.
+            "price_links":       "ALTER TABLE brands ADD COLUMN price_links TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

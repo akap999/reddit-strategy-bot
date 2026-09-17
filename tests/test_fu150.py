@@ -127,7 +127,10 @@ def test_two_pass_batched_resolve_no_starvation():
     gen = _gen(call_handler=_claim_extract, search_handler=_vendor_for_pinned)
     sourcing = gen._source_for_completion(BRAND, SEED, ARTICLE, ymyl=None)
     assert sourcing is not None
-    assert sourcing["unsourced"] == []
+    # FU213: a `price_only` ask now fires whenever a competitor has no VERIFIED ledger price (the old
+    # gate accepted any block carrying a figure — including a Forbes roundup). This test is about
+    # ENTITY starvation, so it asserts on the entity-level items.
+    assert [u for u in sourcing["unsourced"] if not u.get("price_only")] == []
     labels = {b["label"] for b in sourcing["fresh"]}
     assert {"CompA", "CompB", "CompC"} <= labels
     assert gen.claude.domain_calls == []   # batched resolver replaced per-tool find_official_domain
@@ -140,8 +143,8 @@ def test_genuinely_unsourceable_tool_pauses_with_dims():
         return _claim_extract(prompt)
     gen = _gen(call_handler=handler, search_handler=_vendor_for_pinned, official_domain=lambda b, c: "")
     sourcing = gen._source_for_completion(BRAND, SEED, ARTICLE, ymyl=None)
-    unsourced_tools = {u["tool"] for u in sourcing["unsourced"]}
-    assert unsourced_tools == {"CompC"}
+    unsourced_tools = {u["tool"] for u in sourcing["unsourced"] if not u.get("price_only")}
+    assert unsourced_tools == {"CompC"}   # FU213: price asks are separate from an unsourced ENTITY
     rec = next(u for u in sourcing["unsourced"] if u["tool"] == "CompC")
     assert rec["facts"] == ["pricing", "commercial license", "royalty-free"]
     labels = {b["label"] for b in sourcing["fresh"]}

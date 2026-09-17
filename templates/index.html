@@ -13059,17 +13059,19 @@ async function renderBlogs(c) {
         <div class="card p-4 mb-5" style="border:1px solid #3b0764">
             <h3 class="font-bold mb-2" style="color:#c084fc">Generate a blog</h3>
             <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault();_blogRefreshReset()">${brandOpts || '<option value="">No brands</option>'}</select></div>
+                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault();_blogRefreshReset();_blogPriceLinksRender()">${brandOpts || '<option value="">No brands</option>'}</select></div>
                 <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
             <div class="grid gap-3 mt-2" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Source URLs (optional, one per line) <span class="text-gray-600">— competitor docs / pricing / testimonial or review page URLs to cite</span></label><textarea id="blog-gen-sources" rows="2" placeholder="https://competitor.com/pricing&#10;https://g2.com/products/competitor/reviews" style="font-family:inherit"></textarea></div>
+                <div><label class="text-xs text-gray-400">Source URLs (optional, one per line) <span class="text-gray-600">— competitor docs / testimonial or review page URLs to cite. For PRICES use the "Price pages" block below — a pasted source URL is cited, never treated as a verified price</span></label><textarea id="blog-gen-sources" rows="2" placeholder="https://competitor.com/pricing&#10;https://g2.com/products/competitor/reviews" style="font-family:inherit"></textarea></div>
                 <div><label class="text-xs text-gray-400">Research notes / testimonials (optional) <span class="text-gray-600">— real facts or a customer quote the article may cite</span></label><textarea id="blog-gen-notes" rows="2" placeholder="e.g. &quot;Cut our reporting time in half&quot; — Jane, VP Growth · or: Competitor X raised \$20M (TechCrunch 2025)"></textarea></div>
                 <div><label class="text-xs text-gray-400">Reddit thread URL (optional) <span class="text-gray-600">— a live thread (your post + comments incl. the brand comment) the article cites as community proof</span></label><input id="blog-gen-reddit-url" type="text" placeholder="https://www.reddit.com/r/Construction/comments/abc123/..."></div>
                 <div><label class="text-xs text-gray-400">Geography / location (optional) <span class="text-gray-600">— e.g. US, California, London. Makes the page a genuine geo variant (geo-specific sourcing + content); auto-detected from the seed when blank</span></label><input id="blog-gen-geo" type="text" placeholder="e.g. US · California · London — blank = auto-detect from the seed"></div>
                 <div><label class="text-xs text-gray-400">Focus / qualifier (optional) <span class="text-gray-600">— e.g. financing, free shipping, for beginners. The page's variant angle; gets dedicated sourcing + substance. Auto-detected from a trailing "with …" when blank</span></label><input id="blog-gen-qualifier" type="text" placeholder="e.g. financing · free shipping — blank = auto-detect"></div>
             </div>
+            <!-- FU213 (Change 5): point the tool at the exact page that holds each brand's price. -->
+            <div id="blog-price-links-wrap" class="mt-3"></div>
             <p class="text-xs text-gray-500 mt-1">The brand's own site + known competitor sites are auto-fetched and cited; add URLs/notes here only to supplement.</p>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
                 <input type="checkbox" id="blog-gen-websearch" checked>
@@ -13093,7 +13095,7 @@ async function renderBlogs(c) {
                 <span class="text-gray-600">— weave 3-6 links to the brand's own (verified) pages + published sibling blogs into the body, and generate an SEO meta title. Quality/extractability preserved; off = today's output exactly.</span>
             </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
-                <input type="checkbox" id="blog-gen-pricing" checked>
+                <input type="checkbox" id="blog-gen-pricing" checked onchange="_blogPriceLinksRender()">
                 💲 Include pricing
                 <span class="text-gray-600">— research &amp; compare per-product prices, canonical prices and price cells (default on). UNCHECK for a non-pricing blog (how-to, doctor-led comparison) to skip ALL pricing work — no pricing searches, no price cells, cheaper.</span>
             </label>
@@ -13132,6 +13134,7 @@ async function renderBlogs(c) {
         </table>`;
     window._blogYmylTouched = false;   // FU133: fresh form → auto-default follows the brand again
     _blogYmylAutoDefault();
+    _blogPriceLinksRender();   // FU213 (Change 5): prefill the Price pages block for the selected brand
 }
 
 // FU183: was this blog UPLOADED (FU180) rather than generated? The import endpoint stamps
@@ -13598,7 +13601,11 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
             : isOpt
             ? `No public reference found for <b>${_blogEsc(m.tool)}</b> — it's an option, not a company, so there's no page to link. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Type the facts below to keep it in the comparison.`
             : isPrice
-            ? `Found <b>${_blogEsc(m.tool)}</b>, but couldn't confirm its <b>current price</b> from its own site or a reputable source${hint}. Paste a product/pricing link or type the price below — or, without a price, choose whether to drop the price column or drop ${_blogEsc(m.tool)} (a blank cell is never shipped).`
+            ? (m.price_link
+                // FU213 (Change 5): the operator pasted a link and it could not be read — say so, so
+                // the paste does not look ignored.
+                ? `Couldn't read a regular price for <b>${_blogEsc(m.tool)}</b> from the page you linked (<a href="${_blogEsc(m.price_link)}" target="_blank" class="underline">${_blogEsc(String(m.price_link).replace(/^https?:\/\//, '').slice(0, 48))}</a>) — it may be blocked, or the price may be drawn by JavaScript. Type the price below (e.g. "$24.99, single 9 oz bottle"), paste a different page, or choose what to drop.`
+                : `Found <b>${_blogEsc(m.tool)}</b>, but couldn't VERIFY a regular (non-sale) price from its own site or a named retailer${hint}. Type the price below or paste the exact page that shows it — or, without a price, choose whether to drop the price column or drop ${_blogEsc(m.tool)} (a blank cell is never shipped).`)
             : `Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.`;
         const urlInput = isOpt ? '' :
             `<input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">`;
@@ -13802,13 +13809,14 @@ function blogGenerate() {
     const reddit_url = (document.getElementById('blog-gen-reddit-url')?.value || '').trim();
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
     const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
+    const price_links = include_pricing ? _blogPriceLinksCollect() : [];   // FU213 (Change 5/6)
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
         author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, price_links, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -13840,6 +13848,138 @@ function _blogRefreshCbToggle() {
     window._blogRefreshSel = { all: on, slugs: [] };   // manual toggle: checked = all, unchecked = none
     _blogRefreshSelLabel();
 }
+// ---------------------------------------------------------------- FU213: price pages (Change 5)
+// Point the tool at the exact page that holds each brand's price instead of relying on a search.
+// The rows are the selected brand first, then its OWN competitors (FU210), then its other known
+// competitors; each row's links are prefilled from what was saved on the brand last time.
+function _blogPriceLinksBrands(brand) {
+    if (!brand) return [];
+    const out = [], seen = new Set();
+    const add = n => { n = String(n || '').trim(); const k = n.toLowerCase();
+        if (n && !seen.has(k)) { seen.add(k); out.push(n); } };
+    add(brand.name);
+    let mine = [], all = [];
+    try { mine = JSON.parse(brand.manual_competitors || '[]') || []; } catch (_) {}
+    try { all = JSON.parse(brand.competitors || '[]') || []; } catch (_) {}
+    (mine || []).forEach(add);
+    (all || []).forEach(add);
+    return out.slice(0, 12);
+}
+function _blogPriceLinksRender() {
+    const wrap = document.getElementById('blog-price-links-wrap');
+    if (!wrap) return;
+    const on = document.getElementById('blog-gen-pricing')?.checked !== false;
+    if (!on) { wrap.innerHTML = ''; return; }   // FU213 (Change 6): pricing off ⇒ no price UI at all
+    const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
+    const brand = _blogFindBrand(bid);
+    if (!brand) { wrap.innerHTML = ''; return; }
+    let saved = {};
+    try { saved = JSON.parse(brand.price_links || '{}') || {}; } catch (_) {}
+    const names = _blogPriceLinksBrands(brand);
+    const extra = (window._blogPriceExtra || []).filter(n => !names.some(x => x.toLowerCase() === n.toLowerCase()));
+    const row = (nm, isSubject) => {
+        const slug = _kfSlug(nm);
+        const urls = ((saved[slug] || {}).urls || []).join('\n');
+        return `<div class="grid gap-2 mb-1" style="grid-template-columns:180px 1fr">
+            <div class="text-xs text-gray-300 pt-1">${_blogEsc(nm)}${isSubject ? ' <span class="text-gray-600">(yours)</span>' : ''}</div>
+            <textarea class="blog-price-link" data-name="${_blogEsc(nm)}" rows="1" placeholder="https://brand.com/product/… (one per line, up to 3)" style="font-family:inherit">${_blogEsc(urls)}</textarea>
+        </div>`;
+    };
+    wrap.innerHTML = `<details open>
+        <summary class="text-xs text-gray-400 cursor-pointer">💲 Price pages (optional) — paste the page that shows each brand's price</summary>
+        <p class="text-xs text-gray-600 mt-1 mb-2">The price is read off the page you paste (regular list price, not a sale price) and that page becomes the citation. A brand left blank is looked up by search instead. Your own row is fetched and cited, never written into your cell by code.</p>
+        ${names.map((n, i) => row(n, i === 0)).join('')}
+        ${extra.map(n => row(n, false)).join('')}
+        <div class="grid gap-2 mb-1" style="grid-template-columns:180px 1fr">
+            <input id="blog-price-add-name" placeholder="+ Add a brand" class="text-xs">
+            <div class="flex gap-2">
+                <input id="blog-price-add-url" placeholder="https://… price page for that brand" class="text-xs flex-1">
+                <button class="btn btn-sm btn-secondary" onclick="_blogPriceAddBrand()">Add</button>
+            </div>
+        </div>
+        <div class="flex gap-2 justify-end mt-2">
+            <button class="btn btn-sm btn-secondary" onclick="_blogPriceLinksCheck()" title="Saves these links and checks the prices — no blog is generated">💾 Save links &amp; check prices</button>
+        </div>
+    </details>`;
+}
+function _blogPriceAddBrand() {
+    const nm = (document.getElementById('blog-price-add-name')?.value || '').trim();
+    const url = (document.getElementById('blog-price-add-url')?.value || '').trim();
+    if (!nm) { toast('Name the brand first', 'error'); return; }
+    window._blogPriceExtra = (window._blogPriceExtra || []).concat([nm]);
+    const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
+    const b = _blogFindBrand(bid);
+    if (b && url) {   // stash it so the re-render prefills the new row
+        let pl = {}; try { pl = JSON.parse(b.price_links || '{}') || {}; } catch (_) {}
+        pl[_kfSlug(nm)] = { name: nm, urls: [url] };
+        b.price_links = JSON.stringify(pl);
+    }
+    _blogPriceLinksRender();
+}
+function _blogPriceLinksCollect() {
+    return Array.from(document.querySelectorAll('.blog-price-link')).map(t => ({
+        name: t.dataset.name || '',
+        urls: (t.value || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3),
+    })).filter(r => r.name);
+}
+async function _blogPriceLinksCheck() {
+    const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    const rows = _blogPriceLinksCollect();
+    const subject = (document.getElementById('blog-gen-seed')?.value || '').trim();
+    const names = rows.map(r => r.name).filter(n => n.toLowerCase() !== ((_blogFindBrand(bid) || {}).name || '').toLowerCase());
+    try {
+        await api('/api/brands/' + bid + '/price-links', { method: 'PUT', body: { price_links: rows } });
+        const b = _blogFindBrand(bid);
+        if (b) {
+            let pl = {}; try { pl = JSON.parse(b.price_links || '{}') || {}; } catch (_) {}
+            rows.forEach(r => { const s = _kfSlug(r.name);
+                if (r.urls.length) pl[s] = { name: r.name, urls: r.urls }; else delete pl[s]; });
+            b.price_links = JSON.stringify(pl);
+        }
+    } catch (e) { return; }
+    runTask('/api/brands/' + bid + '/competitor-prices/check',
+        { price_links: rows, subject, names, include_pricing: true },
+        (res) => {
+            if (res && typeof res.verified === 'number') {
+                toast(`✓ ${res.verified}/${res.checked} price(s) verified` +
+                      (res.cost ? ` · ≈ $${Number(res.cost).toFixed(2)}` : ''), 'success', 9000);
+            }
+            // refresh the brand in memory so the popup shows the new ledger, then open it
+            api('/api/brands/all').then(bs => { _blogBrands = bs || _blogBrands;
+                blogCompetitorCacheModal(bid, 'view'); }).catch(() => blogCompetitorCacheModal(bid, 'view'));
+        }, 'Checking competitor prices');
+}
+async function _blogPriceSaveEdit(slug) {
+    const bid = window._blogCacheBrandId;
+    const val = (document.getElementById('blog-price-v-' + slug)?.value || '').trim();
+    const basis = (document.getElementById('blog-price-b-' + slug)?.value || '').trim();
+    const url = (document.getElementById('blog-price-u-' + slug)?.value || '').trim();
+    try {
+        await api('/api/brands/' + bid + '/competitor-prices',
+                  { method: 'PUT', body: { prices: [{ slug, name: slug, value: val, basis, url }] } });
+        _blogBrands = await api('/api/brands/all');
+        toast(val ? 'Saved as your price (it now writes the cell)' : 'Price cleared', 'success');
+        blogCompetitorCacheModal(bid, window._blogCacheMode || 'view');
+    } catch (e) {}
+}
+async function _blogPriceRecheck() {
+    const bid = window._blogCacheBrandId;
+    const b = _blogFindBrand(bid) || {};
+    closeModal();
+    runTask('/api/brands/' + bid + '/competitor-prices/check',
+        { subject: (document.getElementById('blog-gen-seed')?.value || '').trim(),
+          refresh: true, include_pricing: true },
+        (res) => {
+            if (res && typeof res.verified === 'number') {
+                toast(`✓ ${res.verified}/${res.checked} price(s) verified` +
+                      (res.cost ? ` · ≈ $${Number(res.cost).toFixed(2)}` : ''), 'success', 9000);
+            }
+            api('/api/brands/all').then(bs => { _blogBrands = bs || _blogBrands;
+                blogCompetitorCacheModal(bid, 'view'); }).catch(() => {});
+        }, 'Re-checking competitor prices');
+}
+
 function _blogRefreshReset() {
     window._blogRefreshSel = { all: false, slugs: [] };
     const cb = document.getElementById('blog-gen-refresh-competitors');
@@ -13876,16 +14016,34 @@ function blogCompetitorCacheModal(brandId, mode) {
         }
         const details = blocks.map(b => `<div class="text-xs text-gray-400 mt-1"><b>${_blogEsc(b.label || '')}</b> — <a href="${_blogEsc(b.url || '')}" target="_blank" class="underline">${_blogEsc((b.url || '').replace(/^https?:\/\//, ''))}</a><br>${_blogEsc((b.text || '').slice(0, 600))}</div>`).join('');
         const chk = (mode === 'refresh') ? `<input type="checkbox" class="blog-cache-chk" value="${_blogEsc(slug)}">` : '';
+        // FU213 (4f): the VERIFIED price ledger for this competitor — value, basis, where it came
+        // from and when it was checked — editable inline (an edit is saved as YOUR price, which
+        // outranks everything and writes the comparison cell).
+        const pe = (e && typeof e.price === 'object') ? e.price : null;
+        const pSrc = pe ? ({ yours: 'your value', link: 'your link', own: "brand's own site", retail: 'retailer' }[pe.source] || pe.source || '') : '';
+        const priceBox = `
+          <div class="mt-1 border-t border-gray-800 pt-1">
+            <div class="text-xs ${pe ? 'text-green-400' : 'text-yellow-500'}">${pe
+                ? `Verified price: <b>${_blogEsc(pe.value || '')}</b>${pe.basis ? ' (' + _blogEsc(pe.basis) + ')' : ''}${pe.per_unit ? ' — ' + _blogEsc(pe.per_unit) : ''} · ${_blogEsc(pSrc)}${pe.checked_at ? ' · checked ' + _blogEsc(String(pe.checked_at).slice(0, 10)) : ''}${pe.url ? ` · <a href="${_blogEsc(pe.url)}" target="_blank" class="underline">page</a>` : ''}`
+                : 'No verified price — the blog will ask you for it (or drop the price column).'}</div>
+            <div class="grid gap-1 mt-1" style="grid-template-columns:110px 1fr 1fr auto">
+              <input id="blog-price-v-${_blogEsc(slug)}" class="text-xs" placeholder="$24.99" value="${_blogEsc((pe && pe.value) || '')}">
+              <input id="blog-price-b-${_blogEsc(slug)}" class="text-xs" placeholder="basis (e.g. single 9 oz bottle)" value="${_blogEsc((pe && pe.basis) || '')}">
+              <input id="blog-price-u-${_blogEsc(slug)}" class="text-xs" placeholder="source URL" value="${_blogEsc((pe && pe.url) || '')}">
+              <button class="btn btn-sm btn-secondary" onclick="_blogPriceSaveEdit('${_blogEsc(slug)}')" title="Save as YOUR price — it writes the cell and is never re-checked">Save</button>
+            </div>
+          </div>`;
         return `
         <div class="border border-gray-700 rounded p-2 mb-2">
           <div class="flex items-center gap-2">
             ${chk}
             <div class="flex-1">
               <div class="text-sm font-bold">${_blogEsc(name)} <span class="text-gray-500 text-xs">${_blogEsc(e.domain || '')}</span> <span class="text-xs">${badge}</span></div>
-              <div class="text-xs text-gray-400">${price ? _blogEsc(price) : '<i>(no price cached)</i>'}</div>
+              <div class="text-xs text-gray-400">${price ? _blogEsc(price) : '<i>(no facts cached)</i>'}</div>
             </div>
             <button class="btn btn-sm btn-secondary" title="Remove from cache" onclick="_blogCacheDelete('${_blogEsc(slug)}')">🗑</button>
           </div>
+          ${priceBox}
           <details class="mt-1"><summary class="text-xs text-gray-500 cursor-pointer">details</summary>${details || '<div class="text-xs text-gray-500">(no blocks)</div>'}</details>
         </div>`;
     }).join('');
@@ -13893,7 +14051,8 @@ function blogCompetitorCacheModal(brandId, mode) {
         ? `<button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
            <button class="btn btn-sm btn-secondary" onclick="_blogCacheRefreshAll()">Refresh all</button>
            <button class="btn btn-sm btn-primary" onclick="_blogCacheUseSelected()">Use selected</button>`
-        : `<button class="btn btn-sm btn-primary" onclick="closeModal()">Close</button>`;
+        : `<button class="btn btn-sm btn-secondary" onclick="_blogPriceRecheck()" title="Run ONLY the price lookup for this brand's competitors — no blog is generated">↻ Re-check prices</button>
+           <button class="btn btn-sm btn-primary" onclick="closeModal()">Close</button>`;
     showModal(`<div style="max-width:680px">
         <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold">Cached competitor data — ${_blogEsc(brand.name || '')}</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-400 mb-3">${mode === 'refresh' ? 'Tick the competitors whose data is wrong/stale to re-source them for this generation (the rest keep their cached data). 🗑 removes an entry from the cache.' : 'All competitor data cached for this brand. 🗑 removes an entry.'} Cache lasts 45 days.</p>

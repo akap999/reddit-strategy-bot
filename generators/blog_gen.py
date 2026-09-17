@@ -1103,6 +1103,138 @@ def _is_offtopic_credential(src, subject_tokens):
     return not any(t in blob for t in subject_tokens)
 
 
+# FU213 — words that are far too generic to PROVE a page is about this article's business. A G2 URL
+# is literally ".../products/..." , so leaving "products" in the topic tokens makes the same-name
+# guard inert for exactly the pages it exists to catch.
+_BIZ_GENERIC_TOKENS = {
+    "product", "products", "service", "services", "solution", "solutions", "company", "companies",
+    "brand", "brands", "platform", "platforms", "software", "tool", "tools", "app", "apps", "site",
+    "sites", "website", "store", "stores", "shop", "review", "reviews", "guide", "guides", "top",
+    "compare", "comparison", "provider", "providers", "supplier", "suppliers", "market", "business",
+    "businesses", "system", "systems", "quality", "premium", "new", "you", "your", "our", "all",
+}
+
+
+def _biz_topic_tokens(*texts):
+    """FU213: the distinctive tokens that say 'this page is about THIS article's business' — the
+    subject, the brand category and the core topic, minus generic nouns and bare numbers."""
+    out = set()
+    for t in texts:
+        out |= set(_product_tokens(t or ""))
+    return sorted(t for t in out if t not in _BIZ_GENERIC_TOKENS and not t.isdigit() and len(t) >= 3)
+
+
+# ---------------------------------------------------------------- FU213: verified price ledger
+# The reviewed export had three of five competitor prices wrong: Philips' cited to a PMC study,
+# Pigeon's to the FDA BPA page, Dr. Brown's "$24.99 (gift box, sale)" to a Forbes roundup, and
+# Comotomo's cell holding "5 oz and 8 oz sizes available". Nothing checked that a price cell came
+# from the brand's own site or a retailer, was a REGULAR (not sale) price, or was a price at all.
+# The model proposes; the code below decides, and only an accepted price reaches the article.
+_PRICE_FIG_RE = re.compile(r"[$€£]\s?\d[\d,]*(?:\.\d{1,2})?")
+_SALE_WORD_RE = re.compile(
+    r"\b(?:sale|save|saving|savings|deal|deals|discount|discounted|clearance|promo|promotion|"
+    r"coupon|limited\s+time|today\s+only|rollback|off)\b|%\s*off", re.I)
+_WAS_PRICE_RE = re.compile(
+    r"\b(?:was|list\s+price|regular(?:ly)?(?:\s+price)?|reg\.?|msrp|originally|orig\.?)\b"
+    r"[^$€£\n]{0,24}([$€£]\s?\d[\d,]*(?:\.\d{1,2})?)", re.I)
+_PACK_COUNT_RE = re.compile(
+    r"\b(\d{1,2})\s*[-\s]?(?:pack|pk|ct\b|count|bottles?|pieces?|units?|pcs?\b)", re.I)
+_PRICE_LEDGER_TTL_DAYS = float(os.environ.get("PRICE_LEDGER_TTL_DAYS", "14"))
+
+
+def _norm_fig(fig):
+    """A price figure compared the way a page writes it: no spaces, no thousands separators."""
+    return re.sub(r"[\s,]", "", (fig or "").strip())
+
+
+def _fig_in_text(fig, text):
+    """True when `text` shows this exact figure — tolerant of the space and the thousands comma a
+    page may or may not use ("$1,299.00" vs "$1299.00"), never of a DIFFERENT number."""
+    if not fig or not text:
+        return False
+    n = _norm_fig(fig)
+    return any(_norm_fig(m.group(0)) == n for m in _PRICE_FIG_RE.finditer(text))
+
+
+def _is_retail_listing(url):
+    d = _norm_domain(url or "")
+    return bool(d) and any(d == r or d.endswith("." + r) for r in _RETAIL_LISTINGS)
+
+
+def _norm_page_url(u):
+    """A URL compared as a PAGE: scheme/www/query/fragment/trailing slash removed."""
+    u = re.sub(r"[?#].*$", "", (u or "").strip())
+    u = re.sub(r"^https?://", "", u, flags=re.I)
+    u = re.sub(r"^www\.", "", u, flags=re.I)
+    return u.rstrip("/").lower()
+
+
+def _per_unit_price(value, basis):
+    """FU213 (4a): a pack count in the basis gives a per-unit price ("3-pack → $7.99 each")."""
+    m = _PACK_COUNT_RE.search(basis or "")
+    amt, cur = _price_amount(value or "")
+    if not (m and amt):
+        return ""
+    try:
+        n = int(m.group(1))
+        if n < 2:
+            return ""
+        sym = {"USD": "$", "EUR": "€", "GBP": "£"}.get(cur, "$")
+        return f"{sym}{float(amt) / n:,.2f} each"
+    except Exception:
+        return ""
+
+
+def _price_is_sale(fig, text):
+    """True when this figure is a SALE price: sale wording within ~40 characters of it. Returns the
+    regular ("was / list / regular") figure alongside when the page shows one, so the caller can use
+    THAT instead of rejecting outright."""
+    was = ""
+    m = _WAS_PRICE_RE.search(text or "")
+    if m:
+        was = m.group(1).strip()
+    n = _norm_fig(fig)
+    for hit in _PRICE_FIG_RE.finditer(text or ""):
+        if _norm_fig(hit.group(0)) != n:
+            continue
+        lo, hi = max(0, hit.start() - 40), min(len(text), hit.end() + 40)
+        if _SALE_WORD_RE.search(text[lo:hi]):
+            return True, was
+    return False, was
+
+
+def _is_other_business(src, own_domain, topic_tokens):
+    """FU213 (Change 3) — True when a page is about a DIFFERENT COMPANY THAT SHARES THE NAME.
+
+    A consumer-goods article ended up citing two listing pages for a same-named B2B software company
+    as evidence for the goods brand: the pages genuinely carry the brand's name, and the off-subject-
+    credential filter only inspects credential-SHAPED titles, so a plain pricing page walked through.
+
+    Shape-based and vertical-neutral: a page that is NOT on the compared brand's own domain and whose
+    title + url + fact carries NONE of the article's subject or category tokens is about something
+    else. INERT when no tokens were derived, so it can never fire by default."""
+    if not topic_tokens or not isinstance(src, dict):
+        return False
+    u = (src.get("url") or "").strip()
+    if own_domain and u and _same_site_url(u, own_domain):
+        return False   # the brand's OWN site is never "a different company"
+    blob = ((src.get("title") or "") + " " + u + " " + (src.get("fact") or "")).lower()
+    if not blob.strip():
+        return False
+    for t in topic_tokens:
+        # a plural token must also match the singular on the page ("bottles" vs "baby bottle")
+        if t in blob or (len(t) > 4 and t.endswith("s") and t[:-1] in blob):
+            return False
+    return True
+
+
+def _same_site_url(u, dom):
+    """Module-level mirror of the per-call `_same_site` closure: is url `u` on `dom` (or a subdomain)?"""
+    dd = _norm_domain(dom)
+    du = _norm_domain(u)
+    return bool(dd) and bool(du) and (du == dd or du.endswith("." + dd))
+
+
 def _product_tokens(s):
     """FU156: a product name's distinctive tokens for matching a URL path / title / fact — generic
     filler dropped (so 'tirzepatide program' doesn't match every /program/ page). Mirrors the FU142
@@ -1495,6 +1627,12 @@ def _brand_in_comparison(body, name):
     return bool(re.search(r"^\|[^\n]*" + re.escape(name.strip()), body, re.MULTILINE | re.IGNORECASE))
 
 
+def _dom_module(u):
+    """FU213: module-level alias of the registrable-domain helper (the per-call `_dom` closure
+    inside `_source_for_completion` is not visible to these methods)."""
+    return _norm_domain(u)
+
+
 def _norm_domain(u):
     """Registrable-ish domain from a url/bare domain: strip scheme + path + a leading 'www.' so a
     www / non-www variant compares equal (FU54). Module-level so it's unit-testable."""
@@ -1514,6 +1652,11 @@ class BlogGenerator:
         self.writer = writer
         self.writer_mode = (writer_mode or "off")
         self._evidence_blocks = []   # set by _gather_evidence; read by _rebuild_sources
+        # FU213 (Change 1): the LAST ## Sources section this instance rendered — its exact lines and
+        # the new-number → raw-evidence-index map. A later `_rebuild_sources` over a body that still
+        # carries that section translates the markers BACK to raw indexes first, so a second pass can
+        # never read the renumbered [S1..Sn] as raw evidence indexes (the scrambled-Sources bug).
+        self._sources_render = None
         # FU205 (R4) — the deterministic checks' notes, initialised EXPLICITLY. Every one is read
         # with `getattr(self, ..., default)` in `_finalize_article`, so an absent attribute silently
         # evaluates to "clean" instead of failing loudly. On the FU79 resume path — a fresh instance
@@ -2180,6 +2323,7 @@ class BlogGenerator:
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
         # from a prior call on this instance can't leak in.
         self._evidence_blocks = list(blocks)
+        self._sources_render = None   # FU213: a fresh evidence map invalidates the last render
         if not blocks:
             return ""
         parts = ["EVIDENCE (the ONLY admissible support for factual claims — cite by [S#] and URL. "
@@ -2295,18 +2439,414 @@ class BlogGenerator:
                 out.append(b)
         return out
 
+    # ---------------------------------------------------------- FU213: the price ledger (Change 4)
     @staticmethod
-    def _has_confirmed_price(blocks, dom):
-        """True when one of `blocks` carries a price AND comes from the tool's OWN site or a
-        reputable third-party domain — an affiliate/retail price does not count as confirmed."""
-        dd = _norm_domain(dom or "")
-        for b in (blocks or []):
-            if not _PRICE_SIGNAL_RE.search(b.get("text") or ""):
+    def _accept_price_candidate(cand, citations, brand_name, own_domain, topic_tokens,
+                                require_url="", source_hint=""):
+        """FU213 (4a) — CODE, not the model, decides whether a price candidate may be used. Returns
+        a ledger entry {value, basis, per_unit, url, source, quote, checked_at} or None + a reason.
+
+        Every rule here exists because the reviewed export broke it:
+          - the URL must be the brand's OWN site or a named retailer (a Forbes roundup is not a price
+            source) — unless `require_url` pins the operator's own chosen page (Change 5);
+          - a CITATION of that page must contain the exact figure (a number no page shows is rejected —
+            that is how a PMC study and the FDA BPA page became "prices");
+          - the cited text or title must name the brand AND the article's subject (rejects a same-named
+            different company);
+          - sale wording within ~40 characters of the figure disqualifies it, unless the page also shows
+            a was / list / regular price — then THAT figure is used ("$24.99 gift box, sale")."""
+        if not isinstance(cand, dict):
+            return None, "no candidate"
+        url = (cand.get("url") or "").strip()
+        m = _PRICE_FIG_RE.search(cand.get("price") or "")
+        if not m:
+            return None, "no price figure"
+        fig = m.group(0).strip()
+        if not url:
+            return None, "no url"
+        if require_url:
+            if _norm_page_url(url) != _norm_page_url(require_url):
+                return None, f"not the page you linked ({_norm_domain(url) or url})"
+            source = source_hint or "link"
+        elif own_domain and _same_site_url(url, own_domain):
+            source = "own"
+        elif _is_retail_listing(url):
+            source = "retail"
+        else:
+            return None, f"{_norm_domain(url) or url} is not the brand's own site or a named retailer"
+        cite = next((c for c in (citations or [])
+                     if _norm_page_url(c.get("url") or "") == _norm_page_url(url)), None)
+        if not cite:
+            return None, "the answer cited no passage from that page"
+        quote = ((cite.get("fact") or "") + " " + (cite.get("title") or "")).strip()
+        if not _fig_in_text(fig, quote):
+            return None, f"{fig} does not appear on the cited page"
+        blob = quote.lower()
+        stem = next((w for w in re.findall(r"[a-z0-9']{3,}", (brand_name or "").lower())), "")
+        if stem and stem not in blob and stem not in _norm_page_url(url):
+            return None, f"the cited page never names {brand_name}"
+        if topic_tokens and not any(t in blob or (len(t) > 4 and t.endswith("s") and t[:-1] in blob)
+                                    or t in _norm_page_url(url) for t in topic_tokens):
+            return None, "the cited page is not about this article's subject"
+        is_sale, was = _price_is_sale(fig, quote)
+        if is_sale:
+            if was and _fig_in_text(was, quote):
+                fig = was.strip()
+            else:
+                return None, f"{fig} is a sale price and the page shows no regular price"
+        basis = (cand.get("basis") or "").strip()[:80]
+        return {"value": fig, "basis": basis, "per_unit": _per_unit_price(fig, basis),
+                "url": url, "source": source, "quote": re.sub(r"\s+", " ", quote)[:220],
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, ""
+
+    @staticmethod
+    def _price_entry_usable(entry):
+        """FU213 (4b): an operator-set price never expires; a link / tool-found one is re-checked
+        after `_PRICE_LEDGER_TTL_DAYS` (14)."""
+        if not isinstance(entry, dict) or not (entry.get("value") or "").strip():
+            return False
+        if (entry.get("source") or "") == "yours":
+            return True
+        try:
+            import calendar as _cal
+            age = time.time() - _cal.timegm(time.strptime(entry.get("checked_at") or "",
+                                                          "%Y-%m-%dT%H:%M:%SZ"))
+            return age <= _PRICE_LEDGER_TTL_DAYS * 86400
+        except Exception:
+            return False
+
+    def _price_from_link(self, name, urls, brand_name, topic_tokens):
+        """FU213 (Change 5) — read the price off the exact page the operator pasted.
+
+        1. fetch it with the existing `_fetch_url` (browser UA, retries, residential fallback, the
+           FU113 bot-wall gate);
+        2. page text found → ONE small `claude.call` (no web search) lists the figures the page shows;
+           a figure is accepted only when it appears VERBATIM in the fetched text, the page names the
+           brand, and no sale wording sits within ~40 characters. The own-domain rule is skipped —
+           the operator chose the page;
+        3. blocked or empty (common behind a bot wall on Railway) → `find_regular_price` pinned to
+           that link's domain and told the exact URL; a candidate is accepted only when its url IS
+           that page and its cited text carries the figure.
+        Returns (entry, reason). Never raises."""
+        last_why = ""
+        for u in [str(x).strip() for x in (urls or []) if str(x).strip()][:3]:
+            text = ""
+            try:
+                text = self._fetch_url(u) or ""
+            except Exception:
+                text = ""
+            if len(text.strip()) >= 200:
+                entry, why = self._price_from_page_text(name, u, text, brand_name, topic_tokens)
+                if entry:
+                    print(f"[blog_gen] price-link: {name} {u} → accepted {entry['value']} "
+                          f"({entry.get('basis') or 'no basis'})", flush=True)
+                    return entry, ""
+                print(f"[blog_gen] price-link: {name} {u} → rejected ({why})", flush=True)
+                last_why = why
                 continue
-            du = _norm_domain(b.get("url") or "")
-            if (dd and du and (du == dd or du.endswith("." + dd))) or du in _THIRD_PARTY_DOMAINS:
-                return True
-        return False
+            print(f"[blog_gen] price-link: {name} {u} → blocked/empty → pinned search", flush=True)
+            try:
+                res = self.claude.find_regular_price(
+                    name, " ".join(topic_tokens[:4]) or "this product",
+                    own_domain=_norm_domain(u), retail_domains=[], max_searches=1, url_hint=u)
+            except Exception:
+                res = {"candidates": [], "citations": []}
+            for c in (res.get("candidates") or []):
+                entry, why = self._accept_price_candidate(
+                    c, res.get("citations"), name, "", topic_tokens,
+                    require_url=u, source_hint="link")
+                if entry:
+                    print(f"[blog_gen] price-link: {name} {u} → accepted {entry['value']} "
+                          f"(pinned search)", flush=True)
+                    return entry, ""
+                print(f"[blog_gen] price-link: {name} {u} → rejected ({why})", flush=True)
+                last_why = why
+        return None, last_why or "no regular price could be read from the link(s)"
+
+    def _price_from_page_text(self, name, url, text, brand_name, topic_tokens):
+        """FU213 (Change 5, step 2): one small no-web-search Claude call over the FETCHED page text.
+        The model only LISTS what the page shows; code accepts."""
+        body = re.sub(r"\s+", " ", text or "")[:6000]
+        prompt = (
+            f"Below is the visible text of {url}, a product/pricing page for {name}.\n\n"
+            f"{body}\n\n"
+            "List the price figures this page actually shows for the product, exactly as written. "
+            "If a sale price sits beside a was / list / regular price, give the was/list/regular one "
+            'as `price` and the sale figure as `was_price`. Respond with JSON ONLY (no prose, no code '
+            'fences): {"candidates": [{"product": "...", "price": "$24.99", "basis": "single 9 oz '
+            'bottle", "was_price": ""}]}. Return an empty list if the page shows no price.')
+        try:
+            data = self.claude.call(prompt, max_tokens=700, temperature=0)
+        except Exception:
+            data = None
+        cands = (data or {}).get("candidates") if isinstance(data, dict) else None
+        if not cands:
+            return None, "the page text carries no price"
+        stem = next((w for w in re.findall(r"[a-z0-9']{3,}", (brand_name or name or "").lower())), "")
+        low = body.lower()
+        if stem and stem not in low and stem not in _norm_page_url(url):
+            return None, f"the page never names {brand_name or name} (wrong link?)"
+        for c in cands:
+            if not isinstance(c, dict):
+                continue
+            m = _PRICE_FIG_RE.search(str(c.get("price") or ""))
+            if not m:
+                continue
+            fig = m.group(0).strip()
+            if not _fig_in_text(fig, body):
+                return None, f"{fig} is not in the page text"
+            is_sale, was = _price_is_sale(fig, body)
+            if is_sale:
+                if not (was and _fig_in_text(was, body)):
+                    return None, f"{fig} is a sale price and the page shows no regular price"
+                fig = was.strip()
+            basis = str(c.get("basis") or "").strip()[:80]
+            # the excerpt around the figure, so the ledger carries a quotable proof
+            pos = next((h.start() for h in _PRICE_FIG_RE.finditer(body)
+                        if _norm_fig(h.group(0)) == _norm_fig(fig)), 0)
+            return {"value": fig, "basis": basis, "per_unit": _per_unit_price(fig, basis),
+                    "url": url, "source": "link",
+                    "quote": body[max(0, pos - 90):pos + 110].strip()[:220],
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, ""
+        return None, "no usable figure on the page"
+
+    @staticmethod
+    def _brand_price_links(brand):
+        """FU213 (Change 5): the operator's stored price-page links, {slug: {name, urls, updated_at}}."""
+        try:
+            pl = json.loads((brand or {}).get("price_links") or "{}")
+            return pl if isinstance(pl, dict) else {}
+        except Exception:
+            return {}
+
+    def _ensure_price_ledger(self, brand, tools, tool_state, cfacts, topic_tokens, subject,
+                             refresh_slugs=None, refresh_all=False):
+        """FU213 (4b) — fill the per-competitor VERIFIED price ledger, which is what the comparison
+        cells are written from. Precedence: `yours` (operator-set, never expires) > `link` (the page
+        the operator pasted) > the brand's own site > a named retailer. A tool-found entry is reused
+        for 14 days; while a link is set, a search result never replaces it.
+
+        Returns (ledger {tool: entry}, missing [tool], dirty)."""
+        ledger, missing, dirty = {}, [], False
+        links_map = self._brand_price_links(brand)
+        _refresh = {str(s).strip().lower() for s in (refresh_slugs or []) if str(s).strip()}
+        for tool in tools:
+            slug = _kf_slug(tool)
+            entry = ((cfacts.get(slug) or {}).get("price")) if isinstance(cfacts.get(slug), dict) else None
+            urls = [str(u).strip() for u in ((links_map.get(slug) or {}).get("urls") or [])
+                    if str(u).strip()]
+            forced = refresh_all or slug in _refresh
+            if isinstance(entry, dict) and (entry.get("source") or "") == "yours":
+                ledger[tool] = entry   # the operator's own value is the authority — never re-checked
+                continue
+            if urls:
+                if (not forced and isinstance(entry, dict) and (entry.get("source") or "") == "link"
+                        and self._price_entry_usable(entry)):
+                    ledger[tool] = entry
+                    continue
+                got, why = self._price_from_link(tool, urls, tool, topic_tokens)
+                if got:
+                    ledger[tool] = got
+                    cfacts.setdefault(slug, {})["price"] = got
+                    dirty = True
+                else:
+                    missing.append(tool)
+                    print(f"[blog_gen] price-ledger: {tool} — {why}", flush=True)
+                continue
+            if not forced and self._price_entry_usable(entry):
+                ledger[tool] = entry
+                continue
+            dom = (tool_state.get(tool) or {}).get("dom") or ""
+            try:
+                # ONE search per competitor (the cost promise of this round): pinned to its own
+                # domain plus the named retailers, so the model has nowhere noisy to look.
+                res = self.claude.find_regular_price(tool, subject or "this product",
+                                                     own_domain=_dom_module(dom),
+                                                     retail_domains=sorted(_RETAIL_LISTINGS),
+                                                     max_searches=1)
+            except Exception:
+                res = {"candidates": [], "citations": []}
+            accepted, reasons = None, []
+            # own-site beats a retailer, so try the brand's own pages first
+            cands = sorted((res.get("candidates") or []),
+                           key=lambda c: 0 if (dom and _same_site_url(c.get("url") or "", dom)) else 1)
+            for c in cands:
+                accepted, why = self._accept_price_candidate(
+                    c, res.get("citations"), tool, _dom_module(dom), topic_tokens)
+                if accepted:
+                    break
+                reasons.append(why)
+            if accepted:
+                ledger[tool] = accepted
+                cfacts.setdefault(slug, {})["price"] = accepted
+                dirty = True
+                print(f"[blog_gen] price-ledger: {tool} → {accepted['value']} "
+                      f"({accepted.get('basis') or 'no basis'}) from {accepted['source']} "
+                      f"{accepted['url']}", flush=True)
+            else:
+                missing.append(tool)
+                print(f"[blog_gen] price-ledger: {tool} — no verified price "
+                      f"({'; '.join(reasons[:2]) or 'nothing returned'})", flush=True)
+        return ledger, missing, dirty
+
+    def _save_price_entry(self, brand, tool, entry):
+        """FU213 (4b): persist ONE ledger entry into the brand's `competitor_facts[slug]["price"]`,
+        so the value is reused by the next blog. Best-effort; never breaks a generation."""
+        if not (brand or {}).get("id") or not getattr(self, "db", None):
+            return
+        try:
+            cf = json.loads((brand or {}).get("competitor_facts") or "{}")
+            if not isinstance(cf, dict):
+                cf = {}
+            cf.setdefault(_kf_slug(tool), {})["price"] = entry
+            self.db.update_brand(brand["id"], competitor_facts=json.dumps(cf))
+        except Exception as e:
+            print(f"[blog_gen] price-ledger: persist failed for {tool}: {e}", flush=True)
+
+    @staticmethod
+    def _price_ledger_blocks(ledger):
+        """FU213 (4c): each ledger entry becomes a citable evidence block, so the cell the code writes
+        carries a real [S#] that points at the page the price was actually read from."""
+        out = []
+        for tool, e in (ledger or {}).items():
+            if not (isinstance(e, dict) and (e.get("value") or "").strip()):
+                continue
+            when = str(e.get("checked_at") or "")[:10]
+            basis = (e.get("basis") or "").strip()
+            per = (e.get("per_unit") or "").strip()
+            txt = (f"{tool} regular price: {e['value']}"
+                   + (f" ({basis})" if basis else "")
+                   + (f" — {per}" if per else "")
+                   + (f", checked {when}" if when else ""))
+            src = e.get("source") or "own"
+            label = (f"price · {tool} · "
+                     + ("operator-set" if src == "yours" else (_norm_domain(e.get("url") or "") or src)))
+            out.append({"label": label, "url": (e.get("url") or "").strip(), "text": txt})
+        return out
+
+    _PRICE_NOTE_PREFIX = "Competitor prices are regular list prices"
+
+    def _write_price_cells(self, body, ledger):
+        """FU213 (4d) — CODE writes the competitor price cells, from the verified ledger, whatever the
+        model wrote. Three of five prices in the reviewed export were wrong precisely because the cell
+        was the model's to fill; a cell written here carries the value that was actually read off a
+        page, the basis, the per-unit price where a pack applies, and the [S#] of the evidence block
+        that price came from.
+
+        Runs BEFORE the first `_rebuild_sources`, so the raw evidence index it writes is renumbered
+        with every other marker. Idempotent: a cell that already holds the target text is left alone.
+        Returns (body, cells_written)."""
+        if not body or not ledger:
+            return body, 0
+        blocks = getattr(self, "_evidence_blocks", None) or []
+        # raw evidence index of each brand's price block (the blocks `_price_ledger_blocks` appended)
+        idx_by_tool = {}
+        for tool, e in ledger.items():
+            if not (isinstance(e, dict) and (e.get("value") or "").strip()):
+                continue
+            want_url = (e.get("url") or "").strip()
+            for i, b in enumerate(blocks):
+                lab = (b.get("label") or "")
+                if lab.startswith("price · ") and _kf_slug(lab.split(" · ")[1] if " · " in lab else "") \
+                        == _kf_slug(tool) and (b.get("url") or "").strip() == want_url:
+                    idx_by_tool[tool] = i + 1
+                    break
+        lines = body.split("\n")
+        out, i, written = [], 0, 0
+        done = False
+        while i < len(lines):
+            if done or not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
+                out.append(lines[i]); i += 1
+                continue
+            tbl = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].count("|") >= 2:
+                tbl.append(lines[i]); i += 1
+            rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in tbl]
+            if len(rows) < 3:
+                out.extend(tbl)
+                continue
+            header = rows[0]
+            pcols = [ci for ci in range(1, len(header))
+                     if _PRICE_DIM_RE.search(header[ci] or "")
+                     and not re.search(r"source", header[ci] or "", re.I)]
+            if not pcols:
+                out.extend(tbl)
+                continue
+            for r in rows[2:]:
+                who = (r[0] if r else "").strip().strip("*").strip()
+                if not who:
+                    continue
+                tool = next((t for t in ledger
+                             if _kf_slug(t) and (_kf_slug(t) == _kf_slug(who)
+                                                 or _kf_slug(t) in _kf_slug(who)
+                                                 or _kf_slug(who) in _kf_slug(t))), None)
+                e = ledger.get(tool) if tool else None
+                if not (e and (e.get("value") or "").strip()):
+                    continue
+                basis = (e.get("basis") or "").strip()
+                per = (e.get("per_unit") or "").strip()
+                cell = e["value"] + (f" ({basis}" + (f", {per}" if per else "") + ")" if basis
+                                     else (f" ({per})" if per else ""))
+                _ix = idx_by_tool.get(tool)
+                if _ix:
+                    cell += f" [S{_ix}]"
+                for ci in pcols:
+                    if ci >= len(r):
+                        continue
+                    if r[ci].strip() == cell:
+                        continue
+                    r[ci] = cell
+                    written += 1
+            rebuilt = ["| " + " | ".join(r) + " |" for r in rows]
+            out.extend(rebuilt)
+            done = True   # the comparison table is the FIRST table; never touch a later one
+        body = "\n".join(out)
+        if written:
+            when = time.strftime("%Y-%m-%d", time.gmtime())
+            note = (f"{self._PRICE_NOTE_PREFIX} from each brand's own site or a named retailer, "
+                    f"checked {when}.")
+            if self._PRICE_NOTE_PREFIX not in body:
+                # put it directly under the table block we just wrote
+                nl = body.split("\n")
+                last = max(i for i, ln in enumerate(nl) if ln.strip().startswith("|"))
+                nl.insert(last + 1, "")
+                nl.insert(last + 2, f"*{note}*")
+                body = "\n".join(nl)
+            print(f"[blog_gen] price-cells: wrote {written} verified price cell(s)", flush=True)
+        return body, written
+
+    def _strip_price_columns(self, body):
+        """FU213 (Change 6) — with "Include pricing" off, a price column must not exist. The prompt
+        is not trusted alone: with no price in the evidence, any figure in that column is one the
+        model invented, and every check that would have caught it (the ledger, the own-site rule,
+        the ask) is switched off. Drops any price/cost/fee column from every table, reusing the same
+        cell convention as `_resolve_table_punts`. Returns (body, [dropped headers])."""
+        if not body:
+            return body, []
+        lines, out, i, dropped = body.split("\n"), [], 0, []
+        while i < len(lines):
+            if not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
+                out.append(lines[i]); i += 1
+                continue
+            tbl = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].count("|") >= 2:
+                tbl.append(lines[i]); i += 1
+            rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in tbl]
+            if len(rows) < 3:
+                out.extend(tbl); continue
+            header = rows[0]
+            drop = {ci for ci in range(1, len(header))
+                    if _PRICE_DIM_RE.search(header[ci] or "")
+                    and not re.search(r"source", header[ci] or "", re.I)}
+            if not drop or len(drop) >= len(header) - 1:
+                out.extend(tbl); continue
+            dropped.extend(header[ci] or f"column {ci + 1}" for ci in sorted(drop))
+            for r in rows:
+                for ci in sorted(drop, reverse=True):
+                    if ci < len(r):
+                        del r[ci]
+            out.extend("| " + " | ".join(r) + " |" for r in rows)
+        return "\n".join(out), dropped
 
     def _resolve_table_punts(self, body):
         """FU138 — STRUCTURAL resolution of data-unavailable table cells, in any phrasing:
@@ -2531,6 +3071,66 @@ class BlogGenerator:
             return out
         return sorted(stats(draft) - stats(revised))
 
+    # FU213 (Change 1): our own rendered Sources line — `- [Sn] label — <url>` (the separator is the
+    # em-dash `_rebuild_sources` writes; a hyphen is accepted for a hand-edited body).
+    _SRC_LINE_URL_RE = re.compile(r"^-\s*\[S(\d+)\]\s+(.*?)\s*[\u2014\u2013-]\s*<(\S+)>\s*$")
+    _SRC_LINE_RE = re.compile(r"^-\s*\[S(\d+)\]\s+(.*\S)\s*$")
+
+    def _unmap_rendered_sources(self, body, blocks):
+        """FU213 — translate a body whose [S#] markers point at a ## Sources section WE rendered back
+        to RAW evidence indexes, so `_rebuild_sources` can safely run over its own output.
+
+        A section is recognised two ways, in order:
+          1. it matches, line for line, the last section this instance rendered — the recorded
+             new-number → raw-index map is then authoritative;
+          2. otherwise EVERY line must be our exact format AND resolve to an evidence block by label
+             + url. One unrecognised line means the list was written by the model, and today's
+             behaviour stands (no translation at all).
+        Returns the body unchanged whenever nothing can be proven."""
+        try:
+            parts = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b.*$", body, maxsplit=1)
+            if len(parts) < 2:
+                return body   # no Sources section — nothing was ever rendered into this body
+            prose, tail = parts[0], body[len(parts[0]):]
+            lines = [ln.strip() for ln in parts[1].splitlines() if ln.strip()]
+            if not lines:
+                return body
+            parsed = []
+            for ln in lines:
+                m = self._SRC_LINE_URL_RE.match(ln) or self._SRC_LINE_RE.match(ln)
+                if not m:
+                    return body   # a line we did not write → do not touch the markers
+                g = m.groups()
+                parsed.append((int(g[0]), (g[1] or "").strip(), (g[2] if len(g) > 2 else "") or ""))
+            mapping = {}
+            rec = getattr(self, "_sources_render", None) or {}
+            if rec.get("map") and list(rec.get("lines") or []) == lines:
+                mapping = {int(k): int(v) for k, v in rec["map"].items()}
+            else:
+                by_key = {}
+                for i, bl in enumerate(blocks):
+                    key = ((bl.get("label") or "").strip(),
+                           (bl.get("url") or "").strip().rstrip("/").lower())
+                    by_key.setdefault(key, i + 1)
+                for num, label, url in parsed:
+                    key = (label, (url or "").strip().rstrip("/").lower())
+                    if key not in by_key:
+                        return body   # can't prove this line is ours → leave the body alone
+                    mapping[num] = by_key[key]
+            if not mapping:
+                return body
+            new_prose = re.sub(r"\[S(\d+)\]",
+                               lambda m: (f"[S{mapping[int(m.group(1))]}]"
+                                          if int(m.group(1)) in mapping else m.group(0)),
+                               prose)
+            if new_prose != prose:
+                print(f"[blog_gen] sources: re-mapped {len(mapping)} marker number(s) back to raw "
+                      f"evidence indexes before rebuilding", flush=True)
+            return new_prose + tail
+        except Exception as exc:
+            print(f"[blog_gen] sources: un-map skipped ({exc})", flush=True)
+            return body
+
     def _rebuild_sources(self, body):
         """Deterministically rebuild the article's ## Sources from the evidence map captured by
         the last `_gather_evidence` call. Renumbers the [S#] markers the model actually used to a
@@ -2547,6 +3147,13 @@ class BlogGenerator:
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not body or not blocks:
             return body
+        # FU213 (Change 1): this method is NOT idempotent by construction — it reads every [S#] as a
+        # RAW evidence index, but its own output numbers them 1..n by first appearance. Running it a
+        # second time over its own output (which FU202's verify step does whenever it applies a content
+        # repair) therefore re-reads [S1..Sn] as blocks[0..n-1] and the Sources list silently becomes
+        # "the first n evidence blocks in fetch order". Translate the markers back to raw indexes first
+        # and the second pass is byte-stable.
+        body = self._unmap_rendered_sources(body, blocks)
         # Drop the model's own ## / ### Sources section (we rebuild it).
         prose = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b.*", body, maxsplit=1)[0].rstrip()
         used = []   # cited indices in order of first appearance, in range only
@@ -2591,6 +3198,9 @@ class BlogGenerator:
             url = (bl.get("url") or "").strip()
             # <url> autolink → renders as a clickable <a> in the HTML/`.md` export (bare URLs don't).
             lines.append(f"- [S{remap[old]}] {label}" + (f" — <{url}>" if url else ""))
+        # FU213: remember exactly what we rendered + how to read it back (new number → raw index).
+        self._sources_render = {"lines": [ln.strip() for ln in lines if ln.strip().startswith("- [S")],
+                                "map": {remap[old]: old for old in render}}
         return prose.rstrip() + "\n" + "\n".join(lines) + "\n"
 
     # ----------------------------------------------------------- keyword sourcing
@@ -2679,6 +3289,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
 
     # ------------------------------------------------------------------- article
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
+                         include_pricing=True,
                          sibling_titles=None, qualifier="", internal_links=False,
                          link_targets=None, ymyl=None, key_facts=None, key_facts_products=None):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
@@ -2701,6 +3312,47 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
                         "question-shaped H2/H3 with a concise answer, and an FAQ entry:\n"
                         + "\n".join(f"- {k}" for k in kws) + "\n")
         evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
+        # FU213 (Change 6) — "Include pricing" OFF has to mean the article has no prices at all.
+        # Every rule below is phrased "any price you state must …", so with pricing off they all go
+        # quiet and NOTHING forbids a price column — and with no price in the evidence, any figure the
+        # model writes is one it invented, with every check that would catch it switched off.
+        # Byte-identical to before when pricing is ON.
+        pricing_rules = f"""  - PRICING PRODUCT-MATCH: any price you state for a brand/tool must be the price of the ARTICLE'S product
+    at that brand — NEVER the brand's DIFFERENT product (e.g. do not use a TRT price in a tirzepatide
+    article). Distinguish a PROGRAM / MEMBERSHIP / SUBSCRIPTION fee from the MEDICATION / product cost and
+    LABEL which one a number is; never present a membership/program fee as the medication price. If the
+    product's own price isn't in the EVIDENCE, state the pricing model — never a different product's number.
+  - CANONICAL PRICE IS AUTHORITATIVE (subject): when the CANONICAL FACTS block above lists a price for THIS
+    article's product ({name}'s own authoritative value), that value IS the EVIDENCE — use it VERBATIM in
+    {name}'s comparison-table pricing cell and every {name} price sentence; an [operator-set] line overrides
+    any priced page you found. NEVER substitute a general plan / consult / membership / base fee (a base
+    "$X/mo plans", a processing/lab fee) as {name}'s product price. The "state the pricing model" fallback
+    applies ONLY when there is NO canonical value AND no product price in the EVIDENCE.
+  - PRICE IN FULL (FU161): carry the ENTIRE canonical pricing structure — the intro price, the ongoing
+    price, AND the billing cadence/dose — VERBATIM everywhere {name}'s price appears, INCLUDING the
+    `meta_description` and the Quick answer; NEVER truncate to just the first/intro figure. E.g. a canonical
+    "Starts at $149/month then $249/month billed quarterly for 60mg" must appear as "$149/month intro, then
+    $249/month billed quarterly" — not "starting at $149/month". If the ≤160-char meta is tight, keep BOTH
+    figures (intro AND ongoing), never only the intro.
+  - COMPETITOR PRICE = the vendor's OWN site: a price you state for a COMPETITOR must come from that
+    competitor's OWN website (its own pricing/product page in the EVIDENCE) — NEVER from a third-party
+    review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
+    the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
+    this product") — NEVER copy a number from a review-site source.
+  - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
+    quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
+    specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not
+    strip it. Label an introductory / entry-tier / lowest-unit price AS such (e.g. "first month $X then $Y",
+    "from $X on the cheapest tier / smallest size") and do NOT present it as the ongoing/typical cost when
+    the source shows the ladder differs. Do NOT compare cells on DIFFERENT bases as if equal — note each
+    cell's basis when it differs. When a price is a plain flat number with no such qualifier, state it
+    plainly — never invent a basis."""
+        if not include_pricing:
+            pricing_rules = f"""  - NO PRICING IN THIS ARTICLE: this article does not cover pricing. Do NOT create a price / cost /
+    fee comparison column, and do NOT state a price, fee, plan cost or "starting at" figure for
+    {name} or any compared option anywhere — the table, the prose, the Quick answer, the FAQ or the
+    meta_description. Do NOT write "pricing not available" (or any variation) in its place: choose a
+    different comparison dimension the evidence can actually answer."""
         kf_block = _canonical_facts_block(name, key_facts, key_facts_products)   # FU150 (#4): cluster-synced
         ci_block = _content_instructions_block(brand, "blog")   # FU212: "" when the brand has none
         link = f" Link to {url} where it reads naturally." if url else ""
@@ -3051,36 +3703,7 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     brand. Format STRICTLY: each question is an H3 heading ending in "?" (a real question about the topic,
     not about {name}), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (Keep
     this exact format — it is parsed into FAQPage structured data.)
-  - PRICING PRODUCT-MATCH: any price you state for a brand/tool must be the price of the ARTICLE'S product
-    at that brand — NEVER the brand's DIFFERENT product (e.g. do not use a TRT price in a tirzepatide
-    article). Distinguish a PROGRAM / MEMBERSHIP / SUBSCRIPTION fee from the MEDICATION / product cost and
-    LABEL which one a number is; never present a membership/program fee as the medication price. If the
-    product's own price isn't in the EVIDENCE, state the pricing model — never a different product's number.
-  - CANONICAL PRICE IS AUTHORITATIVE (subject): when the CANONICAL FACTS block above lists a price for THIS
-    article's product ({name}'s own authoritative value), that value IS the EVIDENCE — use it VERBATIM in
-    {name}'s comparison-table pricing cell and every {name} price sentence; an [operator-set] line overrides
-    any priced page you found. NEVER substitute a general plan / consult / membership / base fee (a base
-    "$X/mo plans", a processing/lab fee) as {name}'s product price. The "state the pricing model" fallback
-    applies ONLY when there is NO canonical value AND no product price in the EVIDENCE.
-  - PRICE IN FULL (FU161): carry the ENTIRE canonical pricing structure — the intro price, the ongoing
-    price, AND the billing cadence/dose — VERBATIM everywhere {name}'s price appears, INCLUDING the
-    `meta_description` and the Quick answer; NEVER truncate to just the first/intro figure. E.g. a canonical
-    "Starts at $149/month then $249/month billed quarterly for 60mg" must appear as "$149/month intro, then
-    $249/month billed quarterly" — not "starting at $149/month". If the ≤160-char meta is tight, keep BOTH
-    figures (intro AND ongoing), never only the intro.
-  - COMPETITOR PRICE = the vendor's OWN site: a price you state for a COMPETITOR must come from that
-    competitor's OWN website (its own pricing/product page in the EVIDENCE) — NEVER from a third-party
-    review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
-    the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
-    this product") — NEVER copy a number from a review-site source.
-  - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
-    quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
-    specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not
-    strip it. Label an introductory / entry-tier / lowest-unit price AS such (e.g. "first month $X then $Y",
-    "from $X on the cheapest tier / smallest size") and do NOT present it as the ongoing/typical cost when
-    the source shows the ladder differs. Do NOT compare cells on DIFFERENT bases as if equal — note each
-    cell's basis when it differs. When a price is a plain flat number with no such qualifier, state it
-    plainly — never invent a basis.
+{pricing_rules}
   - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
   - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
@@ -3786,6 +4409,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         _subject = re.sub(r"\s+", " ", _subject)[:80].strip()
         _cat_toks = set(_product_tokens(cat))
         _subj_toks = [t for t in _product_tokens(_subject) if t not in _cat_toks]
+        # FU213 (Change 3): the tokens that say "this page is about THIS article's business". Wider
+        # than `_subj_toks` on purpose — the subject, the brand's category AND the core topic, minus
+        # bare numbers (a year matches everything, which would make the filter inert).
+        _biz_toks = _biz_topic_tokens(_subject, cat, core_topic)
+        if _biz_toks:
+            print(f"[blog_gen] same-name guard: topic tokens {', '.join(_biz_toks[:8])}", flush=True)
         _subj_brief = (f"; specifically their {_subject} work — any ranking, credential or documented "
                        f"capability IN {_subject}, NOT standing in their other practice/product areas"
                        if (_subj_toks and _subject) else "")
@@ -3943,7 +4572,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     or _is_negative_about({"title": ttl, "fact": fct}, name) \
                     or _is_affiliate_review({"title": ttl, "url": u}) \
                     or _is_non_capability_source({"title": ttl, "url": u}) \
-                    or _is_offtopic_credential({"title": ttl, "url": u, "fact": fct}, _subj_toks):
+                    or _is_offtopic_credential({"title": ttl, "url": u, "fact": fct}, _subj_toks) \
+                    or _is_other_business({"title": ttl, "url": u, "fact": fct}, "", _biz_toks):
                 # FU150 (#2/#3): a demoted core-topic source that is a REVIEW OF or NEGATIVE about the
                 # subject — or a low-quality affiliate review (FU161) — never becomes a third-party block.
                 # FU198: nor a recruitment/encyclopedia page, nor a credential from a different
@@ -4060,6 +4690,16 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if _is_offtopic_credential(s, _subj_toks):
                     print(f"[blog_gen] source-hygiene: dropped off-subject credential "
                           f"'{(s.get('title') or '')[:70]}'", flush=True)
+                    continue
+                # FU213: a page about a DIFFERENT company that happens to share the name. Applied
+                # HERE (every competitor tier, incl. the broad Tier-3/key-fact rescue that admitted
+                # the same-named listing pages) and at the corroboration intake — NOT in the
+                # dimension rescue, whose per-tool/per-dimension snippet often carries no category
+                # noun and whose honest labelling (FU184) already protects it.
+                if _is_other_business(s, dom, _biz_toks):
+                    print(f"[blog_gen] source-hygiene: dropped different-company page "
+                          f"'{(s.get('title') or '')[:70]}' (nothing about {(_subject or cat)[:40]})",
+                          flush=True)
                     continue
                 u = (s.get("url") or "").strip()
                 fc = (s.get("fact") or s.get("title") or "").strip()
@@ -4444,6 +5084,44 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_rescue_live))) as _ex:
                 list(_ex.map(_do_rescue, _rescue_live))
 
+        # ---- FU213 (Change 4) — the VERIFIED competitor price ledger. Until now nothing checked that
+        # a price cell came from the brand's own site or a retailer, was a REGULAR price, or was a
+        # price at all, so the model filled the column from whatever it had (a Forbes roundup, a sale
+        # figure, a PMC study). From here on CODE fills those cells, and only from an accepted entry.
+        _price_ledger, _price_missing = {}, []
+        _price_links_map = self._brand_price_links(brand)
+        if _px and any(_PRICE_DIM_RE.search(d or "") for d in dims):
+            # FU189: a generic OPTION (a method / material / plan type) is not a company and has no
+            # price page — never buy a price search for one.
+            _price_tools = [t for t in tools if not (tool_state.get(t) or {}).get("option")]
+            _price_ledger, _price_missing, _pl_dirty = self._ensure_price_ledger(
+                brand, _price_tools, tool_state, _cfacts, _biz_toks, _subject,
+                refresh_slugs=refresh_competitor_slugs, refresh_all=refresh_competitor_facts)
+            if _pl_dirty:
+                _cf_dirty = True
+            if _price_ledger:
+                print(f"[blog_gen] price-ledger: {len(_price_ledger)}/{len(tools)} competitor "
+                      f"price(s) verified", flush=True)
+        self._price_ledger = dict(_price_ledger)   # read by the reconcile + the finalize cell writer
+        # FU213 (Change 5) — the SUBJECT's own price link: fetched and added as a first-party block so
+        # the article cites it like the brand's own site. Code never writes the subject's own cell.
+        _subj_dom213 = _dom(brand.get("domain_url") or "")
+        if _px and _subj_dom213:
+            for _u in [str(x).strip() for x
+                       in ((_price_links_map.get(_kf_slug(name)) or {}).get("urls") or [])
+                       if str(x).strip()][:2]:
+                try:
+                    _t = self._fetch_url(_u) or ""
+                except Exception:
+                    _t = ""
+                if len(_t.strip()) >= 200:
+                    fresh.append({"label": name, "url": _u,
+                                  "text": re.sub(r"\s+", " ", _t)[:_EVIDENCE_TEXT_CAP]})
+                    print(f"[blog_gen] price-link: {name} (subject) {_u} → first-party block",
+                          flush=True)
+                else:
+                    print(f"[blog_gen] price-link: {name} (subject) {_u} → blocked/empty", flush=True)
+
         # ---- Finalize: emit in ORIGINAL order (keeps each tool's [S#] blocks contiguous) ----
         for tool in tools:
             st = tool_state[tool]
@@ -4471,16 +5149,21 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # from the FU151 45-day cache could never trigger the ask, so on the SECOND blog for a
                 # brand the question silently stopped being asked. The check is pure inspection of
                 # blocks already in hand (the FU157 rationale) — it costs nothing to run on them too.
-                if _px and any(_PRICE_DIM_RE.search(d or "") for d in dims):
-                    if not self._has_confirmed_price(blocks, st.get("dom")):
-                        # FU209: the operator may REMOVE the brand instead of dropping the price
-                        # column for everyone — the modal needs the same floor count as FU206b.
-                        unsourced.append({"tool": tool, "dom": st.get("dom") or "",
-                                          "facts": ["current price"], "price_only": True,
-                                          "remaining_if_removed": len(tools) - 1,
-                                          **({"manual": True} if tool.lower() in _mine_low else {})})
-                        print(f"[blog_gen] price-check: {tool} has no confirmed own-site/reputable price "
-                              f"— FU79 will ask the operator", flush=True)
+                # FU213 (4e): the question now fires on a missing VERIFIED LEDGER ENTRY, not on
+                # "some block carries a price" — a price the code will not write into the cell is
+                # not a price the article has. A stored link is named in the ask, so the operator
+                # knows the paste was tried and could not be read.
+                if tool in _price_missing:
+                    _plink = [str(u).strip() for u
+                              in ((_price_links_map.get(_kf_slug(tool)) or {}).get("urls") or [])
+                              if str(u).strip()]
+                    unsourced.append({"tool": tool, "dom": st.get("dom") or "",
+                                      "facts": ["current price"], "price_only": True,
+                                      "remaining_if_removed": len(tools) - 1,
+                                      **({"price_link": _plink[0]} if _plink else {}),
+                                      **({"manual": True} if tool.lower() in _mine_low else {})})
+                    print(f"[blog_gen] price-check: {tool} has no VERIFIED price "
+                          f"— FU79 will ask the operator", flush=True)
             else:
                 # FU150: the pause names the actual comparison COLUMNS the operator must supply — a
                 # zero-block tool is missing EVERY dimension — not the old static "price + license".
@@ -4828,7 +5511,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                           f"the {cat or 'topic'} space{subj_cat}, returning a factual value + a source URL "
                           f"for each. Do NOT return negative-review roundups or 'products/brands to avoid' "
                           f"listicles, and do NOT return pages that criticize {name} — seek factual "
-                          f"coverage (features, pricing, terms, scale). Claims: {claim_lines or seed}"
+                          + (f"coverage (features, pricing, terms, scale)." if _px
+                             else f"coverage (features, terms, scale) — this article does NOT cover "
+                                  f"pricing, so do not return pricing pages.")
+                          + f" Claims: {claim_lines or seed}"
                           + (f" Focus on {rgeo}-specific coverage where available." if rgeo else "")
                           + (f" Focus also on {rqual}-related terms, options and mechanics." if rqual else ""))
             try:
@@ -4878,6 +5564,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] source-hygiene: dropped off-subject credential "
                       f"'{(c.get('title') or '')[:70]}'", flush=True)
                 continue
+            # FU213: corroboration is the third competitor-evidence path — a same-named different
+            # company reaches the Sources list from here too (the two "Digital Pigeon" pages did).
+            if _is_other_business(c, "", _biz_toks):
+                print(f"[blog_gen] source-hygiene: dropped different-company page "
+                      f"'{(c.get('title') or '')[:70]}'", flush=True)
+                continue
             u = (c.get("url") or "").strip()
             ttl = (c.get("title") or "").strip()
             fct = (c.get("fact") or ttl or "").strip()
@@ -4911,8 +5603,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # item (we found the brand; we are missing its price), so it deleted every price ask
                 # ever queued. Re-run the SAME predicate that created the item instead.
                 if _u.get("price_only"):
-                    if self._has_confirmed_price(self._blocks_naming(_t, fresh), _u.get("dom")):
-                        print(f"[blog_gen] price-check: {_t} picked up a confirmed price after all "
+                    # FU213: re-test the SAME predicate that queued the item — a VERIFIED ledger
+                    # entry, not "some block mentions a price". A block carrying a figure the code
+                    # will not write into the cell is exactly what this round stopped trusting.
+                    if (getattr(self, "_price_ledger", None) or {}).get(_t):
+                        print(f"[blog_gen] price-check: {_t} picked up a verified price after all "
                               f"— dropping it from the pause list", flush=True)
                         continue
                     _kept.append(_u)
@@ -4938,7 +5633,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # `_finalize_article` (which runs later and has no access to the extraction). Mirrors how
         # `_peer_note` / `_invented_note` / `_price_warn` already ride the instance.
         self._article_tools = [str(t).strip() for t in (tools or []) if str(t).strip()]
+        # FU213 (4c): the verified prices become citable evidence, appended LAST so every other
+        # block keeps its [S#] position.
+        for _pb in self._price_ledger_blocks(_price_ledger):
+            if not any((f.get("url") or "") == _pb["url"] and (f.get("label") or "") == _pb["label"]
+                       for f in fresh):
+                fresh.append(_pb)
         return {"name": name, "cat": cat, "tools": tools, "dims": dims, "claims": claims,
+                "prices": dict(_price_ledger),   # FU213: the ledger rides the FU79 checkpoint too
+                "include_pricing": bool(_px),     # FU213 (Change 6): reconcile + finalize + resume
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
                 "options": sorted(_options),   # FU189: the non-vendor entities, for the reconcile
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
@@ -5065,6 +5768,33 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 " …\") — do NOT attach an [S#] to them and do NOT present them as independently "
                 "established. Keep every value in them EXACT.\n"
                 + "".join(f"      • {x}\n" for x in _unv[:12]))
+
+        # FU213 (4c) — the VERIFIED competitor price ledger. Present ONLY when entries exist, so a
+        # blog with no verified prices has a byte-identical reconcile prompt.
+        _px_on = bool(sourcing.get("include_pricing", True))   # FU213 (Change 6)
+        _pl = (getattr(self, "_price_ledger", None) or dict(sourcing.get("prices") or {})) if _px_on else {}
+        price_rules = ""
+        if not _px_on:
+            price_rules = (
+                "\n  - NO PRICING IN THIS ARTICLE: this article does not cover pricing. Do NOT keep or "
+                "create a price / cost / fee comparison column, and do NOT state a price, fee or plan "
+                "cost for any brand anywhere — the table, the prose, the Quick answer, the FAQ or the "
+                "meta description. Do NOT write \"pricing not available\" in its place: drop the "
+                "dimension and use one the FRESH FACTS can actually answer.")
+        elif _pl:
+            _plines = "".join(
+                f"      • {t}: {e.get('value')}"
+                + (f" ({e.get('basis')})" if (e.get("basis") or "").strip() else "")
+                + (f" — {e.get('per_unit')}" if (e.get("per_unit") or "").strip() else "")
+                + (f" [{e.get('url')}]" if (e.get("url") or "").strip() else "") + "\n"
+                for t, e in _pl.items() if (e or {}).get("value"))
+            price_rules = (
+                "\n  - VERIFIED COMPETITOR PRICES — use EXACTLY these, and no other figure, for the "
+                "brands listed. Each was read off the brand's own site, a named retailer or the page "
+                "the operator pointed at, and checked to be a REGULAR (not sale) price; the comparison "
+                "cell for each is written by code after you, so a different figure in your prose would "
+                "contradict the table. A brand NOT listed here has no verified price — do NOT invent "
+                "one, and do NOT copy a figure from a review, roundup or listicle.\n" + _plines)
 
         # FU135 — source honesty + internal consistency (all blogs).
         honesty_rules = f"""
@@ -5256,7 +5986,7 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}
+    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -6044,6 +6774,7 @@ you MAY assume the description will carry: "{disc}".
             self._evidence_blocks = list(getattr(self, "_evidence_blocks", None) or []) + list(extra_blocks)
         article = self.generate_article(brand, seed, extra_keywords=extra_keywords,
                                         evidence=evidence, geo=geo, sibling_titles=sibling_titles,
+                                        include_pricing=include_pricing,   # FU213 (Change 6)
                                         qualifier=qualifier,   # FU93
                                         internal_links=internal_links, link_targets=link_targets,
                                         ymyl=rymyl,   # FU133
@@ -6079,6 +6810,7 @@ you MAY assume the description will carry: "{disc}".
         return self._finalize_article(brand, seed, article, draft_body, geo=geo,
                                       qualifier=qualifier,   # FU93
                                       ymyl=rymyl,   # FU133
+                                      include_pricing=include_pricing,   # FU213 (Change 6)
                                       link_targets=link_targets)   # FU151 (D): internal-link honesty
 
     # ------------------------------------------------------------------ FU153 writer pass
@@ -8125,7 +8857,7 @@ you MAY assume the description will carry: "{disc}".
                 setattr(self, k, v)
 
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
-                          ymyl=None, link_targets=None, with_linkedin=True):
+                          ymyl=None, link_targets=None, with_linkedin=True, include_pricing=True):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
         geo-check — a WARNING (never a block) when a geo page barely mentions its geography. FU151 (D):
@@ -8177,6 +8909,36 @@ you MAY assume the description will carry: "{disc}".
                 article[_mf] = self._sa(article[_mf])   # a meta field is published text too
         if any(_n_sym.values()):
             article["ai_symbols_removed"] = _n_sym
+        # FU213 (Change 6): pricing OFF → no price column, and a warning if a figure survived.
+        if not include_pricing:
+            article["body_markdown"], _dropped_px = self._strip_price_columns(article["body_markdown"])
+            if _dropped_px:
+                _pon = ("pricing-off: removed the "
+                        + ", ".join(f'"{h}"' for h in dict.fromkeys(_dropped_px))
+                        + " column(s) — Include pricing was off for this blog")
+                print(f"[blog_gen] {_pon}", flush=True)
+                self._warn(article, _pon)
+            _scan = (article.get("body_markdown") or "") + " " + (article.get("meta_description") or "")
+            if _PRICE_FIG_RE.search(_scan):
+                _pw213 = ("pricing-off: the article still states a price figure although Include "
+                          "pricing was off — check it, or regenerate with pricing on")
+                print(f"[blog_gen] {_pw213}", flush=True)
+                self._warn(article, _pw213)
+        # FU213 (4d): CODE writes the competitor price cells from the VERIFIED ledger, before the
+        # Sources rebuild renumbers the markers it cites.
+        _ledger213 = getattr(self, "_price_ledger", None) or {}
+        if _ledger213 and include_pricing:
+            # the price block must BE in the evidence map for the cell's [S#] to resolve. It normally
+            # arrives with the reconcile's `fresh` append; if the reconcile failed (or was skipped on
+            # a resume) add it here, so a code-written cell is never left uncited.
+            _known = {((b.get("label") or ""), (b.get("url") or ""))
+                      for b in (getattr(self, "_evidence_blocks", None) or [])}
+            for _pb in self._price_ledger_blocks(_ledger213):
+                if (_pb["label"], _pb["url"]) not in _known:
+                    self._evidence_blocks = list(getattr(self, "_evidence_blocks", None) or []) + [_pb]
+            article["body_markdown"], _npc = self._write_price_cells(article["body_markdown"], _ledger213)
+            if _npc:
+                article["price_cells_written"] = _npc
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         # FU205 (R3): `_resolve_table_punts` RESETS `self._table_punt_note` on every call, and the
@@ -8472,7 +9234,7 @@ you MAY assume the description will carry: "{disc}".
             except Exception:
                 _kf205 = {}
             _canon205 = _canonical_price_item(_kf205, f"{seed} {article.get('title') or ''}")
-            if _canon205 and _canon205.get("operator_set") and _subj_rows:
+            if _canon205 and _canon205.get("operator_set") and _subj_rows and include_pricing:
                 _cval = str(_canon205.get("value") or "")
                 _cnum, _ = _price_amount(_cval)
                 if _cnum:
@@ -10370,6 +11132,9 @@ you MAY assume the description will carry: "{disc}".
         # FU204: same reason — the citation-attribution check needs the compared brand names, and
         # sourcing does not re-run on a resume, so rebuild them from the checkpoint.
         self._article_tools = [str(x).strip() for x in (sourcing.get("tools") or []) if str(x).strip()]
+        # FU213: the verified price ledger rides the checkpoint, so a RESUMED blog writes the same
+        # code-written cells as an unpaused one.
+        self._price_ledger = dict(sourcing.get("prices") or {})
         _inv_ck = [str(x).strip() for x in ((ck.get("sourcing") or {}).get("invented_tools") or [])
                    if str(x).strip()]
         if _inv_ck:
@@ -10480,6 +11245,22 @@ you MAY assume the description will carry: "{disc}".
                 continue   # nothing usable for this tool → it stays dropped
             sourcing["fresh"].append({"label": tool, "url": url, "text": text[:_EVIDENCE_TEXT_CAP]})
             resolved.add(tool.lower())
+            # FU213 (4e): the answer to a PRICE question is saved to the ledger as `yours` — the
+            # operator's value is the authority, it writes the cell, and it is never asked again.
+            _was_price = any(u.get("price_only") and
+                             str(u.get("tool") or "").lower() == tool.lower()
+                             for u in (sourcing.get("unsourced") or []))
+            if _was_price and fact and _PRICE_FIG_RE.search(fact):
+                _fig = _PRICE_FIG_RE.search(fact).group(0).strip()
+                _entry = {"value": _fig, "basis": re.sub(r"\s+", " ", fact).strip()[:80],
+                          "per_unit": "", "url": url, "source": "yours",
+                          "quote": re.sub(r"\s+", " ", fact).strip()[:220],
+                          "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                self._price_ledger[tool] = _entry
+                sourcing.setdefault("prices", {})[tool] = _entry
+                self._save_price_entry(brand, tool, _entry)
+                print(f"[blog_gen] price-ledger: {tool} ← your answer {_fig} (saved as operator-set)",
+                      flush=True)
         if resolved:
             sourcing["unsourced"] = [u for u in sourcing["unsourced"]
                                      if str(u.get("tool") or "").lower() not in resolved]
@@ -10509,6 +11290,10 @@ you MAY assume the description will carry: "{disc}".
                                       geo=(sourcing.get("geo") or ""),
                                       qualifier=(sourcing.get("qualifier") or ""),   # FU93
                                       ymyl=(sourcing.get("ymyl") or None),   # FU133
+                                      # FU213: the pricing choice + the verified ledger ride the
+                                      # checkpoint, so a RESUMED blog writes the same cells and
+                                      # obeys the same "no pricing" rule as an unpaused one.
+                                      include_pricing=bool(sourcing.get("include_pricing", True)),
                                       with_linkedin=ck.get("part") in (None, "all"))
 
 
@@ -10824,6 +11609,10 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
         # (e.g. the $79 TRT price) can never accompany the operator's price. No operator items → today's.
         _ops = [it for it in _ok_items if it.get("operator_set")]
         offers = [_mk_offer(it) for it in (_ops if _ops else _ok_items)]
+    # FU213 (Change 6): a blog generated with "Include pricing" off must not advertise a price in
+    # structured data either — FU162 named this and deferred it. Legacy rows default to 1.
+    if offers and (blog.get("include_pricing", 1) in (0, "0", False)):
+        offers = []
     if offers and brand_name:
         prod = {"@type": "Product", "name": brand_name,
                 "offers": offers if len(offers) > 1 else offers[0]}

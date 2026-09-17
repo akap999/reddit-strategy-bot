@@ -188,4 +188,7 @@ def test_an_entity_sourced_later_drops_off_the_pause_list():
 
     _, sourcing = _run(["Noom Med"], dims=("pricing",), search_h=search_h,
                        domains={"Noom Med": "noom.com"})
-    assert not [u for u in sourcing["unsourced"] if u["tool"] == "Noom Med"], sourcing["unsourced"]
+    # FU213: the ENTITY-level pause is what the dim-rescue clears; a `price_only` ask is a separate
+    # item that fires when there is no VERIFIED price for that competitor.
+    assert not [u for u in sourcing["unsourced"]
+                if u["tool"] == "Noom Med" and not u.get("price_only")], sourcing["unsourced"]

@@ -2303,6 +2303,187 @@ def api_brand_competitor_cache_delete(bid):
     finally:
         db.close()
 
+def _clean_price_links(payload, max_brands=12, max_urls=3):
+    """FU213 (Change 5) — validate the operator's price-page links into the stored shape
+    {slug: {name, urls, updated_at}}. http/https only, at most 3 links per brand, 12 brands. A brand
+    sent with an EMPTY link box is returned in `drop` so the caller can remove its entry."""
+    from generators.blog_gen import _kf_slug
+    out, drop = {}, []
+    now = _fu128_time.strftime("%Y-%m-%dT%H:%M:%SZ", _fu128_time.gmtime())
+    for row in (payload or [])[:max_brands]:
+        if not isinstance(row, dict):
+            continue
+        nm = str(row.get("name") or "").strip()
+        if not nm:
+            continue
+        raw = row.get("urls")
+        if isinstance(raw, str):
+            raw = raw.replace(",", "\n").split("\n")
+        urls = []
+        for u in (raw or []):
+            u = str(u).strip()
+            if not u:
+                continue
+            if not re.match(r"^https?://\S+\.\S+", u, re.I):
+                continue
+            if u not in urls:
+                urls.append(u)
+            if len(urls) >= max_urls:
+                break
+        slug = _kf_slug(nm)
+        if not slug:
+            continue
+        if urls:
+            out[slug] = {"name": nm, "urls": urls, "updated_at": now}
+        else:
+            drop.append(slug)
+    return out, drop
+
+
+def _save_price_links(db, brand, rows):
+    """Merge validated rows into EVERY stored copy of this brand (same name), the way Edit Brand
+    already saves brand-level fields. A row sent with an empty box removes that brand's entry;
+    brands not sent are untouched. Returns the merged map."""
+    clean, drop = _clean_price_links(rows)
+    try:
+        cur = json.loads(brand.get("price_links") or "{}")
+    except Exception:
+        cur = {}
+    if not isinstance(cur, dict):
+        cur = {}
+    cur.update(clean)
+    for s in drop:
+        cur.pop(s, None)
+    blob = json.dumps(cur)
+    targets = [brand["id"]]
+    try:
+        targets = [b["id"] for b in db.get_all_brands()
+                   if (b.get("name") or "").strip().lower() == (brand.get("name") or "").strip().lower()] \
+            or targets
+    except Exception:
+        pass
+    for bid in targets:
+        try:
+            db.update_brand(bid, price_links=blob)
+        except Exception as e:
+            print(f"[price-links] save failed for brand {bid}: {e}", flush=True)
+    return cur
+
+
+@app.route("/api/brands/<int:bid>/price-links", methods=["PUT"])
+def api_brand_price_links(bid):
+    """FU213 (Change 5): save the operator's per-brand price-page links (used by the blog generator
+    to read a price straight off the page instead of searching for it)."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        merged = _save_price_links(db, brand, (request.json or {}).get("price_links") or [])
+        return jsonify({"ok": True, "price_links": merged, "brands": len(merged)})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/competitor-prices", methods=["PUT"])
+def api_brand_competitor_prices(bid):
+    """FU213 (4f): an inline edit in the competitor popup — saves the price as `yours`, the highest
+    precedence in the ledger (it writes the cell and is never re-checked or re-asked)."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        from generators.blog_gen import _kf_slug, _PRICE_FIG_RE
+        try:
+            cf = json.loads(brand.get("competitor_facts") or "{}")
+        except Exception:
+            cf = {}
+        if not isinstance(cf, dict):
+            cf = {}
+        saved, cleared = [], []
+        now = _fu128_time.strftime("%Y-%m-%dT%H:%M:%SZ", _fu128_time.gmtime())
+        for row in ((request.json or {}).get("prices") or [])[:20]:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            slug = str(row.get("slug") or "").strip().lower() or _kf_slug(nm)
+            if not slug:
+                continue
+            val = str(row.get("value") or "").strip()
+            if not val:
+                if isinstance(cf.get(slug), dict):
+                    cf[slug].pop("price", None)
+                    cleared.append(slug)
+                continue
+            if not _PRICE_FIG_RE.search(val):
+                return jsonify({"error": f"'{val}' is not a price figure (e.g. $24.99)"}), 400
+            cf.setdefault(slug, {})["price"] = {
+                "value": _PRICE_FIG_RE.search(val).group(0).strip(),
+                "basis": str(row.get("basis") or "").strip()[:80],
+                "per_unit": "", "url": str(row.get("url") or "").strip(),
+                "source": "yours", "quote": val[:220], "checked_at": now}
+            saved.append(slug)
+        db.update_brand(bid, competitor_facts=json.dumps(cf))
+        return jsonify({"ok": True, "saved": saved, "cleared": cleared})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/competitor-prices/check", methods=["POST"])
+def api_brand_competitor_prices_check(bid):
+    """FU213 (4f) — run ONLY the price lookup for this brand's competitors: the stored price link
+    first (Change 5), else one pinned search each. No blog is generated. Body may carry
+    `price_links` (saved first, so "Save links & check prices" is one click) and `subject` (the
+    topic the prices are for)."""
+    data = request.json or {}
+    if data.get("include_pricing") is False:
+        return jsonify({"error": "Include pricing is off — turn it on to check prices."}), 400
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    _rows = data.get("price_links") or []
+    _subject = (data.get("subject") or "").strip()
+    _names = [str(n).strip() for n in (data.get("names") or []) if str(n).strip()]
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator, _biz_topic_tokens, _as_list
+        from generators.base import ClaudeClient
+        db = Database(DB_PATH)
+        db.initialize()
+        try:
+            brand = db.get_brand(bid)
+            if not brand:
+                raise ValueError("brand not found")
+            if _rows:
+                _save_price_links(db, brand, _rows)
+                brand = db.get_brand(bid)
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()
+            gen = BlogGenerator(claude, db)
+            tools = _names or [str(c).strip() for c in _as_list(brand.get("competitors")) if str(c).strip()]
+            tools = [t for t in tools if t.lower() != (brand.get("name") or "").lower()][:12]
+            try:
+                cf = json.loads(brand.get("competitor_facts") or "{}")
+            except Exception:
+                cf = {}
+            if not isinstance(cf, dict):
+                cf = {}
+            toks = _biz_topic_tokens(_subject, brand.get("category") or "")
+            state = {t: {"dom": (json.loads(brand.get("competitor_domains") or "{}") or {}).get(t, "")}
+                     for t in tools}
+            ledger, missing, dirty = gen._ensure_price_ledger(
+                brand, tools, state, cf, toks, _subject or (brand.get("category") or ""),
+                refresh_all=bool(data.get("refresh")))
+            if dirty:
+                db.update_brand(bid, competitor_facts=json.dumps(cf))
+            return {"brand_id": bid, "checked": len(tools), "verified": len(ledger),
+                    "missing": missing, "prices": ledger,
+                    "cost": round(claude.usage_cost(), 4)}
+        finally:
+            db.close()
+
+    return jsonify({"task_id": start_task("Checking competitor prices", task, pass_task_id=True)})
+
+
 @app.route("/api/brands/<int:bid>/reset-cached-data", methods=["POST"])
 def api_brand_reset_cached_data(bid):
     """FU160: clear the brand's AUTO-generated caches — competitor_facts + auto-resolved
@@ -2815,6 +2996,10 @@ def api_blog_generate():
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
                                 if str(s).strip()]   # FU160: selectively refresh only these competitors
+    # FU213 (Change 5): per-brand PRICE PAGE links pasted on the generate form. Saved on the brand
+    # (so the next blog is prefilled and "Re-check prices" uses them) and read by the generator.
+    # IGNORED entirely when Include pricing is off.
+    price_links_in = (data.get("price_links") or []) if include_pricing else []
     # FU133: YMYL authoritative sourcing — checkbox True/False; absent = auto-detect from the brand.
     ymyl_in = data.get("ymyl")
     ymyl_arg = (True if ymyl_in is True else (False if ymyl_in is False else None))
@@ -2840,6 +3025,9 @@ def api_blog_generate():
             # so the byline/schema are populated without the user re-enriching the brand.
             brand = _ensure_brand_byline_logo(claude, bg, brand)
             brand = _ensure_content_context(claude, bg, brand)   # FU212: read new lines / auto once
+            if price_links_in:   # FU213 (Change 5): save the pasted links, then generate with them
+                _save_price_links(bg, brand, price_links_in)
+                brand = bg.get_brand(brand_id) or brand
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
@@ -3167,7 +3355,8 @@ def api_blog_regenerate(blog_id):
                 # symbol scrub, Sources rebuild, invisible-char strip and every deterministic check —
                 # instead of the lone `_rebuild_sources` this branch used to hand-roll.
                 gen._finalize_article(brand, seed, a, _draft, geo=stored_geo, qualifier=stored_qual,
-                                      ymyl=stored_ymyl, link_targets=_lt, with_linkedin=False)
+                                      ymyl=stored_ymyl, link_targets=_lt, with_linkedin=False,
+                                      include_pricing=stored_px)   # FU213
                 body = a.get("body_markdown", "")
                 _part_warn = a.get("geo_warning", "")
                 _part_qr = a.get("quality_report") or {}
@@ -3205,7 +3394,8 @@ def api_blog_regenerate(blog_id):
                 # FU205 (R1): same composition as the main path (see part=article above).
                 _fa = {**article, "body_markdown": body_md}
                 gen._finalize_article(brand, seed, _fa, _draft, geo=stored_geo,
-                                      qualifier=stored_qual, ymyl=stored_ymyl, with_linkedin=False)
+                                      qualifier=stored_qual, ymyl=stored_ymyl, with_linkedin=False,
+                                      include_pricing=stored_px)   # FU213
                 _part_warn = _fa.get("geo_warning", "")
                 _part_qr = _fa.get("quality_report") or {}
                 _part_warnings = _fa.get("warnings") or []

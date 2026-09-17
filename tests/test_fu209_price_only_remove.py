@@ -54,8 +54,10 @@ def test_the_price_only_pause_item_tells_the_modal_whether_removal_is_available(
     s = gen._source_for_completion({"name": "Acme", "category": "c"}, "where to buy x",
                                    {"title": "t", "body_markdown": "# t\n"})
     price = [u for u in s["unsourced"] if u.get("price_only")]
-    assert [u["tool"] for u in price] == ["Zeta"]
-    assert price[0]["remaining_if_removed"] == 3
+    # FU213: the ask now fires on a missing VERIFIED ledger price, so a competitor whose only figure
+    # came from a search snippet is asked about too — Zeta (no figure at all) is still among them.
+    assert "Zeta" in [u["tool"] for u in price]
+    assert all(u["remaining_if_removed"] == 3 for u in price)
 
 
 def test_removing_a_price_only_brand_keeps_the_price_column_for_everyone_else():

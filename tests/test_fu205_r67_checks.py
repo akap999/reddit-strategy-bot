@@ -143,3 +143,50 @@ def test_a_real_reviewer_or_disclosure_line_is_accepted():
 def test_a_bold_line_is_not_mistaken_for_a_byline():
     body = "# t\n\n**Key takeaway**\n\n## Quick answer\n\nAcme.\n"
     assert "byline-check" in _keys(_finalize(body))
+
+
+# ── R6: the starved run's MOST likely exit is the pause, which never reaches _finalize_article ──
+def test_a_starved_generation_that_PAUSES_still_reports_the_budget():
+    """A starved run is the one most likely to mass-pause: every competitor it never got to reaches
+    the modal as unsourced. That exit returns BEFORE `_finalize_article`, so the check that lives
+    there would never fire on the exact case it was written for — the operator would be asked to
+    paste links for four competitors with nothing saying the tool had simply stopped looking."""
+    gen = _gen(skipped=14)
+    assert "14 search(es) were SKIPPED" in gen._budget_note()
+
+    def _source(*a, **k):
+        return {"name": "Acme", "cat": "c", "tools": ["Bravo"], "dims": ["Pricing"], "claims": [],
+                "fresh": [], "unsourced": [{"tool": "Bravo", "facts": ["Pricing"]}], "peers": []}
+    gen._source_for_completion = _source
+    gen.generate_article = lambda *a, **k: {"title": "t", "meta_description": "d",
+                                            "keywords": [], "body_markdown": "# t\n"}
+    gen.verify_claims = lambda *a, **k: None
+    gen._gather_evidence = lambda *a, **k: ""
+    res = gen.generate_blog({"name": "Acme"}, "t", allow_pause=True)
+    pending = (res or {}).get("_pending") or {}
+    assert pending.get("missing"), "the run did not pause"
+    assert "14 search(es) were SKIPPED" in (pending.get("budget_warning") or ""), \
+        "a starved mass-pause still says nothing about the budget"
+
+
+def test_a_healthy_pause_carries_no_budget_warning():
+    gen = _gen(skipped=0)
+    assert gen._budget_note() == ""
+
+
+def test_the_starvation_survives_the_pause_and_reaches_the_finished_blog():
+    """A resume re-runs no searches, so its OWN skip count is zero. Without the checkpoint the
+    finished blog forgets why its competitors were unsourced."""
+    paused = _gen(skipped=9)
+    paused._budget_warn = paused._budget_note()
+    notes = paused._check_notes()
+    assert "9 search(es)" in notes["_budget_warn"]
+
+    resumed = _gen(skipped=0)          # a fresh client, as the resume really has
+    resumed._restore_check_notes(notes)
+    body = f"# t\n\n{BYLINE}\n\n## Quick answer\n\nAcme.\n"
+    art = {"title": "t", "meta_description": "d", "body_markdown": body}
+    resumed._finalize_article(BRAND, "t", art, body, with_linkedin=False)
+    hits = [w for w in art["warnings"] if w["check"] == "budget-check"]
+    assert hits and "9 search(es)" in hits[0]["detail"], \
+        "the finished blog forgot that the budget, not the web, was the problem"

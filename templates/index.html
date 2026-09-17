@@ -13150,7 +13150,7 @@ function _blogFactLabel(facts) {
     return f.length ? f.join(' + ') : 'a usable source';
 }
 
-function blogProvideSourcesModal(blogId, missing) {
+function blogProvideSourcesModal(blogId, missing, budgetWarning) {
     missing = missing || [];
     if (!missing.length) { openBlog(blogId); return; }
     window._blogPendingId = blogId;
@@ -13186,6 +13186,7 @@ function blogProvideSourcesModal(blogId, missing) {
     showModal(`<div style="max-width:640px">
         <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">Generation paused — needs a source</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each entry below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
+        ${budgetWarning ? `<div class="text-xs mb-3 p-2 rounded border border-amber-700 text-amber-300">⚠ ${_blogEsc(budgetWarning)}<div class="text-gray-400 mt-1">These entries are unsourced because the search budget ran out, not because nothing exists — a regenerate with a higher ceiling may fill them without you pasting anything.</div></div>` : ''}
         ${rows}
         <div class="flex gap-2 justify-end mt-3">
             <button class="btn btn-sm btn-secondary" onclick="_blogSubmitSources(true)">Skip all &amp; finish now</button>
@@ -13323,7 +13324,7 @@ function blogGenerate() {
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150 pricing conflict
         _blogQualityToast(res);   // FU151 (D)
         _blogWriterToast(res);    // FU164 writer time / fallback
-        if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || []); return; }   // FU79 pause
+        if (res && res.needs_sources) { blogProvideSourcesModal(res.blog_id, res.missing || [], res.budget_warning || ''); return; }   // FU79 pause
         if (res && res.blog_id) openBlog(res.blog_id);
     }, 'Generating blog');
 }

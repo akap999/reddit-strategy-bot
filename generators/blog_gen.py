@@ -1365,6 +1365,7 @@ class BlogGenerator:
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
         self._article_tools = []      # FU204: the compared brand names, for the citation check
+        self._budget_warn = ""        # FU205 (R6): a starvation note carried across a FU79 pause
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -5626,6 +5627,10 @@ Return JSON only:
                                                refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
                                                include_pricing=include_pricing)   # FU162
         if allow_pause and sourcing and sourcing.get("unsourced"):
+            # FU205 (R6): the resume runs on a FRESH client whose skip count is its own (zero), so
+            # the starvation has to travel in the checkpoint or the finished blog forgets WHY its
+            # competitors were unsourced.
+            self._budget_warn = self._budget_note()
             print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
                   f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
             return {"_pending": {
@@ -5640,6 +5645,9 @@ Return JSON only:
                 },
                 "gen_cost": round(self.claude.usage_cost(), 4),
                 "gen_usage": dict(self.claude._usage),
+                # FU205 (R6): a starved run is the one MOST likely to land here, and this exit never
+                # reaches `_finalize_article` — so the warning travels with the pause instead.
+                "budget_warning": self._budget_note(),
             }}
         if sourcing and sourcing.get("fresh"):
             vc = self._reconcile_and_finish(brand, seed, article, sourcing)
@@ -7510,6 +7518,28 @@ Return JSON only:
             article["geo_warning"] = "; ".join(
                 x for x in [article.get("geo_warning", ""), note] if x)
 
+    def _budget_note(self):
+        """FU205 (R6) — the starvation signal, as a note or "" when the run was healthy.
+
+        Shared by BOTH exits of a generation, and the second one is the one that matters: a starved
+        run is the MOST likely to hit the FU79 pause (every competitor it never got to reaches the
+        modal as unsourced), and the pause returns BEFORE `_finalize_article` — so the check that
+        lives there would never fire on the exact case it was written for. The operator would be
+        asked to paste links for four competitors with nothing saying the tool simply stopped
+        looking. That is the misdiagnosis this retires, so the note has to reach the modal too."""
+        try:
+            n = int(getattr(self.claude, "skipped_searches", lambda: 0)() or 0)
+        except Exception:
+            n = 0
+        if not n:
+            # a RESUMED generation re-runs no searches, so its own count is zero — fall back to the
+            # note the paused run recorded in the checkpoint.
+            return getattr(self, "_budget_warn", "") or ""
+        return (f"budget-check: the ${_BLOG_COST_CEILING:.2f} web-search ceiling was reached — "
+                f"{n} search(es) were SKIPPED, so thin sourcing here means the tool stopped "
+                f"looking, not that nothing exists; raise BLOG_COST_CEILING or regenerate with "
+                f"fewer competitors")
+
     # ───────────────── FU205 (R7): the two properties nothing verified ─────────────────
     # A stall is the failure mode the answer-first rule exists to prevent: heading + first sentence
     # are lifted as ONE chunk, and a chunk that opens "The honest answer is: it depends" carries no
@@ -7574,7 +7604,8 @@ Return JSON only:
     # FU205 (R4) — the check notes that survive a FU79 pause. Sourcing does not re-run on resume,
     # so without this every check that depends on it silently reports clean on a resumed blog.
     _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
-                    "_table_punt_note", "_core_mechanics", "_subject_phrase", "_subject_peers")
+                    "_table_punt_note", "_core_mechanics", "_subject_phrase", "_subject_peers",
+                    "_budget_warn")
 
     def _check_notes(self):
         """JSON-safe snapshot of the deterministic checks' state, for the pause checkpoint."""
@@ -7961,15 +7992,8 @@ Return JSON only:
         # operator. Every downstream symptom (thin sources, unsourced competitors, blank cells,
         # punts, the mass-pause) then looks like a logic bug, and has been debugged as one for ~15
         # rounds. One boolean retires a whole class of misdiagnosis.
-        try:
-            _skipped = int(getattr(self.claude, "skipped_searches", lambda: 0)() or 0)
-        except Exception:
-            _skipped = 0
-        if _skipped:
-            _bnote = (f"budget-check: the ${_BLOG_COST_CEILING:.2f} web-search ceiling was reached — "
-                      f"{_skipped} search(es) were SKIPPED, so thin sourcing here means the tool "
-                      f"stopped looking, not that nothing exists; raise BLOG_COST_CEILING or "
-                      f"regenerate with fewer competitors")
+        _bnote = self._budget_note()
+        if _bnote:
             print(f"[blog_gen] {_bnote}", flush=True)
             self._warn(article, _bnote)
         if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring

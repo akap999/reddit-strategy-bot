@@ -2796,6 +2796,10 @@ def api_blog_generate():
                         "missing": pending.get("missing") or [],
                         "reddit_status": reddit_status,
                         "reddit_note": _reddit_status_note(reddit_status),
+                        # FU205 (R6): tell the operator WHY these tools are unsourced. A starved run
+                        # mass-pauses, and without this the modal asks for four links while saying
+                        # nothing about the tool having stopped looking after the ceiling.
+                        "budget_warning": pending.get("budget_warning", ""),
                         "gen_cost": gcost}
             # FU84: adaptive disclosure — a user-typed byline disclosure wins; else the article's
             # generated, factually-accurate line (e.g. "one of the platforms compared in this guide").

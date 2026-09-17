@@ -2953,6 +2953,26 @@ def api_blog_regenerate(blog_id):
             # warnings and a scorecard to report. Previously they computed neither and the endpoint
             # returned an empty geo_warning for every part but "all".
             _part_warn, _part_qr, _part_warnings, _part_vrep = "", {}, [], {}
+
+            def _park(pending):
+                """FU207 — a regenerate that needs the operator's input. Stores the checkpoint and
+                NOTHING else: the blog's body, title, LinkedIn post and status are left exactly as they
+                are, so a published blog keeps serving its finished version while the question waits.
+                (A first Generate has no finished version to protect, which is why that path saves
+                the draft and sets `awaiting_sources` instead.) The cost of this partial run is kept
+                on the checkpoint and added to the resume, so the finished regenerate reports its
+                true total."""
+                pend = dict(pending)
+                pend["mode"] = "regenerate"
+                pend["part"] = part
+                bg.update_blog(blog_id, pending_state=pend)
+                print(f"[blog_regenerate] blog #{blog_id} part={part}: PAUSED for "
+                      f"{len(pend.get('missing') or [])} competitor(s) — the existing blog is untouched",
+                      flush=True)
+                return {"blog_id": blog_id, "needs_sources": True, "regenerate": True, "part": part,
+                        "missing": pend.get("missing") or [],
+                        "budget_warning": pend.get("budget_warning", ""),
+                        "gen_cost": pend.get("gen_cost", 0)}
             if part == "all":
                 fresh = gen.generate_blog(brand, seed, extra_keywords=keywords,
                                           source_urls=stored_urls, research_notes=stored_notes,
@@ -2962,7 +2982,11 @@ def api_blog_regenerate(blog_id):
                                           qualifier=stored_qual,                       # FU93
                                           internal_links=stored_il, sibling_links=sib_links,  # FU114
                                           ymyl=stored_ymyl,                            # FU133
-                                          include_pricing=stored_px)                   # FU162
+                                          include_pricing=stored_px,                   # FU162
+                                          allow_pause=True)                            # FU207: ask, like Generate
+                if fresh and fresh.get("_pending"):
+                    fresh["_pending"]["checkpoint"]["part"] = "all"
+                    return _park(fresh["_pending"])
                 if not fresh:
                     raise ValueError(claude.last_error or "Regeneration failed")
                 bg.update_blog(
@@ -3012,8 +3036,12 @@ def api_blog_regenerate(blog_id):
                 a["body_markdown"] = (v or {}).get("body_markdown") or a.get("body_markdown", "")
                 flagged = (v or {}).get("flagged") or []
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
+                a["claims_flagged"] = flagged   # FU207: carried through a pause, so the resume keeps it
                 vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo,
-                                             qualifier=stored_qual, include_pricing=stored_px)   # FU93/162
+                                             qualifier=stored_qual, include_pricing=stored_px,   # FU93/162
+                                             allow_pause=True, draft_body=_draft, part="article")   # FU207
+                if vc and vc.get("_pending"):
+                    return _park(vc["_pending"])
                 if vc:
                     a["body_markdown"] = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -3046,9 +3074,13 @@ def api_blog_regenerate(blog_id):
                 body_md = v["body_markdown"]
                 flagged = v["flagged"]
                 # FU49: always source competitors + fill the comparison (deep = extra corroboration)
-                vc = gen.verify_and_complete(brand, seed, {**article, "body_markdown": body_md},
+                vc = gen.verify_and_complete(brand, seed,
+                                             {**article, "body_markdown": body_md, "claims_flagged": flagged},
                                              deep=stored_deep, geo=stored_geo,
-                                             qualifier=stored_qual, include_pricing=stored_px)   # FU93/162
+                                             qualifier=stored_qual, include_pricing=stored_px,   # FU93/162
+                                             allow_pause=True, draft_body=_draft, part="verify")   # FU207
+                if vc and vc.get("_pending"):
+                    return _park(vc["_pending"])
                 if vc:
                     body_md = vc["body_markdown"]
                     flagged = flagged + vc["flagged"]
@@ -3067,6 +3099,15 @@ def api_blog_regenerate(blog_id):
                 li = gen.generate_linkedin(brand, seed, article, geo=stored_geo)   # FU91
                 bg.update_blog(blog_id, linkedin_text=_sub_link(li or "",
                                                                 _blog_link_target(blog, brand)))   # FU81
+            # FU207: a regenerate that completed supersedes any pause still sitting on this blog —
+            # an older regenerate nobody answered, or a first Generate that paused. Left in place, the
+            # banner would keep asking, and answering it would overwrite this fresh result with the
+            # stale checkpoint's. A blog that was only ever a paused draft is now a finished draft.
+            if part in ("all", "article", "verify"):
+                if blog.get("pending_state"):
+                    bg.update_blog(blog_id, pending_state="")
+                if blog.get("status") == "awaiting_sources":
+                    bg.update_blog(blog_id, status="draft")
             if stored_reddit:
                 bg.update_blog(blog_id, reddit_status=reddit_status)
             regen_cost = round(claude.usage_cost(), 4)   # FU54: cost of this regeneration
@@ -3295,11 +3336,25 @@ def api_blog_provide_sources(blog_id):
                 _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
             gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
             seed = blog.get("seed") or ""
+            # FU207: a paused REGENERATE resumes against the blog as it stands. "Re-verify" never
+            # carried the title or meta through its checkpoint (it never changes them), so fill any
+            # blank field from the live row — otherwise the scorecard written below would mark the
+            # meta description missing on a blog that has one.
+            _regen = (pending or {}).get("mode") == "regenerate"
+            _rpart = (pending or {}).get("part") or "all"
+            if _regen:
+                _ca = checkpoint.setdefault("article", {})
+                for _k in ("title", "meta_description", "meta_title", "keywords"):
+                    if not _ca.get(_k) and blog.get(_k):
+                        _ca[_k] = blog.get(_k)
             art = gen.finish_pending_blog(brand, seed, checkpoint, sources)
             if not art:
                 raise ValueError(claude.last_error or "Finishing the blog failed")
             resume_cost = round(claude.usage_cost(), 4)
-            total_cost = round(float(blog.get("gen_cost") or 0) + resume_cost, 4)
+            # FU207: a regenerate reports what the REGENERATE cost (its partial run + this resume),
+            # exactly as the regenerate endpoint does; a first Generate adds to the paused draft's cost.
+            total_cost = round((float((pending or {}).get("gen_cost") or 0) if _regen
+                                else float(blog.get("gen_cost") or 0)) + resume_cost, 4)
             # FU134: operator-provided links are KEPT — merged into this blog's source_urls (so a
             # regenerate re-fetches them) AND into the brand's known_sources (so every FUTURE blog
             # for this brand starts with them; capped, deduped).
@@ -3320,19 +3375,44 @@ def api_blog_provide_sources(blog_id):
                           f"+ brand known_sources ({len(_merged_brand)} total)", flush=True)
                 except Exception as e:
                     print(f"[provide-sources] persist links failed: {e}", flush=True)
-            bg.update_blog(
-                blog_id,
-                title=art.get("title", ""),
-                meta_description=art.get("meta_description", ""),
-                keywords=art.get("keywords") or [],
-                body_markdown=art.get("body_markdown", ""),
-                linkedin_text=art.get("linkedin_text", ""),
-                claims_flagged=art.get("claims_flagged") or [],
-                status="draft",
-                prompt_version=art.get("prompt_version", ""),
-                pending_state="",   # clear the checkpoint — no longer awaiting sources
-                gen_cost=total_cost,
-            )
+            if _regen:
+                # FU207: write back EXACTLY what the paused button writes when it doesn't pause.
+                # "Re-verify" never touched the title; "Regen article" never touched the LinkedIn
+                # post. The blog's status is left alone — a published blog stays published — unless
+                # it was only ever a paused draft, which it now no longer is.
+                _w = {"body_markdown": art.get("body_markdown", ""),
+                      "claims_flagged": art.get("claims_flagged") or [],
+                      "prompt_version": art.get("prompt_version", ""),
+                      "pending_state": "", "gen_cost": total_cost}
+                if _rpart in ("all", "article"):
+                    _w.update(title=art.get("title", ""),
+                              meta_description=art.get("meta_description", ""),
+                              meta_title=art.get("meta_title", ""),
+                              keywords=art.get("keywords") or [])
+                if _rpart == "all":
+                    _w["linkedin_text"] = _sub_link(art.get("linkedin_text", ""),
+                                                    _blog_link_target(blog, brand))   # FU81
+                    _w["body_pre_verify"] = art.get("body_pre_verify") or ""   # FU202: both versions
+                    if (not (blog.get("disclosure") or "").strip()
+                            and (art.get("disclosure") or "").strip()):
+                        _w["disclosure"] = art["disclosure"].strip()   # FU84: fill a blank, never clobber
+                if blog.get("status") == "awaiting_sources":
+                    _w["status"] = "draft"
+                bg.update_blog(blog_id, **_w)
+            else:
+                bg.update_blog(
+                    blog_id,
+                    title=art.get("title", ""),
+                    meta_description=art.get("meta_description", ""),
+                    keywords=art.get("keywords") or [],
+                    body_markdown=art.get("body_markdown", ""),
+                    linkedin_text=art.get("linkedin_text", ""),
+                    claims_flagged=art.get("claims_flagged") or [],
+                    status="draft",
+                    prompt_version=art.get("prompt_version", ""),
+                    pending_state="",   # clear the checkpoint — no longer awaiting sources
+                    gen_cost=total_cost,
+                )
             # FU205 (R2): a RESUMED blog runs the exact same checks as an unpaused one, and every
             # one of them used to be thrown away here — this endpoint returned {blog_id, resumed,
             # gen_cost} and wrote no scorecard, so the operator never saw a single warning on a blog
@@ -3346,6 +3426,7 @@ def api_blog_provide_sources(blog_id):
             if art.get("warnings"):
                 bg.update_blog(blog_id, warnings=art["warnings"])
             return {"blog_id": blog_id, "resumed": True, "gen_cost": total_cost,
+                    "regenerate": _regen, "part": (_rpart if _regen else ""),
                     "geo_warning": art.get("geo_warning", ""),
                     "warnings": art.get("warnings") or [],
                     "key_facts_warning": art.get("key_facts_warning", ""),
@@ -3354,6 +3435,32 @@ def api_blog_provide_sources(blog_id):
             bg.close()
 
     return jsonify({"task_id": start_task("blog_provide_sources", task, pass_task_id=True)})
+
+@app.route("/api/blogs/<int:blog_id>/discard-pending", methods=["POST"])
+def api_blog_discard_pending(blog_id):
+    """FU207 — cancel a paused REGENERATE and keep the blog exactly as it is.
+
+    A regenerate pause leaves the finished blog untouched while it waits, so walking away is a real
+    choice and needs a real button — otherwise the banner asks forever. Refused for a first-generation
+    pause: that blog has no finished version to fall back to, so the only ways forward are providing
+    sources or skipping them."""
+    db = get_db()
+    try:
+        blog = db.get_blog(blog_id)
+        if not blog:
+            return jsonify({"error": "blog not found"}), 404
+        pending = blog.get("pending_state") or {}
+        if not pending:
+            return jsonify({"ok": True, "discarded": False})
+        if pending.get("mode") != "regenerate":
+            return jsonify({"error": "this blog has no finished version to keep yet — provide the "
+                                     "sources or skip them to finish it"}), 400
+        db.update_blog(blog_id, pending_state="")
+        print(f"[blog_regenerate] blog #{blog_id}: paused regenerate discarded — blog kept as it was",
+              flush=True)
+        return jsonify({"ok": True, "discarded": True})
+    finally:
+        db.close()
 
 @app.route("/api/blogs/<int:blog_id>/linkedin-article", methods=["POST"])
 def api_blog_linkedin_article(blog_id):

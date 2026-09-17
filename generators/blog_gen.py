@@ -3011,7 +3011,44 @@ Return JSON only:
             "flagged": [f for f in (res.get("flagged") or []) if isinstance(f, dict)],
         }
 
-    def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier="", include_pricing=True):
+    def _pause_sentinel(self, sourcing, article, draft_body, part=None):
+        """FU79/FU207 — the ONE shape of a paused generation, shared by the first Generate and every
+        regenerate. Built in one place so the two can never drift: a checkpoint written by one and
+        resumed by the other must mean the same thing.
+
+        `part` is recorded only for a REGENERATE ("all" / "article" / "verify"), because the resume
+        has to write back exactly what that button would have written — `part=article` never touches
+        the LinkedIn post, `part=verify` never touches the title. A first-generation pause omits it,
+        so its checkpoint is byte-identical to before."""
+        # FU205 (R6): the resume runs on a FRESH client whose skip count is its own (zero), so the
+        # starvation has to travel in the checkpoint or the finished blog forgets WHY its competitors
+        # were unsourced.
+        self._budget_warn = self._budget_note()
+        print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
+              f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
+        checkpoint = {
+            "sourcing": sourcing,
+            "evidence_blocks": list(getattr(self, "_evidence_blocks", None) or []),
+            "check_notes": self._check_notes(),   # FU205 (R4): the checks survive the pause
+            "article": {k: article.get(k) for k in
+                        ("title", "meta_description", "meta_title", "keywords", "body_markdown",
+                         "claims_flagged")},
+            "draft_body": draft_body,
+        }
+        if part:
+            checkpoint["part"] = part
+        return {
+            "missing": sourcing["unsourced"],
+            "checkpoint": checkpoint,
+            "gen_cost": round(self.claude.usage_cost(), 4),
+            "gen_usage": dict(self.claude._usage),
+            # FU205 (R6): a starved run is the one MOST likely to land here, and this exit never
+            # reaches `_finalize_article` — so the warning travels with the pause instead.
+            "budget_warning": self._budget_note(),
+        }
+
+    def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier="", include_pricing=True,
+                            allow_pause=False, draft_body=None, part=None):
         """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
         then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
         into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
@@ -3025,6 +3062,15 @@ Return JSON only:
                                          include_pricing=include_pricing)
         if not sr:
             return None
+        # FU207 — REGENERATE asks too. Until now only the first Generate could pause, so on
+        # "Regen article" / "Re-verify" an empty competitor was handed straight to the reconcile: at
+        # best its row went and its FAQ entry and prose mentions stayed, at worst its blank row
+        # deleted the whole comparison table. The operator now gets the same choice as the first
+        # time. Returns {"_pending": ...} instead of a reconcile result — the caller must check.
+        if allow_pause and sr.get("unsourced"):
+            return {"_pending": self._pause_sentinel(
+                sr, article, article.get("body_markdown", "") if draft_body is None else draft_body,
+                part=part)}
         if not sr.get("fresh"):
             print("[blog_gen] verify+complete: no fresh evidence gathered — draft unchanged", flush=True)
             return None
@@ -5709,28 +5755,7 @@ Return JSON only:
                                                refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
                                                include_pricing=include_pricing)   # FU162
         if allow_pause and sourcing and sourcing.get("unsourced"):
-            # FU205 (R6): the resume runs on a FRESH client whose skip count is its own (zero), so
-            # the starvation has to travel in the checkpoint or the finished blog forgets WHY its
-            # competitors were unsourced.
-            self._budget_warn = self._budget_note()
-            print(f"[blog_gen] verify+complete: PAUSING — {len(sourcing['unsourced'])} tool(s) unsourced "
-                  f"after all retries: {', '.join(u['tool'] for u in sourcing['unsourced'])}", flush=True)
-            return {"_pending": {
-                "missing": sourcing["unsourced"],
-                "checkpoint": {
-                    "sourcing": sourcing,
-                    "evidence_blocks": list(getattr(self, "_evidence_blocks", None) or []),
-                    "check_notes": self._check_notes(),   # FU205 (R4): the checks survive the pause
-                    "article": {k: article.get(k) for k in
-                                ("title", "meta_description", "meta_title", "keywords", "body_markdown", "claims_flagged")},
-                    "draft_body": draft_body,
-                },
-                "gen_cost": round(self.claude.usage_cost(), 4),
-                "gen_usage": dict(self.claude._usage),
-                # FU205 (R6): a starved run is the one MOST likely to land here, and this exit never
-                # reaches `_finalize_article` — so the warning travels with the pause instead.
-                "budget_warning": self._budget_note(),
-            }}
+            return {"_pending": self._pause_sentinel(sourcing, article, draft_body)}
         if sourcing and sourcing.get("fresh"):
             vc = self._reconcile_and_finish(brand, seed, article, sourcing)
             if vc:
@@ -8890,10 +8915,13 @@ Return JSON only:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
         # FU90: the checkpoint's sourcing carries the resolved geo — the resume stays geo-aware.
+        # FU207: a paused "Regen article" / "Re-verify" must not regenerate the LinkedIn post on
+        # resume — those buttons never did. Only a first Generate or "Regen all" does.
         return self._finalize_article(brand, seed, article, draft_body,
                                       geo=(sourcing.get("geo") or ""),
                                       qualifier=(sourcing.get("qualifier") or ""),   # FU93
-                                      ymyl=(sourcing.get("ymyl") or None))   # FU133
+                                      ymyl=(sourcing.get("ymyl") or None),   # FU133
+                                      with_linkedin=ck.get("part") in (None, "all"))
 
 
 # ----------------------------------------------------------------------------- JSON-LD

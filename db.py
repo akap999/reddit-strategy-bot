@@ -1163,6 +1163,10 @@ class Database:
         q = ("SELECT b.id, b.brand_id, b.seed, b.title, b.status, b.created_at, "
              "b.updated_at, b.quality_report, "          # FU151 (D): list-row score chip
              "b.prompt_version, "                        # FU183: 'imported' → the list-row origin badge
+             # FU207: a paused REGENERATE leaves the blog's status alone (a published blog stays
+             # published), so the list cannot find it by status — flag it from the checkpoint instead.
+             "(CASE WHEN b.pending_state LIKE '%\"mode\": \"regenerate\"%' THEN 1 ELSE 0 END) "
+             "AS regen_pending, "
              "br.name AS brand_name "
              "FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id WHERE 1=1")
         params = []

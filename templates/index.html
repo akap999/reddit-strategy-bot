@@ -13008,11 +13008,13 @@ function _blogRow(b) {
         <td>${_blogEsc(b.brand_name || '—')}</td>
         <td>${b.status === 'awaiting_sources'
             ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'
-            : `<span class="badge">${_blogEsc(b.status)}</span>`}</td>
+            : `<span class="badge">${_blogEsc(b.status)}</span>`}${b.regen_pending
+            ? ' <span class="badge" style="background:#4a3a12;color:#fbbf24" title="A regenerate paused to ask you about a competitor it could not source. The blog itself is unchanged until you answer.">⏸ Regenerate waiting</span>'
+            : ''}</td>
         <td>${chips}</td>
         <td class="text-xs text-gray-400">${upd}</td>
         <td><div class="flex gap-1">
-            ${b.status === 'awaiting_sources'
+            ${(b.status === 'awaiting_sources' || b.regen_pending)
                 ? `<button class="btn btn-sm btn-primary" onclick="openBlog(${b.id})" title="Add the missing source(s) and finish">Provide sources</button>`
                 : `<button class="btn btn-sm btn-secondary" onclick="openBlog(${b.id})">Open</button>`}
             <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="deleteBlog(${b.id})">Delete</button>
@@ -13150,7 +13152,7 @@ function _blogFactLabel(facts) {
     return f.length ? f.join(' + ') : 'a usable source';
 }
 
-function blogProvideSourcesModal(blogId, missing, budgetWarning) {
+function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
     missing = missing || [];
     if (!missing.length) { openBlog(blogId); return; }
     window._blogPendingId = blogId;
@@ -13222,11 +13224,14 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning) {
         </div>`;
     }).join('');
     showModal(`<div style="max-width:640px">
-        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">Generation paused — needs a source</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-400 mb-3">The blog is saved and waiting. For each entry below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.</p>
+        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#fbbf24">${isRegen ? 'Regenerate paused — needs a decision' : 'Generation paused — needs a source'}</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-400 mb-3">${isRegen
+            ? 'Your current blog is unchanged and stays that way until you answer. For each entry below, add a link or paste the fact, or choose what to drop. You can also cancel the regenerate and keep the blog exactly as it is.'
+            : 'The blog is saved and waiting. For each entry below, add a link or paste the fact so it stays in the comparison (with a citation) — or skip it to drop it. This should be rare.'}</p>
         ${budgetWarning ? `<div class="text-xs mb-3 p-2 rounded border border-amber-700 text-amber-300">⚠ ${_blogEsc(budgetWarning)}<div class="text-gray-400 mt-1">These entries are unsourced because the search budget ran out, not because nothing exists — a regenerate with a higher ceiling may fill them without you pasting anything.</div></div>` : ''}
         ${rows}
         <div class="flex gap-2 justify-end mt-3">
+            ${isRegen ? `<button class="btn btn-sm btn-secondary mr-auto" onclick="closeModal(); blogDiscardPending(${blogId})">Cancel regenerate</button>` : ''}
             <button class="btn btn-sm btn-secondary" onclick="_blogSubmitSources(true)">Skip all &amp; finish now</button>
             <button class="btn btn-sm btn-primary" onclick="_blogSubmitSources(false)">Generate with these</button>
         </div>
@@ -13599,14 +13604,29 @@ async function openBlog(id) {
     window._ytTagsCopy = _ytTagsStr;
     // FU79 — restart-proof resume: an awaiting_sources blog shows a banner to provide the missing links/facts.
     let pendBanner = '';
-    if (b.status === 'awaiting_sources') {
-        const miss = ((b.pending_state || {}).missing) || [];
+    const _pend = b.pending_state || {};
+    const _isRegenPend = _pend.mode === 'regenerate' && (_pend.missing || []).length;
+    if (b.status === 'awaiting_sources' || _isRegenPend) {
+        const miss = _pend.missing || [];
         window._blogOpenMissing = miss;
+        window._blogOpenBudget = _pend.budget_warning || '';
         const names = miss.map(m => _blogEsc(m.tool)).join(', ') || 'a source';
-        pendBanner = `<div class="card p-2 mb-2" style="background:#4a3a12;border:1px solid #a16207">
+        // FU207 — a paused REGENERATE is a different situation from a paused first Generate: the blog
+        // below is the finished one, unchanged, and walking away is a real option.
+        const _partLabel = ({all: 'Regen all', article: 'Regen article', verify: 'Re-verify'})[_pend.part] || 'Regenerate';
+        pendBanner = _isRegenPend
+            ? `<div class="card p-2 mb-2" style="background:#4a3a12;border:1px solid #a16207">
+            <div class="text-sm" style="color:#fbbf24">⏸ ${_partLabel} is waiting for you — it needs a decision about: <b>${names}</b></div>
+            <div class="text-xs text-gray-400 mt-1">The blog below is your current version and is unchanged. It is only replaced once you answer and the ${_partLabel} finishes.</div>
+            <div class="flex gap-2 mt-2">
+                <button class="btn btn-sm btn-primary" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing, window._blogOpenBudget, true)">Answer and finish</button>
+                <button class="btn btn-sm btn-secondary" onclick="blogDiscardPending(${id})">Cancel — keep the blog as it is</button>
+            </div>
+        </div>`
+            : `<div class="card p-2 mb-2" style="background:#4a3a12;border:1px solid #a16207">
             <div class="text-sm" style="color:#fbbf24">⏸ Paused — waiting for a manual source for: <b>${names}</b></div>
             <div class="text-xs text-gray-400 mt-1">Add a link or paste the fact so it stays in the comparison, or skip to drop it.</div>
-            <button class="btn btn-sm btn-primary mt-2" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing)">Provide sources</button>
+            <button class="btn btn-sm btn-primary mt-2" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing, window._blogOpenBudget)">Provide sources</button>
         </div>`;
     }
     // FU151 (D): persisted quality scorecard panel — structure/meta/link checks, folded warnings,
@@ -14085,6 +14105,13 @@ async function blogUnpublish(id, platform) {
 
 function blogRegen(id, part) {
     runTask(`/api/blogs/${id}/regenerate`, { part }, (res) => {
+        // FU207: a regenerate can now pause to ask, exactly like the first Generate.
+        if (res && res.needs_sources) {
+            blogReload();
+            openBlog(id);
+            blogProvideSourcesModal(res.blog_id, res.missing || [], res.budget_warning || '', true);
+            return;
+        }
         openBlog(id);
         blogReload();
         _blogRedditToast(res);
@@ -14094,6 +14121,17 @@ function blogRegen(id, part) {
         _blogQualityToast(res);   // FU151 (D)
         _blogWriterToast(res);    // FU164 writer time / fallback
     }, `Regenerating ${part}`);
+}
+
+async function blogDiscardPending(id) {
+    // FU207: walk away from a paused regenerate — the blog was never changed, so nothing is lost.
+    if (!confirm('Cancel this regenerate? Your blog stays exactly as it is.')) return;
+    try {
+        await api('/api/blogs/' + id + '/discard-pending', { method: 'POST' });
+        toast('Regenerate cancelled — blog unchanged', 'info');
+        blogReload();
+        openBlog(id);
+    } catch (e) {}
 }
 
 async function deleteBlog(id) {

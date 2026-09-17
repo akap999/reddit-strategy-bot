@@ -369,6 +369,71 @@ def _forgiving_json_loads(s):
     return None
 
 
+
+def _extract_json_object(text, key):
+    """FU211: pull the JSON object that carries `key` out of a web_search answer.
+
+    With the web_search tool the model routinely wraps its JSON in prose ("I'll search for…",
+    "Based on my research…"), splits it across citation text blocks, or writes it twice — a bare
+    json.loads then fails ("Expecting value … char 0" / "Extra data") and the whole search was
+    thrown away. Tries, in order: a clean parse, the forgiving outermost-{…} salvage, then a
+    raw_decode scan from every "{" (finds the object inside prose or next to a second object).
+    Returns (dict, how) with how in {"clean", "salvaged"}, or (None, "") when nothing parses."""
+    t = (text or "").strip()
+    for fence in ("```json", "```"):
+        if t.startswith(fence):
+            t = t[len(fence):]
+    if t.endswith("```"):
+        t = t[:-3]
+    t = t.strip()
+    if not t:
+        return None, ""
+    try:
+        data = json.loads(t)
+        if isinstance(data, dict) and key in data:
+            return data, "clean"
+    except Exception:
+        pass
+    data = _forgiving_json_loads(t)
+    if isinstance(data, dict) and key in data:
+        return data, "salvaged"
+    dec = json.JSONDecoder()
+    starts = [m.start() for m in re.finditer(r"\{", t)][:400]
+    for i in starts:
+        try:
+            obj, _end = dec.raw_decode(t, i)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and key in obj:
+            return obj, "salvaged"
+    return None, ""
+
+
+def _web_citations(message):
+    """FU211: the pages the model actually CITED in its answer (text-block citations of type
+    web_search_result_location) as [{title, url, fact}] — fact = the cited passage. Deduped by
+    url. Only citations, never uncited search hits: a result the model merely saw is not a source."""
+    out, seen = [], set()
+    try:
+        blocks = list(getattr(message, "content", None) or [])
+    except Exception:
+        return out
+    for block in blocks:
+        btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+        if btype != "text":
+            continue
+        cites = block.get("citations") if isinstance(block, dict) else getattr(block, "citations", None)
+        for c in (cites or []):
+            get = (c.get if isinstance(c, dict) else (lambda k, _c=c: getattr(_c, k, None)))
+            url = str(get("url") or "").strip()
+            if not url or url.lower() in seen:
+                continue
+            seen.add(url.lower())
+            out.append({"title": str(get("title") or "").strip(), "url": url,
+                        "fact": re.sub(r"\s+", " ", str(get("cited_text") or "")).strip()[:500]})
+    return out
+
+
 class WriterClient:
     """FU153: a lightweight OpenAI-compatible caller for a SELF-HOSTED open-weight model
     (e.g. Qwen3-14B on Modal/vLLM), used ONLY for the final blog content-writing pass that
@@ -776,7 +841,7 @@ class ClaudeClient:
         try:
             message = self.client.messages.create(
                 model=self.model,
-                max_tokens=2000,
+                max_tokens=3000,
                 tools=[tool],
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -793,15 +858,9 @@ class ClaudeClient:
                     text += block.text
         except Exception:
             text = ""
-        text = text.strip()
-        for fence in ("```json", "```"):
-            if text.startswith(fence):
-                text = text[len(fence):]
-        if text.endswith("```"):
-            text = text[:-3]
         out, seen = [], set()
-        try:
-            data = json.loads(text.strip())
+        data, how = _extract_json_object(text, "sources")
+        if data is not None:
             for s in (data.get("sources") or []):
                 if not isinstance(s, dict):
                     continue
@@ -811,8 +870,19 @@ class ClaudeClient:
                     out.append({"title": str(s.get("title") or "").strip(),
                                 "url": url,
                                 "fact": str(s.get("fact") or "").strip()})
-        except (json.JSONDecodeError, TypeError, AttributeError) as e:
-            print(f"    web_search: could not parse sources JSON: {e}", flush=True)
+            if how == "salvaged" and out:
+                print(f"    web_search: recovered {len(out)} source(s) from prose-wrapped JSON",
+                      flush=True)
+        else:
+            # FU211: no parseable JSON (prose answer / truncated) — fall back to the pages the
+            # model actually cited, instead of discarding a search that found real sources.
+            out = _web_citations(message)
+            if out:
+                print(f"    web_search: recovered {len(out)} source(s) from citations "
+                      f"(answer had no parseable JSON)", flush=True)
+            else:
+                print(f"    web_search: could not parse sources JSON (no JSON, no citations; "
+                      f"{len(text)} chars of text)", flush=True)
         if not out:
             print("    web_search: returned 0 usable sources for this brief", flush=True)
         return out
@@ -859,21 +929,29 @@ class ClaudeClient:
                     text += block.text
         except Exception:
             text = ""
-        text = text.strip()
-        for fence in ("```json", "```"):
-            if text.startswith(fence):
-                text = text[len(fence):]
-        if text.endswith("```"):
-            text = text[:-3]
         facts = []
-        try:
-            data = json.loads(text.strip())
+        data, how = _extract_json_object(text, "facts")
+        if data is not None:
             for f in (data.get("facts") or []):
                 v = str(f).strip()
                 if v:
                     facts.append(v)
-        except (json.JSONDecodeError, TypeError, AttributeError) as e:
-            print(f"    fetch_site_facts: could not parse facts JSON ({domain}): {e}", flush=True)
+            if how == "salvaged" and facts:
+                print(f"    fetch_site_facts: recovered {len(facts)} fact(s) from prose-wrapped "
+                      f"JSON ({domain})", flush=True)
+        else:
+            # FU211: fall back to the passages the model cited FROM THIS SITE (the search is pinned
+            # to it; the domain check keeps a stray citation elsewhere out of first-party facts).
+            for c in _web_citations(message):
+                cd = re.sub(r"^https?://", "", c["url"].lower()).split("/")[0]
+                if (cd == domain or cd.endswith("." + domain)) and c["fact"]:
+                    facts.append(c["fact"])
+            if facts:
+                print(f"    fetch_site_facts: recovered {len(facts)} fact(s) from citations "
+                      f"({domain})", flush=True)
+            else:
+                print(f"    fetch_site_facts: could not parse facts JSON ({domain}; no JSON, "
+                      f"no citations)", flush=True)
         return "\n".join(f"- {f}" for f in facts)
 
     def find_official_domain(self, brand, context=""):
@@ -914,15 +992,10 @@ class ClaudeClient:
                     text += block.text
         except Exception:
             text = ""
-        text = text.strip()
-        for fence in ("```json", "```"):
-            if text.startswith(fence):
-                text = text[len(fence):]
-        if text.endswith("```"):
-            text = text[:-3]
-        try:
-            data = json.loads(text.strip())
-        except (json.JSONDecodeError, TypeError, AttributeError):
+        # FU211: salvage prose-wrapped JSON. No citation fallback here — a cited URL is as likely
+        # a review or directory as the official site, and a wrong domain is worse than none.
+        data, _how = _extract_json_object(text, "domain")
+        if data is None:
             return ""
         dom = str((data or {}).get("domain") or "").strip().lower()
         dom = dom.replace("https://", "").replace("http://", "").strip("/")

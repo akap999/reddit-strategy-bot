@@ -656,6 +656,9 @@ _AUTHORITY_ORGS = {
     "apa.org", "psychiatry.org", "aafp.org", "acponline.org", "gastro.org", "thyroid.org",
     "kidney.org", "lung.org", "rheumatology.org", "uspreventiveservicestaskforce.org",
     "cochrane.org", "ada.org",
+    # FU211: society-OWNED patient sites — same standing as the society's own domain
+    # (healthychildren.org = AAP, familydoctor.org = AAFP, cancer.net = ASCO)
+    "healthychildren.org", "familydoctor.org", "cancer.net",
     # finance / legal professional bodies
     "finra.org", "sipc.org", "aicpa.org", "cfainstitute.org", "nfcc.org", "americanbar.org",
     # international organizations
@@ -3256,7 +3259,12 @@ Return JSON only:
                 # FU141: dedupe by URL, not domain — two products' labels legitimately live on
                 # the same registry (dailymed/accessdata); the 6-block cap bounds volume.
                 uk = u.rstrip("/").lower()
-                if not u or uk in seen or not _ok(u, ttl):
+                if not u or uk in seen:
+                    continue
+                if not _ok(u, ttl):
+                    # FU211: say WHY a page was not kept, so "why no AAP/FDA" is answerable from the log
+                    print(f"[blog_gen] ymyl-sources {tag}: rejected not-official "
+                          f"{_norm_domain(u) or u[:60]} '{ttl[:60]}'", flush=True)
                     continue
                 # FU142: TOPICAL validation — an official page kept for a specific PRODUCT must
                 # actually NAME that product (title/url/fact). Domain+shape alone let a
@@ -3269,6 +3277,7 @@ Return JSON only:
                               f"'{(ttl or u)[:60]}'", flush=True)
                         continue
                 seen.add(uk)
+                print(f"[blog_gen] ymyl-sources {tag}: kept {u[:120]}", flush=True)
                 blocks.append({"label": f"official · {ttl or u}", "url": u,
                                "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
                 kept += 1

@@ -430,6 +430,10 @@ _DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
 # is even offerable — shrinking the field below the floor is the self-crowning failure the floor
 # exists to prevent, so the option is simply not offered there.
 _MIN_COMPARISON_BRANDS = int(os.environ.get("BLOG_MIN_COMPETITORS", "3"))
+# FU214 (operator decision) — the brands you PRICE are mandatory, and the comparison may top up with
+# real competitors beyond them, to this many in total. A wider table stops being readable (FU200 cut a
+# real 11-column matrix for the same reason), so this is the ceiling, not a target.
+_PRICED_FIELD_MAX = int(os.environ.get("BLOG_PRICED_FIELD_MAX", "5"))
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
 _SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
                                 # (its own row previously had no rescue path at all) — separate pool so
@@ -1156,6 +1160,22 @@ def _fig_in_text(fig, text):
     return any(_norm_fig(m.group(0)) == n for m in _PRICE_FIG_RE.finditer(text))
 
 
+def _range_in_text(lo, hi, text):
+    """FU214 — True when `text` shows lo..hi as a RANGE, including the way people actually type one:
+    "$28.99-29.99", where the upper bound drops the currency symbol and so fails the plain verbatim
+    check. Anchored on the PAIR (lower, separator, upper), so a bare number sitting anywhere else in
+    the paste can never satisfy it — the figure still has to be in what you pasted, as a range."""
+    if not (lo and hi and text):
+        return False
+    lo_n = re.sub(r"[^\d.]", "", _norm_fig(lo))
+    hi_n = re.sub(r"[^\d.]", "", _norm_fig(hi))
+    if not (lo_n and hi_n):
+        return False
+    flat = re.sub(r"[\s,]", "", text)
+    pat = re.escape(lo_n) + r"(?:-|\u2013|\u2014|to|and|\u2212)[$\u20ac\u00a3]?" + re.escape(hi_n)
+    return re.search(pat, flat, re.I) is not None
+
+
 def _is_retail_listing(url):
     d = _norm_domain(url or "")
     return bool(d) and any(d == r or d.endswith("." + r) for r in _RETAIL_LISTINGS)
@@ -1169,8 +1189,20 @@ def _norm_page_url(u):
     return u.rstrip("/").lower()
 
 
+# FU214: a basis that already says the price IS per unit ("per bottle in a 2-pack", "$X each").
+# Dividing again turns a correct per-bottle figure into a wrong one — seen on a real pasted table
+# whose whole column was per-bottle entries.
+_PER_UNIT_SAID_RE = re.compile(
+    r"\b(?:per|a|an)\s+(?:unit|bottle|item|seat|user|licen[cs]e|piece|pack|month|mo\b)|"
+    r"\beach\b|\bapiece\b|\bper[- ]unit\b|/\s*(?:unit|bottle|seat|user|item)", re.I)
+
+
 def _per_unit_price(value, basis):
-    """FU213 (4a): a pack count in the basis gives a per-unit price ("3-pack → $7.99 each")."""
+    """FU213 (4a): a pack count in the basis gives a per-unit price ("3-pack → $7.99 each").
+    FU214: NOT when the basis already says the figure is per unit — then the value is the unit price
+    and dividing it by the pack count would state a price nobody charges."""
+    if _PER_UNIT_SAID_RE.search(basis or ""):
+        return ""
     m = _PACK_COUNT_RE.search(basis or "")
     amt, cur = _price_amount(value or "")
     if not (m and amt):
@@ -1201,6 +1233,113 @@ def _price_is_sale(fig, text):
         if _SALE_WORD_RE.search(text[lo:hi]):
             return True, was
     return False, was
+
+
+# ---------------------------------------------------------------- FU214: price KINDS + one formatter
+# A competitor price used to be ONE figure: `PUT /api/brands/<id>/competitor-prices` forced the value
+# through `_PRICE_FIG_RE` and kept `m.group(0)`, so "from $24.99" and "$19.99-$29.99" could not be
+# stored at all — let alone printed. The ledger entry now carries `kind` + `value_max`, and
+# `_format_price_value` is the ONE place an entry becomes text, so the comparison cell, the evidence
+# block and the reconcile's VERIFIED PRICES list can never disagree about the same price.
+_PRICE_KINDS = ("exact", "from", "range", "upto", "none")
+
+
+def _norm_price_kind(k):
+    """Normalise whatever the operator/parser wrote into one of the five allowed kinds. Anything
+    unrecognised is `exact` — the shape every pre-FU214 stored entry implicitly had."""
+    t = re.sub(r"[^a-z]", "", str(k or "").lower())
+    if t in ("from", "startingat", "startsat", "startingfrom", "startingprice", "startprice",
+             "startfrom", "min", "minimum", "aslowas"):
+        return "from"
+    if t in ("range", "between", "fromto", "spread", "band"):
+        return "range"
+    if t in ("upto", "under", "max", "maximum", "below", "atmost"):
+        return "upto"
+    if t in ("none", "notpublished", "nopublishedprice", "nopublicprice", "unpublished",
+             "notlisted", "nopricing", "noprice", "na"):
+        return "none"
+    return "exact"
+
+
+def _format_price_value(entry):
+    """FU214 — the ONE place a ledger entry becomes printable text.
+
+      exact -> "$24.99" | from -> "From $24.99" | range -> "$19.99-$29.99" | up to -> "Up to $29.99"
+
+    The basis and the per-unit price append exactly as they did before, so a cell reads
+    `From $24.99 (3-pack, 9 oz, $7.99 each)`. A `none` entry ("they publish no price") prints as
+    NOTHING — the column is dropped instead (`_strip_price_columns`), never left blank.
+    The range separator is a plain ASCII HYPHEN on purpose: `_ai_fix_dashes` rewrites an en-dash
+    between a digit and a `$` into a COMMA, which would silently turn a range into two prices."""
+    if not isinstance(entry, dict):
+        return ""
+    val = (entry.get("value") or "").strip()
+    kind = _norm_price_kind(entry.get("kind"))
+    if kind == "none" or not val:
+        return ""
+    vmax = (entry.get("value_max") or "").strip()
+    if kind == "from":
+        core = f"From {val}"
+    elif kind == "upto":
+        core = f"Up to {val}"
+    elif kind == "range" and vmax:
+        core = f"{val}-{vmax}"
+    else:
+        core = val
+    basis = (entry.get("basis") or "").strip()
+    per = (entry.get("per_unit") or "").strip()
+    if basis:
+        core += f" ({basis}" + (f", {per}" if per else "") + ")"
+    elif per:
+        core += f" ({per})"
+    return core
+
+
+def _priced_competitor_names(brand, subject_name=""):
+    """FU214 (Change 5) — the COMPETITORS the operator priced, in the order they were pasted.
+
+    When this is non-empty it becomes the comparison field: nothing else is sourced, named or kept.
+    The subject is excluded (its rows are canonical pricing, not a competitor row), and a row marked
+    "they publish no price" still counts — the brand is compared, the column is what goes."""
+    out, seen = [], set()
+    try:
+        pt = json.loads((brand or {}).get("price_table") or "{}")
+    except Exception:
+        pt = {}
+    if not isinstance(pt, dict):
+        return []
+    subj = _kf_slug(subject_name or (brand or {}).get("name") or "")
+    for slug, ent in pt.items():
+        if not isinstance(ent, dict) or not (ent.get("rows") or []):
+            continue
+        nm = str(ent.get("name") or "").strip()
+        if not nm or slug == subj or _kf_slug(nm) == subj:
+            continue
+        if _kf_slug(nm) in seen:
+            continue
+        seen.add(_kf_slug(nm))
+        out.append(nm)
+    return out
+
+
+def _is_priced(name, priced_names):
+    """Tolerant name match against the priced set: equal slugs, or one name's WORDS appearing as a
+    contiguous run in the other's ("Philips Avent Natural" matches "Philips Avent"). Matching on
+    whole words, not raw substrings, is what stops "Ro" swallowing "Rory" — the FU210 lesson."""
+    aw = [w for w in _kf_slug(name or "").split("-") if w]
+    if not aw:
+        return False
+    for p in (priced_names or []):
+        bw = [w for w in _kf_slug(p).split("-") if w]
+        if not bw:
+            continue
+        if "".join(aw) == "".join(bw):
+            return True    # punctuation only ("Dr. Brown's" vs "Dr Browns") — never a prefix match
+
+        lo, hi = (aw, bw) if len(aw) <= len(bw) else (bw, aw)
+        if any(hi[i:i + len(lo)] == lo for i in range(len(hi) - len(lo) + 1)):
+            return True
+    return False
 
 
 def _is_other_business(src, own_domain, topic_tokens):
@@ -1675,6 +1814,10 @@ class BlogGenerator:
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
         self._article_tools = []      # FU204: the compared brand names, for the citation check
+        self._priced_names = []       # FU214: the brands the operator priced — the comparison field
+        self._priced_excluded_mine = []   # FU214: YOUR competitors the priced list left out
+        self._priced_topups = []      # FU214: unpriced brands added to fill the field to the ceiling
+        self._priced_over_cap = []    # FU214: priced brands past the comparison ceiling
         self._budget_warn = ""        # FU205 (R6): a starvation note carried across a FU79 pause
         self._removed_brands = []     # FU206: brands the operator removed from the whole blog
         self._removed_refused = []    # FU206: removals refused because they would breach the floor
@@ -1725,6 +1868,15 @@ class BlogGenerator:
                              + ", ".join(f"{n} ({d})" for n, d in _speers.items()))
         elif _comp:
             lines.append(f"Competitors: {', '.join(_comp)}")
+        # FU214 (Change 5) — when the operator priced a set of brands, THAT is the comparison field.
+        # Said here (in the brand context every writer prompt carries) so the DRAFT already names them
+        # and the reconcile is not left deleting rows a prompt talked the model into.
+        _priced_b = getattr(self, "_priced_names", None) or []
+        if _priced_b:
+            lines.append(f"MUST BE COMPARED (the operator supplied their prices — every one of these "
+                         f"gets a comparison row and a prose profile): {', '.join(_priced_b)}. You may "
+                         f"add other real competitors alongside them, to at most "
+                         f"{_PRICED_FIELD_MAX} compared brands in total.")
         if b.get("context"):
             lines.append(f"Context: {b['context']}")
         if b.get("learned_context"):
@@ -2495,7 +2647,8 @@ class BlogGenerator:
             else:
                 return None, f"{fig} is a sale price and the page shows no regular price"
         basis = (cand.get("basis") or "").strip()[:80]
-        return {"value": fig, "basis": basis, "per_unit": _per_unit_price(fig, basis),
+        return {"value": fig, "value_max": "", "kind": "exact",   # FU214: a searched price is exact
+                "basis": basis, "per_unit": _per_unit_price(fig, basis),
                 "url": url, "source": source, "quote": re.sub(r"\s+", " ", quote)[:220],
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, ""
 
@@ -2604,7 +2757,8 @@ class BlogGenerator:
             # the excerpt around the figure, so the ledger carries a quotable proof
             pos = next((h.start() for h in _PRICE_FIG_RE.finditer(body)
                         if _norm_fig(h.group(0)) == _norm_fig(fig)), 0)
-            return {"value": fig, "basis": basis, "per_unit": _per_unit_price(fig, basis),
+            return {"value": fig, "value_max": "", "kind": "exact",   # FU214
+                    "basis": basis, "per_unit": _per_unit_price(fig, basis),
                     "url": url, "source": "link",
                     "quote": body[max(0, pos - 90):pos + 110].strip()[:220],
                     "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, ""
@@ -2619,6 +2773,61 @@ class BlogGenerator:
         except Exception:
             return {}
 
+    @staticmethod
+    def _brand_price_table(brand):
+        """FU214 (Change 1): the operator's pasted PRICE ROWS,
+        {slug: {name, rows: [{product, kind, value, value_max, basis, url, raw, updated_at}]}}.
+
+        Deliberately NOT inside `competitor_facts`: that is a 45-day CACHE, capped at 40 and pruned by
+        `verified_at`, so operator input stored there would be evicted. This column is never evicted."""
+        try:
+            pt = json.loads((brand or {}).get("price_table") or "{}")
+            return pt if isinstance(pt, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _price_row_entry(row, name):
+        """FU214: one pasted row -> a ledger entry, `source: "yours"` (the operator's own value, which
+        the FU213 precedence already treats as authoritative and never expires)."""
+        if not isinstance(row, dict):
+            return None
+        kind = _norm_price_kind(row.get("kind"))
+        val = str(row.get("value") or "").strip()
+        if kind != "none" and not val:
+            return None
+        basis = str(row.get("basis") or "").strip()[:80]
+        url = str(row.get("url") or "").strip()
+        if url and not re.match(r"^https?://", url, re.I):
+            url = ""
+        return {"value": val, "value_max": str(row.get("value_max") or "").strip(), "kind": kind,
+                "basis": basis, "per_unit": _per_unit_price(val, basis) if kind != "none" else "",
+                "url": url, "source": "yours",
+                "quote": str(row.get("raw") or "").strip()[:220],
+                "product": str(row.get("product") or "").strip()[:80],
+                "checked_at": str(row.get("updated_at") or "")
+                or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+    def _price_row_for(self, rows, name, topic_tokens, subject=""):
+        """FU214 (Change 3) — SEVERAL rows per brand, so pick the one this article is about.
+
+        A brand may have a 9 oz single AND a 3-pack; the ledger is keyed by brand alone, so exactly one
+        row can reach the cell. Precedence (mirrors `_canonical_price_item`): the row whose product
+        tokens intersect the article's product/subject wins; failing that, the SINGLE row is used as-is;
+        failing that the FIRST row is used and the caller warns. Returns (entry, ambiguous)."""
+        ents = [e for e in (self._price_row_entry(r, name) for r in (rows or [])) if e]
+        if not ents:
+            return None, False
+        want = set(topic_tokens or []) | set(_product_tokens(subject))
+        if want:
+            for e in ents:
+                toks = set(_product_tokens(e.get("product") or ""))
+                if toks and (toks & want):
+                    return e, False
+        if len(ents) == 1:
+            return ents[0], False
+        return ents[0], True
+
     def _ensure_price_ledger(self, brand, tools, tool_state, cfacts, topic_tokens, subject,
                              refresh_slugs=None, refresh_all=False):
         """FU213 (4b) — fill the per-competitor VERIFIED price ledger, which is what the comparison
@@ -2626,9 +2835,20 @@ class BlogGenerator:
         the operator pasted) > the brand's own site > a named retailer. A tool-found entry is reused
         for 14 days; while a link is set, a search result never replaces it.
 
+        FU214 extends the precedence upward: a PRICE-TABLE ROW you pasted outranks everything, so a
+        brand you priced is never searched and never link-fetched (the cost win) and its cell carries
+        your value, your wording and your kind.
+
         Returns (ledger {tool: entry}, missing [tool], dirty)."""
         ledger, missing, dirty = {}, [], False
         links_map = self._brand_price_links(brand)
+        table_map = self._brand_price_table(brand)   # FU214
+        try:      # FU214: name -> official domain, for the link-less-row fallback above
+            _cdoms = {_kf_slug(k): str(v).strip()
+                      for k, v in (json.loads((brand or {}).get("competitor_domains") or "{}") or {}).items()
+                      if str(v or "").strip()}
+        except Exception:
+            _cdoms = {}
         _refresh = {str(s).strip().lower() for s in (refresh_slugs or []) if str(s).strip()}
         for tool in tools:
             slug = _kf_slug(tool)
@@ -2636,6 +2856,30 @@ class BlogGenerator:
             urls = [str(u).strip() for u in ((links_map.get(slug) or {}).get("urls") or [])
                     if str(u).strip()]
             forced = refresh_all or slug in _refresh
+            # FU214 — a pasted row is the operator speaking: it outranks the cache, the link and any
+            # search, and it is never re-checked (nothing to re-check — you typed it).
+            _rows = (table_map.get(slug) or {}).get("rows") or []
+            if _rows:
+                _row_e, _amb = self._price_row_for(_rows, tool, topic_tokens, subject)
+                if _row_e:
+                    # Operator decision: a priced row with no link of its own cites the brand's own
+                    # OFFICIAL SITE. Same rule FU158 already applies to an operator-set canonical
+                    # price (FU178 kept that fallback deliberately): the value is first-party, and a
+                    # Sources entry that resolves to the brand beats one that resolves to nothing.
+                    if not (_row_e.get("url") or "").strip():
+                        _d_px = (_cdoms.get(slug) or (tool_state.get(tool) or {}).get("dom") or "")
+                        _d_px = _norm_domain(_d_px) or (_d_px or "").strip().strip("/")
+                        if _d_px:
+                            _row_e["url"] = f"https://{_d_px}"
+                    ledger[tool] = _row_e
+                    if _amb:
+                        print(f"[blog_gen] price-table: {tool} has several rows and none names this "
+                              f"article's product — used the first ({_row_e.get('product') or 'no product'})",
+                              flush=True)
+                    else:
+                        print(f"[blog_gen] price-table: {tool} → {_format_price_value(_row_e) or 'no published price'}"
+                              f" (yours)", flush=True)
+                    continue
             if isinstance(entry, dict) and (entry.get("source") or "") == "yours":
                 ledger[tool] = entry   # the operator's own value is the authority — never re-checked
                 continue
@@ -2712,12 +2956,12 @@ class BlogGenerator:
             if not (isinstance(e, dict) and (e.get("value") or "").strip()):
                 continue
             when = str(e.get("checked_at") or "")[:10]
-            basis = (e.get("basis") or "").strip()
-            per = (e.get("per_unit") or "").strip()
-            txt = (f"{tool} regular price: {e['value']}"
-                   + (f" ({basis})" if basis else "")
-                   + (f" — {per}" if per else "")
-                   + (f", checked {when}" if when else ""))
+            # FU214: ONE formatter, so the evidence block, the cell and the reconcile all say the
+            # same thing (basis + per-unit are inside the formatted value).
+            _shown = _format_price_value(e)
+            if not _shown:
+                continue
+            txt = (f"{tool} regular price: {_shown}" + (f", checked {when}" if when else ""))
             src = e.get("source") or "own"
             label = (f"price · {tool} · "
                      + ("operator-set" if src == "yours" else (_norm_domain(e.get("url") or "") or src)))
@@ -2725,6 +2969,10 @@ class BlogGenerator:
         return out
 
     _PRICE_NOTE_PREFIX = "Competitor prices are regular list prices"
+    # FU214: the FU213 note describes where a SEARCHED price came from. A price you supplied did not
+    # come from "the brand's own site or a named retailer", and this whole round exists to stop the
+    # article misdescribing where a price came from — so the note says what is actually true.
+    _PRICE_NOTE_YOURS = "Prices were supplied by the publisher"
 
     def _write_price_cells(self, body, ledger):
         """FU213 (4d) — CODE writes the competitor price cells, from the verified ledger, whatever the
@@ -2783,10 +3031,9 @@ class BlogGenerator:
                 e = ledger.get(tool) if tool else None
                 if not (e and (e.get("value") or "").strip()):
                     continue
-                basis = (e.get("basis") or "").strip()
-                per = (e.get("per_unit") or "").strip()
-                cell = e["value"] + (f" ({basis}" + (f", {per}" if per else "") + ")" if basis
-                                     else (f" ({per})" if per else ""))
+                cell = _format_price_value(e)   # FU214: the ONE formatter
+                if not cell:
+                    continue
                 _ix = idx_by_tool.get(tool)
                 if _ix:
                     cell += f" [S{_ix}]"
@@ -2803,9 +3050,17 @@ class BlogGenerator:
         body = "\n".join(out)
         if written:
             when = time.strftime("%Y-%m-%d", time.gmtime())
-            note = (f"{self._PRICE_NOTE_PREFIX} from each brand's own site or a named retailer, "
-                    f"checked {when}.")
-            if self._PRICE_NOTE_PREFIX not in body:
+            _srcs = {(e.get("source") or "own") for e in ledger.values()
+                     if isinstance(e, dict) and _format_price_value(e)}
+            if _srcs == {"yours"}:
+                note = f"{self._PRICE_NOTE_YOURS}, last updated {when}."
+            elif "yours" in _srcs:
+                note = (f"{self._PRICE_NOTE_PREFIX} from each brand's own site or a named retailer, "
+                        f"checked {when}; the rest were supplied by the publisher.")
+            else:
+                note = (f"{self._PRICE_NOTE_PREFIX} from each brand's own site or a named retailer, "
+                        f"checked {when}.")
+            if (self._PRICE_NOTE_PREFIX not in body and self._PRICE_NOTE_YOURS not in body):
                 # put it directly under the table block we just wrote
                 nl = body.split("\n")
                 last = max(i for i, ln in enumerate(nl) if ln.strip().startswith("|"))
@@ -3304,6 +3559,14 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         seed = (seed or "").strip()
         if not seed:
             return None
+        # FU214 (Change 5) — resolve the PRICED comparison field before the brand block is rendered
+        # (it carries the "compare exactly these" line) so a regenerate that builds a fresh generator
+        # scopes the same way a first generation does.
+        if include_pricing:
+            if not (getattr(self, "_priced_names", None) or []):
+                self._priced_names = _priced_competitor_names(brand)
+        else:
+            self._priced_names = []
         name, url, block = self._brand_block(brand)
         kws = _as_list(extra_keywords)
         kw_block = ""
@@ -3445,6 +3708,23 @@ extractable answer), still under 160 chars.
                           f"profile, even when it is not a specialist in this exact subject (then say "
                           f"honestly what it offers for this topic). They count toward the floor; the "
                           f"subject-fit test below applies ONLY to the other names.\n")
+        # FU214 (Change 5) — the operator priced a set of brands, so the comparison IS that set. This
+        # OVERRIDES the floor: padding a short field with an unpriced brand is exactly what the price
+        # table exists to stop. Empty (byte-identical) when no table was pasted.
+        _priced_a = getattr(self, "_priced_names", None) or []
+        _priced_step = ""
+        if _priced_a:
+            _room_a = max(0, _PRICED_FIELD_MAX - len(_priced_a))
+            _priced_step = (f"      0. MANDATORY FIELD — the operator supplied prices for these "
+                            f"brands: {', '.join(_priced_a)}. EVERY one of them gets its own "
+                            f"comparison row and prose profile, whatever this article's angle. "
+                            + (f"You MAY add up to {_room_a} more real competitor(s) from steps 1-2 "
+                               f"below, for at most {_PRICED_FIELD_MAX} compared brands in total — "
+                               f"never more. "
+                               if _room_a else
+                               f"The field is already full at {_PRICED_FIELD_MAX}: add NO other "
+                               f"brand. ")
+                            + f"Never drop one of the priced brands to make room.\n")
         # FU199 — subject fit decides WHO is compared, not position on the operator's list. Empty
         # (and so byte-identical) unless this article's subject is narrower than the brand's category.
         _sfit_p = getattr(self, "_subject_phrase", "") or ""
@@ -3677,7 +3957,7 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
     (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
     {name} itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
-{_mine_step}      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
+{_priced_step}{_mine_step}      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
          this article's angle before you consider any other name. These are the operator's own list;
          they are the peers the reader expects to see.
       2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
@@ -4475,6 +4755,73 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         _keep = {t.lower() for t in _prov_q} | {t.lower() for t in _opt_q}
         tools = [t for t in tools_u if t.lower() in _keep]
         _options = {t.lower() for t in _opt_q}   # grows in the loop via the products backstop
+        # FU214 (Change 5) — the operator priced a set of brands, so THAT is the comparison field.
+        # Restricting here (before Pass 0) means nothing is BOUGHT for a brand you did not price, the
+        # pause never asks about one, and the cells/prose scope to the same set the draft names.
+        # Scoped to PROVIDERS: a generic OPTION (FU189 — a method/material/plan type) is not a brand
+        # and has no price page, so it is neither priced nor excluded by the price table.
+        _priced_s = (getattr(self, "_priced_names", None) or []) if _px else []
+        if _px and not _priced_s:
+            # regenerate part=article/verify builds a fresh generator, so resolve the priced field
+            # here too — the scope must not silently widen just because the entry point differed.
+            _priced_s = _priced_competitor_names(brand, name)
+            self._priced_names = list(_priced_s)
+        if _priced_s:
+            # The brands you priced are MANDATORY and lead the field; the comparison may then top up
+            # with real competitors to `_PRICED_FIELD_MAX` in total. Ordering matters downstream —
+            # the finalize loop and the [S#] numbering both walk `tools` in order.
+            _seen_px, _lead = set(), []
+            for _pn in _priced_s:
+                _hit = next((t for t in tools if _is_priced(t, [_pn])), "") or _pn
+                if _hit.lower() in _seen_px:
+                    continue
+                _seen_px.add(_hit.lower())
+                _lead.append(_hit)
+                if not any(_is_priced(t, [_pn]) for t in tools):
+                    print(f"[blog_gen] price-table: {_pn} was not in the draft — added to the "
+                          f"comparison (you priced it)", flush=True)
+            # Your own list wins over the floor, but it cannot win over readability: a priced brand
+            # past the ceiling is CUT and NAMED, never dropped quietly.
+            _over_px = _lead[_PRICED_FIELD_MAX:]
+            _lead = _lead[:_PRICED_FIELD_MAX]
+            self._priced_over_cap = list(_over_px)
+            if _over_px:
+                print(f"[blog_gen] price-table: {len(_priced_s)} priced brands exceeds the "
+                      f"{_PRICED_FIELD_MAX}-brand comparison ceiling — not compared: "
+                      f"{', '.join(_over_px)}", flush=True)
+            _room = max(0, _PRICED_FIELD_MAX - len(_lead))
+            # Top-up order = the same precedence the rest of the pipeline already uses: YOUR
+            # competitors (FU210) first, then whatever the draft named, in the draft's order.
+            # Candidates come from the FULL extracted list, not the `_VERIFY_MAX_BRANDS`-capped one:
+            # that cap bounds SEARCHES, and a priced brand is never searched — so a field of
+            # 3 priced + 2 topped up buys two lookups where an unpriced article buys four.
+            _pool = [t for t in tools_u if not _named_as_option(t, _opt_names)]
+            _cand = ([t for t in _pool if t.lower() in _mine_low and t.lower() not in _seen_px]
+                     + [t for t in _pool if t.lower() not in _mine_low
+                        and t.lower() not in _seen_px])
+            _room = min(_room, _VERIFY_MAX_BRANDS)   # never more lookups than an unpriced article
+            _top = []
+            for t in _cand:
+                if len(_top) >= _room:
+                    break
+                if t.lower() in {x.lower() for x in _top}:
+                    continue
+                _top.append(t)
+            # a generic OPTION (FU189 — a method/material/plan type) is not a brand: it has no price
+            # to give and never displaces one, so it rides outside the ceiling exactly as before.
+            _kept_px = _lead + _top + [t for t in tools if t.lower() in _options]
+            _dropped_px5 = [t for t in tools if t not in _kept_px]
+            # YOUR competitors (FU210) the field still leaves out are NAMED, never dropped silently.
+            self._priced_excluded_mine = [t for t in _dropped_px5 if t.lower() in _mine_low]
+            self._priced_topups = list(_top)
+            if _top:
+                print(f"[blog_gen] price-table: topped the field up to {len(_lead) + len(_top)} of "
+                      f"{_PRICED_FIELD_MAX} with {', '.join(_top)} (no price supplied — looked up)",
+                      flush=True)
+            if _dropped_px5:
+                print(f"[blog_gen] price-table: not compared (the field is full at "
+                      f"{_PRICED_FIELD_MAX}) — {', '.join(_dropped_px5)}", flush=True)
+            tools = _kept_px
         if _options:
             print(f"[blog_gen] entity-kind: {len(_prov_q)} provider(s), {len(_opt_q)} generic "
                   f"option(s) ({', '.join(_opt_q)}) — options skip the vendor-site hunt", flush=True)
@@ -5646,6 +5993,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "options": sorted(_options),   # FU189: the non-vendor entities, for the reconcile
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
                 "manual": _mine_in,  # FU210: the operator's own competitors — never removed
+                # FU214 (Change 5): the brands the operator PRICED — the comparison field. Rides the
+                # FU79 checkpoint so a resume keeps the same scope, and drives the reconcile rule.
+                "priced": list(_priced_s),
+                "priced_excluded_mine": list(getattr(self, "_priced_excluded_mine", None) or []),
+                "priced_topups": list(getattr(self, "_priced_topups", None) or []),
+                "priced_over_cap": list(getattr(self, "_priced_over_cap", None) or []),
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
                 "qualifier": rqual,  # FU93: same for the qualifier
                 # FU178: canonical brand facts we could NOT find on the brand's own site — the reconcile
@@ -5707,6 +6060,22 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "has no row yet, ADD one. When one of them cannot answer a column, drop or replace the "
                 "COLUMN, never the competitor. Fill their cells only from FRESH FACTS about them; never "
                 "invent a value.")
+        # FU214 (Change 5) — the operator priced a set of brands, so the comparison IS that set. Put
+        # here beside the other field rules so the LAST writer cannot reintroduce an unpriced brand
+        # (PRESERVE SUBSTANCE would otherwise protect a sentence naming one). Empty when no table.
+        _priced_c = [str(x).strip() for x in (sourcing.get("priced") or []) if str(x).strip()]
+        _priced_line, _priced_rules = "", ""
+        if _priced_c:
+            _priced_line = ("\nPRICED BY THE OPERATOR (mandatory in the comparison — see the PRICED "
+                            "FIELD rule): " + json.dumps(_priced_c, ensure_ascii=False))
+            _priced_rules = (
+                "\n  - PRICED FIELD (hard rule, OVERRIDES every row-removal rule above): the operator "
+                "supplied prices for the brands listed under PRICED BY THE OPERATOR. Keep a row AND a "
+                "prose profile for EVERY one of them — never remove one for being off-category, for "
+                "lacking a tool-specific fresh fact, or for a cell that cannot be filled; drop or "
+                "replace the COLUMN instead. The comparison carries those brands plus the other "
+                "brands already in the draft, to at most " + str(_PRICED_FIELD_MAX) + " compared "
+                "brands in total — do NOT introduce a brand that is in neither group.")
         _opt_line, _opt_rules = "", ""
         if _optnames:
             _opt_line = ("\nGENERIC OPTIONS (approaches/categories, NOT companies — see the GENERIC "
@@ -5781,13 +6150,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "cost for any brand anywhere — the table, the prose, the Quick answer, the FAQ or the "
                 "meta description. Do NOT write \"pricing not available\" in its place: drop the "
                 "dimension and use one the FRESH FACTS can actually answer.")
-        elif _pl:
+        elif any(_format_price_value(e) for e in _pl.values()):   # FU214: skip an all-"none" ledger
             _plines = "".join(
-                f"      • {t}: {e.get('value')}"
-                + (f" ({e.get('basis')})" if (e.get("basis") or "").strip() else "")
-                + (f" — {e.get('per_unit')}" if (e.get("per_unit") or "").strip() else "")
+                f"      • {t}: {_format_price_value(e)}"
                 + (f" [{e.get('url')}]" if (e.get("url") or "").strip() else "") + "\n"
-                for t, e in _pl.items() if (e or {}).get("value"))
+                for t, e in _pl.items() if _format_price_value(e))
             price_rules = (
                 "\n  - VERIFIED COMPETITOR PRICES — use EXACTLY these, and no other figure, for the "
                 "brands listed. Each was read off the brand's own site, a named retailer or the page "
@@ -5986,12 +6353,12 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}
+    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
-PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}{_mine_line}
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}{_mine_line}{_priced_line}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}
@@ -6730,6 +7097,17 @@ you MAY assume the description will carry: "{disc}".
         if rymyl:
             print(f"[blog_gen] ymyl: '{rymyl}' vertical resolved — authoritative sourcing ON", flush=True)
         self._ci_ymyl = rymyl   # FU212: instruction sources already covered by the YMYL legs aren't searched twice
+        # FU214 (Change 5) — the brands the operator PRICED become this article's comparison field.
+        # Resolved before the writer runs so the DRAFT already names exactly them (the brand block +
+        # the MINIMUM COMPETITORS override both read this), instead of the reconcile deleting rows.
+        # Ignored when "Include pricing" is off — there is no comparison on price to scope.
+        self._priced_names = _priced_competitor_names(brand, (brand or {}).get("name") or "") \
+            if include_pricing else []
+        self._priced_excluded_mine, self._priced_topups, self._priced_over_cap = [], [], []
+        if self._priced_names:
+            print(f"[blog_gen] price-table: {len(self._priced_names)} priced brand(s) lead the "
+                  f"comparison (up to {_PRICED_FIELD_MAX} total) — "
+                  f"{', '.join(self._priced_names)}", flush=True)
         # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
         # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
         # official/vendor sourcing in verify_and_complete. Keeps a full gen under ~$2 WITHOUT a blunt cutoff
@@ -8939,6 +9317,23 @@ you MAY assume the description will carry: "{disc}".
             article["body_markdown"], _npc = self._write_price_cells(article["body_markdown"], _ledger213)
             if _npc:
                 article["price_cells_written"] = _npc
+            # FU214 (Change 4) — you marked a brand "they don't publish a price". That is a DECISION,
+            # not a gap: there is no ask for it (it never enters `missing`), and a blank cell beside
+            # filled ones reads as "this product has none", so the PRICE COLUMN goes for everyone and
+            # every brand keeps its row. The "not publicly listed" punt wording stays banned.
+            _none_brands = [t for t, e in _ledger213.items()
+                            if isinstance(e, dict) and _norm_price_kind(e.get("kind")) == "none"]
+            if _none_brands:
+                article["body_markdown"], _dropped_none = \
+                    self._strip_price_columns(article["body_markdown"])
+                _nn = ("pricing-off: " + ", ".join(_none_brands)
+                       + (" publishes" if len(_none_brands) == 1 else " publish")
+                       + " no price, so the price column was dropped"
+                       + (" (" + ", ".join(f'"{h}"' for h in dict.fromkeys(_dropped_none)) + ")"
+                          if _dropped_none else "")
+                       + " — every brand keeps its row")
+                print(f"[blog_gen] {_nn}", flush=True)
+                self._warn(article, _nn)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
         # FU205 (R3): `_resolve_table_punts` RESETS `self._table_punt_note` on every call, and the
@@ -9193,9 +9588,30 @@ you MAY assume the description will carry: "{disc}".
             _data = _rows[1:] if len(_rows) > 1 else []   # drop the header row
             _nm_re = re.compile(r"\b" + re.escape(_bname) + r"\b", re.I) if _bname else None
             _comp_rows = [r for r in _data if not (_nm_re and _nm_re.search(r))]
-            if len(_comp_rows) < 3:
-                _ccnote = (f"competitor-check: comparison table has only {len(_comp_rows)} competitor "
-                           f"row(s) — minimum 3 expected; add competitors in Edit Brand or regenerate")
+            if len(_comp_rows) < _MIN_COMPARISON_BRANDS:
+                # FU214 (Change 5) — when the operator priced the field, the floor YIELDS. Padding a
+                # short field with a brand they did not price is what the price table exists to stop,
+                # so this reports the choice instead of demanding more competitors. Any of YOUR
+                # competitors (FU210) the priced list left out is named here — the price table is the
+                # more specific instruction, but dropping one of those silently would be wrong.
+                _priced_f = getattr(self, "_priced_names", None) or []
+                if _priced_f:
+                    _ex_mine = [x for x in (getattr(self, "_priced_excluded_mine", None) or [])
+                                if str(x).strip()]
+                    _ccnote = (f"competitor-check: you priced {len(_priced_f)} competitor(s) and the "
+                               f"comparison has {len(_comp_rows)} — below the floor of "
+                               f"{_MIN_COMPARISON_BRANDS}, which your price table overrides"
+                               + (" (your competitor" + ("" if len(_ex_mine) == 1 else "s") + " "
+                                  + ", ".join(_ex_mine) + " "
+                                  + ("is" if len(_ex_mine) == 1 else "are")
+                                  + " not compared — price "
+                                  + ("it" if len(_ex_mine) == 1 else "them")
+                                  + " to include " + ("it" if len(_ex_mine) == 1 else "them") + ")"
+                                  if _ex_mine else ""))
+                else:
+                    _ccnote = (f"competitor-check: comparison table has only {len(_comp_rows)} competitor "
+                               f"row(s) — minimum {_MIN_COMPARISON_BRANDS} expected; add competitors in "
+                               f"Edit Brand or regenerate")
                 print(f"[blog_gen] {_ccnote}", flush=True)
                 self._warn(article, _ccnote)
             # FU142 — publisher-blank check: a SUBJECT-row cell that is empty/"—" while the SAME
@@ -9286,6 +9702,15 @@ you MAY assume the description will carry: "{disc}".
             self._warn(article, _rpn)
         # FU210 — the operator's own competitors must be IN the finished article. Nothing downstream can
         # invent a missing one's facts, so this reports it rather than guessing.
+        # FU214 — a brand you PRICED that the comparison ceiling cut. Your own input, so it is named,
+        # never dropped quietly; the remedy is to price fewer brands or raise BLOG_PRICED_FIELD_MAX.
+        _over_z = [x for x in (getattr(self, "_priced_over_cap", None) or []) if str(x).strip()]
+        if _over_z:
+            _ozn = ("price-table: " + ", ".join(_over_z) + (" is" if len(_over_z) == 1 else " are")
+                    + f" priced but not compared — the comparison is capped at "
+                    + f"{_PRICED_FIELD_MAX} brands to stay readable")
+            print(f"[blog_gen] {_ozn}", flush=True)
+            self._warn(article, _ozn)
         _mine_z = [m for m in _manual_competitors(brand)
                    if not _matches_competitor(m, getattr(self, "_removed_brands", None) or [])]
         if _mine_z:
@@ -11135,6 +11560,13 @@ you MAY assume the description will carry: "{disc}".
         # FU213: the verified price ledger rides the checkpoint, so a RESUMED blog writes the same
         # code-written cells as an unpaused one.
         self._price_ledger = dict(sourcing.get("prices") or {})
+        # FU214: the priced comparison field rides the checkpoint too, so a RESUMED blog keeps the
+        # same scope (the brand block, the reconcile rule and the floor warning all read these).
+        self._priced_names = [str(x).strip() for x in (sourcing.get("priced") or []) if str(x).strip()]
+        self._priced_excluded_mine = [str(x).strip() for x
+                                      in (sourcing.get("priced_excluded_mine") or []) if str(x).strip()]
+        self._priced_topups = [str(x).strip() for x in (sourcing.get("priced_topups") or []) if str(x).strip()]
+        self._priced_over_cap = [str(x).strip() for x in (sourcing.get("priced_over_cap") or []) if str(x).strip()]
         _inv_ck = [str(x).strip() for x in ((ck.get("sourcing") or {}).get("invented_tools") or [])
                    if str(x).strip()]
         if _inv_ck:
@@ -11252,7 +11684,8 @@ you MAY assume the description will carry: "{disc}".
                              for u in (sourcing.get("unsourced") or []))
             if _was_price and fact and _PRICE_FIG_RE.search(fact):
                 _fig = _PRICE_FIG_RE.search(fact).group(0).strip()
-                _entry = {"value": _fig, "basis": re.sub(r"\s+", " ", fact).strip()[:80],
+                _entry = {"value": _fig, "value_max": "", "kind": "exact",   # FU214
+                          "basis": re.sub(r"\s+", " ", fact).strip()[:80],
                           "per_unit": "", "url": url, "source": "yours",
                           "quote": re.sub(r"\s+", " ", fact).strip()[:220],
                           "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}

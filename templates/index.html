@@ -13059,7 +13059,7 @@ async function renderBlogs(c) {
         <div class="card p-4 mb-5" style="border:1px solid #3b0764">
             <h3 class="font-bold mb-2" style="color:#c084fc">Generate a blog</h3>
             <div class="grid gap-3" style="grid-template-columns:1fr 1fr">
-                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault();_blogRefreshReset();_blogPriceLinksRender()">${brandOpts || '<option value="">No brands</option>'}</select></div>
+                <div><label class="text-xs text-gray-400">Brand</label><select id="blog-gen-brand" onchange="_blogYmylAutoDefault();_blogRefreshReset();_blogPriceReset();_blogPriceLinksRender()">${brandOpts || '<option value="">No brands</option>'}</select></div>
                 <div><label class="text-xs text-gray-400">Additional keywords (optional, comma-separated)</label><input id="blog-gen-kw" placeholder="target terms / queries to prioritize"></div>
             </div>
             <div class="mt-2"><label class="text-xs text-gray-400">Seed (the prompt/topic to target)</label><textarea id="blog-gen-seed" rows="2" placeholder="e.g. how do I get my brand cited by AI search engines"></textarea></div>
@@ -13810,13 +13810,14 @@ function blogGenerate() {
     const geo = (document.getElementById('blog-gen-geo')?.value || '').trim();   // FU90
     const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
     const price_links = include_pricing ? _blogPriceLinksCollect() : [];   // FU213 (Change 5/6)
+    const price_table = include_pricing ? _blogPriceTableCollect() : [];   // FU214
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
         author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, price_links, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -13865,6 +13866,9 @@ function _blogPriceLinksBrands(brand) {
     (all || []).forEach(add);
     return out.slice(0, 12);
 }
+function _blogPriceReset() {   // FU214: a different brand has a different price table
+    window._blogPriceRows = null; window._blogPriceDropped = [];
+}
 function _blogPriceLinksRender() {
     const wrap = document.getElementById('blog-price-links-wrap');
     if (!wrap) return;
@@ -13886,8 +13890,10 @@ function _blogPriceLinksRender() {
         </div>`;
     };
     wrap.innerHTML = `<details open>
-        <summary class="text-xs text-gray-400 cursor-pointer">💲 Price pages (optional) — paste the page that shows each brand's price</summary>
-        <p class="text-xs text-gray-600 mt-1 mb-2">The price is read off the page you paste (regular list price, not a sale price) and that page becomes the citation. A brand left blank is looked up by search instead. Your own row is fetched and cited, never written into your cell by code.</p>
+        <summary class="text-xs text-gray-400 cursor-pointer">💲 Prices (optional) — paste the pricing you already have, or link the page that shows it</summary>
+        ${_blogPriceTableHtml(brand)}
+        <div class="text-xs text-gray-400 mt-3 mb-1">Price pages — the page that shows each brand's price</div>
+        <p class="text-xs text-gray-600 mb-2">The price is read off the page you paste (regular list price, not a sale price) and that page becomes the citation. A brand left blank is looked up by search instead. Your own row is fetched and cited, never written into your cell by code.</p>
         ${names.map((n, i) => row(n, i === 0)).join('')}
         ${extra.map(n => row(n, false)).join('')}
         <div class="grid gap-2 mb-1" style="grid-template-columns:180px 1fr">
@@ -13898,9 +13904,100 @@ function _blogPriceLinksRender() {
             </div>
         </div>
         <div class="flex gap-2 justify-end mt-2">
-            <button class="btn btn-sm btn-secondary" onclick="_blogPriceLinksCheck()" title="Saves these links and checks the prices — no blog is generated">💾 Save links &amp; check prices</button>
+            <button class="btn btn-sm btn-secondary" onclick="_blogPriceLinksCheck()" title="Saves your prices and the links, then checks only the brands you haven't priced — no blog is generated">💾 Save prices &amp; check</button>
         </div>
     </details>`;
+}
+
+// ---------------------------------------------------------------- FU214: the pasted price table
+// Paste pricing in ANY shape -> Analyse -> reviewable rows. The model parses; the server decides what
+// survives (every figure must be verbatim in what you pasted), so a row you see is a row it kept.
+const _BLOG_PRICE_KINDS = [['exact', 'exact'], ['from', 'from'], ['range', 'range'],
+                          ['upto', 'up to'], ['none', 'not published']];
+function _blogPriceRowsFromBrand(brand) {
+    let pt = {};
+    try { pt = JSON.parse((brand || {}).price_table || '{}') || {}; } catch (_) {}
+    const out = [];
+    Object.keys(pt).forEach(slug => {
+        const ent = pt[slug] || {};
+        (ent.rows || []).forEach(r => out.push(Object.assign({ brand: ent.name || slug }, r)));
+    });
+    return out;
+}
+function _blogPriceTableHtml(brand) {
+    if (!Array.isArray(window._blogPriceRows)) window._blogPriceRows = _blogPriceRowsFromBrand(brand);
+    const rows = window._blogPriceRows || [];
+    const dropped = window._blogPriceDropped || [];
+    const kindSel = (v, i) => `<select class="text-xs" onchange="_blogPriceRowEdit(${i},'kind',this.value)">`
+        + _BLOG_PRICE_KINDS.map(([k, lbl]) =>
+            `<option value="${k}"${(v || 'exact') === k ? ' selected' : ''}>${lbl}</option>`).join('')
+        + `</select>`;
+    const cell = (i, f, v, ph) => `<input class="text-xs" value="${_blogEsc(v || '')}" placeholder="${ph}"`
+        + ` onchange="_blogPriceRowEdit(${i},'${f}',this.value)">`;
+    const body = rows.map((r, i) => `<tr${r.unknown_brand ? ' title="this name matched none of your competitors — check the spelling"' : ''}>
+        <td>${cell(i, 'brand', r.brand, 'Brand')}${r.unknown_brand ? ' <span class="text-yellow-500" title="unmatched brand name">⚠</span>' : ''}</td>
+        <td>${cell(i, 'product', r.product, 'Product / plan')}</td>
+        <td>${kindSel(r.kind, i)}</td>
+        <td>${cell(i, 'value', r.value, '$24.99')}</td>
+        <td>${cell(i, 'value_max', r.value_max, '$29.99')}</td>
+        <td>${cell(i, 'basis', r.basis, '3-pack, 9 oz')}</td>
+        <td>${cell(i, 'url', r.url, 'https://… (optional)')}</td>
+        <td><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowDel(${i})" title="remove this row">✕</button></td>
+    </tr>`).join('');
+    return `<div class="mt-1">
+        <textarea id="blog-price-paste" rows="3" placeholder="Paste your pricing in any shape: a table from a sheet, a few lines, whatever you have — e.g. 'Philips Avent 3-pack $23.97 / Pigeon from $12.99 / Comotomo $19.99-$24.99 / Dr. Brown's doesn't publish a price'" style="font-family:inherit"></textarea>
+        <div class="flex gap-2 items-center mt-1">
+            <button class="btn btn-sm btn-secondary" onclick="_blogPriceParse()" title="Reads your paste into rows you can correct — one small call, no web search">🔎 Analyse</button>
+            <span class="text-xs text-gray-600">The brands you price are always compared and lead the table; up to 5 brands in total, so a few more can ride along. No link on a row ⇒ the brand's own site is cited. A brand marked “not published” keeps its row and the price column is dropped for everyone.</span>
+        </div>
+        ${rows.length ? `<table class="w-full mt-2 text-xs"><thead><tr class="text-gray-500">
+            <th>Brand</th><th>Product</th><th>Kind</th><th>Price</th><th>to</th><th>Basis</th><th>Link</th><th></th>
+        </tr></thead><tbody>${body}</tbody></table>
+        <div class="flex gap-2 mt-1"><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowAdd()">+ Add a row</button></div>` : ''}
+        ${dropped.length ? `<div class="text-xs text-yellow-600 mt-2">Not kept (${dropped.length}):<ul class="ml-4">`
+            + dropped.map(d => `<li>“${_blogEsc(String(d.raw || '').slice(0, 80))}” — ${_blogEsc(d.why || '')}</li>`).join('')
+            + `</ul></div>` : ''}
+    </div>`;
+}
+function _blogPriceRowEdit(i, field, val) {
+    const rows = window._blogPriceRows || [];
+    if (rows[i]) { rows[i][field] = val; if (field === 'brand') rows[i].unknown_brand = false; }
+}
+function _blogPriceRowDel(i) {
+    (window._blogPriceRows || []).splice(i, 1);
+    _blogPriceLinksRender();
+}
+function _blogPriceRowAdd() {
+    window._blogPriceRows = (window._blogPriceRows || []).concat(
+        [{ brand: '', product: '', kind: 'exact', value: '', value_max: '', basis: '', url: '' }]);
+    _blogPriceLinksRender();
+}
+function _blogPriceTableCollect() {
+    return (window._blogPriceRows || []).filter(r => (r.brand || '').trim());
+}
+async function _blogPriceParse() {
+    const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    const text = (document.getElementById('blog-price-paste')?.value || '').trim();
+    if (!text) { toast('Paste your pricing first', 'error'); return; }
+    const brand = _blogFindBrand(bid) || {};
+    const names = _blogPriceLinksBrands(brand);
+    const btn = document.querySelector('#blog-price-links-wrap button[onclick="_blogPriceParse()"]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Analysing…'; }
+    try {
+        const res = await api('/api/brands/' + bid + '/price-table/parse',
+            { method: 'POST', body: { text, names, subject: brand.name || '' } });
+        const got = (res && res.rows) || [];
+        // keep what you already had; append what the paste added
+        window._blogPriceRows = (window._blogPriceRows || []).concat(got);
+        window._blogPriceDropped = (res && res.dropped) || [];
+        _blogPriceLinksRender();
+        const dp = ((res && res.dropped) || []).length;
+        toast(`Read ${got.length} price row(s)` + (dp ? ` · ${dp} not kept` : '')
+              + (res && res.cost ? ` · ≈ $${Number(res.cost).toFixed(2)}` : ''),
+              got.length ? 'success' : 'error', 9000);
+    } catch (e) { /* api() already toasted */ }
+    if (btn) { btn.disabled = false; btn.textContent = '🔎 Analyse'; }
 }
 function _blogPriceAddBrand() {
     const nm = (document.getElementById('blog-price-add-name')?.value || '').trim();
@@ -13927,8 +14024,19 @@ async function _blogPriceLinksCheck() {
     if (!bid) { toast('Pick a brand first', 'error'); return; }
     const rows = _blogPriceLinksCollect();
     const subject = (document.getElementById('blog-gen-seed')?.value || '').trim();
-    const names = rows.map(r => r.name).filter(n => n.toLowerCase() !== ((_blogFindBrand(bid) || {}).name || '').toLowerCase());
+    const priced = _blogPriceTableCollect();   // FU214
+    const pricedLow = priced.map(r => (r.brand || '').trim().toLowerCase()).filter(Boolean);
+    // FU214: a brand you priced needs no search — check only the ones still without a price.
+    const names = rows.map(r => r.name)
+        .filter(n => n.toLowerCase() !== ((_blogFindBrand(bid) || {}).name || '').toLowerCase())
+        .filter(n => !pricedLow.some(p => p === n.toLowerCase() || p.includes(n.toLowerCase()) || n.toLowerCase().includes(p)));
     try {
+        if (priced.length) {   // FU214: save the reviewed rows on the brand first
+            const pr = await api('/api/brands/' + bid + '/price-table', { method: 'PUT', body: { rows: priced } });
+            const b0 = _blogFindBrand(bid);
+            if (b0 && pr && pr.price_table) b0.price_table = JSON.stringify(pr.price_table);
+            toast(`✓ ${(pr && pr.rows) || 0} price row(s) saved across ${(pr && pr.brands) || 0} brand(s)`, 'success');
+        }
         await api('/api/brands/' + bid + '/price-links', { method: 'PUT', body: { price_links: rows } });
         const b = _blogFindBrand(bid);
         if (b) {
@@ -13955,9 +14063,11 @@ async function _blogPriceSaveEdit(slug) {
     const val = (document.getElementById('blog-price-v-' + slug)?.value || '').trim();
     const basis = (document.getElementById('blog-price-b-' + slug)?.value || '').trim();
     const url = (document.getElementById('blog-price-u-' + slug)?.value || '').trim();
+    const kind = (document.getElementById('blog-price-k-' + slug)?.value || 'exact');   // FU214
+    const value_max = (document.getElementById('blog-price-m-' + slug)?.value || '').trim();
     try {
         await api('/api/brands/' + bid + '/competitor-prices',
-                  { method: 'PUT', body: { prices: [{ slug, name: slug, value: val, basis, url }] } });
+                  { method: 'PUT', body: { prices: [{ slug, name: slug, value: val, value_max, kind, basis, url }] } });
         _blogBrands = await api('/api/brands/all');
         toast(val ? 'Saved as your price (it now writes the cell)' : 'Price cleared', 'success');
         blogCompetitorCacheModal(bid, window._blogCacheMode || 'view');
@@ -13992,9 +14102,10 @@ function blogCompetitorCacheModal(brandId, mode) {
     window._blogCacheBrandId = brandId;
     const brand = _blogFindBrand(brandId);
     if (!brand) { toast('Pick a brand first', 'error'); return; }
-    let cf = {}, cd = {};
+    let cf = {}, cd = {}, pt = {};
     try { cf = JSON.parse(brand.competitor_facts || '{}') || {}; } catch (_) {}
     try { cd = JSON.parse(brand.competitor_domains || '{}') || {}; } catch (_) {}
+    try { pt = JSON.parse(brand.price_table || '{}') || {}; } catch (_) {}   // FU214
     const slugName = {};
     Object.keys(cd).forEach(nm => { slugName[_kfSlug(nm)] = nm; });
     const now = Date.now();
@@ -14021,13 +14132,33 @@ function blogCompetitorCacheModal(brandId, mode) {
         // outranks everything and writes the comparison cell).
         const pe = (e && typeof e.price === 'object') ? e.price : null;
         const pSrc = pe ? ({ yours: 'your value', link: 'your link', own: "brand's own site", retail: 'retailer' }[pe.source] || pe.source || '') : '';
+        // FU214: a price carries a KIND and an optional second figure, so "from $24.99" and
+        // "$19.99-$29.99" are shown (and editable) exactly as the article will print them.
+        const pKind = (pe && pe.kind) || 'exact';
+        const pShown = !pe ? '' : (pKind === 'none' ? '<i>no published price</i>'
+            : (pKind === 'from' ? 'From ' : pKind === 'upto' ? 'Up to ' : '') + _blogEsc(pe.value || '')
+              + (pKind === 'range' && pe.value_max ? '-' + _blogEsc(pe.value_max) : ''));
+        // FU214: rows you pasted into the price table OUTRANK everything below, and live on the
+        // brand (never in this cache, which is evicted). Shown here so the popup can't contradict
+        // what the article will actually print.
+        const ptRows = ((pt[slug] || {}).rows) || [];
+        const ptLine = ptRows.length ? `<div class="text-xs text-green-400">Your price table: `
+            + ptRows.map(r => (r.kind === 'none' ? '<i>no published price</i>'
+                : (r.kind === 'from' ? 'From ' : r.kind === 'upto' ? 'Up to ' : '')
+                  + _blogEsc(r.value || '') + (r.kind === 'range' && r.value_max ? '-' + _blogEsc(r.value_max) : ''))
+                + (r.product ? ' · ' + _blogEsc(r.product) : '')).join(' &nbsp;|&nbsp; ')
+            + ` <span class="text-gray-500">(edit on the generate form)</span></div>` : '';
         const priceBox = `
           <div class="mt-1 border-t border-gray-800 pt-1">
+            ${ptLine}
             <div class="text-xs ${pe ? 'text-green-400' : 'text-yellow-500'}">${pe
-                ? `Verified price: <b>${_blogEsc(pe.value || '')}</b>${pe.basis ? ' (' + _blogEsc(pe.basis) + ')' : ''}${pe.per_unit ? ' — ' + _blogEsc(pe.per_unit) : ''} · ${_blogEsc(pSrc)}${pe.checked_at ? ' · checked ' + _blogEsc(String(pe.checked_at).slice(0, 10)) : ''}${pe.url ? ` · <a href="${_blogEsc(pe.url)}" target="_blank" class="underline">page</a>` : ''}`
+                ? `Verified price: <b>${pShown}</b>${pe.product ? ' · ' + _blogEsc(pe.product) : ''}${pe.basis ? ' (' + _blogEsc(pe.basis) + ')' : ''}${pe.per_unit ? ' — ' + _blogEsc(pe.per_unit) : ''} · ${_blogEsc(pSrc)}${pe.checked_at ? ' · checked ' + _blogEsc(String(pe.checked_at).slice(0, 10)) : ''}${pe.url ? ` · <a href="${_blogEsc(pe.url)}" target="_blank" class="underline">page</a>` : ''}`
                 : 'No verified price — the blog will ask you for it (or drop the price column).'}</div>
-            <div class="grid gap-1 mt-1" style="grid-template-columns:110px 1fr 1fr auto">
+            <div class="grid gap-1 mt-1" style="grid-template-columns:96px 100px 100px 1fr 1fr auto">
+              <select id="blog-price-k-${_blogEsc(slug)}" class="text-xs">${
+                _BLOG_PRICE_KINDS.map(([k, lbl]) => `<option value="${k}"${pKind === k ? ' selected' : ''}>${lbl}</option>`).join('')}</select>
               <input id="blog-price-v-${_blogEsc(slug)}" class="text-xs" placeholder="$24.99" value="${_blogEsc((pe && pe.value) || '')}">
+              <input id="blog-price-m-${_blogEsc(slug)}" class="text-xs" placeholder="to $29.99" value="${_blogEsc((pe && pe.value_max) || '')}">
               <input id="blog-price-b-${_blogEsc(slug)}" class="text-xs" placeholder="basis (e.g. single 9 oz bottle)" value="${_blogEsc((pe && pe.basis) || '')}">
               <input id="blog-price-u-${_blogEsc(slug)}" class="text-xs" placeholder="source URL" value="${_blogEsc((pe && pe.url) || '')}">
               <button class="btn btn-sm btn-secondary" onclick="_blogPriceSaveEdit('${_blogEsc(slug)}')" title="Save as YOUR price — it writes the cell and is never re-checked">Save</button>

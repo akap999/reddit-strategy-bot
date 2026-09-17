@@ -368,7 +368,7 @@ class Database:
                      disclosure=None, logo_url=None, known_sources=None,
                      meta_autofetched_at=None, key_facts=None, competitor_facts=None,
                      name=None, manual_competitors=None, content_context=None,
-                     price_links=None):
+                     price_links=None, price_table=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
@@ -392,6 +392,7 @@ class Database:
             "manual_competitors": manual_competitors,   # FU210: the operator's own — always compared
             "content_context": content_context,   # FU212: content instructions (yours + auto) JSON
             "price_links": price_links,   # FU213: operator price-page links per compared brand JSON
+            "price_table": price_table,   # FU214: operator-pasted PRICE ROWS per compared brand JSON
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2451,6 +2452,10 @@ class Database:
             # brand slug): {slug: {name, urls: [...], updated_at}}. The blog generator reads the
             # price straight off these pages instead of guessing it from a search.
             "price_links":       "ALTER TABLE brands ADD COLUMN price_links TEXT",
+            # FU214: operator-pasted PRICE ROWS per compared brand (JSON, keyed by brand slug):
+            # {slug: {name, rows: [{product, kind, value, value_max, basis, url, raw, updated_at}]}}.
+            # OPERATOR INPUT — never evicted (unlike competitor_facts, a 45-day TTL cache).
+            "price_table":       "ALTER TABLE brands ADD COLUMN price_table TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

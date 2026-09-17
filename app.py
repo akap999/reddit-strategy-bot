@@ -2370,6 +2370,273 @@ def _save_price_links(db, brand, rows):
     return cur
 
 
+# --------------------------------------------------------------- FU214: the pasted PRICE TABLE
+# The operator already HAS the pricing — in a sheet, a doc, a few typed lines. Before this round the
+# only ways to give it to the tool were a link, a one-row inline edit, or an answer to a pause, and a
+# competitor price could only ever be ONE figure with no product attached. Here they paste it in
+# whatever shape it is, a single small parse call turns it into rows, and CODE decides what survives.
+_PRICE_TABLE_MAX_ROWS = 40
+_PRICE_TABLE_MAX_BRANDS = 12
+
+
+def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TABLE_MAX_ROWS,
+                      max_brands=_PRICE_TABLE_MAX_BRANDS, verbatim_text=None):
+    """FU214 (Change 2) — validate parsed/edited rows into the stored shape, keyed by brand slug:
+    {slug: {name, rows: [{product, kind, value, value_max, basis, url, raw, updated_at}]}}.
+
+    The FU213 discipline, applied to a paste: the MODEL parses, CODE decides. Every figure must appear
+    VERBATIM in the pasted text when `verbatim_text` is supplied (so a number the model invented can
+    never reach a cell), `kind` is normalised to the five allowed values, two figures typed as `exact`
+    become a `range`, a brand name is matched to a known competitor by slug containment, a url must be
+    http(s), and the caps bound the whole thing. Returns (stored_map, dropped[{raw, why}], flagged[]).
+    `flagged` = rows whose brand matched none of `known_names` — kept, so a typo is VISIBLE rather than
+    silently a new brand."""
+    from generators.blog_gen import (_kf_slug, _PRICE_FIG_RE, _norm_price_kind, _fig_in_text,
+                                     _is_priced, _range_in_text)
+    out, dropped, flagged = {}, [], []
+    now = _fu128_time.strftime("%Y-%m-%dT%H:%M:%SZ", _fu128_time.gmtime())
+    known = [str(n).strip() for n in (known_names or []) if str(n).strip()]
+    if subject and subject.strip():
+        known = known + [subject.strip()]
+
+    def _match_known(nm):
+        """Same question, same rule as the comparison field: whole-word matching, so "Ro" never
+        swallows "Rory" and "Dr. Brown's" still finds "Dr Browns"."""
+        for k in known:
+            if _is_priced(nm, [k]):
+                return k
+        return ""
+
+    for row in (payload or [])[:max_rows]:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("raw") or "").strip()[:200]
+        nm = str(row.get("brand") or row.get("name") or "").strip()
+        if not nm:
+            dropped.append({"raw": raw or "(no brand)", "why": "no brand name"})
+            continue
+        kind = _norm_price_kind(row.get("kind"))
+        figs = []
+        for key in ("value", "value_max"):
+            v = str(row.get(key) or "").strip()
+            if not v:
+                continue
+            m = _PRICE_FIG_RE.search(v)
+            if not m:
+                if key == "value" and kind != "none":
+                    dropped.append({"raw": raw or f"{nm} {v}",
+                                    "why": f"'{v}' is not a price figure"})
+                    figs = None
+                    break
+                continue
+            fig = m.group(0).strip()
+            # FU214: the upper bound of a range is commonly typed WITHOUT the currency symbol
+            # ("$28.99-29.99"), so accept it when the pasted text shows the pair as a range.
+            _ok = (not verbatim_text) or _fig_in_text(fig, verbatim_text) or (
+                key == "value_max" and figs and _range_in_text(figs[0], fig, verbatim_text))
+            if not _ok:
+                dropped.append({"raw": raw or f"{nm} {fig}",
+                                "why": f"{fig} is not in the text you pasted"})
+                figs = None
+                break
+            figs.append(fig)
+        if figs is None:
+            continue
+        if kind != "none" and not figs:
+            dropped.append({"raw": raw or nm, "why": "no price given"})
+            continue
+        if len(figs) > 1 and kind in ("exact", "from"):
+            kind = "range"      # two figures typed as one price ARE a range
+        value = figs[0] if figs else ""
+        value_max = figs[1] if (len(figs) > 1 and kind == "range") else ""
+        url = str(row.get("url") or "").strip()
+        if url and not re.match(r"^https?://\S+\.\S+", url, re.I):
+            url = ""
+        hit = _match_known(nm)
+        display = hit or nm
+        if not hit:
+            flagged.append(display)
+        slug = _kf_slug(display)
+        if not slug:
+            continue
+        if slug not in out and len(out) >= max_brands:
+            dropped.append({"raw": raw or display,
+                            "why": f"more than {max_brands} brands — this one was not kept"})
+            continue
+        ent = out.setdefault(slug, {"name": display, "rows": []})
+        ent["rows"].append({"product": str(row.get("product") or "").strip()[:80],
+                            "kind": kind, "value": value, "value_max": value_max,
+                            "basis": str(row.get("basis") or "").strip()[:80],
+                            "url": url, "raw": raw, "updated_at": now})
+    return out, dropped, sorted(set(flagged))
+
+
+def _save_price_table(db, brand, rows, subject=""):
+    """FU214 (Change 1) — persist the rows on EVERY stored copy of this brand (same name), the way
+    `_save_price_links` already does, and route the SUBJECT's own rows into the CANONICAL price store.
+
+    The subject's rows must NOT go through the Edit Brand save path: that treats what it is sent as the
+    COMPLETE list and DELETES every operator-set price absent from it (the FU163 rule), so saving one
+    pasted price there would silently wipe the others. `upsert_canonical_value` is the additive upsert
+    built for exactly this. Returns (stored_map, dropped, flagged, canonical_saved)."""
+    from generators.blog_gen import _kf_slug, upsert_canonical_value, _format_price_value
+    known = []
+    try:
+        known = [str(c).strip() for c in json.loads(brand.get("competitors") or "[]")
+                 if str(c).strip()]
+    except Exception:
+        known = []
+    try:
+        known += [str(c).strip() for c in json.loads(brand.get("manual_competitors") or "[]")
+                  if str(c).strip()]
+    except Exception:
+        pass
+    clean, dropped, flagged = _clean_price_rows(rows, known_names=known,
+                                                subject=(brand.get("name") or ""))
+    # the SUBJECT's own rows are canonical pricing, not a competitor row
+    subj_slug = _kf_slug(brand.get("name") or "")
+    subj = clean.pop(subj_slug, None) if subj_slug else None
+    canonical = 0
+    if subj:
+        _dom_b = re.sub(r"^https?://", "", (brand.get("domain_url") or "").strip(),
+                        flags=re.I).strip("/")
+        _subj_url = f"https://{_dom_b}" if _dom_b else ""
+        kf = brand.get("key_facts") or "{}"
+        for r in (subj.get("rows") or []):
+            shown = _format_price_value(r)
+            if not shown:
+                continue
+            # FU214 (operator decision): no link on the row ⇒ cite the brand's own site, exactly as
+            # FU158 stores an operator-set canonical price (FU178 kept that fallback on purpose).
+            _su = (r.get("url") or "").strip() or _subj_url
+            kf, ok = upsert_canonical_value(kf, "price", r.get("product") or "", shown,
+                                            source_url=_su)
+            canonical += 1 if ok else 0
+        try:
+            db.update_brand(brand["id"], key_facts=json.dumps(kf))
+        except Exception as e:
+            print(f"[price-table] canonical save failed for brand {brand['id']}: {e}", flush=True)
+    try:
+        cur = json.loads(brand.get("price_table") or "{}")
+    except Exception:
+        cur = {}
+    if not isinstance(cur, dict):
+        cur = {}
+    # a brand SENT with no surviving row has its entry removed; a brand not sent is untouched
+    sent = {_kf_slug(str((r or {}).get("brand") or (r or {}).get("name") or ""))
+            for r in (rows or []) if isinstance(r, dict)}
+    for sl in sent:
+        if sl and sl not in clean and sl != subj_slug:
+            cur.pop(sl, None)
+    cur.update(clean)
+    blob = json.dumps(cur)
+    targets = [brand["id"]]
+    try:
+        targets = [b["id"] for b in db.get_all_brands()
+                   if (b.get("name") or "").strip().lower() == (brand.get("name") or "").strip().lower()] \
+            or targets
+    except Exception:
+        pass
+    for tid in targets:
+        try:
+            db.update_brand(tid, price_table=blob)
+        except Exception as e:
+            print(f"[price-table] save failed for brand {tid}: {e}", flush=True)
+    print(f"[price-table] saved {sum(len(v.get('rows') or []) for v in cur.values())} row(s) across "
+          f"{len(cur)} brand(s) on {len(targets)} brand record(s); "
+          f"{canonical} canonical subject price(s); {len(dropped)} dropped", flush=True)
+    return cur, dropped, flagged, canonical
+
+
+@app.route("/api/brands/<int:bid>/price-table/parse", methods=["POST"])
+def api_brand_price_table_parse(bid):
+    """FU214 (Change 2) — paste pricing in ANY shape (a table copied from a sheet, a few lines,
+    prose); get back reviewable ROWS. ONE small Claude call, NO web search: the model parses, and the
+    deterministic validation in `_clean_price_rows` decides what survives. Nothing is saved here."""
+    data = request.json or {}
+    text = str(data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "paste your pricing first"}), 400
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        names = [str(n).strip() for n in (data.get("names") or []) if str(n).strip()]
+        subject = str(data.get("subject") or brand.get("name") or "").strip()
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return jsonify({"error": "no API key configured"}), 400
+        claude = ClaudeClient(api_key)
+        claude.reset_usage()   # FU54: cost this parse from real API usage
+        prompt = (
+            "Below is pricing information an operator pasted. It may be a table copied from a "
+            "spreadsheet, a Markdown table, a few typed lines, or prose.\n\n"
+            f"PASTED TEXT:\n{text[:8000]}\n\n"
+            + (f"BRANDS ALREADY IN THIS COMPARISON: {', '.join(names[:15])}\n" if names else "")
+            + (f"THE SUBJECT BRAND (the one publishing the article): {subject}\n" if subject else "")
+            + "\nReturn ONE ROW PER PRICE STATEMENT. For each row give:\n"
+              "  brand      - the brand/company the price belongs to, spelled as in the text\n"
+              "  product    - the specific product/plan/size the price is for ('' if not stated)\n"
+              "  kind       - one of: exact | from | range | upto | none\n"
+              "                 exact = a single stated price; from = 'from/starting at $X';\n"
+              "                 range = 'between $X and $Y'; upto = 'up to/under $X';\n"
+              "                 none  = the text says this brand does NOT publish a price\n"
+              "  value      - the price figure, copied EXACTLY as written ('' when kind is none)\n"
+              "  value_max  - the upper figure when kind is range, else ''\n"
+              "  basis      - the unit/quantity/term the price is for, e.g. '3-pack, 9 oz',\n"
+              "               'per seat, billed annually' ('' if not stated)\n"
+              "  url        - a source link if the text gives one for that price, else ''\n"
+              "  raw        - the line/cell of the pasted text this row came from, verbatim\n\n"
+              "RULES: copy every figure EXACTLY as the text writes it, including the currency symbol "
+              "and any comma. NEVER infer, convert, round or invent a figure that is not in the text — "
+              "a row whose price is not in the text will be discarded. If a brand's price is not "
+              "stated at all, do NOT create a row for it.\n"
+              'Respond with JSON ONLY (no prose, no code fences): {"rows": [{"brand": "...", '
+              '"product": "...", "kind": "exact", "value": "$23.97", "value_max": "", '
+              '"basis": "...", "url": "", "raw": "..."}]}')
+        try:
+            out = claude.call(prompt, max_tokens=2500, temperature=0)
+        except Exception as e:
+            print(f"[price-table] parse call failed: {e}", flush=True)
+            out = None
+        parsed = (out or {}).get("rows") if isinstance(out, dict) else None
+        if parsed is None:
+            return jsonify({"error": "couldn't read that pricing — try pasting it differently",
+                            "detail": (getattr(claude, "last_error", "") or "")[:200]}), 502
+        clean, dropped, flagged = _clean_price_rows(
+            parsed, known_names=names, subject=subject, verbatim_text=text)
+        rows = []
+        for slug, ent in clean.items():
+            for r in (ent.get("rows") or []):
+                rows.append({"brand": ent.get("name") or "", "slug": slug,
+                             "unknown_brand": (ent.get("name") or "") in flagged, **r})
+        print(f"[price-table] parsed {len(rows)} row(s) for brand {bid}; {len(dropped)} dropped; "
+              f"{len(flagged)} unmatched brand name(s)", flush=True)
+        return jsonify({"ok": True, "rows": rows, "dropped": dropped, "flagged": flagged,
+                        "cost": round(claude.usage_cost(), 4)})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/price-table", methods=["PUT"])
+def api_brand_price_table(bid):
+    """FU214 — save the reviewed price rows on the brand (every copy), routing the subject's own rows
+    into the canonical price store through the ADDITIVE upsert."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        stored, dropped, flagged, canonical = _save_price_table(
+            db, brand, (request.json or {}).get("rows") or [])
+        return jsonify({"ok": True, "price_table": stored, "brands": len(stored),
+                        "rows": sum(len(v.get("rows") or []) for v in stored.values()),
+                        "dropped": dropped, "flagged": flagged, "canonical_saved": canonical})
+    finally:
+        db.close()
+
+
 @app.route("/api/brands/<int:bid>/price-links", methods=["PUT"])
 def api_brand_price_links(bid):
     """FU213 (Change 5): save the operator's per-brand price-page links (used by the blog generator
@@ -2394,7 +2661,8 @@ def api_brand_competitor_prices(bid):
         brand = db.get_brand(bid)
         if not brand:
             return jsonify({"error": "brand not found"}), 404
-        from generators.blog_gen import _kf_slug, _PRICE_FIG_RE
+        from generators.blog_gen import (_kf_slug, _PRICE_FIG_RE, _norm_price_kind,
+                                         _per_unit_price)   # FU214
         try:
             cf = json.loads(brand.get("competitor_facts") or "{}")
         except Exception:
@@ -2416,12 +2684,31 @@ def api_brand_competitor_prices(bid):
                     cf[slug].pop("price", None)
                     cleared.append(slug)
                 continue
+            # FU214: a price is no longer forced to be ONE figure. It carries a KIND (exact / from /
+            # range / up to / they publish none) and an optional second figure, so "from $24.99" and
+            # "$19.99-$29.99" are storable — and printable — for the first time.
+            _kind = _norm_price_kind(row.get("kind"))
+            _vmax = str(row.get("value_max") or "").strip()
+            if _kind == "none":
+                cf.setdefault(slug, {})["price"] = {
+                    "value": "", "value_max": "", "kind": "none", "basis": "", "per_unit": "",
+                    "url": str(row.get("url") or "").strip(), "source": "yours",
+                    "quote": val[:220], "checked_at": now}
+                saved.append(slug)
+                continue
             if not _PRICE_FIG_RE.search(val):
                 return jsonify({"error": f"'{val}' is not a price figure (e.g. $24.99)"}), 400
+            _v = _PRICE_FIG_RE.search(val).group(0).strip()
+            _m2 = _PRICE_FIG_RE.search(_vmax) if _vmax else None
+            if _vmax and not _m2:
+                return jsonify({"error": f"'{_vmax}' is not a price figure (e.g. $29.99)"}), 400
+            if _m2 and _kind in ("exact", "from"):
+                _kind = "range"
+            _basis = str(row.get("basis") or "").strip()[:80]
             cf.setdefault(slug, {})["price"] = {
-                "value": _PRICE_FIG_RE.search(val).group(0).strip(),
-                "basis": str(row.get("basis") or "").strip()[:80],
-                "per_unit": "", "url": str(row.get("url") or "").strip(),
+                "value": _v, "value_max": (_m2.group(0).strip() if (_m2 and _kind == "range") else ""),
+                "kind": _kind, "basis": _basis, "per_unit": _per_unit_price(_v, _basis),
+                "url": str(row.get("url") or "").strip(),
                 "source": "yours", "quote": val[:220], "checked_at": now}
             saved.append(slug)
         db.update_brand(bid, competitor_facts=json.dumps(cf))
@@ -3000,6 +3287,10 @@ def api_blog_generate():
     # (so the next blog is prefilled and "Re-check prices" uses them) and read by the generator.
     # IGNORED entirely when Include pricing is off.
     price_links_in = (data.get("price_links") or []) if include_pricing else []
+    # FU214 (Change 1/5): the PRICE ROWS pasted on the generate form. Saved on the brand before
+    # generating (so the priced set is in hand when the writer runs) and, like the links, ignored
+    # entirely when Include pricing is off.
+    price_table_in = (data.get("price_table") or []) if include_pricing else []
     # FU133: YMYL authoritative sourcing — checkbox True/False; absent = auto-detect from the brand.
     ymyl_in = data.get("ymyl")
     ymyl_arg = (True if ymyl_in is True else (False if ymyl_in is False else None))
@@ -3027,6 +3318,9 @@ def api_blog_generate():
             brand = _ensure_content_context(claude, bg, brand)   # FU212: read new lines / auto once
             if price_links_in:   # FU213 (Change 5): save the pasted links, then generate with them
                 _save_price_links(bg, brand, price_links_in)
+                brand = bg.get_brand(brand_id) or brand
+            if price_table_in:   # FU214: save the pasted price rows, then generate with them
+                _save_price_table(bg, brand, price_table_in)
                 brand = bg.get_brand(brand_id) or brand
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.

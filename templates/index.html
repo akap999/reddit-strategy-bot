@@ -2024,8 +2024,16 @@ async function editBrandContext(brandName) {
     const _cdNames = [];
     competitorNames.forEach(n => { const k = String(n).trim(); if (k && !_cdNames.includes(k)) _cdNames.push(k); });
     Object.keys(competitorDomains).forEach(n => { const k = String(n).trim(); if (k && !_cdNames.includes(k)) _cdNames.push(k); });
-    const _cdText = _cdNames.map(n => `${n} | ${competitorDomains[n] || ''}`).join('\n');
+    // FU210: "your competitors" (always compared, never dropped) are shown apart from every other
+    // known competitor. The stored full list still contains both.
+    let _myNames = [];
+    try { _myNames = (JSON.parse(first.manual_competitors || '[]') || []).map(n => String(n).trim()).filter(Boolean); } catch(e) {}
+    const _isMine = n => _myNames.some(m => m.toLowerCase() === String(n).trim().toLowerCase());
+    const _otherNames = _cdNames.filter(n => !_isMine(n));
+    const _cdText = _otherNames.map(n => `${n} | ${competitorDomains[n] || ''}`).join('\n');
+    const _mineText = _myNames.map(n => `${n} | ${competitorDomains[n] || (Object.entries(competitorDomains).find(([k]) => k.toLowerCase() === n.toLowerCase()) || [,''])[1]}`).join('\n');
     const _ev = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
+    const _markChips = _otherNames.map(n => `<button type="button" class="btn btn-sm btn-secondary" style="padding:1px 8px;margin:2px" data-name="${_ev(n)}" onclick="_brandMarkMine(this)" title="Move to your competitors — compared in every blog, never dropped">+ ${_ev(n)}</button>`).join('');
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -2074,7 +2082,9 @@ async function editBrandContext(brandName) {
                     </div>
                     <div><label class="text-xs text-gray-400">Disclosure line <span class="text-gray-600">(shown on first-party comparisons)</span></label><input id="edit-brand-disclosure" value="${_ev(first.disclosure)}" placeholder="e.g. This comparison is published by ${_ev(brandName)}."></div>
                     <div><label class="text-xs text-gray-400">Logo URL <span class="text-gray-600">(for publisher schema / blog image fallback)</span></label><input id="edit-brand-logo" value="${_ev(first.logo_url)}" placeholder="https://…/logo.png"></div>
-                    <div><label class="text-xs text-gray-400">Competitor domains <span class="text-gray-600">(one per line as <code>Name | domain.com</code> — auto-fetched + cited in blogs)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
+                    <div><label class="text-xs text-gray-400"><b style="color:#c4b5fd">Your competitors</b> <span class="text-gray-600">(compared in EVERY blog and never dropped — one per line as <code>Name | domain.com</code>)</span></label><textarea id="edit-brand-mycomps" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_mineText}</textarea>
+                        ${_markChips ? `<div class="text-xs text-gray-500 mt-1">Mark as yours: <span id="edit-brand-markchips">${_markChips}</span></div>` : ''}</div>
+                    <div><label class="text-xs text-gray-400">Other known competitors <span class="text-gray-600">(suggested by Auto-analyze or found during blog generation — used in a blog only when they fit its topic; one per line as <code>Name | domain.com</code>)</span></label><textarea id="edit-brand-compdomains" rows="3" placeholder="Profound | tryprofound.com&#10;Otterly | otterly.ai" style="font-family:inherit">${_cdText}</textarea></div>
                     <div><label class="text-xs text-gray-400">Known sources <span class="text-gray-600">(one URL per line — links you supplied during past generations; auto-fetched as evidence on EVERY future blog for this brand)</span></label><textarea id="edit-brand-knownsources" rows="3" placeholder="https://www.accessdata.fda.gov/…/label.pdf&#10;https://diabetesjournals.org/care/…" style="font-family:inherit">${(() => { try { return (JSON.parse(first.known_sources || '[]') || []).join('\n'); } catch (_) { return ''; } })()}</textarea></div>
                     <div><label class="text-xs text-gray-400">Canonical pricing <span class="text-gray-600">(first-party — ${_ev(brandName)}'s OWN pricing per product, reused &amp; kept consistent across every blog; set this when the site blocks fetches. Auto-synced from the site. One per line as <code>Product | Price</code>; a single-price brand can enter just the price.)</span></label><textarea id="edit-brand-keyfacts-pricing" rows="3" placeholder="Tirzepatide | $149 first month, then $249/mo billed quarterly (60mg)&#10;Semaglutide | $199/mo" style="font-family:inherit">${(() => { try { const p = (JSON.parse(first.key_facts || '{}') || {}).pricing || {}; const items = Array.isArray(p.items) ? p.items : (p.value ? [{product:'',value:p.value}] : []); return items.map(it => (it.product ? (it.product + ' | ' + (it.value||'')) : (it.value||''))).filter(Boolean).join('\n'); } catch(_) { return ''; } })()}</textarea></div>
                     <div><label class="text-xs text-gray-400">Brand facts <span class="text-gray-600">(first-party — anything about ${_ev(brandName)} a blog should USE and may cite: positioning, credentials, coverage, policies, guarantees, real numbers. ONE FACT PER LINE, plain sentences are fine. Optional: <code>Label | Value</code> to label it, and a trailing <code>| https://…</code> to point at the page that states it. These are treated as ${_ev(brandName)}'s own authoritative evidence — never invented, never hedged.)</span></label><textarea id="edit-brand-keyfacts-facts" rows="5" placeholder="B2B-only — does not handle consumer debt&#10;Minimum claim | $10,000 per file&#10;Member of the Commercial Law League of America | https://example.com/about" style="font-family:inherit">${(() => { try { const f = (JSON.parse(first.key_facts || '{}') || {}).facts || {}; const items = Array.isArray(f.items) ? f.items : (Array.isArray(f) ? f : []); return items.map(it => { if (typeof it === 'string') return it; const v = (it && it.value) || ''; if (!v) return ''; return [(it.label || ''), v, (it.source_url || '')].filter(Boolean).join(' | '); }).filter(Boolean).join('\n'); } catch(_) { return ''; } })()}</textarea></div>
@@ -2130,6 +2140,21 @@ async function regenerateBrandPersonas(bid) {
     }
 }
 
+// FU210 — move one "other known competitor" into "your competitors" (Edit Brand).
+function _brandMarkMine(btn) {
+    const name = (btn && btn.dataset && btn.dataset.name) || '';
+    const other = document.getElementById('edit-brand-compdomains');
+    const mine = document.getElementById('edit-brand-mycomps');
+    if (!name || !other || !mine) return;
+    const lines = other.value.split('\n');
+    const idx = lines.findIndex(l => (l.split('|')[0] || '').trim().toLowerCase() === name.toLowerCase());
+    const line = idx >= 0 ? lines.splice(idx, 1)[0].trim() : `${name} | `;
+    other.value = lines.filter(l => l.trim()).join('\n');
+    const have = mine.value.split('\n').some(l => (l.split('|')[0] || '').trim().toLowerCase() === name.toLowerCase());
+    if (!have) mine.value = (mine.value.trim() ? mine.value.trim() + '\n' : '') + line;
+    btn.remove();
+}
+
 async function saveBrandContext(brandName) {
     const context = document.getElementById('edit-brand-context').value;
     const domainUrl = document.getElementById('edit-brand-url').value;
@@ -2151,11 +2176,16 @@ async function saveBrandContext(brandName) {
     const _val = id => (document.getElementById(id)?.value || '').trim();
     const competitor_domains = {};
     const competitor_names = [];
-    (_val('edit-brand-compdomains')).split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
-        const [name, dom] = line.split('|').map(x => (x || '').trim());
-        if (!name) return;
-        if (!competitor_names.some(n => n.toLowerCase() === name.toLowerCase())) competitor_names.push(name);
-        if (dom) competitor_domains[name] = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    const manual_competitors = [];   // FU210: "your competitors" — always compared, never dropped
+    const _hasMine = !!document.getElementById('edit-brand-mycomps');
+    [['edit-brand-mycomps', true], ['edit-brand-compdomains', false]].forEach(([fid, mine]) => {
+        (_val(fid)).split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+            const [name, dom] = line.split('|').map(x => (x || '').trim());
+            if (!name) return;
+            if (!competitor_names.some(n => n.toLowerCase() === name.toLowerCase())) competitor_names.push(name);
+            if (mine && !manual_competitors.some(n => n.toLowerCase() === name.toLowerCase())) manual_competitors.push(name);
+            if (dom) competitor_domains[name] = dom.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        });
     });
 
     const allBrands = _brandsViewState._allBrands || [];
@@ -2190,6 +2220,7 @@ async function saveBrandContext(brandName) {
             key_facts_facts: (document.getElementById('edit-brand-keyfacts-facts')?.value || ''),
             competitors: competitor_names,
             competitor_domains,
+            ...(_hasMine ? { manual_competitors } : {}),   // FU210
         }});
     }
 
@@ -13440,26 +13471,27 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
             : isOpt
             ? `No public reference found for <b>${_blogEsc(m.tool)}</b> — it's an option, not a company, so there's no page to link. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Type the facts below to keep it in the comparison.`
             : isPrice
-            ? `Found <b>${_blogEsc(m.tool)}</b>, but couldn't confirm its <b>current price</b> from its own site or a reputable source${hint}. Paste a product/pricing link, or type the price below. Skip it and the price column is dropped from the comparison (a blank cell is never shipped).`
+            ? `Found <b>${_blogEsc(m.tool)}</b>, but couldn't confirm its <b>current price</b> from its own site or a reputable source${hint}. Paste a product/pricing link or type the price below — or, without a price, choose whether to drop the price column or drop ${_blogEsc(m.tool)} (a blank cell is never shipped).`
             : `Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.`;
         const urlInput = isOpt ? '' :
             `<input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">`;
         return `
         <div class="border border-gray-700 rounded p-2 mb-2">
-            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}${isPrice ? ' <span class="text-xs font-normal text-gray-500">(price only — everything else is sourced)</span>' : ''}</div>
+            <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${m.manual ? ' <span class="text-xs font-normal" style="color:#c4b5fd">(your competitor)</span>' : ''}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}${isPrice ? ' <span class="text-xs font-normal text-gray-500">(price only — everything else is sourced)</span>' : ''}</div>
             <div class="text-xs text-gray-400 mb-2">${ask}</div>
             ${urlInput}
             <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : isPrice ? "…or type the price, e.g. '$24.99 for the 2-pack'" : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
             ${(!isThin && !isPrice) ? (() => {
                 // FU206b — a brand with NO information. "Skip" used to keep it and destroy the table;
                 // it now removes it from the whole blog. Both choices are shown, with what each costs.
-                const canRemove = (m.remaining_if_removed || 0) >= 3;
+                // FU210: one of the operator's OWN competitors is never removed.
+                const canRemove = !m.manual && (m.remaining_if_removed || 0) >= 3;
                 return `
             <div class="text-xs mt-2 border-t border-gray-700 pt-2">
                 <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
                 <label class="flex items-start gap-2 ${canRemove ? 'cursor-pointer' : 'opacity-50'} mb-1">
                     <input type="radio" name="blog-ps-empty-${i}" id="blog-ps-remove-${i}" value="remove" ${canRemove ? 'checked' : 'disabled'} class="mt-0.5">
-                    <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it.${canRemove ? ` The comparison keeps its columns with ${m.remaining_if_removed} competitors.` : ` <span class="text-amber-400">Not available: only ${m.remaining_if_removed || 0} competitor(s) would remain, and a comparison needs at least 3.</span>`}</span>
+                    <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it.${canRemove ? ` The comparison keeps its columns with ${m.remaining_if_removed} competitors.` : (m.manual ? ` <span class="text-amber-400">Not available: ${_blogEsc(m.tool)} is one of your competitors, which are always compared.</span>` : ` <span class="text-amber-400">Not available: only ${m.remaining_if_removed || 0} competitor(s) would remain, and a comparison needs at least 3.</span>`)}</span>
                 </label>
                 <label class="flex items-start gap-2 cursor-pointer">
                     <input type="radio" name="blog-ps-empty-${i}" id="blog-ps-keep-${i}" value="keep" ${canRemove ? '' : 'checked'} class="mt-0.5">
@@ -13478,10 +13510,31 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
                     <input type="radio" name="blog-ps-thin-${i}" id="blog-ps-remove-${i}" value="remove" class="mt-0.5">
                     <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it. The comparison keeps its depth with ${m.remaining_if_removed} competitor${m.remaining_if_removed === 1 ? '' : 's'}.</span>
                 </label>
-            </div>` : (isPrice ? `
-            <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
-                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop the price column
-            </label>` : '')}
+            </div>` : (isPrice ? (() => {
+                // FU209 — a brand whose PRICE could not be confirmed. Two ways to lose it: keep the brand
+                // and drop the price column for everyone (the old "Skip"), or remove the brand from the
+                // whole blog so the other brands keep their prices. Same floor as FU206b. A checkpoint
+                // written before this round has no count — the server still enforces the floor.
+                const known = m.remaining_if_removed != null;
+                const canRemove = !m.manual && (!known || m.remaining_if_removed >= 3);   // FU210
+                return `
+            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+                <div class="text-gray-400 mb-1">If you don't have the price, choose what to lose:</div>
+                <label class="flex items-start gap-2 cursor-pointer mb-1">
+                    <input type="radio" name="blog-ps-price-${i}" id="blog-ps-skip-${i}" value="skip" checked class="mt-0.5" style="width:auto;flex:none">
+                    <span><b>Keep ${_blogEsc(m.tool)}</b> — drop the price column for every brand. Everything else about ${_blogEsc(m.tool)} stays in the comparison.</span>
+                </label>
+                <label class="flex items-start gap-2 ${canRemove ? 'cursor-pointer' : 'opacity-50'}">
+                    <input type="radio" name="blog-ps-price-${i}" id="blog-ps-remove-${i}" value="remove" ${canRemove ? '' : 'disabled'} class="mt-0.5" style="width:auto;flex:none">
+                    <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it. The price column stays for the other brands.${m.manual
+                        ? ` <span class="text-amber-400">Not available: ${_blogEsc(m.tool)} is one of your competitors, which are always compared.</span>`
+                        : known
+                        ? (canRemove ? ` ${m.remaining_if_removed} competitors remain.`
+                                     : ` <span class="text-amber-400">Not available: only ${m.remaining_if_removed} competitor(s) would remain, and a comparison needs at least 3.</span>`)
+                        : ` If that would leave fewer than 3 competitors, it is kept instead and you are told.`}</span>
+                </label>
+            </div>`;
+            })() : '')}
         </div>`;
     }).join('');
     showModal(`<div style="max-width:640px">
@@ -13505,9 +13558,11 @@ function _blogSubmitSources(skipAll) {
     const sources = [];
     if (!skipAll) {
         tools.forEach((tool, i) => {
-            const skip = !!document.getElementById('blog-ps-skip-' + i)?.checked;
             const url = (document.getElementById('blog-ps-url-' + i)?.value || '').trim();
             const fact = (document.getElementById('blog-ps-fact-' + i)?.value || '').trim();
+            // FU209: the price-only "keep the brand, drop the price column" choice is now a pre-selected
+            // radio, so it must never override a price the operator actually pasted.
+            const skip = !!document.getElementById('blog-ps-skip-' + i)?.checked && !url && !fact;
             // FU206: a THIN competitor has a keep/remove radio instead of a skip box. "Remove" takes
             // the brand out of the ENTIRE blog; "keep" is the current behaviour (its unanswered
             // dimensions are dropped). A pasted source wins over either — it makes the choice moot.
@@ -13871,7 +13926,11 @@ async function openBlog(id) {
     const _isRegenPend = _pend.mode === 'regenerate' && (_pend.missing || []).length;
     if (b.status === 'awaiting_sources' || _isRegenPend) {
         const miss = _pend.missing || [];
-        window._blogOpenMissing = miss;
+        // FU209: a checkpoint paused before the removal count existed on price-only entries — derive it
+        // from the checkpoint's compared brands so the modal can show whether removal is allowed.
+        const _ckTools = ((_pend.checkpoint || {}).sourcing || {}).tools || [];
+        window._blogOpenMissing = miss.map(m => (m.remaining_if_removed == null && _ckTools.length)
+            ? Object.assign({}, m, { remaining_if_removed: _ckTools.length - 1 }) : m);
         window._blogOpenBudget = _pend.budget_warning || '';
         const names = miss.map(m => _blogEsc(m.tool)).join(', ') || 'a source';
         // FU207 — a paused REGENERATE is a different situation from a paused first Generate: the blog

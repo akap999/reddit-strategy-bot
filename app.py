@@ -1978,7 +1978,8 @@ def _extract_brand_enrichment_fields(data):
             out[scalar] = val.strip() if isinstance(val, str) else val
     # `use_cases` / `pain_points` / `features` / `competitors` /
     # `search_subreddits` are plain JSON list-of-strings.
-    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits"):
+    for listf in ("use_cases", "pain_points", "features", "competitors", "search_subreddits",
+                  "manual_competitors"):   # FU210
         if listf in data:
             v = data.get(listf)
             if v is None:
@@ -2103,6 +2104,7 @@ def api_add_brand(sid):
     try:
         data = request.json
         enrich_fields = _extract_brand_enrichment_fields(data)
+        enrich_fields.pop("manual_competitors", None)   # FU210: set in Edit Brand, not at creation
         bid = db.add_brand(
             subreddit_id=sid,
             name=data["name"],
@@ -2122,6 +2124,7 @@ def api_add_brand_standalone():
     try:
         data = request.json
         enrich_fields = _extract_brand_enrichment_fields(data)
+        enrich_fields.pop("manual_competitors", None)   # FU210: set in Edit Brand, not at creation
         bid = db.add_brand(
             subreddit_id=data.get("subreddit_id") or None,
             name=data["name"],
@@ -2141,6 +2144,22 @@ def api_update_brand(bid):
     try:
         data = request.json
         enrich_fields = _extract_brand_enrichment_fields(data)
+        # FU210: "your competitors" is always a SUBSET of the full competitor list, so every other
+        # consumer of `competitors` (posts, comments, blog curation) still sees them.
+        if enrich_fields.get("manual_competitors") is not None:
+            try:
+                _mine = [str(x).strip() for x in json.loads(enrich_fields["manual_competitors"]) if str(x).strip()]
+                if enrich_fields.get("competitors") is not None:
+                    _all = json.loads(enrich_fields["competitors"])
+                else:
+                    _all = json.loads((db.get_brand(bid) or {}).get("competitors") or "[]")
+                _all = [str(x).strip() for x in (_all or []) if str(x).strip()]
+                for _m in _mine:
+                    if _m.lower() not in {a.lower() for a in _all}:
+                        _all.append(_m)
+                enrich_fields["competitors"] = json.dumps(_all)
+            except Exception as e:
+                print(f"[brands] manual competitors merge skipped: {e}", flush=True)
         # FU150 (#4): operator-set CANONICAL PER-PRODUCT pricing (durable fix when the site bot-walls
         # the fetch). Accept a full `key_facts` object, a per-product `key_facts_pricing_items` list
         # ([{product,value}], from the UI's `Product | Price` textarea), or a single `key_facts_pricing`

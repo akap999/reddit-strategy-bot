@@ -304,7 +304,7 @@ class Database:
                      author_title=None, reviewer_name=None, reviewer_title=None,
                      disclosure=None, logo_url=None, known_sources=None,
                      meta_autofetched_at=None, key_facts=None, competitor_facts=None,
-                     name=None):
+                     name=None, manual_competitors=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
@@ -325,6 +325,7 @@ class Database:
             "meta_autofetched_at": meta_autofetched_at,
             "key_facts": key_facts,   # FU150 (#4): canonical first-party facts JSON
             "competitor_facts": competitor_facts,   # FU151 (A): per-competitor sourced-fact cache JSON
+            "manual_competitors": manual_competitors,   # FU210: the operator's own — always compared
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2334,6 +2335,9 @@ class Database:
             "pain_points":       "ALTER TABLE brands ADD COLUMN pain_points TEXT",
             "features":          "ALTER TABLE brands ADD COLUMN features TEXT",
             "competitors":       "ALTER TABLE brands ADD COLUMN competitors TEXT",
+            # FU210: the subset of `competitors` the operator marked as THEIRS (JSON list of names) —
+            # compared in every blog and never dropped. Starts empty for every existing brand.
+            "manual_competitors": "ALTER TABLE brands ADD COLUMN manual_competitors TEXT",
             "enriched_at":       "ALTER TABLE brands ADD COLUMN enriched_at TEXT",
             "search_subreddits": "ALTER TABLE brands ADD COLUMN search_subreddits TEXT",
             # User-supplied editorial direction for the comment voice —

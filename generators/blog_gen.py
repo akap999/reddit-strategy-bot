@@ -935,6 +935,32 @@ def _fact_stated_in(value, text):
     return all(a in hay for a in anchors)
 
 
+def _manual_competitors(brand):
+    """FU210 — the competitors the OPERATOR marked as theirs in Edit Brand. They are compared in
+    every blog and never dropped. Stored as a JSON list of names (`brands.manual_competitors`), always
+    a SUBSET of `brands.competitors`, so every other consumer of the full list is unchanged. Empty for
+    a brand the operator has not marked — and then every prompt is byte-identical to before."""
+    out, seen = [], set()
+    for n in _as_list((brand or {}).get("manual_competitors")):
+        n = str(n or "").strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def _matches_competitor(name, names):
+    """Slug match on a hyphen boundary, so "Noom" matches "Noom Med" but "Ro" never matches "Rory"."""
+    a = _kf_slug(name)
+    if not a:
+        return ""
+    for n in names or []:
+        b = _kf_slug(n)
+        if b and (a == b or a.startswith(b + "-") or b.startswith(a + "-")):
+            return n
+    return ""
+
+
 def _drop_nameless_when_named(items):
     """FU163: a NAMELESS general (empty-product) pricing item must never coexist with NAMED-product
     items — a catch-all price (e.g. a homepage "flexible plans … $79/mo") contradicts the specific
@@ -1439,6 +1465,7 @@ class BlogGenerator:
         self._budget_warn = ""        # FU205 (R6): a starvation note carried across a FU79 pause
         self._removed_brands = []     # FU206: brands the operator removed from the whole blog
         self._removed_refused = []    # FU206: removals refused because they would breach the floor
+        self._removed_protected = []  # FU210: removals refused because the brand is one of the operator's
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -1467,6 +1494,13 @@ class BlogGenerator:
         # every article. The operator's list is brand-level by nature; when this article has a NARROWER
         # subject, say so and offer the specialists found for it. Byte-identical when inert.
         _comp = _as_list(b.get("competitors"))
+        # FU210 — the operator's OWN competitors get their own line and are taken out of the general
+        # list below, so the subject-fit wording there can never talk the writer out of naming them.
+        _mine = _manual_competitors(b)
+        if _mine:
+            lines.append("Competitors YOU MUST COMPARE (set by the operator — include EVERY one in the "
+                         "comparison and the prose, whatever the article's subject): " + ", ".join(_mine))
+            _comp = [c for c in _comp if not _matches_competitor(c, _mine)]
         _sphr = getattr(self, "_subject_phrase", "") or ""
         _speers = getattr(self, "_subject_peers", None) or {}
         if _sphr and (_comp or _speers):
@@ -1727,6 +1761,9 @@ class BlogGenerator:
         cached = cached if isinstance(cached, dict) else {}
         stored_domains = dict(cached)          # original (before model-resolution) — to detect new
         comp_names = _as_list(b.get("competitors"))
+        _mine_e = _manual_competitors(b)   # FU210: the operator's own competitors are fetched first
+        if _mine_e:
+            comp_names = _mine_e + [c for c in comp_names if not _matches_competitor(c, _mine_e)]
         seed_low = (seed or "").lower()
 
         def _in_seed(nm):
@@ -2594,6 +2631,16 @@ extractable answer), still under 160 chars.
                      f"title, headings, or forward-looking copy MUST be the current year — never "
                      f"date the page with an earlier year unless the sentence is explicitly about "
                      f"a past event (a founding date, a past ruling).\n")
+        # FU210 — the operator's own competitors are compared in EVERY blog. Empty (byte-identical) when
+        # the operator has marked none.
+        _mine_a = _manual_competitors(brand)
+        _mine_step = ""
+        if _mine_a:
+            _mine_step = (f"      0. EVERY competitor under \"Competitors YOU MUST COMPARE\" "
+                          f"({', '.join(_mine_a)}) — each gets its OWN comparison-table row AND a prose "
+                          f"profile, even when it is not a specialist in this exact subject (then say "
+                          f"honestly what it offers for this topic). They count toward the floor; the "
+                          f"subject-fit test below applies ONLY to the other names.\n")
         # FU199 — subject fit decides WHO is compared, not position on the operator's list. Empty
         # (and so byte-identical) unless this article's subject is narrower than the brand's category.
         _sfit_p = getattr(self, "_subject_phrase", "") or ""
@@ -2826,7 +2873,7 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
     (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
     {name} itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
-      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
+{_mine_step}      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
          this article's angle before you consider any other name. These are the operator's own list;
          they are the peers the reader expects to see.
       2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
@@ -3620,8 +3667,24 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         for t in tools:
             if t.lower() not in seen_t:
                 seen_t.add(t.lower()); tools_u.append(t)
-        _prov_q = [t for t in tools_u if not _named_as_option(t, _opt_names)][:_VERIFY_MAX_BRANDS]
-        _opt_q = [t for t in tools_u if _named_as_option(t, _opt_names)][:_VERIFY_MAX_OPTIONS]
+        # FU210 — the operator's own competitors are ALWAYS sourced and compared, whether or not the
+        # draft named them and whatever the extraction thought of their category fit. They never count
+        # against the per-kind cap, so they can never evict (or be evicted by) a discovered name.
+        _mine = _manual_competitors(brand)
+        _mine_in = []
+        for _m in _mine:
+            _hit = next((t for t in tools_u if _matches_competitor(t, [_m])), "")
+            if not _hit:
+                tools_u.append(_m)
+                _hit = _m
+                print(f"[blog_gen] your-competitors: {_m} was not in the draft — added to the comparison",
+                      flush=True)
+            _mine_in.append(_hit)
+        _mine_low = {t.lower() for t in _mine_in}
+        _prov_q = _mine_in + [t for t in tools_u if t.lower() not in _mine_low
+                              and not _named_as_option(t, _opt_names)][:_VERIFY_MAX_BRANDS]
+        _opt_q = [t for t in tools_u if t.lower() not in _mine_low
+                  and _named_as_option(t, _opt_names)][:_VERIFY_MAX_OPTIONS]
         _keep = {t.lower() for t in _prov_q} | {t.lower() for t in _opt_q}
         tools = [t for t in tools_u if t.lower() in _keep]
         _options = {t.lower() for t in _opt_q}   # grows in the loop via the products backstop
@@ -3639,7 +3702,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # Warning ONLY: never drops a tool, never blocks a generation (the floor still stands).
         # CRITICAL: brand["competitors"] is a JSON STRING (db.get_brand returns dict(row) with no JSON
         # parsing) — read it with _as_list; list() would iterate CHARACTERS and mark every tool invented.
-        _curated_slugs = {_kf_slug(c) for c in _as_list(brand.get("competitors")) if _kf_slug(c)}
+        _curated_slugs = {_kf_slug(c) for c in (_as_list(brand.get("competitors")) + _mine) if _kf_slug(c)}
         _ev_blob = " ".join(
             str((b or {}).get("text") or "") + " " + str((b or {}).get("label") or "")
             for b in (getattr(self, "_evidence_blocks", None) or [])).lower()
@@ -4252,8 +4315,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # blocks already in hand (the FU157 rationale) — it costs nothing to run on them too.
                 if _px and any(_PRICE_DIM_RE.search(d or "") for d in dims):
                     if not self._has_confirmed_price(blocks, st.get("dom")):
+                        # FU209: the operator may REMOVE the brand instead of dropping the price
+                        # column for everyone — the modal needs the same floor count as FU206b.
                         unsourced.append({"tool": tool, "dom": st.get("dom") or "",
-                                          "facts": ["current price"], "price_only": True})
+                                          "facts": ["current price"], "price_only": True,
+                                          "remaining_if_removed": len(tools) - 1,
+                                          **({"manual": True} if tool.lower() in _mine_low else {})})
                         print(f"[blog_gen] price-check: {tool} has no confirmed own-site/reputable price "
                               f"— FU79 will ask the operator", flush=True)
             else:
@@ -4263,16 +4330,17 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU206b: how many competitors would remain if this one were removed, so the modal can
                 # offer (or honestly withhold) removal without re-deriving the floor client-side.
                 _rir = len(tools) - 1
+                _mflag = {"manual": True} if tool.lower() in _mine_low else {}   # FU210: never removable
                 if st.get("option"):
                     # FU189: a generic OPTION has no page, so demanding "paste a link to its page" is
                     # asking for something that cannot exist. The PAUSE stays (it is the ONLY way to
                     # rescue the row — `finish_pending_blog` turns a typed fact into the TOOL-LABELED
                     # block the reconcile needs), but the ask changes to typed facts only.
                     unsourced.append({"tool": tool, "facts": _mf, "generic_option": True,
-                                      "remaining_if_removed": _rir})
+                                      "remaining_if_removed": _rir, **_mflag})
                 else:
                     unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf,
-                                      "remaining_if_removed": _rir})
+                                      "remaining_if_removed": _rir, **_mflag})
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
@@ -4557,6 +4625,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # in the first place. Offered only while enough competitors remain WITHOUT it.
             if len(tools) - 1 < _MIN_COMPARISON_BRANDS:
                 break
+            # FU210: the only choice a thin-coverage ask offers is keep-or-remove. One of the operator's
+            # own competitors is never removed, so there is nothing to ask: its gaps drop the columns.
+            if _t.lower() in _mine_low:
+                continue
             _covered = [d for d in dims if any(w in tool_texts.get(_t, "") for w in _dim_words(d) or [""])]
             unsourced.append({
                 "tool": _t, "thin_coverage": True,
@@ -4712,6 +4784,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "core_topic": core_topic, "fresh": fresh, "unsourced": unsourced,
                 "options": sorted(_options),   # FU189: the non-vendor entities, for the reconcile
                 "peers": peers,     # FU105: same-type competitors — the reconcile's protected set
+                "manual": _mine_in,  # FU210: the operator's own competitors — never removed
                 "geo": rgeo,        # FU90: rides the checkpoint too, so the FU79 resume stays geo-aware
                 "qualifier": rqual,  # FU93: same for the qualifier
                 # FU178: canonical brand facts we could NOT find on the brand's own site — the reconcile
@@ -4756,6 +4829,23 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "them. Do NOT replace them with a substitute, do NOT say they were removed, and do "
                 "NOT leave a dangling comparison that still implies them. Rewrite the surrounding "
                 "sentence so it reads naturally without the name. Every OTHER brand stays.")
+        # FU210 — the operator's OWN competitors. Several rules below delete a row (off-category, no
+        # tool-specific fact, a cell that cannot be filled) and the writer used to apply them to these
+        # exactly like any other name. Empty (and byte-identical) when the operator marked none.
+        _mine_r = [str(x).strip() for x in (sourcing.get("manual") or []) if str(x).strip()
+                   and str(x).strip().lower() not in {r.lower() for r in _rm}]
+        _mine_line, _mine_rules = "", ""
+        if _mine_r:
+            _mine_line = ("\nYOUR COMPETITORS (set by the operator — see the OPERATOR'S COMPETITORS rule): "
+                          + json.dumps(_mine_r, ensure_ascii=False))
+            _mine_rules = (
+                "\n  - OPERATOR'S COMPETITORS (hard rule, OVERRIDES every row-removal rule above): the "
+                "competitors listed under YOUR COMPETITORS are ALWAYS compared. NEVER remove their "
+                "comparison row, their prose profile or their mentions — not for being off-category, "
+                "not for lacking a tool-specific fresh fact, not for a cell that cannot be filled. If one "
+                "has no row yet, ADD one. When one of them cannot answer a column, drop or replace the "
+                "COLUMN, never the competitor. Fill their cells only from FRESH FACTS about them; never "
+                "invent a value.")
         _opt_line, _opt_rules = "", ""
         if _optnames:
             _opt_line = ("\nGENERIC OPTIONS (approaches/categories, NOT companies — see the GENERIC "
@@ -5008,12 +5098,12 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}
+    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
-PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}{_mine_line}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}
@@ -8239,6 +8329,28 @@ Return JSON only:
                     "instead")
             print(f"[blog_gen] {_rrn}", flush=True)
             self._warn(article, _rrn)
+        _rmp = [x for x in (getattr(self, "_removed_protected", None) or []) if str(x).strip()]
+        if _rmp:
+            _rpn = ("removed-brand: " + ", ".join(_rmp) + " could NOT be removed — it is one of your "
+                    "competitors (Edit Brand), which are always compared; untick it there first")
+            print(f"[blog_gen] {_rpn}", flush=True)
+            self._warn(article, _rpn)
+        # FU210 — the operator's own competitors must be IN the finished article. Nothing downstream can
+        # invent a missing one's facts, so this reports it rather than guessing.
+        _mine_z = [m for m in _manual_competitors(brand)
+                   if not _matches_competitor(m, getattr(self, "_removed_brands", None) or [])]
+        if _mine_z:
+            _bz = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", article.get("body_markdown") or "",
+                           maxsplit=1)[0]
+            _missing_z = [m for m in _mine_z
+                          if not re.search(r"(?<![\w])" + re.escape(m) + r"(?![\w])", _bz, re.I)]
+            if _missing_z:
+                _one_z = len(_missing_z) == 1
+                _mzn = ("your-competitors: " + ", ".join(_missing_z) + (" is" if _one_z else " are")
+                        + " missing from the article although you marked " + ("it" if _one_z else "them")
+                        + " as your competitor" + ("" if _one_z else "s") + " — regenerate the article")
+                print(f"[blog_gen] {_mzn}", flush=True)
+                self._warn(article, _mzn)
         # FU205 (R7) — the two properties nothing verified: the answer-first guarantee that earns the
         # citation, and that the byline the client must replace actually survived the rewrites.
         _afn = self._answer_first_check(article.get("body_markdown") or "")
@@ -9643,6 +9755,13 @@ Return JSON only:
                         return "the fix changed the [S#] citations"
                 elif fc.get(k, 0) != qc.get(k, 0):
                     return "the fix changed the [S#] citations"
+        # FU210: a correction may change what a row SAYS about one of the operator's own competitors,
+        # never delete the row itself.
+        if quote.strip().startswith("|"):
+            _cell0 = re.sub(r"[*_`]", "", quote.strip().strip("|").split("|")[0]).strip()
+            _own = _matches_competitor(_cell0, _manual_competitors(brand)) if _cell0 else ""
+            if _own and (not fix.strip() or _own.lower() not in re.sub(r"[*_`]", "", fix).lower()):
+                return f"{_own} is one of your competitors — its comparison row is never removed"
         if not fix.strip():
             if action != "remove":
                 return "the fix is empty"
@@ -10068,6 +10187,10 @@ Return JSON only:
         # exists to prevent. A refused removal is REPORTED, never silently ignored.
         _tools_now = [str(t).strip() for t in (sourcing.get("tools") or []) if str(t).strip()]
         removed, refused = [], []
+        # FU210: the operator's own competitors — from the checkpoint AND the brand as it is now (a
+        # competitor marked while the blog was paused is protected too).
+        _mine_f = list(sourcing.get("manual") or []) + _manual_competitors(brand)
+        protected = []
         # FU206b — a competitor with NO information at all, skipped by the operator. The modal has
         # always labelled that choice "Skip this one — drop it from the comparison", and it did the
         # OPPOSITE: the reconcile never ran (nothing new was provided), the brand's blank row stayed,
@@ -10089,6 +10212,8 @@ Return JSON only:
             _ut = str(_u.get("tool") or "").strip()
             if not _ut or _u.get("price_only") or _u.get("thin_coverage"):
                 continue
+            if _u.get("manual") or _matches_competitor(_ut, _mine_f):
+                continue   # FU210: one of the operator's own competitors is never removed implicitly
             _it = _asked.get(_ut.lower()) or {}
             if str(_it.get("url") or "").strip() or str(_it.get("fact") or "").strip():
                 continue   # the operator supplied something — it gets filled, not removed
@@ -10100,7 +10225,12 @@ Return JSON only:
             if not isinstance(item, dict) or not item.get("remove"):
                 continue
             _t = str(item.get("tool") or "").strip()
-            if not _t or _t.lower() in {r.lower() for r in removed + refused}:
+            if not _t or _t.lower() in {r.lower() for r in removed + refused + protected}:
+                continue
+            if _matches_competitor(_t, _mine_f):
+                protected.append(_t)
+                print(f"[blog_gen] remove-brand: REFUSED {_t} — it is one of the operator's own "
+                      f"competitors, which are never removed", flush=True)
                 continue
             if len([x for x in _tools_now if x.lower() != _t.lower()]) < _MIN_COMPARISON_BRANDS:
                 refused.append(_t)
@@ -10125,6 +10255,8 @@ Return JSON only:
                   f"(row, evidence and prose) — {len(_tools_now)} competitor(s) remain", flush=True)
         if refused:
             self._removed_refused = refused
+        if protected:
+            self._removed_protected = protected
 
         resolved = set()
         for item in (provided or []):
@@ -10158,6 +10290,17 @@ Return JSON only:
             if vc:
                 article["body_markdown"] = vc["body_markdown"]
                 article["claims_flagged"] = (article.get("claims_flagged") or []) + vc["flagged"]
+            elif sourcing.get("fresh") and (article.get("body_markdown") or "").strip():
+                # FU209b — the reconcile is the ONLY step that writes what the operator just supplied
+                # (a pasted price, a link, a removal) into the article. It used to fail SILENTLY here:
+                # the unreconciled draft was finalized, its blank cell dropped the whole column, the
+                # checkpoint was cleared, and the operator's answer was gone — observed when the
+                # Anthropic credit balance ran out mid-resume. Stop instead: raising leaves the blog
+                # paused (the endpoint writes nothing), so the operator can answer again once the
+                # cause is fixed.
+                _err = (getattr(self.claude, "last_error", None) or "the model returned no usable article")
+                raise ValueError(f"Could not write your answers into the article ({_err}). Nothing was "
+                                 "changed and the blog is still paused. Fix the cause and answer again.")
         # FU90: the checkpoint's sourcing carries the resolved geo — the resume stays geo-aware.
         # FU207: a paused "Regen article" / "Re-verify" must not regenerate the LinkedIn post on
         # resume — those buttons never did. Only a first Generate or "Regen all" does.

@@ -3295,6 +3295,219 @@ def api_blog_verify(blog_id):
             bg.close()
     return jsonify({"task_id": start_task("blog_verify", task, pass_task_id=True)})
 
+# ── FU208: verify a finished blog → review with the operator's input → a SEPARATE verified version ──
+# The original body_markdown is never written by any of these endpoints. The verified version sits
+# beside the original exactly like the watermark-free version (use=verified on every export).
+def _vx_source_text(blog, source):
+    """(body, meta_description) the analysis/apply works on: the original blog, or the verified
+    version on a "Verify again" round."""
+    if source == "verified":
+        return ((blog.get("verified_body") or ""),
+                (blog.get("verified_meta_description") or blog.get("meta_description") or ""))
+    return (blog.get("body_markdown") or ""), (blog.get("meta_description") or "")
+
+
+def _vx_merge_decisions(session, decisions):
+    """Fold the review panel's per-item decisions into the stored items (so a re-check or a redo
+    carries them). Unknown ids are ignored."""
+    session = dict(session or {})
+    decisions = decisions if isinstance(decisions, dict) else {}
+    items = []
+    for it in (session.get("items") or []):
+        it = dict(it)
+        d = decisions.get(it.get("id"))
+        if isinstance(d, dict):
+            merged = dict(it.get("decision") or {})
+            for k in ("approved", "action", "new_value", "comment", "save_canonical", "fixes"):
+                if k in d:
+                    merged[k] = d[k]
+            it["decision"] = merged
+        items.append(it)
+    session["items"] = items
+    return session
+
+
+def _vx_now():
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+
+
+@app.route("/api/blogs/<int:blog_id>/verify-analyze", methods=["POST"])
+def api_blog_verify_analyze(blog_id):
+    """FU208 — run the scrutiny ANALYSIS (background task). Body:
+      {"notes": [{"text","value","url"}], "source": "original"|"verified"}  — a new analysis
+      {"recheck": true, "decisions": {...}, "added": [...], "instructions": "..."}  — Re-check with my input
+    Writes only `verify_session`."""
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    data = request.get_json(silent=True) or {}
+    recheck = bool(data.get("recheck"))
+    source_req = (data.get("source") or "original").strip()
+    if source_req not in ("original", "verified"):
+        return jsonify({"error": f"unknown source {source_req!r}"}), 400
+
+    def task(_task_id=None):
+        from generators.blog_gen import BlogGenerator, _VX_COST_CEILING
+        bg = Database(DB_PATH)
+        bg.connect()
+        bg.initialize()
+        try:
+            blog = bg.get_blog(blog_id)
+            if not blog:
+                raise ValueError("blog not found")
+            existing = blog.get("verify_session") if isinstance(blog.get("verify_session"), dict) else {}
+            if recheck:
+                if not existing.get("status"):
+                    raise ValueError("there is no analysis to re-check — run Verify first")
+                prior = _vx_merge_decisions(existing, data.get("decisions"))
+                source = prior.get("source") or "original"
+                notes = list(prior.get("notes") or []) + list(data.get("added") or [])
+                instructions = (data.get("instructions") if data.get("instructions") is not None
+                                else prior.get("instructions")) or ""
+            else:
+                prior, source = {}, source_req
+                notes = data.get("notes") or []
+                instructions = ""
+            body, meta = _vx_source_text(blog, source)
+            if not body.strip():
+                raise ValueError("there is no verified version yet — create one first"
+                                 if source == "verified" else "the blog has no body to verify")
+            brand = bg.get_brand(blog.get("brand_id")) or {}
+            claude = ClaudeClient(api_key)
+            claude.reset_usage()
+            claude.set_cost_ceiling(_VX_COST_CEILING)   # gates web search; skips are counted and shown
+            gen = BlogGenerator(claude, bg)
+            session = gen.verify_analyze(brand, body, meta, notes=notes, prior=prior,
+                                         instructions=instructions)
+            session["source"] = source
+            session["cost"] = round(claude.usage_cost(), 4)
+            session["total_cost"] = round(float(prior.get("total_cost") or 0) + session["cost"], 4)
+            # a fresh analysis over an APPLIED one keeps the applied session aside, so Discard restores
+            # "Redo corrections" instead of losing it
+            _keep = existing if existing.get("status") == "applied" else existing.get("previous_applied")
+            if _keep:
+                session["previous_applied"] = {k: v for k, v in _keep.items()
+                                               if k not in ("pages", "previous_applied")}
+            bg.update_blog(blog_id, verify_session=session)
+            st = session.get("stats") or {}
+            return {"blog_id": blog_id, "ok": True, "items": len(session.get("items") or []),
+                    "claims": st.get("claims", 0), "confirmed": st.get("confirmed", 0),
+                    "searches": st.get("searches", 0), "skipped_searches": st.get("skipped_searches", 0),
+                    "search_capped": st.get("search_capped", 0), "cost": session["cost"]}
+        finally:
+            bg.close()
+    return jsonify({"task_id": start_task("blog_verify_analyze", task, pass_task_id=True,
+                                     dedup_key=f"blog_verify_analyze:{blog_id}")})
+
+
+def _vx_run_apply(blog_id, api_key, redo, data):
+    from generators.blog_gen import BlogGenerator, upsert_canonical_value
+    bg = Database(DB_PATH)
+    bg.connect()
+    bg.initialize()
+    try:
+        blog = bg.get_blog(blog_id)
+        if not blog:
+            raise ValueError("blog not found")
+        session = blog.get("verify_session") if isinstance(blog.get("verify_session"), dict) else {}
+        if redo:
+            if session.get("status") != "applied" or not isinstance(session.get("applied_from"), dict):
+                raise ValueError("there are no applied corrections to redo — create a verified version first")
+            body = session["applied_from"].get("body") or ""
+            meta = session["applied_from"].get("meta") or ""
+            added = session.get("added") or []
+            instructions = session.get("instructions") or ""
+        else:
+            if session.get("status") not in ("ready", "applied"):
+                raise ValueError("there is no analysis to apply — run Verify first")
+            session = _vx_merge_decisions(session, data.get("decisions"))
+            added = data.get("added") or []
+            instructions = (data.get("instructions") or "").strip()
+            body, meta = _vx_source_text(blog, session.get("source") or "original")
+        if not body.strip():
+            raise ValueError("the source text is empty")
+        brand = bg.get_brand(blog.get("brand_id")) or {}
+        claude = ClaudeClient(api_key)
+        claude.reset_usage()
+        gen = BlogGenerator(claude, bg)
+        out = gen.verify_apply(brand, body, meta, session, added=added, instructions=instructions,
+                               seed=blog.get("seed") or "", redo=redo)
+        report = out["report"]
+        report["canonical"] = []
+        if not redo:
+            for req in report.get("canonical_requests") or []:
+                try:
+                    kf, saved = upsert_canonical_value(brand.get("key_facts"), req["kind"], req.get("product"),
+                                                       req["value"], req.get("source_url") or "",
+                                                       req.get("label") or "")
+                    if saved:
+                        bg.update_brand(brand["id"], key_facts=json.dumps(kf))
+                        brand["key_facts"] = json.dumps(kf)
+                    report["canonical"].append({**req, "saved": bool(saved),
+                                                **({} if saved else {"reason": "this brand has named per-product "
+                                                   "prices; a price with no product name is not kept"})})
+                except Exception as e:
+                    report["canonical"].append({**req, "saved": False, "reason": str(e)})
+        cost = round(claude.usage_cost(), 4)
+        report["cost"] = cost
+        report["at"] = _vx_now()
+        report["source"] = session.get("source") or "original"
+        session = dict(session)
+        if not redo:
+            session.update({"status": "applied", "applied_at": report["at"], "added": added,
+                            "instructions": instructions, "applied_from": {"body": body, "meta": meta}})
+        else:
+            session["redone_at"] = report["at"]
+        total = round(float(session.get("total_cost") or 0) + cost, 4)
+        session["total_cost"] = total
+        bg.update_blog(blog_id, verified_body=out["body"], verified_meta_description=out["meta_description"],
+                       verified_at=report["at"], verified_report=report, verified_cost=total,
+                       verify_session=session)
+        return {"blog_id": blog_id, "ok": True, "n_applied": report.get("n_applied", 0),
+                "n_refused": report.get("n_refused", 0), "n_items": report.get("n_items", 0),
+                "cost": cost, "total_cost": total, "redo": redo}
+    finally:
+        bg.close()
+
+
+@app.route("/api/blogs/<int:blog_id>/verify-apply", methods=["POST"])
+def api_blog_verify_apply(blog_id):
+    """FU208 — "Create verified version": apply the approved items (+ comments, edits, added
+    corrections, general instructions) to a copy of the source text. Body:
+    {"decisions": {item_id: {approved, action, new_value, comment, save_canonical, fixes}},
+     "added": [{text, value, url}], "instructions": "..."}"""
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    data = request.get_json(silent=True) or {}
+    return jsonify({"task_id": start_task("blog_verify_apply",
+                                          lambda _task_id=None: _vx_run_apply(blog_id, api_key, False, data),
+                                          pass_task_id=True, dedup_key=f"blog_verify_apply:{blog_id}")})
+
+
+@app.route("/api/blogs/<int:blog_id>/verify-redo", methods=["POST"])
+def api_blog_verify_redo(blog_id):
+    """FU208 — "Redo corrections": the same approved analysis, re-written wording. No page fetch and
+    no web search — the analysis is reused as stored."""
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    return jsonify({"task_id": start_task("blog_verify_redo",
+                                          lambda _task_id=None: _vx_run_apply(blog_id, api_key, True, {}),
+                                          pass_task_id=True, dedup_key=f"blog_verify_apply:{blog_id}")})
+
+
+@app.route("/api/blogs/<int:blog_id>/verify-discard", methods=["POST"])
+def api_blog_verify_discard(blog_id):
+    """FU208 — discard the analysis awaiting review. If it replaced an applied one, that one comes back
+    (so "Redo corrections" still works). The verified version itself is kept."""
+    db = get_db()
+    try:
+        blog = db.get_blog(blog_id)
+        if not blog:
+            return jsonify({"error": "blog not found"}), 404
+        s = blog.get("verify_session") if isinstance(blog.get("verify_session"), dict) else {}
+        restored = s.get("previous_applied") if s.get("status") != "applied" else None
+        db.update_blog(blog_id, verify_session=(restored or {}))
+        return jsonify({"ok": True, "restored": bool(restored)})
+    finally:
+        db.close()
+
 @app.route("/api/blogs/<int:blog_id>/provide-sources", methods=["POST"])
 def api_blog_provide_sources(blog_id):
     """FU79 — finish a blog PAUSED awaiting manual sources. Body: {sources:[{tool,url,fact}]}.
@@ -3582,7 +3795,8 @@ def api_blog_patch(blog_id):
                # FU154 fix: blogSave has always SENT rewritten_body, but it was never whitelisted —
                # so a manual edit to the watermark-free version was silently discarded on save.
                "rewritten_body",
-               "linkedin_rewritten", "linkedin_article_rewritten")   # FU179
+               "linkedin_rewritten", "linkedin_article_rewritten",   # FU179
+               "verified_body", "verified_meta_description")         # FU208
               if k in data}
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
@@ -4275,15 +4489,18 @@ def api_blog_export(blog_id):
     # FU154: `?use=rewritten` exports the watermark-free rewrite (falls back to the original when
     # no rewrite exists). One swap covers md / html / gdoc below.
     _use = (request.args.get("use") or "").lower()
+    _vf = _use == "verified" and bool((blog.get("verified_body") or "").strip())   # FU208
     if _use == "rewritten" and (blog.get("rewritten_body") or "").strip():
         body = blog["rewritten_body"]
+    elif _vf:
+        body = blog["verified_body"]
     else:
         body = blog.get("body_markdown") or ""
     title = blog.get("title") or "blog"
     # FU114: the exported <title> tag prefers the SEO meta_title (when generated); the H1
     # and the download slug stay seed-based (stable, FU88).
     page_title = (blog.get("meta_title") or "").strip() or title
-    desc = blog.get("meta_description") or ""
+    desc = ((blog.get("verified_meta_description") or "") if _vf else "") or blog.get("meta_description") or ""
     published = (blog.get("created_at") or "")[:10]
     updated = (blog.get("updated_at") or "")[:10]
 
@@ -6811,10 +7028,14 @@ def api_blog_upload_gdoc(blog_id):
             # already did this (FU179); the blog itself — the surface the operator actually hands to a
             # client — did not, so its watermark-free version could not reach Drive at all.
             _rw_src = ((blog.get("rewritten_body") if _gw else "") or "").strip()
-            body = _rw_src or (blog.get("body_markdown") or "")
+            # FU208: `use='verified'` uploads the operator-approved verified version (falls back to the
+            # original when none exists).
+            _vf_src = ((blog.get("verified_body") if (data.get("use") or "") == "verified" else "") or "").strip()
+            body = _rw_src or _vf_src or (blog.get("body_markdown") or "")
             _gw_used = bool(_rw_src)
             page_title = (blog.get("meta_title") or "").strip() or title
-            desc = blog.get("meta_description") or ""
+            desc = ((blog.get("verified_meta_description") or "") if _vf_src else "") \
+                or blog.get("meta_description") or ""
             published = (blog.get("created_at") or "")[:10]
             updated = (blog.get("updated_at") or "")[:10]
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:80] or "blog"

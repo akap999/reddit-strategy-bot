@@ -34,6 +34,7 @@ MARKDOWN_FIELDS = frozenset({
     "body_markdown",      # the blog itself
     "rewritten_body",     # FU154 watermark-free version — shipped to clients, same guarantees
     "body_pre_verify",    # FU202 snapshot; scrubbed so the "before" view isn't worse than the after
+    "verified_body",      # FU208 operator-approved verified version — hand edits get the same guards
 })
 
 # PROSE surfaces: plain text or light markdown that must NOT be restructured. A LinkedIn post has no
@@ -49,7 +50,8 @@ PROSE_FIELDS = frozenset({
 # META fields: published text, so the symbol scrub applies — exactly as `_finalize_article` already
 # does for these two. `title` is deliberately ABSENT: FU88 pins it to the operator's seed verbatim,
 # and the H1 is pinned to the same string, so scrubbing it would break that equality.
-META_FIELDS = frozenset({"meta_description", "meta_title"})
+META_FIELDS = frozenset({"meta_description", "meta_title",
+                         "verified_meta_description"})   # FU208
 
 SANITIZED_FIELDS = MARKDOWN_FIELDS | PROSE_FIELDS | META_FIELDS
 

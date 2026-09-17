@@ -1150,6 +1150,11 @@ class Database:
             blog["rewrites_meta"] = json.loads(blog.get("rewrites_meta") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["rewrites_meta"] = {}
+        for _k208 in ("verify_session", "verified_report"):   # FU208: verification analysis + apply record
+            try:
+                blog[_k208] = json.loads(blog.get(_k208) or "{}")
+            except (json.JSONDecodeError, TypeError):
+                blog[_k208] = {}
         prows = self.conn.execute(
             "SELECT platform, published_url, published_at, status FROM blog_platforms "
             "WHERE blog_id = ? ORDER BY platform", (blog_id,)
@@ -1216,7 +1221,9 @@ class Database:
                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",   # FU179
                    "body_pre_verify",   # FU202: the body before the verification pass edited it
                    "verify_report",     # FU205 (R2): computed every run, previously never stored
-                   "warnings"}          # FU205 (R2): the structured warning list behind the toast
+                   "warnings",          # FU205 (R2): the structured warning list behind the toast
+                   "verified_body", "verified_meta_description", "verified_at",   # FU208
+                   "verify_session", "verified_report", "verified_cost"}          # FU208
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
         # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
@@ -1229,7 +1236,8 @@ class Database:
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
             elif k in ("pending_state", "youtube_meta", "quality_report",
-                       "rewrites_meta", "verify_report") and not isinstance(v, str):
+                       "rewrites_meta", "verify_report",
+                       "verify_session", "verified_report") and not isinstance(v, str):
                 v = json.dumps(v or {})   # FU79/FU80/FU151/FU179/FU205: JSON dict
             elif k == "warnings" and not isinstance(v, str):
                 v = json.dumps(v or [])   # FU205 (R2): JSON list of {check, detail}
@@ -2420,7 +2428,14 @@ class Database:
                     # FU205 (R2): the structured warning list (JSON [{check, detail}]) behind the
                     # single "; "-joined toast string. One entry per check that fired, so the count
                     # and the score are right and the operator sees whole warnings, not fragments.
-                    "warnings"):
+                    "warnings",
+                    # FU208: the operator-approved VERIFIED version of the blog — a separate copy kept
+                    # beside the original, exactly like the watermark-free version. The original
+                    # body_markdown is never touched by verification. verify_session is the JSON
+                    # analysis awaiting review (notes, correction items, fetched-page excerpts);
+                    # verified_report is the per-item before -> after record of the last apply.
+                    "verified_body", "verified_meta_description", "verified_at",
+                    "verify_session", "verified_report"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
@@ -2472,6 +2487,9 @@ class Database:
             self.conn.commit()
         if "rewritten_cost" not in blog_cols:   # FU155: rough GPU-cost estimate of the rewrite
             self.conn.execute("ALTER TABLE blogs ADD COLUMN rewritten_cost REAL DEFAULT 0")
+            self.conn.commit()
+        if "verified_cost" not in blog_cols:   # FU208: Claude + search cost of the last verification
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN verified_cost REAL DEFAULT 0")
             self.conn.commit()
 
         # ----- posts: intent column for GEO-style 1:1:1 batches -----

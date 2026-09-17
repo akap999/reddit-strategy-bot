@@ -13144,6 +13144,267 @@ function blogVerify(id, surface, use) {
     }, 'Verifying with ' + (use === 'rewritten' ? 'Claude, repairing with Qwen' : 'Claude'));
 }
 
+// ── FU208 — verify a finished blog: request → the tool's analysis → your approval → a SEPARATE verified
+// version. The original blog is never modified; the verified version sits beside it like watermark-free.
+function _vxNoteRow(prefix, i) {
+    return `<div class="border border-gray-700 rounded p-2 mb-2" id="${prefix}-row-${i}">
+        <textarea id="${prefix}-text-${i}" class="w-full text-xs mb-1" rows="2" placeholder="What's wrong — e.g. 'Ro's price is out of date' or 'we don't offer a free trial any more'"></textarea>
+        <div class="flex gap-2">
+            <input id="${prefix}-value-${i}" class="text-xs" style="flex:1" placeholder="Correct value (optional) — e.g. $74/month">
+            <input id="${prefix}-url-${i}" class="text-xs" style="flex:2" placeholder="Source link (optional) — https://…">
+        </div>
+    </div>`;
+}
+
+function _vxAddNoteRow(prefix) {
+    const box = document.getElementById(prefix + '-rows');
+    if (!box) return;
+    const n = box.querySelectorAll(':scope > div').length;
+    box.insertAdjacentHTML('beforeend', _vxNoteRow(prefix, n));
+}
+
+function _vxCollectNotes(prefix) {
+    const out = [];
+    const box = document.getElementById(prefix + '-rows');
+    if (!box) return out;
+    const n = box.querySelectorAll(':scope > div').length;
+    for (let i = 0; i < n; i++) {
+        const t = (document.getElementById(`${prefix}-text-${i}`)?.value || '').trim();
+        const v = (document.getElementById(`${prefix}-value-${i}`)?.value || '').trim();
+        const u = (document.getElementById(`${prefix}-url-${i}`)?.value || '').trim();
+        if (t || v) out.push({ text: t, value: v, url: u });
+    }
+    return out;
+}
+
+function _vxWiden(px) {
+    const box = document.querySelector('#modal-root .modal-box');
+    if (box) box.style.maxWidth = (px || 860) + 'px';
+}
+
+function blogVerifyRequestModal(id, source) {
+    source = source || 'original';
+    const again = source === 'verified';
+    showModal(`<div>
+        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#a5b4fc">${again ? '🔍 Verify the verified version again' : '🔍 Verify this blog'}</h3><button onclick="closeModal(); openBlog(${id})" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-400 mb-2">The tool reads every factual claim, re-reads every page the blog cites, and searches the web for anything those pages don't confirm. It then comes back with its analysis for you to approve, edit or comment on. <b>Nothing changes until you approve it</b>, and the original blog is never modified: the result is saved as a separate verified version.</p>
+        <p class="text-xs text-gray-500 mb-3">Know something is wrong? Say so below, with or without the correct value. A note with no value is researched; a value you give is checked against the sources too. Web search is capped at about $1 per run; skipped searches are reported.</p>
+        <div id="vx-req-rows">${_vxNoteRow('vx-req', 0)}</div>
+        <button class="btn btn-sm btn-secondary" onclick="_vxAddNoteRow('vx-req')">+ Add another note</button>
+        <div class="flex gap-2 justify-end mt-3">
+            <button class="btn btn-sm btn-secondary" onclick="closeModal(); openBlog(${id})">Cancel</button>
+            <button class="btn btn-sm btn-primary" onclick="_vxRunAnalysis(${id}, '${source}')">Run verification</button>
+        </div>
+    </div>`);
+    _vxWiden(680);
+}
+
+function _vxAnalysisToast(res) {
+    if (!res || !res.ok) return;
+    const bits = [`${res.items} item(s) to review`, `${res.claims} claim(s) checked`, `${res.confirmed} confirmed by their page`,
+                  `${res.searches} search(es)`];
+    if (res.skipped_searches) bits.push(`${res.skipped_searches} skipped by the cost cap`);
+    if (res.search_capped) bits.push(`${res.search_capped} over the search limit`);
+    const ct = (typeof res.cost === 'number') ? ` · ≈ $${res.cost.toFixed(2)}` : '';
+    toast('Verification analysis ready — ' + bits.join(' · ') + ct,
+          (res.skipped_searches || res.search_capped) ? 'error' : 'success', 12000);
+}
+
+function _vxRunAnalysis(id, source) {
+    const notes = _vxCollectNotes('vx-req');
+    closeModal();
+    runTask('/api/blogs/' + id + '/verify-analyze', { notes: notes, source: source }, (res) => {
+        _vxAnalysisToast(res);
+        blogVerifyReviewModal(id);
+    }, 'Verifying the blog');
+}
+
+function _vxFixList(it, action) {
+    const prop = it.proposal || {};
+    if (action === prop.action) return prop.fixes || [];
+    return ((prop.alternatives || {})[action]) || [];
+}
+
+function _vxRenderFixes(itemId) {
+    const st = window._vxState;
+    if (!st) return;
+    const it = st.items.find(x => x.id === itemId);
+    if (!it) return;
+    const sel = document.getElementById('vx-act-' + itemId);
+    const action = sel ? sel.value : ((it.decision || {}).action || (it.proposal || {}).action);
+    const box = document.getElementById('vx-fixes-' + itemId);
+    const vbox = document.getElementById('vx-valwrap-' + itemId);
+    if (vbox) vbox.style.display = (action === 'correct') ? '' : 'none';
+    if (!box) return;
+    if (action === 'keep') {
+        box.innerHTML = '<div class="text-xs text-gray-500">Kept as it is — nothing will change.</div>';
+        st.fixes[itemId] = [];
+        return;
+    }
+    const fixes = _vxFixList(it, action);
+    st.fixes[itemId] = fixes;
+    const saved = {};
+    ((it.decision || {}).fixes || []).forEach(f => { if (f && f.edited) saved[f.quote] = f.fix; });
+    const rows = fixes.map((f, k) => `<div class="mb-2">
+        <div class="text-xs text-gray-500">${_blogEsc(f.where || '')} — before:</div>
+        <div class="text-xs text-gray-400 border-l-2 border-gray-600 pl-2 mb-1" style="white-space:pre-wrap">${_blogEsc(f.quote)}</div>
+        <div class="text-xs text-gray-500">after (edit if you like — an edited line is used as written, still checked):</div>
+        <textarea id="vx-fx-${itemId}-${k}" class="w-full text-xs" rows="2">${_blogEsc(saved[f.quote] != null ? saved[f.quote] : f.fix)}</textarea>
+    </div>`).join('');
+    const covered = new Set(fixes.map(f => f.quote));
+    const more = (it.occurrences || []).filter(o => !covered.has(o.quote));
+    box.innerHTML = (rows || '<div class="text-xs text-gray-500">No rewrite proposed yet — add a comment or a value and it will be drafted when you create the verified version.</div>')
+        + (more.length ? `<div class="text-xs text-gray-400">+ ${more.length} more place(s) this appears (${_blogEsc(more.map(o => o.where).join(', '))}) — rewritten when you create the verified version.</div>` : '');
+}
+
+async function blogVerifyReviewModal(id) {
+    let b;
+    try { b = await api('/api/blogs/' + id); } catch (e) { return; }
+    const s = b.verify_session || {};
+    if (!s.status) { toast('No verification analysis yet — click Verify first', 'info'); openBlog(id); return; }
+    const items = s.items || [];
+    window._vxState = { id: id, items: items, fixes: {} };
+    const st = s.stats || {};
+    const badge = (txt, color) => `<span class="text-xs px-1 rounded" style="background:${color};color:#e5e7eb">${_blogEsc(txt)}</span>`;
+    const cards = items.map(it => {
+        const d = it.decision || {};
+        const prop = it.proposal || {};
+        const acts = [prop.action].concat(Object.keys(prop.alternatives || {})).filter((a, i, arr) => a && a !== 'none' && arr.indexOf(a) === i);
+        if (acts.length) acts.push('keep');
+        const curAct = d.action && (acts.includes(d.action)) ? d.action : (acts[0] || 'keep');
+        const actSel = acts.length > 1 ? `<select id="vx-act-${it.id}" class="text-xs" style="width:auto" onchange="_vxRenderFixes('${it.id}')">${acts.map(a =>
+            `<option value="${a}"${a === curAct ? ' selected' : ''}>${({correct: 'Correct it', soften: 'Soften it', remove: 'Remove it', keep: 'Keep as is'})[a] || a}</option>`).join('')}</select>` : '';
+        const occ = (it.occurrences || []).map(o => `<div class="text-xs text-gray-400"><span class="text-gray-500">${_blogEsc(o.where)}:</span> ${_blogEsc((o.quote || '').slice(0, 220))}</div>`).join('');
+        const bs = it.basis || {};
+        const basis = (bs.type || bs.url || bs.excerpt) ? `<div class="text-xs mt-1"><span class="text-gray-500">Basis:</span> ${_blogEsc(bs.type || '')}${bs.url ? ` · <a href="${_blogEsc(bs.url)}" target="_blank" class="underline">${_blogEsc(bs.url.replace(/^https?:\/\//, '').slice(0, 60))}</a>` : ''}${bs.excerpt ? `<div class="text-gray-400 italic">"${_blogEsc(bs.excerpt)}"</div>` : ''}</div>` : '';
+        const note = it.note ? `<div class="text-xs text-gray-400">Your note: "${_blogEsc(it.note.text)}"${it.note.value ? ` · your value: <b>${_blogEsc(it.note.value)}</b>` : ''}</div>` : '';
+        const noChange = prop.action === 'none';
+        return `<div class="card p-2 mb-2" style="background:#11131c;border:1px solid ${it.conflict ? '#9a3412' : '#312e81'}">
+            <label class="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" id="vx-ap-${it.id}" class="mt-1" style="width:auto;flex:none" ${d.approved ? 'checked' : ''}${noChange ? ' disabled' : ''}>
+                <span class="text-sm"><b>${_blogEsc(it.problem || it.claim || '')}</b></span>
+            </label>
+            <div class="flex flex-wrap gap-1 mt-1">${badge(it.origin || '', it.origin === 'your note' ? '#1e3a8a' : '#374151')}${badge(it.kind || '', '#374151')}${it.entity ? badge(it.entity, '#374151') : ''}${badge('confidence: ' + (it.confidence || '?'), it.confidence === 'high' ? '#14532d' : (it.confidence === 'medium' ? '#713f12' : '#7f1d1d'))}${it.new_source ? badge('adds a new source', '#155e75') : ''}</div>
+            ${note}
+            ${it.conflict ? `<div class="text-xs mt-1 p-1 rounded" style="background:#431407;color:#fdba74">⚠ Conflict: ${_blogEsc(it.conflict)}</div>` : ''}
+            ${noChange ? '<div class="text-xs mt-1 text-emerald-400">The evidence says the article is right here — no change proposed. Add a comment to override.</div>' : ''}
+            <details class="mt-1"><summary class="text-xs cursor-pointer text-gray-400">Where it appears (${(it.occurrences || []).length})</summary>${occ || '<div class="text-xs text-gray-500">not pinned to a place yet</div>'}</details>
+            ${basis}
+            <div class="flex items-center gap-2 mt-2">
+                ${actSel}
+                <span id="vx-valwrap-${it.id}" class="flex items-center gap-1 text-xs" style="${curAct === 'correct' || noChange ? '' : 'display:none'}">
+                    ${prop.old_value ? `<span class="text-gray-500">${_blogEsc(prop.old_value)} →</span>` : ''}
+                    <input id="vx-val-${it.id}" class="text-xs" style="width:220px;flex:none" value="${_blogEsc(d.new_value != null ? d.new_value : (prop.new_value || ''))}" placeholder="correct value">
+                </span>
+            </div>
+            <div id="vx-fixes-${it.id}" class="mt-2"></div>
+            <textarea id="vx-com-${it.id}" class="w-full text-xs mt-1" rows="1" placeholder="Comment (optional) — e.g. 'only change the table', 'use the annual price'">${_blogEsc(d.comment || '')}</textarea>
+            ${it.subject ? `<label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400"><input type="checkbox" id="vx-can-${it.id}" style="width:auto;flex:none" ${d.save_canonical ? 'checked' : ''}> Also save as ${_blogEsc(b.brand_name || 'the brand')}'s canonical ${it.kind === 'price' ? 'price' : 'fact'} (future blogs use it; other saved values are kept)</label>` : ''}
+        </div>`;
+    }).join('');
+    const statsLine = `${st.claims || 0} claim(s) checked · ${st.confirmed || 0} confirmed by their page · ${st.pages_fetched || 0} page(s) read${st.pages_unreadable ? ` (${st.pages_unreadable} unreadable)` : ''}${st.pages_reused ? ` · ${st.pages_reused} reused` : ''} · ${st.searches || 0} search(es)${st.skipped_searches ? ` · <span class="text-amber-400">${st.skipped_searches} skipped by the cost cap</span>` : ''}${st.search_capped ? ` · <span class="text-amber-400">${st.search_capped} over the search limit</span>` : ''}${typeof s.total_cost === 'number' ? ` · ≈ $${s.total_cost.toFixed(2)} so far` : ''}`;
+    const srcLabel = s.source === 'verified' ? 'the verified version' : 'the original blog';
+    showModal(`<div>
+        <div class="flex justify-between items-center mb-1"><h3 class="text-lg font-bold" style="color:#a5b4fc">🔍 Verification — review the corrections</h3><button onclick="closeModal(); openBlog(${id})" class="text-gray-400 text-xl leading-none">&times;</button></div>
+        <p class="text-xs text-gray-400 mb-1">Checked: ${srcLabel}${s.round > 1 ? ` · round ${s.round}` : ''}. Tick what to apply, edit a value or a rewrite, or leave a comment. Nothing is applied until you click <b>Create verified version</b>, and the original blog is never modified.</p>
+        <p class="text-xs text-gray-500 mb-2">${statsLine}</p>
+        <div style="max-height:55vh;overflow:auto">
+            ${cards || '<div class="text-sm text-emerald-400 mb-2">No corrections found — every checked claim was confirmed. Add a correction below if you know something is wrong.</div>'}
+            <div class="card p-2 mb-2" style="background:#0f0f16">
+                <div class="text-xs font-bold mb-1">Add another correction</div>
+                <div id="vx-add-rows"></div>
+                <button class="btn btn-sm btn-secondary" onclick="_vxAddNoteRow('vx-add')">+ Add a correction</button>
+                <div class="text-xs font-bold mt-2 mb-1">General instructions (optional)</div>
+                <textarea id="vx-instructions" class="w-full text-xs" rows="2" placeholder="e.g. 'quote monthly prices, not annual'">${_blogEsc(s.instructions || '')}</textarea>
+            </div>
+        </div>
+        <div class="flex gap-2 justify-end mt-3">
+            <button class="btn btn-sm btn-secondary mr-auto" onclick="_vxDiscard(${id})">Discard analysis</button>
+            <button class="btn btn-sm btn-secondary" title="Run the analysis again taking your comments, values and added corrections into account. Pages already read are reused." onclick="_vxRecheck(${id})">Re-check with my input</button>
+            <button class="btn btn-sm btn-primary" onclick="_vxApply(${id})">Create verified version</button>
+        </div>
+    </div>`);
+    _vxWiden(900);
+    items.forEach(it => _vxRenderFixes(it.id));
+}
+
+function _vxCollectDecisions() {
+    const st = window._vxState;
+    const out = {};
+    if (!st) return out;
+    st.items.forEach(it => {
+        const ap = document.getElementById('vx-ap-' + it.id);
+        const sel = document.getElementById('vx-act-' + it.id);
+        const val = document.getElementById('vx-val-' + it.id);
+        const com = document.getElementById('vx-com-' + it.id);
+        const can = document.getElementById('vx-can-' + it.id);
+        const fixes = [];
+        (st.fixes[it.id] || []).forEach((f, k) => {
+            const ta = document.getElementById(`vx-fx-${it.id}-${k}`);
+            if (ta && ta.value !== f.fix) fixes.push({ quote: f.quote, fix: ta.value, edited: true });
+        });
+        const comment = com ? com.value.trim() : '';
+        const action = sel ? sel.value : ((it.proposal || {}).action === 'none' ? 'correct' : (it.proposal || {}).action);
+        out[it.id] = {
+            // a comment on a "no change" item is the operator overriding the analysis — apply it
+            approved: ap ? (ap.checked || (ap.disabled && !!comment)) : false,
+            action: action,
+            new_value: val ? val.value.trim() : undefined,
+            comment: comment,
+            save_canonical: can ? can.checked : false,
+            fixes: fixes,
+        };
+    });
+    return out;
+}
+
+function _vxApply(id) {
+    const body = { decisions: _vxCollectDecisions(), added: _vxCollectNotes('vx-add'),
+                   instructions: (document.getElementById('vx-instructions')?.value || '').trim() };
+    closeModal();
+    runTask('/api/blogs/' + id + '/verify-apply', body, (res) => {
+        if (res && res.ok) {
+            const ct = (typeof res.cost === 'number') ? ` · ≈ $${res.cost.toFixed(2)}` : '';
+            toast(`Verified version created — ${res.n_applied} change(s) from ${res.n_items} correction(s)`
+                  + (res.n_refused ? ` · ${res.n_refused} refused (see Changes)` : '') + ct,
+                  res.n_refused ? 'error' : 'success', 12000);
+        }
+        openBlog(id);
+    }, 'Creating the verified version');
+}
+
+function _vxRecheck(id) {
+    const body = { recheck: true, decisions: _vxCollectDecisions(), added: _vxCollectNotes('vx-add'),
+                   instructions: (document.getElementById('vx-instructions')?.value || '').trim() };
+    closeModal();
+    runTask('/api/blogs/' + id + '/verify-analyze', body, (res) => {
+        _vxAnalysisToast(res);
+        blogVerifyReviewModal(id);
+    }, 'Re-checking with your input');
+}
+
+async function _vxDiscard(id) {
+    if (!confirm('Discard this analysis? The blog and any verified version stay as they are.')) return;
+    try {
+        await api('/api/blogs/' + id + '/verify-discard', { method: 'POST' });
+        toast('Analysis discarded', 'info');
+    } catch (e) {}
+    closeModal();
+    openBlog(id);
+}
+
+function blogVerifyRedo(id) {
+    if (!confirm('Redo the corrections? The same approved analysis is re-written with fresh wording (no new searches). Hand edits to the verified version are replaced.')) return;
+    runTask('/api/blogs/' + id + '/verify-redo', {}, (res) => {
+        if (res && res.ok) {
+            const ct = (typeof res.cost === 'number') ? ` · ≈ $${res.cost.toFixed(2)}` : '';
+            toast(`Corrections redone — ${res.n_applied} change(s)` + (res.n_refused ? ` · ${res.n_refused} refused` : '') + ct,
+                  res.n_refused ? 'error' : 'success', 10000);
+        }
+        openBlog(id);
+    }, 'Redoing the corrections');
+}
+
 // FU79 — generation PAUSED: the model couldn't source a tool after all retries. Ask for a link/fact
 // per missing tool (or skip → drop it), then finish via /api/blogs/<id>/provide-sources.
 function _blogFactLabel(facts) {
@@ -13502,10 +13763,12 @@ async function _blogClearCachedData(brandId) {
 // distinguishable — without that you get two files with the same name.
 async function blogUploadGdoc(id, variant, use) {
     const _wm = use === 'rewritten';
-    toast(`Uploading ${_wm ? 'the watermark-free version ' : ''}to Google Drive…`, 'info');
+    const _vf = use === 'verified';   // FU208
+    toast(`Uploading ${_wm ? 'the watermark-free version ' : (_vf ? 'the verified version ' : '')}to Google Drive…`, 'info');
     try {
         const body = { variant: variant || 'blog' };
         if (_wm) body.use = 'rewritten';
+        if (_vf) body.use = 'verified';
         const res = await api(`/api/blogs/${id}/upload-gdoc`, { method: 'POST', body });
         if (res && res.ok && res.doc_url) {
             persistentToast('✓ Uploaded to Drive — opening the Google Doc…', 'success');
@@ -13629,6 +13892,57 @@ async function openBlog(id) {
             <button class="btn btn-sm btn-primary mt-2" onclick="blogProvideSourcesModal(${id}, window._blogOpenMissing, window._blogOpenBudget)">Provide sources</button>
         </div>`;
     }
+    // FU208 — verification: a banner when an analysis is waiting for review, and the VERIFIED version card
+    // (kept beside the original like the watermark-free version; every export takes use=verified).
+    const _vs = b.verify_session || {};
+    const _vr = b.verified_report || {};
+    let vxBanner = '';
+    if (_vs.status === 'ready') {
+        const _n = (_vs.items || []).length;
+        vxBanner = `<div class="card p-2 mb-2" style="background:#1e1b4b;border:1px solid #4338ca">
+            <div class="text-sm" style="color:#c7d2fe">🔍 Verification analysis ready — <b>${_n}</b> correction(s) to review${_vs.source === 'verified' ? ' (on the verified version)' : ''}.</div>
+            <div class="text-xs text-gray-400 mt-1">Nothing has changed yet. Approve, edit or comment, then create the verified version.</div>
+            <button class="btn btn-sm btn-primary mt-2" onclick="blogVerifyReviewModal(${id})">Review</button>
+        </div>`;
+    }
+    const _vxHas = !!(b.verified_body || '').trim();
+    const _vxChanges = (() => {
+        if (!_vxHas) return '';
+        const ap = (_vr.applied || []).map(a => `<div class="mb-1"><div class="text-gray-500">${_blogEsc(a.where || '')}:</div><div class="text-red-300" style="white-space:pre-wrap">− ${_blogEsc(a.before || '')}</div><div class="text-emerald-300" style="white-space:pre-wrap">+ ${_blogEsc(a.after || '')}</div></div>`).join('');
+        const rf = (_vr.refused || []).map(r => `<div class="text-amber-400 mb-1">↷ not applied${r.where ? ' (' + _blogEsc(r.where) + ')' : ''} — ${_blogEsc(r.reason || '')}<div class="text-gray-500" style="white-space:pre-wrap">${_blogEsc((r.quote || '').slice(0, 200))}</div></div>`).join('');
+        const un = (_vr.unchanged || []).map(r => `<div class="text-gray-400 mb-1">· ${_blogEsc(r.reason || 'left as is')}: ${_blogEsc((r.quote || '').slice(0, 160))}</div>`).join('');
+        const cn = (_vr.canonical || []).map(c => `<div class="${c.saved ? 'text-emerald-400' : 'text-amber-400'}">${c.saved ? '✓ saved to the brand' : '⚠ not saved to the brand'}: ${_blogEsc(c.product ? c.product + ' — ' : '')}${_blogEsc(c.value || '')}${c.reason ? ' (' + _blogEsc(c.reason) + ')' : ''}</div>`).join('');
+        const ns = (_vr.new_sources || []).map(n => `<div class="text-gray-400">+ source ${_blogEsc(n.cite || '')}: ${_blogEsc(n.url || '')}</div>`).join('');
+        const fl = (_vr.flags || []).map(f => `<div class="text-amber-400">⚠ ${_blogEsc(f.problem || '')}${f.detail ? ' — ' + _blogEsc(f.detail) : ''}</div>`).join('');
+        const any = ap || rf || un || cn || ns || fl;
+        return any ? `<details class="mt-1 text-xs"><summary class="cursor-pointer text-gray-300">Changes</summary><div class="mt-1">${ap}${rf}${un}${cn}${ns}${fl ? '<div class="mt-1">Checks on the result:</div>' + fl : ''}</div></details>` : '';
+    })();
+    const _vxStatus = _vxHas
+        ? `<div class="text-xs" style="color:#a5b4fc">${_blogEsc((b.verified_at || '').slice(0, 10))} · ${_vr.n_items || 0} correction(s), ${_vr.n_applied || 0} change(s)${_vr.n_refused ? ` · <span class="text-amber-400">${_vr.n_refused} not applied</span>` : ''}${b.verified_cost ? ' · ≈ $' + Number(b.verified_cost).toFixed(2) + ' total' : ''}${_vr.source === 'verified' ? ' · re-verified' : ''}${_vr.redo ? ' · wording redone' : ''}${_vr.text_changed ? ' · <span class="text-amber-400">the text changed after the analysis</span>' : ''}</div>`
+        : '<div class="text-xs text-gray-500">No verified version yet — click Verify. The original blog is always kept.</div>';
+    const _vxCanRedo = _vs.status === 'applied' || !!(_vs.previous_applied);
+    const vxCard = `<div class="card p-2" style="background:#13122a;border:1px solid #4338ca">
+                <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold" style="color:#a5b4fc">Verified version (the corrections you approved)</label>
+                    <div class="flex items-center gap-2">
+                        <button class="btn btn-sm" style="background:#312e81;color:#e0e7ff" onclick="blogVerifyRequestModal(${id}, 'original')" title="Scrutiny check of the ORIGINAL blog: re-read every cited page, search what they don't confirm, then review the corrections before anything changes.">🔍 Verify</button>
+                        ${_vxHas ? `<button class="btn btn-sm btn-secondary" onclick="blogVerifyRequestModal(${id}, 'verified')" title="Run a fresh analysis of THIS verified version">🔍 Verify again</button>` : ''}
+                        ${_vxHas ? `<button class="btn btn-sm btn-secondary" ${_vs.status === 'applied' ? '' : 'disabled'} onclick="blogVerifyRedo(${id})" title="${_vxCanRedo && _vs.status !== 'applied' ? 'Review or discard the waiting analysis first' : 'Same approved corrections, fresh wording — no new searches'}">↻ Redo corrections</button>` : ''}
+                    </div>
+                </div>
+                <div class="text-xs text-gray-400 mb-1">The original blog is never modified. This is a separate copy with only the corrections you approved — hand it to clients like the watermark-free version.</div>
+                ${_vxStatus}
+                ${_vxHas ? `<label class="text-xs text-gray-400">Verified meta description</label><input id="blog-e-vf-meta" value="${_blogEsc(b.verified_meta_description || '')}">
+                <textarea id="blog-e-vf" rows="14">${_blogEsc(b.verified_body || '')}</textarea>
+                ${_vxChanges}
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-vf')" title="Copy as clean plain text">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html&amp;use=verified" target="_blank" title="Open the formatted verified version">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md&amp;use=verified" title="Download the verified version as Markdown">⬇ Download MD</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc&amp;use=verified" title="Word-compatible .doc of the verified version — opens as a Google Doc in Drive">⬇ Google Doc</a>
+                    <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'blog', 'verified')" title="Create a Google Doc of the verified version in your Drive folder">⬆ Drive</button>
+                </div>` : ''}
+            </div>`;
     // FU151 (D): persisted quality scorecard panel — structure/meta/link checks, folded warnings,
     // the actual flagged claims (before hidden behind a count), and the on-demand link-rot result.
     const qr = b.quality_report || {};
@@ -13680,13 +13994,14 @@ async function openBlog(id) {
         }
         const score = (typeof qr.score === 'number') ? qr.score : null;
         const scoreCls = score == null ? 'text-gray-400' : (score >= 80 ? 'text-emerald-400' : (score >= 60 ? 'text-amber-400' : 'text-red-400'));
-        qualityPanel = `<details class="mb-2 text-xs" style="background:#0f0f16;border-radius:6px;padding:6px"><summary class="cursor-pointer"><span class="${scoreCls} font-bold">Quality${score == null ? '' : ' ' + score + '/100'}</span>${_edScore == null ? '' : ' <span class="text-gray-400">\u00b7 editorial ' + _edScore + '/100</span>'} <span class="text-gray-500">— structure / meta / links checklist</span> <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="event.preventDefault();blogCheckLinks(${id})">Check links</button> <button class="btn btn-sm btn-secondary" title="Claude re-reads the whole article — contradictions, price and brand inconsistencies, typos, duplicated claims, promises of a link with no link — and fixes what it safely can. A repair that would drop a citation, a number or a name is refused and reported, never silently applied." onclick="event.preventDefault();blogVerify(${id}, 'blog', 'original')">Verify</button></summary><div class="mt-2 space-y-1">${chk}${warns ? '<div class="mt-1">' + warns + '</div>' : ''}${lc ? '<div class="mt-1">' + lc + '</div>' : ''}${vfy}${claimsList}</div></details>`;
+        qualityPanel = `<details class="mb-2 text-xs" style="background:#0f0f16;border-radius:6px;padding:6px"><summary class="cursor-pointer"><span class="${scoreCls} font-bold">Quality${score == null ? '' : ' ' + score + '/100'}</span>${_edScore == null ? '' : ' <span class="text-gray-400">\u00b7 editorial ' + _edScore + '/100</span>'} <span class="text-gray-500">— structure / meta / links checklist</span> <button class="btn btn-sm btn-secondary" style="margin-left:8px" onclick="event.preventDefault();blogCheckLinks(${id})">Check links</button> <button class="btn btn-sm btn-secondary" title="FU208: re-read every cited page, search what they don't confirm, then review the corrections before anything changes. The result is a separate verified version; the original is never modified." onclick="event.preventDefault();blogVerifyRequestModal(${id}, 'original')">🔍 Verify</button></summary><div class="mt-2 space-y-1">${chk}${warns ? '<div class="mt-1">' + warns + '</div>' : ''}${lc ? '<div class="mt-1">' + lc + '</div>' : ''}${vfy}${claimsList}</div></details>`;
     }
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
         <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
         ${qualityPanel}
         ${pendBanner}
+        ${vxBanner}
         ${_blogIsImported(b) ? `<div class="text-xs p-2 mb-2" style="background:#1e2a44;color:#93c5fd;border-radius:4px">
             ⬆ <b>Imported</b> — this body was uploaded from a file, not generated here, so it has no
             <code>[S#]</code> evidence chain, no Sources section of its own and no quality scorecard.
@@ -13763,6 +14078,7 @@ async function openBlog(id) {
                     </div>
                 </div>
             </div>
+            ${vxCard}
             <div class="card p-2" style="background:#0c1a1e;border:1px solid #155e75">
                 <div class="flex items-center justify-between mb-1">
                     <label class="text-xs font-bold" style="color:#67e8f9">Watermark-free version (rewritten on the self-hosted model)</label>
@@ -13901,6 +14217,9 @@ async function blogSave(id) {
             geo: _v('blog-e-geo'),
             qualifier: _v('blog-e-qualifier'),
             rewritten_body: _v('blog-e-rw'),   // FU154: watermark-free version (manual edits persist)
+            // FU208: the verified version — only sent when its card is showing (never blanks it)
+            ...(document.getElementById('blog-e-vf') ? { verified_body: _v('blog-e-vf'),
+                verified_meta_description: _v('blog-e-vf-meta') } : {}),
             linkedin_rewritten: _v('blog-e-li-rw'),                      // FU179
             linkedin_article_rewritten: _v('blog-e-li-article-rw'),      // FU179
         }});

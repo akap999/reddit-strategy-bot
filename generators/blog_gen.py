@@ -947,6 +947,72 @@ def _drop_nameless_when_named(items):
     return items, False
 
 
+# ── FU208 ─────────────────────────────────────────────────────────────────────────────────────────
+# Verify a FINISHED blog on demand: a scrutiny analysis (re-read the cited pages, search what they do
+# not confirm) → the operator approves / edits / comments → a SEPARATE verified version. The original
+# body is never touched. The cost cap only gates WEB SEARCH (the `_over_budget` mechanism); every
+# skipped search is counted and shown, never silent.
+_VX_COST_CEILING = float(os.environ.get("BLOG_VERIFY_COST_CEILING", "1.0"))
+_VX_MAX_SEARCHES = int(os.environ.get("BLOG_VERIFY_MAX_SEARCHES", "10"))
+_VX_MAX_CLAIMS = 40
+_VX_MAX_PAGES = int(os.environ.get("BLOG_VERIFY_MAX_PAGES", "15"))
+_VX_PAGE_WINDOW = 6000    # chars of one page shown to the judge
+_VX_PAGE_STORE = 8000     # chars of one page kept in the session (a re-check reuses it, no refetch)
+_VX_KINDS = ("price", "figure", "capability", "license", "date", "comparison", "other")
+
+
+def upsert_canonical_value(key_facts, kind, product, value, source_url="", label=""):
+    """FU208 — ADDITIVE upsert of ONE operator-approved value into a brand's canonical key_facts.
+
+    The Edit Brand save (`api_update_brand`) cannot be reused for this: it treats the list it is sent as
+    COMPLETE and deletes every operator-set item that is not in it (FU163). Saving one corrected price
+    through it would silently wipe every other price the operator set. Here exactly one item is added or
+    replaced — matched by `_kf_slug` of the product (a price) or of the label/value (a fact) — and
+    everything else survives.
+
+    Returns (key_facts_dict, saved). `saved` is False when the item could not be kept: a NAMELESS price
+    on a brand that already has named per-product prices is dropped by `_drop_nameless_when_named`, and
+    reporting that is better than claiming it was saved."""
+    kf = key_facts
+    if isinstance(kf, str):
+        try:
+            kf = json.loads(kf or "{}")
+        except Exception:
+            kf = {}
+    kf = dict(kf) if isinstance(kf, dict) else {}
+    value = str(value or "").strip()
+    if not value:
+        return kf, False
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if kind == "price":
+        prod = str(product or "").strip()
+        by = {}
+        for it in _kf_pricing_items(kf):
+            by[_kf_slug(it.get("product"))] = it
+        new = {"product": prod, "value": value, "source_url": source_url or "",
+               "verified_at": now, "operator_set": True}
+        by[_kf_slug(prod)] = new
+        items, _ = _drop_nameless_when_named(list(by.values()))
+        kf["pricing"] = {"items": items}
+        return kf, any(it is new for it in items)
+    lab = str(label or product or "").strip()
+    key = _kf_slug(lab) if lab else _kf_slug(value)
+    out, placed = [], False
+    new = {"label": lab, "value": value, "source_url": source_url or "", "operator_set": True}
+    for it in _kf_fact_items(kf):
+        k = _kf_slug(it.get("label")) if it.get("label") else _kf_slug(it.get("value"))
+        if k == key:
+            if not placed:
+                out.append(new)
+                placed = True
+            continue
+        out.append(it)
+    if not placed:
+        out.append(new)
+    kf["facts"] = {"items": out}
+    return kf, True
+
+
 # FU156: generic filler dropped so a category/price word doesn't match every page.
 _PRODUCT_FILLER = {"the", "and", "for", "with", "its", "their", "together", "combined", "use",
                    "therapy", "treatment", "medication", "medications", "drug", "drugs", "injection",
@@ -8712,6 +8778,1184 @@ Return JSON only:
             body = body.replace(it["quote"], fix, 1)
             applied.append({**rec, "fix": fix[:160]})
         return body, applied, skipped
+
+    # ══════════════════════════════════════════════════════════════════════════════════════════════════
+    # FU208 — VERIFY A FINISHED BLOG
+    #   verify_analyze : scrutiny analysis → correction ITEMS for the operator to review (writes nothing)
+    #   verify_apply   : the approved items → a SEPARATE verified text (the source text is never mutated)
+    # The existing FU201/202 verify cannot do this job: it never checks a fact against its source, it
+    # auto-applies with no approval, and its gate refuses any fix that changes a number — which is
+    # exactly what "the price is $249, not $149" is.
+    # ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _vx_hash(text):
+        import hashlib
+        return hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _vx_norm(s):
+        return re.sub(r"\s+", " ", (s or "")).strip()
+
+    @staticmethod
+    def _vx_head(body):
+        """The body above `## Sources` — the only part a correction may touch."""
+        cut = _VF_SOURCES_RE.search(body or "")
+        return (body or "")[:cut.start()] if cut else (body or "")
+
+    @staticmethod
+    def _vx_where_of(head, quote):
+        pos = head.find(quote)
+        if pos < 0:
+            return "prose"
+        ls = head.rfind("\n", 0, pos) + 1
+        le = head.find("\n", pos)
+        line = head[ls:(len(head) if le < 0 else le)].strip()
+        if line.startswith("|"):
+            return "table"
+        if line.startswith("#"):
+            return "heading"
+        if re.match(r"^[*_\s]*(quick answer|short answer|tl;?dr)\b", line, re.I):
+            return "quick answer"
+        last_any, last_h2 = "", ""
+        for m in re.finditer(r"(?m)^(#{2,4})[ \t]+(.+)$", head[:ls]):
+            last_any = m.group(2).strip().lower()
+            if len(m.group(1)) == 2:
+                last_h2 = last_any
+        if re.search(r"quick answer|short answer|tl;?dr", last_any):
+            return "quick answer"
+        if re.search(r"\bfaq\b|frequently asked", last_h2):
+            return "faq"
+        return "prose"
+
+    @classmethod
+    def _vx_locate(cls, body, meta, quote):
+        """(exact_text, where) for a quote the model copied, or ("", ""). Exact match first, then a
+        whitespace-tolerant match, so a re-spaced copy still resolves to the article's OWN bytes — a
+        replacement has to match exactly. Never matches inside `## Sources`."""
+        q = (quote or "").strip()
+        if not q:
+            return "", ""
+        head = cls._vx_head(body)
+        meta = meta or ""
+        if q in head:
+            return q, cls._vx_where_of(head, q)
+        if meta and (q == meta.strip() or q in meta):
+            return q, "meta"
+        words = q.split()
+        if not words:
+            return "", ""
+        pat = r"\s+".join(re.escape(w) for w in words)
+        m = re.search(pat, head)
+        if m:
+            return m.group(0), cls._vx_where_of(head, m.group(0))
+        if meta:
+            m = re.search(pat, meta)
+            if m:
+                return m.group(0), "meta"
+        return "", ""
+
+    @classmethod
+    def _vx_value_occurrences(cls, body, meta, value, entity):
+        """Deterministic backstop for "every occurrence": each table row / sentence carrying the claimed
+        VALUE and naming the ENTITY. The model's list of places is the primary source; this only adds
+        what it missed. No entity → no backstop (a bare "$149" is too ambiguous to chase)."""
+        v, ent = (value or "").strip(), (entity or "").strip()
+        if not v or not ent or not re.search(r"\d", v):
+            return []
+        m = _LOADBEARING_NUM_RE.search(v) or re.search(r"\d[\d,.]*", v)
+        core = re.sub(r"[\s,]", "", m.group(0)).lower() if m else ""
+        toks = [t for t in _product_tokens(ent) if len(t) >= 3] or [ent.lower().split()[0]]
+        tok = toks[0]
+        if not core or not tok:
+            return []
+        out = []
+        head = cls._vx_head(body)
+        for ln in head.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            units = [s] if s.startswith("|") else [u for u in re.split(r"(?<=[.!?])\s+", s) if u.strip()]
+            for u in units:
+                lu = u.lower()
+                if core in re.sub(r"[\s,]", "", lu) and tok in lu:
+                    out.append({"where": cls._vx_where_of(head, u), "quote": u, "auto": True})
+        if meta:
+            lm = meta.lower()
+            if core in re.sub(r"[\s,]", "", lm) and tok in lm:
+                out.append({"where": "meta", "quote": meta.strip(), "auto": True})
+        return out
+
+    @staticmethod
+    def _vx_window(text, needles, cap=_VX_PAGE_WINDOW):
+        """The part of a long page worth showing the judge: windows around the claim's distinctive
+        tokens (numbers, names, keywords), merged, capped. A short page is shown whole."""
+        text = text or ""
+        if len(text) <= cap:
+            return text
+        low = text.lower()
+        spans = []
+        for n in needles:
+            n = (n or "").strip().lower()
+            if len(n) < 3:
+                continue
+            start = 0
+            hits = 0
+            while hits < 3:
+                i = low.find(n, start)
+                if i < 0:
+                    break
+                spans.append((max(0, i - 700), min(len(text), i + len(n) + 700)))
+                start = i + len(n)
+                hits += 1
+        if not spans:
+            return text[:cap]
+        spans.sort()
+        merged = [list(spans[0])]
+        for a, b in spans[1:]:
+            if a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        out = " … ".join(text[a:b] for a, b in merged)
+        return out[:cap]
+
+    @staticmethod
+    def _vx_needles(*parts):
+        toks = []
+        for p in parts:
+            p = p or ""
+            toks += re.findall(r"\$?\d[\d,.]*", p)
+            toks += [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", p) if w.lower() not in _FACT_FILLER]
+        seen, out = set(), []
+        for t in toks:
+            k = t.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(t)
+        return out[:14]
+
+    @staticmethod
+    def _vx_clean_notes(notes):
+        out = []
+        for n in (notes or []):
+            if not isinstance(n, dict):
+                continue
+            text = str(n.get("text") or "").strip()
+            value = str(n.get("value") or "").strip()
+            url = str(n.get("url") or "").strip()
+            if url and not re.match(r"^https?://", url, re.I):
+                url = "https://" + url
+            if text or value:
+                out.append({"text": text or f"The correct value is {value}", "value": value, "url": url})
+        return out[:20]
+
+    def _vx_competitor_domains(self, brand):
+        raw = (brand or {}).get("competitor_domains")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or "{}")
+            except Exception:
+                raw = {}
+        return {str(k).strip().lower(): _norm_domain(str(v or "")) for k, v in (raw or {}).items() if v}
+
+    # ── (a) read + extract ─────────────────────────────────────────────────────────────────────────
+    def _vx_extract(self, brand, body, meta, notes):
+        """The checkable claims, each with EVERY place it appears, plus each operator note mapped to
+        its places. One Claude call per `_verify_chunks` chunk (one for a normal article)."""
+        name = ((brand or {}).get("name") or "").strip()
+        head = self._vx_head(body)
+        chunks = self._verify_chunks(head)
+        if not chunks or self.claude is None:
+            return [], {}
+        note_txt = "\n".join(
+            f"[{i}] {n['text']}" + (f" (the operator's correct value: {n['value']})" if n.get("value") else "")
+            for i, n in enumerate(notes)) or "(none)"
+        raw_claims, raw_notes = [], {}
+        for k, chunk in enumerate(chunks):
+            part = (f"This is part {k + 1} of {len(chunks)} of the article; report only what is in this "
+                    "part.\n" if len(chunks) > 1 else "")
+            meta_txt = (f"\nMETA DESCRIPTION (also published — include it as a place):\n{meta}\n"
+                        if (meta and k == 0) else "")
+            try:
+                res = self.claude.call(
+                    "You are auditing a FINISHED, published article under a scrutiny lens. List every "
+                    "CHECKABLE factual claim in it: prices and plan terms, figures and statistics, "
+                    "capabilities and features, licence or commercial-use terms, dates, availability or "
+                    "eligibility, and any claim that compares named brands. Put prices, figures and claims "
+                    f"about named brands first; at most {_VX_MAX_CLAIMS}. Opinions and general advice are "
+                    "not claims.\n"
+                    "For EACH claim, list EVERY place it appears. Copy the text of each place EXACTLY as "
+                    "written: for a table, the whole row line starting with '|'; for prose, the whole "
+                    "sentence; for the meta description, the whole meta description.\n"
+                    "where = table | quick answer | faq | heading | prose | meta\n"
+                    "entity = the brand or product the claim is about (\"\" for a general fact).\n"
+                    "product = the specific product or plan a price is for (\"\" when it is the brand's "
+                    "general price).\n"
+                    "value = the specific value asserted, e.g. \"$149/month\" (\"\" when not a value).\n"
+                    "cited = the [S#] markers attached to the claim, e.g. [\"S3\"].\n"
+                    "ALSO map each OPERATOR NOTE below to the places in this text it concerns, the same "
+                    "way (skip a note that concerns nothing here).\n"
+                    f"BRAND: {name}\n{part}\nOPERATOR NOTES:\n{note_txt}\n{meta_txt}\n"
+                    'Return JSON ONLY: {"claims": [{"claim": "...", "kind": "price|figure|capability|'
+                    'license|date|comparison|other", "entity": "...", "product": "...", "value": "...", '
+                    '"cited": ["S3"], "occurrences": [{"where": "table", "quote": "..."}]}], '
+                    '"notes": [{"note": 0, "entity": "...", "product": "...", "value": "<what the article '
+                    'currently states>", "cited": ["S2"], "occurrences": [{"where": "prose", "quote": '
+                    '"..."}]}]}\n\nARTICLE TEXT:\n' + chunk,
+                    max_tokens=8000, temperature=0)
+            except Exception as e:
+                print(f"[blog_gen] verify-analyze: extract failed ({e})", flush=True)
+                continue
+            if not isinstance(res, dict):
+                continue
+            for c in (res.get("claims") or []):
+                if isinstance(c, dict) and str(c.get("claim") or "").strip():
+                    raw_claims.append(c)
+            for n in (res.get("notes") or []):
+                if not isinstance(n, dict):
+                    continue
+                try:
+                    idx = int(n.get("note"))
+                except Exception:
+                    continue
+                if not (0 <= idx < len(notes)):
+                    continue
+                slot = raw_notes.setdefault(idx, {"entity": "", "product": "", "value": "", "cited": [],
+                                                  "occurrences": []})
+                for key in ("entity", "product", "value"):
+                    if not slot[key] and str(n.get(key) or "").strip():
+                        slot[key] = str(n.get(key)).strip()
+                slot["cited"] += list(n.get("cited") or [])
+                slot["occurrences"] += list(n.get("occurrences") or [])
+
+        def _cites(raw):
+            out = []
+            for c in (raw or []):
+                m = re.search(r"(\d+)", str(c))
+                if m and int(m.group(1)) not in out:
+                    out.append(int(m.group(1)))
+            return out
+
+        def _occs(raw, value="", entity=""):
+            out, seen = [], set()
+            for o in (raw or []):
+                q = o.get("quote") if isinstance(o, dict) else o
+                exact, where = self._vx_locate(body, meta, q)
+                if exact and exact not in seen:
+                    seen.add(exact)
+                    out.append({"where": where, "quote": exact})
+            for o in self._vx_value_occurrences(body, meta, value, entity):
+                if o["quote"] not in seen and not any(o["quote"] in x or x in o["quote"] for x in seen):
+                    seen.add(o["quote"])
+                    out.append(o)
+            return out
+
+        claims, seen_claims = [], set()
+        for c in raw_claims:
+            key = self._vx_norm(str(c.get("claim"))).lower()
+            if key in seen_claims:
+                continue
+            seen_claims.add(key)
+            ent = str(c.get("entity") or "").strip()
+            val = str(c.get("value") or "").strip()
+            kind = str(c.get("kind") or "other").strip().lower()
+            kind = kind if kind in _VX_KINDS else "other"
+            occ = _occs(c.get("occurrences"), val, ent)
+            if not occ:
+                continue   # a claim that cannot be pinned to the article's own text cannot be corrected
+            subj = bool(name) and bool(ent) and (name.lower() in ent.lower() or ent.lower() in name.lower())
+            claims.append({"claim": str(c["claim"]).strip(), "kind": kind, "entity": ent,
+                           "product": str(c.get("product") or "").strip(), "value": val,
+                           "subject": subj, "cited": _cites(c.get("cited")), "occurrences": occ})
+        prio = {"price": 0, "figure": 1, "license": 2, "comparison": 3}
+        claims.sort(key=lambda c: (prio.get(c["kind"], 4), 0 if c["entity"] else 1))
+        claims = claims[:_VX_MAX_CLAIMS]
+        for i, c in enumerate(claims):
+            c["id"] = f"c{i + 1}"
+        note_maps = {}
+        for idx, slot in raw_notes.items():
+            ent = slot["entity"]
+            note_maps[idx] = {"entity": ent, "product": slot["product"], "value": slot["value"],
+                              "subject": bool(name) and bool(ent) and (name.lower() in ent.lower()
+                                                                        or ent.lower() in name.lower()),
+                              "cited": _cites(slot["cited"]),
+                              "occurrences": _occs(slot["occurrences"], slot["value"], ent)}
+        return claims, note_maps
+
+    # ── (b) re-read the cited pages ────────────────────────────────────────────────────────────────
+    def _vx_fetch_pages(self, urls, pages, stats, labels=None):
+        labels = labels or {}
+        todo, seen = [], set()
+        for u in urls:
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            if u in pages:
+                stats["pages_reused"] += 1
+            else:
+                todo.append(u)
+
+        def _one(u):
+            try:
+                return u, self._fetch_url(u)
+            except Exception:
+                return u, ""
+        if todo:
+            with ThreadPoolExecutor(max_workers=max(1, min(_BLOG_FETCH_WORKERS, len(todo)))) as ex:
+                for u, txt in ex.map(_one, todo):
+                    pages[u] = {"label": labels.get(u, ""), "ok": bool(txt), "text": (txt or "")[:_VX_PAGE_STORE]}
+                    stats["pages_fetched"] += 1
+                    if not txt:
+                        stats["pages_unreadable"] += 1
+
+    def _vx_judge_pages(self, cands, pages):
+        """ONE Claude call (batched by size): each candidate judged ONLY against the page text shown.
+        A `page_says` excerpt that is not actually on the page is discarded — and a "contradicted"
+        verdict resting on it is downgraded, so an invented quote can never drive a correction."""
+        verdicts = {}
+        work = [c for c in cands if any(pages.get(u, {}).get("ok") for u in c["urls"])]
+        if not work or self.claude is None:
+            return verdicts
+        groups, cur, size = [], [], 0
+        for c in work:
+            add = sum(min(len(pages[u]["text"]), _VX_PAGE_WINDOW) for u in c["urls"] if pages.get(u, {}).get("ok"))
+            if cur and size + add > 60000:
+                groups.append(cur)
+                cur, size = [], 0
+            cur.append(c)
+            size += add
+        if cur:
+            groups.append(cur)
+        cmap = {c["ref"]: c for c in work}
+        for grp in groups:
+            urls = []
+            for c in grp:
+                for u in c["urls"]:
+                    if pages.get(u, {}).get("ok") and u not in urls:
+                        urls.append(u)
+            pnum = {u: i + 1 for i, u in enumerate(urls)}
+            page_txt = []
+            for u in urls:
+                needles = []
+                for c in grp:
+                    if u in c["urls"]:
+                        needles += self._vx_needles(c["text"], c.get("value"), c.get("entity"))
+                page_txt.append(f"=== P{pnum[u]} {u}\n{self._vx_window(pages[u]['text'], needles)}")
+            lines = []
+            for c in grp:
+                ps = ", ".join(f"P{pnum[u]}" for u in c["urls"] if u in pnum)
+                lines.append(f"[{c['ref']}] (pages {ps}) {c['text']}"
+                             + (f" — the article states: {c['value']}" if c.get("value") else ""))
+            try:
+                res = self.claude.call(
+                    "Check each statement below against the page text shown for it, and ONLY that text "
+                    "(ignore anything you know from elsewhere).\n"
+                    "status: confirmed = the page states the same thing; contradicted = the page states "
+                    "something different; not_on_page = the page does not address it.\n"
+                    "page_says: copy the page's own words that decide it (at most 200 characters), "
+                    "exactly as they appear; \"\" for not_on_page.\n"
+                    "page_value: the value the page gives, or \"\".\n"
+                    'Return JSON ONLY: {"verdicts": [{"ref": "c1", "status": "confirmed|contradicted|'
+                    'not_on_page", "page": "P1", "page_says": "...", "page_value": "..."}]}\n\n'
+                    "PAGES:\n" + "\n\n".join(page_txt) + "\n\nSTATEMENTS:\n" + "\n".join(lines),
+                    max_tokens=4000, temperature=0)
+            except Exception as e:
+                print(f"[blog_gen] verify-analyze: page judge failed ({e})", flush=True)
+                continue
+            for v in ((res or {}).get("verdicts") or []) if isinstance(res, dict) else []:
+                if not isinstance(v, dict):
+                    continue
+                ref = str(v.get("ref") or "").strip()
+                status = str(v.get("status") or "").strip().lower()
+                if status not in ("confirmed", "contradicted", "not_on_page"):
+                    continue
+                m = re.search(r"(\d+)", str(v.get("page") or ""))
+                url = urls[int(m.group(1)) - 1] if (m and 1 <= int(m.group(1)) <= len(urls)) else ""
+                says = str(v.get("page_says") or "").strip()
+                if says:
+                    # the excerpt must really be on one of THIS statement's pages — the named page first
+                    needle = self._vx_norm(says).lower().strip(" .\"'")
+                    own = [u for u in (cmap.get(ref) or {}).get("urls", []) if pages.get(u, {}).get("ok")]
+                    found = ""
+                    for u in ([url] if url in own else []) + [u for u in own if u != url]:
+                        if needle and needle in self._vx_norm(pages[u]["text"]).lower():
+                            found = u
+                            break
+                    if found:
+                        url = found
+                    else:
+                        says = ""
+                if status in ("confirmed", "contradicted") and not says:
+                    status = "not_on_page"   # no verifiable page wording → not decided by the page
+                prev = verdicts.get(ref)
+                rank = {"contradicted": 2, "confirmed": 1, "not_on_page": 0}
+                if prev and rank[prev["status"]] >= rank[status]:
+                    continue
+                verdicts[ref] = {"status": status, "url": url, "page_says": says[:220],
+                                 "page_value": str(v.get("page_value") or "").strip()[:120]}
+        return verdicts
+
+    # ── (c) search what the pages did not settle ───────────────────────────────────────────────────
+    def _vx_search(self, brand, cands, verdicts, stats):
+        name = ((brand or {}).get("name") or "").strip()
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+        cdoms = self._vx_competitor_domains(brand)
+        todo = []
+        for c in cands:
+            if c["ref"].startswith("n"):
+                if c.get("note_value") or c.get("note_url"):
+                    continue          # the operator supplied the value or the page — nothing to search for
+                pr = 0
+            else:
+                if (verdicts.get(c["ref"]) or {}).get("status") in ("confirmed", "contradicted"):
+                    continue          # the cited page settled it
+                pr = 1 if c.get("kind") == "price" else (2 if c.get("subject") else (3 if c.get("entity") else 4))
+            todo.append((pr, c))
+        todo.sort(key=lambda x: x[0])
+        results = {}
+        for _pr, c in todo:
+            if stats["searches"] >= _VX_MAX_SEARCHES:
+                stats["search_capped"] += 1
+                continue
+            ent = c.get("entity") or ""
+            subject = bool(c.get("subject"))
+            dom = own if subject else (cdoms.get(ent.strip().lower()) or "")
+            if c["ref"].startswith("n"):
+                brief = (f"An editor says this part of an article about {ent or name} is wrong: "
+                         f"\"{c['text']}\". The article currently says: "
+                         f"\"{(c['occurrences'][0]['quote'] if c['occurrences'] else c['text'])[:300]}\". "
+                         "Find the correct, current information and the page that states it.")
+            else:
+                brief = (f"Verify this claim about {ent or 'the topic'}: \"{c['text']}\""
+                         + (f" (the article states {c['value']})" if c.get("value") else "")
+                         + ". Return the CURRENT, correct information and the page that states it.")
+            pinned = bool(dom) and (subject or c.get("kind") == "price")
+            res = []
+            try:
+                stats["searches"] += 1
+                if pinned:
+                    res = self.claude.search_sources(brief, max_searches=2, allowed_domains=[dom],
+                                                     first_party=True) or []
+                    if (not res and not subject and stats["searches"] < _VX_MAX_SEARCHES):
+                        stats["searches"] += 1   # a competitor price the vendor's own site did not show
+                        res = self.claude.search_sources(brief, max_searches=2) or []
+                elif subject and not own:
+                    res = self.claude.search_sources(brief, max_searches=2) or []
+                else:
+                    res = self.claude.search_sources(brief, max_searches=2) or []
+            except Exception as e:
+                print(f"[blog_gen] verify-analyze: search failed ({e})", flush=True)
+                res = []
+            kept = []
+            for s in res:
+                if not isinstance(s, dict) or not (s.get("url") or "").strip():
+                    continue
+                if _is_non_evidence(s) or (name and _is_negative_about(s, name)):
+                    continue
+                if not subject and _is_affiliate_review(s, own_domain=dom):
+                    continue
+                kept.append({"title": str(s.get("title") or "")[:160], "url": s["url"].strip(),
+                             "fact": str(s.get("fact") or "")[:600],
+                             "class": _source_class(s.get("url") or "")})
+            results[c["ref"]] = kept[:3]
+        return results
+
+    # ── (d) synthesis ──────────────────────────────────────────────────────────────────────────────
+    def _vx_synthesize(self, brand, cands, verdicts, search_results, pages, prior_feedback, instructions):
+        name = ((brand or {}).get("name") or "").strip()
+        try:
+            canon = "; ".join(f"{i.get('product') or 'general'}: {i.get('value')}"
+                              for i in _kf_pricing_items((brand or {}).get("key_facts")) if i.get("value"))
+        except Exception:
+            canon = ""
+        out = []
+        for g in range(0, len(cands), 10):
+            grp = cands[g:g + 10]
+            blocks = []
+            for c in grp:
+                hdr = (f"[{c['ref']}] OPERATOR NOTE: \"{c['text']}\""
+                       + (f" · the operator's correct value: {c['note_value']}" if c.get("note_value") else "")
+                       + (f" · the operator's link: {c['note_url']}" if c.get("note_url") else "")
+                       if c["ref"].startswith("n") else
+                       f"[{c['ref']}] CLAIM about {c.get('entity') or 'the topic'} ({c.get('kind')}"
+                       + (f"; product: {c['product']}" if c.get("product") else "") + f"): \"{c['text']}\""
+                       + (f" · the article states: {c['value']}" if c.get("value") else ""))
+                lines = [hdr, "  OCCURRENCES:"]
+                for k, o in enumerate(c["occurrences"]):
+                    lines.append(f"   {k + 1}. ({o['where']}) {o['quote']}")
+                if c.get("note_url"):
+                    pg = pages.get(c["note_url"]) or {}
+                    lines.append("  OPERATOR'S LINK PAGE TEXT: "
+                                 + (self._vx_window(pg.get("text"), self._vx_needles(c["text"], c.get("note_value")), 2500)
+                                    if pg.get("ok") else "(could not be read)"))
+                v = verdicts.get(c["ref"])
+                if v:
+                    lines.append(f"  CITED PAGE ({v['url']}): {v['status']}"
+                                 + (f" — the page says \"{v['page_says']}\"" if v.get("page_says") else ""))
+                elif c.get("urls"):
+                    lines.append("  CITED PAGE: " + ("could not be read" if not any(
+                        (pages.get(u) or {}).get("ok") for u in c["urls"]) else "not checked"))
+                sr = search_results.get(c["ref"])
+                if sr is not None:
+                    lines.append("  WEB RESULTS:" + ("" if sr else " none found"))
+                    for s in sr:
+                        lines.append(f"   - {s['title']} — {s['url']}" + (f" [{s['class']}]" if s.get("class") else "")
+                                     + f": {s['fact']}")
+                blocks.append("\n".join(lines))
+            fb = ""
+            if prior_feedback:
+                fb = ("\nTHE OPERATOR'S INPUT ON THE PREVIOUS ROUND (honour it):\n"
+                      + "\n".join(f"- {x}" for x in prior_feedback[:30]) + "\n")
+            ins = f"\nTHE OPERATOR'S GENERAL INSTRUCTIONS: {instructions}\n" if (instructions or "").strip() else ""
+            try:
+                res = self.claude.call(
+                    f"You are the fact-checker for a published article about {name}. Below are candidate "
+                    "problems found by re-reading the article's cited pages and searching the web, plus "
+                    "corrections the operator asked for. Return ONE item per candidate.\n"
+                    "ACTION:\n"
+                    "- correct: the evidence (a cited page, a web source, the operator's note or link, or the "
+                    "brand's canonical facts) gives the right information. Rewrite every occurrence with it.\n"
+                    "- soften: the claim could not be confirmed anywhere. Rewrite each occurrence so it no "
+                    "longer asserts the unconfirmed specific, keeping what is sourced.\n"
+                    "- remove: rewrite each occurrence without the claim.\n"
+                    "- none: on inspection the article is right. No change.\n"
+                    "A claim that could NOT be confirmed after searching is never silently dropped or kept: "
+                    "propose soften, and ALSO give the remove rewrites in \"alternatives\", so the operator "
+                    "chooses keep, soften or remove.\n"
+                    "SCRUTINY BOTH WAYS: the operator can be wrong too. When the operator's value disagrees "
+                    "with what a source page says, set \"conflict\" to one sentence naming both values and "
+                    "the page, and still propose the operator's value; never silently pick either side. For "
+                    "a brand's own prices and terms, the brand's own site outranks review, retail and "
+                    "aggregator pages.\n"
+                    "WRITING EACH FIX:\n"
+                    "- \"quote\" must be one of that candidate's OCCURRENCES, copied exactly.\n"
+                    "- \"fix\" replaces the whole quote: the same sentence, or the same table row line with "
+                    "the SAME number of | cells, or the whole meta description, with only the wrong part "
+                    "changed. For remove, \"fix\" may be \"\" to delete a whole sentence.\n"
+                    "- Keep every [S#] marker that is in the quote. If the correction rests on a web source "
+                    "or the operator's link that the article does not already cite, put [NEW] right after "
+                    "the corrected value.\n"
+                    "- Change only what the correction requires; never add any other fact, figure or name.\n"
+                    "- Never write that something is unavailable, not found, not specified, not disclosed or "
+                    "not public.\n"
+                    "- Plain ASCII punctuation only: no em-dash, en-dash, curly quotes or ellipsis character.\n"
+                    "- A meta description fix stays under 160 characters.\n"
+                    "- basis.excerpt: copy the deciding words from the evidence shown, at most 200 "
+                    "characters; basis.url: the page it came from.\n"
+                    + (f"BRAND CANONICAL PRICING (set by the operator): {canon}\n" if canon else "")
+                    + fb + ins +
+                    '\nReturn JSON ONLY: {"items": [{"ref": "c1", "problem": "<one sentence>", "action": '
+                    '"correct|soften|remove|none", "old_value": "<the wrong value as the article states it>", '
+                    '"new_value": "<the corrected value>", "fixes": [{"quote": "...", "fix": "..."}], '
+                    '"alternatives": {"remove": [{"quote": "...", "fix": "..."}]}, "basis": {"type": '
+                    '"cited page|web source|your note|brand facts", "url": "...", "excerpt": "..."}, '
+                    '"confidence": "high|medium|low", "conflict": ""}]}\n\nCANDIDATES:\n'
+                    + "\n\n".join(blocks),
+                    max_tokens=8000, temperature=0)
+            except Exception as e:
+                print(f"[blog_gen] verify-analyze: synthesis failed ({e})", flush=True)
+                res = None
+            got = {}
+            for r in ((res or {}).get("items") or []) if isinstance(res, dict) else []:
+                if isinstance(r, dict) and str(r.get("ref") or "").strip():
+                    got[str(r["ref"]).strip()] = r
+            for c in grp:
+                out.append((c, got.get(c["ref"])))
+        return out
+
+    def verify_analyze(self, brand, body, meta_description="", notes=None, prior=None, instructions=""):
+        """FU208 — the scrutiny ANALYSIS of a finished blog. Reads the article, re-reads every cited page
+        once, searches the web for what those pages do not settle (and for any operator note given
+        without a value), and returns a SESSION of correction items for the operator to review.
+
+        Writes NOTHING: the caller stores the session. `prior` is the previous session on a "Re-check with
+        my input" round — its fetched pages are reused (no refetch) and its item decisions/comments are
+        handed to the synthesis. Returns the session dict."""
+        brand = brand or {}
+        body = body or ""
+        meta = meta_description or ""
+        notes = self._vx_clean_notes(notes)
+        prior = prior if isinstance(prior, dict) else {}
+        pages = dict(prior.get("pages") or {})
+        stats = {"claims": 0, "confirmed": 0, "pages_fetched": 0, "pages_reused": 0,
+                 "pages_unreadable": 0, "searches": 0, "search_capped": 0}
+        claims, note_maps = self._vx_extract(brand, body, meta, notes)
+        stats["claims"] = len(claims)
+        blocks = self._blocks_from_sources(body, [])
+
+        def _urls(cited):
+            out = []
+            for i in cited:
+                if 1 <= i <= len(blocks):
+                    u = (blocks[i - 1].get("url") or "").strip()
+                    if u and u not in out:
+                        out.append(u)
+            return out
+
+        cands = []
+        for c in claims:
+            cands.append({"ref": c["id"], "text": c["claim"], "kind": c["kind"], "entity": c["entity"],
+                          "product": c["product"], "value": c["value"], "subject": c["subject"],
+                          "urls": _urls(c["cited"]), "occurrences": c["occurrences"]})
+        for i, n in enumerate(notes):
+            m = note_maps.get(i) or {}
+            cands.append({"ref": f"n{i}", "text": n["text"], "kind": "other", "entity": m.get("entity", ""),
+                          "product": m.get("product", ""), "value": m.get("value", ""),
+                          "subject": bool(m.get("subject")), "urls": _urls(m.get("cited") or []),
+                          "occurrences": m.get("occurrences") or [], "note_value": n["value"],
+                          "note_url": n["url"]})
+        # (b) every unique cited URL fetched ONCE (+ each operator link), in parallel, capped
+        want, labels = [], {}
+        for c in cands:
+            for u in c["urls"]:
+                if u not in want:
+                    want.append(u)
+        want = want[:_VX_MAX_PAGES]
+        for i, b in enumerate(blocks):
+            if b.get("url"):
+                labels[b["url"]] = b.get("label") or ""
+        for c in cands:
+            if c.get("note_url"):
+                labels.setdefault(c["note_url"], "your link")
+                if c["note_url"] not in want:
+                    want.append(c["note_url"])
+        for c in cands:
+            c["urls"] = [u for u in c["urls"] if u in want]
+        self._vx_fetch_pages(want, pages, stats, labels)
+        verdicts = self._vx_judge_pages([c for c in cands if c["urls"]], pages)
+        # (c) web search for what the pages did not settle
+        search_results = self._vx_search(brand, cands, verdicts, stats)
+        # internal defects — the FU202 content read, reused as-is
+        defects = []
+        if self.claude is not None:
+            try:
+                defects, _assess = self._verify_content(brand, body)
+            except Exception as e:
+                print(f"[blog_gen] verify-analyze: content read failed ({e})", flush=True)
+        # (d) synthesis — only claims NOT confirmed by their page, plus every operator note
+        prior_feedback = []
+        for it in (prior.get("items") or []):
+            d = it.get("decision") or {}
+            bits = []
+            if d.get("comment"):
+                bits.append(f"comment: {d['comment']}")
+            if d.get("new_value") and d.get("new_value") != (it.get("proposal") or {}).get("new_value"):
+                bits.append(f"the operator's value: {d['new_value']}")
+            if "approved" in d and not d.get("approved"):
+                bits.append("the operator rejected this")
+            if bits:
+                prior_feedback.append(f"\"{it.get('problem') or ''}\" — " + "; ".join(bits))
+        todo = []
+        for c in cands:
+            if c["ref"].startswith("c") and (verdicts.get(c["ref"]) or {}).get("status") == "confirmed":
+                stats["confirmed"] += 1
+                continue
+            if c["ref"].startswith("c") and not c["occurrences"]:
+                continue
+            todo.append(c)
+        synth = self._vx_synthesize(brand, todo, verdicts, search_results, pages, prior_feedback,
+                                    instructions) if (todo and self.claude is not None) else []
+        known_text = {u: (p.get("text") or "") for u, p in pages.items()}
+        for sr in search_results.values():
+            for s in sr:
+                known_text[s["url"]] = (known_text.get(s["url"]) or "") + " " + s.get("fact", "")
+        cited_urls = {(b.get("url") or "").strip().rstrip("/").lower() for b in blocks if b.get("url")}
+        items = []
+
+        def _clean_fixes(raw, occs, meta_ok=True):
+            by_quote = {o["quote"]: o for o in occs}
+            out, seen = [], set()
+            for f in (raw or []):
+                if not isinstance(f, dict):
+                    continue
+                exact, where = self._vx_locate(body, meta, f.get("quote"))
+                if not exact:
+                    continue
+                if exact not in by_quote and by_quote:
+                    # a quote the model found that is not in the listed occurrences: accept it only when
+                    # it CONTAINS or is contained by a listed one (same place, different span). A note the
+                    # extraction could not map to any place accepts any quote that is really in the text.
+                    host = next((q for q in by_quote if exact in q or q in exact), None)
+                    if not host:
+                        continue
+                if exact in seen:
+                    continue
+                seen.add(exact)
+                out.append({"quote": exact, "where": where, "fix": str(f.get("fix") or "")})
+            return out
+
+        for c, r in synth:
+            is_note = c["ref"].startswith("n")
+            r = r if isinstance(r, dict) else {}
+            action = str(r.get("action") or "").strip().lower()
+            if action not in ("correct", "soften", "remove", "none"):
+                action = "correct" if r else "none"
+            if action == "none" and not is_note:
+                continue
+            fixes = _clean_fixes(r.get("fixes"), c["occurrences"]) if action != "none" else []
+            alts = {}
+            for k, v in ((r.get("alternatives") or {}) if isinstance(r.get("alternatives"), dict) else {}).items():
+                if k in ("soften", "remove"):
+                    cf = _clean_fixes(v, c["occurrences"])
+                    if cf:
+                        alts[k] = cf
+            basis = r.get("basis") if isinstance(r.get("basis"), dict) else {}
+            b_url = str(basis.get("url") or "").strip()
+            if b_url and b_url not in known_text and b_url != c.get("note_url"):
+                b_url = ""
+            b_excerpt = str(basis.get("excerpt") or "").strip()[:220]
+            if b_excerpt and b_url and self._vx_norm(b_excerpt).lower().strip(" .\"'") not in \
+                    self._vx_norm(known_text.get(b_url, "")).lower():
+                b_excerpt = ""
+            v = verdicts.get(c["ref"]) or {}
+            if not b_excerpt and v.get("page_says"):
+                b_excerpt, b_url = v["page_says"], (b_url or v.get("url") or "")
+            b_type = str(basis.get("type") or "").strip().lower()
+            if b_type not in ("cited page", "web source", "your note", "brand facts"):
+                b_type = "your note" if is_note else ("cited page" if v else "web source")
+            new_source = None
+            uses_new = any("[NEW]" in f["fix"] for f in fixes) or any(
+                "[NEW]" in f["fix"] for fl in alts.values() for f in fl)
+            if uses_new:
+                ns_url = b_url or (c.get("note_url") or "")
+                if ns_url and ns_url.rstrip("/").lower() not in cited_urls:
+                    title = ""
+                    for s in (search_results.get(c["ref"]) or []):
+                        if s["url"] == ns_url:
+                            title = s["title"]
+                    new_source = {"label": (title or _norm_domain(ns_url) or "source")[:90], "url": ns_url}
+                elif not ns_url:
+                    for f in fixes + [f for fl in alts.values() for f in fl]:
+                        f["fix"] = re.sub(r"\s?\[NEW\]", "", f["fix"])
+            conf = str(r.get("confidence") or "").strip().lower()
+            conf = conf if conf in ("high", "medium", "low") else ("medium" if r else "low")
+            conflict = str(r.get("conflict") or "").strip()
+            problem = str(r.get("problem") or "").strip() or (c["text"] if is_note else f"Unconfirmed: {c['text']}")
+            if not r:
+                problem += " (the analysis could not produce a correction; add a comment and it will be drafted)"
+            covered = {f["quote"] for f in fixes}
+            occs = list(c["occurrences"])
+            for f in fixes + [f for fl in alts.values() for f in fl]:
+                if f["quote"] not in {o["quote"] for o in occs} and not any(
+                        f["quote"] in o["quote"] or o["quote"] in f["quote"] for o in occs):
+                    occs.append({"where": f["where"], "quote": f["quote"]})
+            c = dict(c, occurrences=occs)
+            item = {
+                "id": f"i{len(items) + 1}", "ref": c["ref"],
+                "origin": "your note" if is_note else "scrutiny",
+                "kind": c.get("kind") or "other", "entity": c.get("entity") or "",
+                "product": c.get("product") or "", "subject": bool(c.get("subject")),
+                "claim": c["text"], "problem": problem,
+                "occurrences": c["occurrences"],
+                "uncovered": [o["quote"] for o in c["occurrences"] if o["quote"] not in covered]
+                             if action != "none" else [],
+                "proposal": {"action": action, "old_value": str(r.get("old_value") or c.get("value") or "")[:160],
+                             "new_value": str(r.get("new_value") or c.get("note_value") or "")[:160],
+                             "fixes": fixes, "alternatives": alts},
+                "basis": {"type": b_type, "url": b_url, "excerpt": b_excerpt},
+                "new_source": new_source, "confidence": conf, "conflict": conflict,
+                "note": ({"text": c["text"], "value": c.get("note_value") or "", "url": c.get("note_url") or ""}
+                         if is_note else None),
+            }
+            item["decision"] = {"approved": bool(fixes) and not conflict and action != "none"
+                                            and (is_note or conf == "high"),
+                                "action": action, "new_value": item["proposal"]["new_value"],
+                                "comment": "", "save_canonical": False, "fixes": []}
+            items.append(item)
+        # internal defects from the FU202 read: mechanical ones proposed as-is, the rest need input
+        for d in defects:
+            exact, where = self._vx_locate(body, meta, d.get("quote"))
+            if not exact:
+                continue
+            fixable = d.get("kind") in self._VF_FIXABLE and bool(d.get("fix"))
+            occ = [{"where": where, "quote": exact}]
+            item = {
+                "id": f"i{len(items) + 1}", "ref": "", "origin": "scrutiny",
+                "kind": d.get("kind") or "content", "entity": "", "product": "", "subject": False,
+                "claim": exact[:200], "problem": d.get("problem") or "", "occurrences": occ,
+                "uncovered": [] if fixable else [exact],
+                "proposal": {"action": "correct", "old_value": "", "new_value": "",
+                             "fixes": ([{"quote": exact, "where": where, "fix": d["fix"]}] if fixable else []),
+                             "alternatives": {}},
+                "basis": {"type": "internal", "url": "", "excerpt": ""},
+                "new_source": None, "confidence": "high" if fixable else "low", "conflict": "",
+                "note": None,
+            }
+            item["decision"] = {"approved": fixable, "action": "correct", "new_value": "", "comment": "",
+                                "save_canonical": False, "fixes": []}
+            items.append(item)
+        stats["skipped_searches"] = self.claude.skipped_searches() if (
+            self.claude is not None and hasattr(self.claude, "skipped_searches")) else 0
+        print(f"[blog_gen] verify-analyze: {stats['claims']} claim(s), {stats['confirmed']} confirmed by their "
+              f"page, {stats['pages_fetched']} page(s) fetched ({stats['pages_unreadable']} unreadable, "
+              f"{stats['pages_reused']} reused), {stats['searches']} search(es) "
+              f"(+{stats['search_capped']} over the cap, {stats['skipped_searches']} skipped by the cost ceiling) "
+              f"→ {len(items)} item(s)", flush=True)
+        return {"status": "ready", "round": int(prior.get("round") or 0) + 1,
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "notes": notes, "instructions": instructions or "", "items": items,
+                "pages": pages, "stats": stats,
+                "body_hash": self._vx_hash(body), "meta_hash": self._vx_hash(meta)}
+
+    # ── apply ──────────────────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _vx_value_tokens(*values):
+        cores, words = set(), set()
+        for v in values:
+            v = v or ""
+            for m in re.finditer(r"\d[\d,]*(?:\.\d+)?", v):
+                c = re.sub(r"[^\d.]", "", m.group(0)).strip(".")
+                if c:
+                    cores.add(c)
+            for w in re.findall(r"[A-Za-z0-9®™]+", v):
+                words.add(w.lower())
+        return cores, words
+
+    def _vx_gate(self, target, quote, fix, brand, old_value, action, new_cite="", claim=""):
+        """`_verify_repair_gate` for an APPROVED correction. Identical refusals — a dropped citation, a
+        lost number or name, a punt, edit narration, an em-dash, the H1 / byline / Sources — with ONE
+        exemption: the tokens of the approved `old_value` may change, because that change is the
+        correction the operator approved. A different number changing in the same sentence is still
+        refused. Returns "" when the fix may be applied, else the reason."""
+        from collections import Counter
+        if quote not in target:
+            return "the text changed since the analysis — verify again"
+        cut = _VF_SOURCES_RE.search(target)
+        if cut and target.index(quote) >= cut.start():
+            return "the sentence is inside the ## Sources section"
+        _line = quote.splitlines()[0].strip()
+        if _line.startswith("# "):
+            return "the sentence is the H1 title (pinned to the seed)"
+        if _line.startswith("*") and _line.endswith("*") and len(_line) > 2:
+            return "the sentence is the byline / disclosure line"
+        if "[NEW]" in fix:
+            return "the fix cites a new source that could not be added"
+        qc = Counter(re.findall(r"\[S\d+\]", quote))
+        fc = Counter(re.findall(r"\[S\d+\]", fix))
+        if action == "remove":
+            if any(fc[k] > qc.get(k, 0) for k in fc):
+                return "the fix added a citation"
+        else:
+            for k in set(qc) | set(fc):
+                if k == new_cite:
+                    if fc.get(k, 0) < qc.get(k, 0):   # the approved source may be ADDED, never dropped
+                        return "the fix changed the [S#] citations"
+                elif fc.get(k, 0) != qc.get(k, 0):
+                    return "the fix changed the [S#] citations"
+        if not fix.strip():
+            if action != "remove":
+                return "the fix is empty"
+            return ""
+        if quote.strip().startswith("|"):
+            if not fix.strip().startswith("|"):
+                return "the fix is not a table row"
+            if quote.strip().count("|") != fix.strip().count("|"):
+                return "the fix changed the number of table cells"
+        if (self._PUNT_MEANING_RE.search(fix) or self._PUNT_CELL_RE.search(fix)
+                or self._PUNT_SENT_RE.search(fix) or self._PUNT_URL_SENT_RE.search(fix)
+                or self._PUNT_PROSE_RE.search(fix)):
+            return "the fix says a fact is unavailable — that wording is banned"
+        if self._META_RE.search(fix):
+            return "the fix narrates an editing decision — that is scrubbed from the article"
+        if any(ch in fix for ch in self._VF_BANNED_CHARS):
+            return "the fix reintroduced an em-dash / curly quote / ellipsis"
+        ok, missing = self._facts_preserved(quote, fix, brand)
+        if not ok:
+            cores, words = self._vx_value_tokens(old_value, claim if action == "remove" else "")
+            rest = []
+            for tok in missing:
+                t = str(tok)
+                core = re.sub(r"[^\d.]", "", t).strip(".")
+                if core and core in cores:
+                    continue
+                if t.lower() in words or all(w.lower() in words for w in re.findall(r"[A-Za-z0-9®™]+", t)):
+                    continue
+                rest.append(t)
+            if rest:
+                return (f"the fix changed {', '.join(rest[:3])}, which is not part of the approved change")
+        return ""
+
+    @staticmethod
+    def _vx_replace(target, quote, fix):
+        if fix.strip():
+            return target.replace(quote, fix)
+        if quote.strip().startswith("|"):
+            return re.sub(r"(?m)^[ \t]*" + re.escape(quote.strip()) + r"[ \t]*\n?", "", target)
+        out = target.replace(quote, "")
+        out = re.sub(r"(?m)[ \t]{2,}", " ", out)
+        out = re.sub(r"(?m) +([.,;:])", r"\1", out)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out
+
+    def _vx_draft(self, brand, body, meta, jobs, added, instructions, redo):
+        """ONE batched Claude call that writes the fixes needing the operator's input — an item with a
+        comment or an edited value, an occurrence the analysis did not cover, a changed action, a redo,
+        or a correction the operator added in review. Returns {item_id: [{quote, fix}]}."""
+        if not (jobs or added) or self.claude is None:
+            return {}
+        name = ((brand or {}).get("name") or "").strip()
+        head = self._vx_head(body)
+        out = {}
+        batches = [jobs[i:i + 10] for i in range(0, len(jobs), 10)] or [[]]
+        for bi, batch in enumerate(batches):
+            blocks = []
+            for j in batch:
+                it = j["item"]
+                lines = [f"[{it['id']}] action: {j['action']} · problem: {it.get('problem') or ''}"
+                         + (f" · wrong value: {j['old_value']}" if j.get("old_value") else "")
+                         + (f" · correct value: {j['new_value']}" if j.get("new_value") else "")]
+                if j.get("comment"):
+                    lines.append(f"  THE EDITOR'S COMMENT (follow it exactly): {j['comment']}")
+                b = it.get("basis") or {}
+                if b.get("excerpt"):
+                    lines.append(f"  EVIDENCE: \"{b['excerpt']}\"" + (f" ({b['url']})" if b.get("url") else ""))
+                if it.get("new_source"):
+                    lines.append("  This correction rests on a source the article does not cite yet: put [NEW] "
+                                 "right after the corrected value.")
+                lines.append("  OCCURRENCES:")
+                for k, q in enumerate(j["quotes"]):
+                    lines.append(f"   {k + 1}. {q}")
+                blocks.append("\n".join(lines))
+            add_txt = ""
+            if added and bi == 0:
+                add_lines = []
+                for a in added:
+                    add_lines.append(f"[{a['id']}] OPERATOR CORRECTION: \"{a['text']}\""
+                                     + (f" · correct value: {a['value']}" if a.get("value") else "")
+                                     + (f" · source: {a['url']} (not cited yet: put [NEW] right after the "
+                                        "corrected value)" if a.get("url") else ""))
+                add_txt = ("\nCORRECTIONS THE EDITOR ADDED (find every place in the ARTICLE each one applies "
+                           "to, and return each as a quote copied exactly from the article):\n"
+                           + "\n".join(add_lines) + "\n\nARTICLE:\n" + head)
+            try:
+                res = self.claude.call(
+                    f"You are applying corrections an editor APPROVED to a published article about {name}. "
+                    "For each correction, write the replacement text for each occurrence.\n"
+                    "RULES:\n"
+                    "- Honour the editor's comment and value exactly. If the comment limits where the change "
+                    "goes, return fixes ONLY for those occurrences.\n"
+                    "- \"quote\" is copied exactly from the occurrence (or the article); \"fix\" replaces the "
+                    "whole quote: the same sentence, or the same table row line with the SAME number of | "
+                    "cells, with only the wrong part changed. For a removal, \"fix\" may be \"\".\n"
+                    "- Keep every [S#] marker in the quote.\n"
+                    "- Change only what the correction requires; never add any other fact, figure or name.\n"
+                    "- Never write that something is unavailable, not found, not specified, not disclosed or "
+                    "not public.\n"
+                    "- Plain ASCII punctuation only: no em-dash, en-dash, curly quotes or ellipsis character.\n"
+                    + (f"THE EDITOR'S GENERAL INSTRUCTIONS: {instructions}\n" if (instructions or "").strip() else "")
+                    + ("Write FRESH wording for each fix — do not reuse the phrasing of any previous rewrite.\n"
+                       if redo else "")
+                    + '\nReturn JSON ONLY: {"items": [{"id": "i1", "fixes": [{"quote": "...", "fix": "..."}]}]}'
+                    "\n\nCORRECTIONS:\n" + ("\n\n".join(blocks) if blocks else "(none)") + add_txt,
+                    max_tokens=8000, temperature=(0.7 if redo else 0.2))
+            except Exception as e:
+                print(f"[blog_gen] verify-apply: drafting failed ({e})", flush=True)
+                continue
+            for r in ((res or {}).get("items") or []) if isinstance(res, dict) else []:
+                if not isinstance(r, dict):
+                    continue
+                iid = str(r.get("id") or "").strip()
+                fx = []
+                for f in (r.get("fixes") or []):
+                    if isinstance(f, dict):
+                        exact, where = self._vx_locate(body, meta, f.get("quote"))
+                        if exact:
+                            fx.append({"quote": exact, "where": where, "fix": str(f.get("fix") or "")})
+                if iid:
+                    out.setdefault(iid, []).extend(fx)
+        return out
+
+    def verify_apply(self, brand, body, meta_description, session, decisions=None, added=None,
+                     instructions="", seed="", redo=False):
+        """FU208 — build the VERIFIED text from an analysis session and the operator's decisions.
+
+        `body` / `meta_description` are the SOURCE text (the original blog, or the verified version on a
+        "Verify again" round). They are never mutated — the corrected copy is RETURNED:
+        {"body", "meta_description", "report"}. Every occurrence of an approved change is applied through
+        `_vx_gate`; a refused fix leaves that text untouched and is reported with its reason."""
+        brand = brand or {}
+        session = session if isinstance(session, dict) else {}
+        decisions = decisions if isinstance(decisions, dict) else {}
+        src_body, src_meta = body or "", meta_description or ""
+        text, meta = src_body, src_meta
+        report = {"applied": [], "refused": [], "kept": [], "not_approved": [], "unchanged": [],
+                  "canonical_requests": [], "new_sources": [], "redo": bool(redo),
+                  "text_changed": bool(session.get("body_hash")) and self._vx_hash(src_body) != session.get("body_hash")}
+        jobs, plans, promoted = [], [], []
+        for it in (session.get("items") or []):
+            d = dict(it.get("decision") or {})
+            d.update(decisions.get(it["id"]) or {})
+            if not d.get("approved"):
+                report["not_approved"].append(it["id"])
+                continue
+            prop = it.get("proposal") or {}
+            action = str(d.get("action") or prop.get("action") or "correct").lower()
+            if action in ("keep", "none"):
+                report["kept"].append({"id": it["id"], "problem": it.get("problem") or ""})
+                continue
+            if action == prop.get("action"):
+                base = list(prop.get("fixes") or [])
+            else:
+                base = list((prop.get("alternatives") or {}).get(action) or [])
+            base_map = {f["quote"]: f.get("fix") or "" for f in base if f.get("quote")}
+            edited = {}
+            for f in (d.get("fixes") or []):
+                if isinstance(f, dict) and f.get("edited") and f.get("quote"):
+                    edited[f["quote"]] = str(f.get("fix") or "")
+            new_value = str(d.get("new_value") if d.get("new_value") is not None else prop.get("new_value") or "").strip()
+            comment = str(d.get("comment") or "").strip()
+            value_changed = new_value != str(prop.get("new_value") or "").strip()
+            occ_quotes = [o["quote"] for o in (it.get("occurrences") or [])]
+            if not occ_quotes and not base_map and not edited:
+                # nothing to pin the correction to (a note the analysis could not map): let the drafting
+                # call find the places, exactly like a correction added in review
+                nt = it.get("note") or {}
+                promoted.append({"id": it["id"], "text": (nt.get("text") or it.get("problem") or it.get("claim") or "")
+                                 + (f" ({comment})" if comment else ""),
+                                 "value": new_value or nt.get("value") or "", "url": nt.get("url") or ""})
+                continue
+            redraft_all = bool(redo or comment or value_changed or (instructions or "").strip()
+                               or (action != prop.get("action") and not base))
+            if redraft_all:
+                draft_quotes = [q for q in occ_quotes if q not in edited]
+                keep = {}
+            else:
+                draft_quotes = [q for q in occ_quotes if q not in edited and q not in base_map]
+                keep = dict(base_map)
+            keep.update(edited)
+            plan = {"item": it, "action": action, "fixes": keep, "old_value": prop.get("old_value") or "",
+                    "new_value": new_value, "comment": comment, "save_canonical": bool(d.get("save_canonical")),
+                    "drafted": bool(draft_quotes)}
+            plans.append(plan)
+            if draft_quotes:
+                jobs.append({"item": it, "action": action, "quotes": draft_quotes, "old_value": plan["old_value"],
+                             "new_value": new_value, "comment": comment})
+        added_items = []
+        for i, a in enumerate(self._vx_clean_notes(added)):
+            added_items.append({"id": f"x{i + 1}", **a})
+        for a in promoted:
+            if a["text"].strip() or a["value"].strip():
+                added_items.append(a)
+        drafted = self._vx_draft(brand, src_body, src_meta, jobs, added_items, instructions, redo)
+        report["drafted"] = len(jobs) + len(added_items)
+        for p in plans:
+            iid = p["item"]["id"]
+            if p["drafted"]:
+                for f in drafted.get(iid, []):
+                    if f["quote"] not in p["fixes"]:
+                        p["fixes"][f["quote"]] = f["fix"]
+        for a in added_items:
+            fx = {f["quote"]: f["fix"] for f in drafted.get(a["id"], [])}
+            pseudo = {"id": a["id"], "problem": a["text"], "occurrences": [{"quote": q} for q in fx],
+                      "proposal": {"new_value": a.get("value") or ""}, "claim": a["text"], "subject": False,
+                      "kind": "other", "new_source": ({"label": _norm_domain(a["url"]) or "source", "url": a["url"]}
+                                                      if a.get("url") else None)}
+            if not fx:
+                report["refused"].append({"id": a["id"], "where": "", "quote": a["text"][:200],
+                                          "reason": "no place in the article matched this correction"})
+                continue
+            plans.append({"item": pseudo, "action": "correct", "fixes": fx, "old_value": "",
+                          "new_value": a.get("value") or "", "comment": "", "save_canonical": False,
+                          "drafted": True, "added": True})
+
+        blocks = self._blocks_from_sources(src_body, [])
+        cited_idx = {}
+        for i, b in enumerate(blocks):
+            u = (b.get("url") or "").strip().rstrip("/").lower()
+            if u and u not in cited_idx:
+                cited_idx[u] = i + 1
+        max_cited = max([int(x) for x in re.findall(r"\[S(\d+)\]", self._vx_head(src_body))] + [len(blocks)])
+        new_blocks = []
+
+        for p in plans:
+            it = p["item"]
+            ns = it.get("new_source") or None
+            new_cite, pending = "", None
+            if ns and ns.get("url"):
+                key = ns["url"].strip().rstrip("/").lower()
+                if key in cited_idx:
+                    new_cite = f"[S{cited_idx[key]}]"
+                else:
+                    pending = max_cited + len(new_blocks) + 1
+                    new_cite = f"[S{pending}]"
+            applied_here = 0
+            fixes = p["fixes"]
+            if not fixes:
+                report["refused"].append({"id": it["id"], "where": "", "quote": (it.get("claim") or "")[:200],
+                                          "reason": "no rewrite was produced for this correction"})
+                continue
+            covered = set(fixes)
+            for o in (it.get("occurrences") or []):
+                q = o.get("quote") or ""
+                if not q or q in covered or any(q in c2 or c2 in q for c2 in covered):
+                    continue
+                if p.get("comment"):
+                    report["unchanged"].append({"id": it["id"], "where": o.get("where") or "", "quote": q[:300],
+                                                "reason": "left as is — your comment limited the change"})
+                else:
+                    report["refused"].append({"id": it["id"], "where": o.get("where") or "", "quote": q[:300],
+                                              "reason": "no rewrite was produced for this place"})
+            for quote, fix in fixes.items():
+                fix = fix.replace("[NEW]", new_cite) if new_cite else fix
+                in_head = quote in self._vx_head(text)
+                in_meta = (not in_head) and bool(meta) and quote in meta
+                where = "meta" if in_meta else self._vx_where_of(self._vx_head(text), quote)
+                target = meta if in_meta else text
+                why = self._vx_gate(target, quote, fix, brand, p["old_value"], p["action"],
+                                    new_cite=new_cite, claim=it.get("claim") or "")
+                if not why and in_meta and len(fix) > 160:
+                    why = "the meta description would exceed 160 characters"
+                if why:
+                    report["refused"].append({"id": it["id"], "where": where, "quote": quote[:300], "reason": why})
+                    continue
+                if in_meta:
+                    meta = self._vx_replace(meta, quote, fix)
+                else:
+                    text = self._vx_replace(text, quote, fix)
+                applied_here += 1
+                report["applied"].append({"id": it["id"], "where": where, "before": quote[:400], "after": fix[:400]})
+            if applied_here and pending and new_cite in (text + meta):
+                new_blocks.append({"label": ns.get("label") or "source", "url": ns["url"]})
+                report["new_sources"].append({"id": it["id"], "cite": new_cite, "url": ns["url"]})
+            if applied_here and p.get("save_canonical") and it.get("subject"):
+                prop = it.get("proposal") or {}
+                val = p.get("new_value") or prop.get("new_value") or ""
+                if it.get("kind") != "price":
+                    # a fact is stored as the corrected SENTENCE (a bare value means nothing on its own)
+                    _sent = next((a["after"] for a in report["applied"]
+                                  if a["id"] == it["id"] and a["where"] not in ("table", "meta") and a["after"].strip()),
+                                 "")
+                    val = re.sub(r"\s*\[S\d+\]", "", _sent).strip() or val
+                if val:
+                    report["canonical_requests"].append({
+                        "id": it["id"], "kind": "price" if it.get("kind") == "price" else "fact",
+                        "product": it.get("product") or "", "value": val,
+                        "source_url": (it.get("basis") or {}).get("url") or (ns or {}).get("url") or "",
+                        "label": it.get("product") or ""})
+
+        if new_blocks:
+            lines = [f"- [S{max_cited + i + 1}] {b['label']} — <{b['url']}>" for i, b in enumerate(new_blocks)]
+            if _VF_SOURCES_RE.search(text):
+                text = text.rstrip() + "\n" + "\n".join(lines) + "\n"
+            else:
+                text = text.rstrip() + "\n\n## Sources\n\n" + "\n".join(lines) + "\n"
+        text = self._split_grouped_citations(self._sa(text))
+        text = scrub_markdown_formatting(text)[0]
+        if seed:
+            text = self._force_h1(text, seed)
+        meta = self._sa(meta)
+        try:
+            report["flags"] = self._verify_consistency(brand, {"body_markdown": text, "meta_description": meta})
+        except Exception:
+            report["flags"] = []
+        report.update({"n_applied": len(report["applied"]), "n_refused": len(report["refused"]),
+                       "n_items": len({a["id"] for a in report["applied"]})})
+        print(f"[blog_gen] verify-apply: {report['n_applied']} change(s) applied across {report['n_items']} "
+              f"item(s), {report['n_refused']} refused, {len(new_blocks)} new source(s)"
+              + (" (redo)" if redo else ""), flush=True)
+        return {"body": text, "meta_description": meta, "report": report}
+
 
     def _quality_report(self, article, brand, link_targets=None):
         """FU151 (D): deterministic quality scorecard — STRUCTURE (Quick answer / question-headings /

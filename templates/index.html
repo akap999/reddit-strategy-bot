@@ -13187,6 +13187,23 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning) {
             <div class="text-xs text-gray-400 mb-2">${ask}</div>
             ${urlInput}
             <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : isPrice ? "…or type the price, e.g. '$24.99 for the 2-pack'" : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
+            ${(!isThin && !isPrice) ? (() => {
+                // FU206b — a brand with NO information. "Skip" used to keep it and destroy the table;
+                // it now removes it from the whole blog. Both choices are shown, with what each costs.
+                const canRemove = (m.remaining_if_removed || 0) >= 3;
+                return `
+            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+                <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
+                <label class="flex items-start gap-2 ${canRemove ? 'cursor-pointer' : 'opacity-50'} mb-1">
+                    <input type="radio" name="blog-ps-empty-${i}" id="blog-ps-remove-${i}" value="remove" ${canRemove ? 'checked' : 'disabled'} class="mt-0.5">
+                    <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it.${canRemove ? ` The comparison keeps its columns with ${m.remaining_if_removed} competitors.` : ` <span class="text-amber-400">Not available: only ${m.remaining_if_removed || 0} competitor(s) would remain, and a comparison needs at least 3.</span>`}</span>
+                </label>
+                <label class="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="blog-ps-empty-${i}" id="blog-ps-keep-${i}" value="keep" ${canRemove ? '' : 'checked'} class="mt-0.5">
+                    <span><b>Keep ${_blogEsc(m.tool)}</b> — but it has no data for any column, so every column it's blank in is dropped for every brand. <span class="text-amber-400">This will usually remove the comparison table entirely.</span></span>
+                </label>
+            </div>`;
+            })() : ''}
             ${isThin ? `
             <div class="text-xs mt-2 border-t border-gray-700 pt-2">
                 <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
@@ -13198,10 +13215,10 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning) {
                     <input type="radio" name="blog-ps-thin-${i}" id="blog-ps-remove-${i}" value="remove" class="mt-0.5">
                     <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it. The comparison keeps its depth with ${m.remaining_if_removed} competitor${m.remaining_if_removed === 1 ? '' : 's'}.</span>
                 </label>
-            </div>` : `
+            </div>` : (isPrice ? `
             <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
-                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — ${isPrice ? 'drop the price column' : 'drop it from the comparison'}
-            </label>`}
+                <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — drop the price column
+            </label>` : '')}
         </div>`;
     }).join('');
     showModal(`<div style="max-width:640px">
@@ -13229,7 +13246,9 @@ function _blogSubmitSources(skipAll) {
             // the brand out of the ENTIRE blog; "keep" is the current behaviour (its unanswered
             // dimensions are dropped). A pasted source wins over either — it makes the choice moot.
             const remove = !!document.getElementById('blog-ps-remove-' + i)?.checked && !url && !fact;
-            sources.push({ tool, url, fact, skip, remove });
+            // FU206b: an explicit KEEP on an empty brand opts it out of the server's default removal.
+            const keep = !!document.getElementById('blog-ps-keep-' + i)?.checked && !url && !fact;
+            sources.push({ tool, url, fact, skip, remove, keep });
         });
     }
     closeModal();

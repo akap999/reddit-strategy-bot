@@ -4148,14 +4148,19 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU150: the pause names the actual comparison COLUMNS the operator must supply — a
                 # zero-block tool is missing EVERY dimension — not the old static "price + license".
                 _mf = [d for d in dims if d.strip()] or _missing_facts([])
+                # FU206b: how many competitors would remain if this one were removed, so the modal can
+                # offer (or honestly withhold) removal without re-deriving the floor client-side.
+                _rir = len(tools) - 1
                 if st.get("option"):
                     # FU189: a generic OPTION has no page, so demanding "paste a link to its page" is
                     # asking for something that cannot exist. The PAUSE stays (it is the ONLY way to
                     # rescue the row — `finish_pending_blog` turns a typed fact into the TOOL-LABELED
                     # block the reconcile needs), but the ask changes to typed facts only.
-                    unsourced.append({"tool": tool, "facts": _mf, "generic_option": True})
+                    unsourced.append({"tool": tool, "facts": _mf, "generic_option": True,
+                                      "remaining_if_removed": _rir})
                 else:
-                    unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf})
+                    unsourced.append({"tool": tool, "dom": st["dom"] or "", "facts": _mf,
+                                      "remaining_if_removed": _rir})
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} t1=0 t2=0 t3=0 -> none "
                       f"(could NOT source — FU79 will PAUSE & ask for a manual link/fact)", flush=True)
 
@@ -7678,6 +7683,59 @@ Return JSON only:
         return ("byline-check: the author byline placeholder is missing from the top of the article — "
                 "a rewrite dropped it; regenerate, or add the byline before publishing")
 
+    @classmethod
+    def _strip_removed_brands(cls, body, names):
+        """FU206b — the DETERMINISTIC half of removing a brand from the whole blog.
+
+        Two parts of a removal cannot be left to the reconcile, and both were broken:
+
+          * its comparison ROW. If the LLM leaves it, the row is blank in every column, so
+            `_resolve_table_punts` drops every column and the FU204 collapse guard deletes the entire
+            table — the exact outcome removing the brand was meant to prevent.
+          * any SECTION whose heading is about it ("### Is Zeta any good?"). `_split_sections` treats
+            every ### as its own section, so this is not exempt as "faq" — and when a compliant reconcile
+            deletes it, FU54's substance guard sees a section present in the draft and missing from the
+            revision, and RESTORES it. The guard exists to stop rewrites losing substance; here it was
+            undoing an operator's explicit decision.
+
+        Both are unambiguous: a row's first cell IS the entity, and a heading naming the brand is about
+        it. PROSE is deliberately not touched here — "Acme, Bravo and Zeta all ship nationwide" also
+        carries facts about other brands, so deleting the sentence would destroy real content. That
+        stays the reconcile's job, verified afterwards by the `removed-brand` check.
+
+        The H1 is never touched: it is pinned to the operator's seed. Returns (body, n_rows, n_sections).
+        """
+        names = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not body or not names:
+            return body, 0, 0
+        pats = [re.compile(r"\b" + re.escape(n) + r"\b", re.I) for n in names]
+
+        def _names_one(text):
+            return any(p.search(text or "") for p in pats)
+
+        lines, out, n_rows, n_secs = body.split("\n"), [], 0, 0
+        skipping, skip_level = False, 0
+        for ln in lines:
+            st = ln.strip()
+            h = re.match(r"^(#{2,6})\s+(.*)$", st)
+            if h:
+                level = len(h.group(1))
+                if skipping and level <= skip_level:
+                    skipping = False
+                if not skipping and _names_one(h.group(2)):
+                    skipping, skip_level = True, level
+                    n_secs += 1
+                    continue
+            if skipping:
+                continue
+            if st.startswith("|") and st.count("|") >= 2:
+                first = st.strip("|").split("|")[0]
+                if _names_one(re.sub(r"[*_`\[\]]", "", first)):
+                    n_rows += 1
+                    continue
+            out.append(ln)
+        return "\n".join(out), n_rows, n_secs
+
     # FU205 (R4) — the check notes that survive a FU79 pause. Sourcing does not re-run on resume,
     # so without this every check that depends on it silently reports clean on a resumed blog.
     _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
@@ -7710,6 +7768,17 @@ Return JSON only:
         hand-rolled a partial subset and so silently lost the sections their own rewrites dropped —
         reach this one composition without also regenerating a surface the operator did not ask for
         (`part=linkedin` exists for that) and without paying for the extra call."""
+        # FU206b: strip an operator-removed brand's ROW and its SECTIONS from the draft AND the revision
+        # BEFORE the substance guard runs. Stripping only the revision is not enough — the guard compares
+        # the two, and would restore a section about the removed brand straight from the draft.
+        _rm206 = [x for x in (getattr(self, "_removed_brands", None) or []) if str(x).strip()]
+        if _rm206:
+            draft_body, _, _ = self._strip_removed_brands(draft_body, _rm206)
+            article["body_markdown"], _nr, _ns = self._strip_removed_brands(
+                article.get("body_markdown") or "", _rm206)
+            if _nr or _ns:
+                print(f"[blog_gen] remove-brand: stripped {_nr} table row(s) and {_ns} section(s) "
+                      f"naming {', '.join(_rm206)}", flush=True)
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
@@ -8730,11 +8799,39 @@ Return JSON only:
         # exists to prevent. A refused removal is REPORTED, never silently ignored.
         _tools_now = [str(t).strip() for t in (sourcing.get("tools") or []) if str(t).strip()]
         removed, refused = [], []
+        # FU206b — a competitor with NO information at all, skipped by the operator. The modal has
+        # always labelled that choice "Skip this one — drop it from the comparison", and it did the
+        # OPPOSITE: the reconcile never ran (nothing new was provided), the brand's blank row stayed,
+        # so EVERY column had a gap, so every column was dropped, so the FU204 collapse guard deleted
+        # the whole comparison table — while the brand itself stayed in the prose and the FAQ.
+        # Measured: three fully-sourced competitors lost their table to the one that had nothing.
+        #
+        # So a skipped (or simply unanswered — "Skip all" sends nothing) zero-information entry is
+        # now a REMOVAL, through exactly the same floor-protected, whole-blog path as FU206. Two
+        # kinds of entry are deliberately excluded because skipping them has a DIFFERENT, correct
+        # meaning: a `price_only` brand is otherwise sourced (skipping drops the price column), and
+        # a `thin_coverage` brand defaults to KEEP (the operator picks remove explicitly).
+        _asked = {}
         for item in (provided or []):
+            if isinstance(item, dict) and str(item.get("tool") or "").strip():
+                _asked[str(item["tool"]).strip().lower()] = item
+        _implicit = []
+        for _u in (sourcing.get("unsourced") or []):
+            _ut = str(_u.get("tool") or "").strip()
+            if not _ut or _u.get("price_only") or _u.get("thin_coverage"):
+                continue
+            _it = _asked.get(_ut.lower()) or {}
+            if str(_it.get("url") or "").strip() or str(_it.get("fact") or "").strip():
+                continue   # the operator supplied something — it gets filled, not removed
+            if _it.get("keep"):
+                continue   # the operator explicitly chose to KEEP it and lose its columns
+            if not _it.get("remove"):
+                _implicit.append({"tool": _ut, "remove": True})
+        for item in list(provided or []) + _implicit:
             if not isinstance(item, dict) or not item.get("remove"):
                 continue
             _t = str(item.get("tool") or "").strip()
-            if not _t:
+            if not _t or _t.lower() in {r.lower() for r in removed + refused}:
                 continue
             if len([x for x in _tools_now if x.lower() != _t.lower()]) < _MIN_COMPARISON_BRANDS:
                 refused.append(_t)

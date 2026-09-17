@@ -205,3 +205,136 @@ def test_the_thin_coverage_ask_survives_the_fu189_recheck():
     assert set(u["blocks_dims"]) == {"Hague Convention expertise",
                                      "Multi-jurisdictional children matters"}
     assert u["remaining_if_removed"] == 3, "the floor is exactly met, so removal is still offerable"
+
+
+# ── FU206b: a competitor with NO information at all ───────────────────────────────────────────
+ZDRAFT = ("# where to buy concrete equipment\n\n*[Add author byline before publishing]*\n\n"
+          "## Quick answer\n\nAcme, Bravo, Delta and Echo all ship nationwide; Zeta is a newer option.\n\n"
+          "| Retailer | Starting Price | Financing |\n| --- | --- | --- |\n"
+          "| Acme | $1,300 | in-house |\n| Bravo | $1,450 | partner lender |\n"
+          "| Delta | $1,200 | partner lender |\n| Echo | $1,350 | in-house |\n| **Zeta** |  |  |\n\n"
+          "## FAQ\n\n### Is Zeta any good?\n\nZeta is a newer retailer.\n\n### Does Acme ship?\n\nYes.\n")
+
+
+def _zeta_ck(tools):
+    return {"sourcing": {"name": "Acme", "cat": "c", "tools": tools, "peers": list(tools),
+                         "dims": ["Starting Price", "Financing"], "claims": [], "fresh": [],
+                         "unsourced": [{"tool": "Zeta", "facts": ["Starting Price", "Financing"]}]},
+            "evidence_blocks": [],
+            "article": {"title": "where to buy concrete equipment", "meta_description": "d",
+                        "keywords": [], "body_markdown": ZDRAFT, "claims_flagged": []},
+            "draft_body": ZDRAFT}
+
+
+def _finish_zeta(tools, provided):
+    """The reconcile here IGNORES the removal rule entirely — the worst case an LLM can produce."""
+    gen = BlogGenerator(StubClaude(), None)
+    gen._reconcile_and_finish = lambda b, s, a, so: {"body_markdown": a["body_markdown"],
+                                                     "flagged": []}
+    art = gen.finish_pending_blog({"name": "Acme"}, "where to buy concrete equipment",
+                                  _zeta_ck(tools), provided)
+    return gen, art
+
+
+def test_skip_on_a_brand_with_no_data_drops_the_brand_not_the_table():
+    """The bug: 'Skip this one — drop it from the comparison' did the OPPOSITE. The brand's blank row
+    stayed, every column had a gap, every column was dropped, and the collapse guard deleted the
+    whole table — while the brand stayed in the prose and the FAQ. Three fully-sourced competitors
+    lost their table to the one that had nothing."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"], [{"tool": "Zeta", "skip": True}])
+    b = art["body_markdown"]
+    assert gen._removed_brands == ["Zeta"]
+    assert "| Retailer | Starting Price | Financing |" in b, "the comparison table was destroyed"
+    assert "Zeta |" not in b, "the empty row survived"
+    for firm in ("Bravo", "Delta", "Echo"):
+        assert f"| {firm} |" in b, f"{firm}'s fully-sourced row was lost"
+
+
+def test_skip_all_sends_nothing_and_still_removes_the_empty_brand():
+    """'Skip all & finish now' posts an EMPTY sources list — an unanswered entry is a skip too."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"], [])
+    assert gen._removed_brands == ["Zeta"]
+    assert "| Retailer |" in art["body_markdown"]
+
+
+def test_a_section_about_the_removed_brand_is_not_restored_by_the_substance_guard():
+    """FU54's guard restores a section present in the draft and missing from the revision. Every ###
+    is its own section, so a compliant reconcile deleting '### Is Zeta any good?' was overruled and
+    the entry put straight back. The draft is stripped too, so there is nothing to restore."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"], [{"tool": "Zeta", "skip": True}])
+    b = art["body_markdown"]
+    assert "Is Zeta any good" not in b, "the substance guard restored the removed brand's FAQ"
+    assert "Does Acme ship" in b, "an unrelated FAQ entry was lost"
+
+
+def test_prose_is_left_to_the_writer_and_verified_not_deleted():
+    """A sentence naming the removed brand usually carries facts about OTHER brands too — deleting it
+    deterministically would destroy real content. It stays the reconcile's job, and when the
+    reconcile misses it the operator is told."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"], [{"tool": "Zeta", "skip": True}])
+    b = art["body_markdown"]
+    assert "Acme, Bravo, Delta and Echo all ship nationwide" in b, "other brands' facts were deleted"
+    hits = [w for w in art["warnings"] if w["check"] == "removed-brand"]
+    assert hits and "still appear" in hits[0]["detail"], "a leftover mention was not reported"
+
+
+def test_at_the_floor_a_skipped_empty_brand_cannot_be_removed_and_says_why():
+    """Three competitors, one empty. Removing it leaves two — below the floor — so it is refused,
+    its gaps drop every column, and the operator is told plainly that no comparison could ship."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Zeta"], [{"tool": "Zeta", "skip": True}])
+    assert gen._removed_brands == [] and gen._removed_refused == ["Zeta"]
+    keys = [w["check"] for w in art["warnings"]]
+    assert "removed-brand" in keys and "comparison table" in keys
+
+
+def test_a_supplied_fact_beats_the_implicit_removal():
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"],
+                            [{"tool": "Zeta", "fact": "Zeta starts at $1,100 with partner financing"}])
+    assert gen._removed_brands == [], "a brand the operator sourced was removed"
+
+
+def test_skipping_a_price_only_brand_still_just_drops_the_price_column():
+    """A price-only entry is otherwise fully sourced. Skipping it has always meant 'drop the price
+    column' — it must never be read as removing the brand."""
+    gen = BlogGenerator(StubClaude(), None)
+    gen._reconcile_and_finish = lambda b, s, a, so: {"body_markdown": a["body_markdown"],
+                                                     "flagged": []}
+    ck = _zeta_ck(["Bravo", "Delta", "Echo", "Zeta"])
+    ck["sourcing"]["unsourced"] = [{"tool": "Zeta", "price_only": True, "facts": ["current price"]}]
+    gen.finish_pending_blog({"name": "Acme"}, "t", ck, [{"tool": "Zeta", "skip": True}])
+    assert gen._removed_brands == []
+
+
+def test_the_strip_never_touches_the_h1_or_an_unrelated_row():
+    body = ("# Acme vs Zeta\n\n| Firm | X |\n| --- | --- |\n| Acme | a |\n| Zeta | z |\n"
+            "| Zetamax | q |\n\n## About Zeta\n\nZeta text.\n\n## Pricing\n\nAcme costs $1.\n")
+    out, rows, secs = BlogGenerator._strip_removed_brands(body, ["Zeta"])
+    assert out.startswith("# Acme vs Zeta"), "the H1 is pinned to the seed and must never be stripped"
+    assert "| Zeta | z |" not in out and rows == 1
+    assert "| Zetamax | q |" in out, "a word-boundary miss stripped a different brand"
+    assert "## About Zeta" not in out and "Zeta text." not in out and secs == 1
+    assert "## Pricing" in out and "Acme costs $1." in out
+
+
+def test_an_explicit_keep_opts_an_empty_brand_out_of_removal():
+    """Both choices are real. Keeping an empty brand usually costs the whole table — the modal says
+    so — but it is the operator's call, and an explicit keep must be honoured."""
+    gen, art = _finish_zeta(["Bravo", "Delta", "Echo", "Zeta"], [{"tool": "Zeta", "keep": True}])
+    assert gen._removed_brands == [], "an explicit keep was overridden"
+
+
+def test_the_pause_item_tells_the_modal_whether_removal_is_available():
+    handler_tools = ["Bravo", "Delta", "Echo"]
+
+    def handler(p):
+        if "core_topic" in p.lower():
+            return {"tools": handler_tools, "peer_tools": handler_tools, "dimensions": ["Price"],
+                    "claims": [], "core_topic": "x", "products": [], "generic_options": []}
+        return {}
+    gen = BlogGenerator(StubClaude(call_handler=handler), None)
+    gen._evidence_blocks = []
+    s = gen._source_for_completion({"name": "Acme", "category": "c"}, "x",
+                                   {"title": "t", "body_markdown": "# t\n"})
+    empties = [u for u in s["unsourced"] if not u.get("thin_coverage") and not u.get("price_only")]
+    assert empties and all(u["remaining_if_removed"] == 2 for u in empties), \
+        "the modal cannot tell that removal would breach the floor"

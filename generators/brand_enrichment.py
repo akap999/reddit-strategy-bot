@@ -705,3 +705,323 @@ Return JSON only, exactly this shape:
             assignments.append([canon_region, valid_labels[lbl]])
             seen_regions.add(canon_region)
     return {"new_personas": new_personas, "assignments": assignments}
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# FU212 — CONTENT INSTRUCTIONS per brand. The operator's own lines ("mine") are never changed by the
+# tool; the auto lines are the tool's proposals, replaced only on regeneration. Stored as one JSON
+# object on brands.content_context:
+#   {"mine": [{text, kind, sources}], "auto": [{text, kind, sources}],
+#    "dismissed": [normalized text], "auto_generated_at": iso}
+# kind ∈ {"source", "writing"} once a line has been read ("" = not read yet); sources =
+# [{name, domains: [bare domain]}] for a source line.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+CI_MAX_MINE = 20
+CI_MAX_AUTO = 8
+CI_MAX_SOURCE_ORGS = 3
+_CI_DOMAIN_RE = re.compile(
+    r"(?<![\w@.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|org|gov|net|edu|int|io|co|ai|us|"
+    r"uk|ca|au|nz|in|de|fr|eu|info|health|care|mil)(?:\.[a-z]{2})?)(?![\w-])", re.IGNORECASE)
+
+
+def ci_norm(text):
+    """Normalized form of an instruction line, for de-duplication and the dismissed list."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return t.rstrip(" .;:!")
+
+
+def ci_norm_domain(d):
+    d = re.sub(r"^https?://", "", str(d or "").strip().lower())
+    d = d.split("/")[0].split("?")[0].strip().strip(".")
+    if d.startswith("www."):
+        d = d[4:]
+    return d if ("." in d and re.fullmatch(r"[a-z0-9.-]+", d)) else ""
+
+
+def _ci_item(raw):
+    if isinstance(raw, str):
+        raw = {"text": raw}
+    if not isinstance(raw, dict):
+        return None
+    text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()
+    if not text:
+        return None
+    kind = str(raw.get("kind") or "").strip().lower()
+    kind = kind if kind in ("source", "writing") else ""
+    sources = []
+    if kind == "source":
+        for s in (raw.get("sources") or []):
+            if not isinstance(s, dict):
+                continue
+            doms = []
+            for d in (s.get("domains") or []):
+                nd = ci_norm_domain(d)
+                if nd and nd not in doms:
+                    doms.append(nd)
+            name = str(s.get("name") or "").strip() or (doms[0] if doms else "")
+            if name:
+                sources.append({"name": name[:80], "domains": doms[:4]})
+    out = {"text": text[:300], "kind": kind}
+    if kind == "source":
+        out["sources"] = sources[:CI_MAX_SOURCE_ORGS]
+    return out
+
+
+def ci_load(raw):
+    """Parse a stored content_context (JSON string / dict / None) into the normalized shape."""
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    ctx = {"mine": [], "auto": [], "dismissed": [], "auto_generated_at": ""}
+    seen = set()
+    for r in (data.get("mine") or []):
+        it = _ci_item(r)
+        if it and ci_norm(it["text"]) not in seen:
+            seen.add(ci_norm(it["text"]))
+            ctx["mine"].append(it)
+    ctx["mine"] = ctx["mine"][:CI_MAX_MINE]
+    for r in (data.get("auto") or []):
+        it = _ci_item(r)
+        if it and ci_norm(it["text"]) not in seen:
+            seen.add(ci_norm(it["text"]))
+            ctx["auto"].append(it)
+    ctx["auto"] = ctx["auto"][:CI_MAX_AUTO]
+    ctx["dismissed"] = sorted({ci_norm(x) for x in (data.get("dismissed") or []) if ci_norm(x)})
+    ctx["auto_generated_at"] = str(data.get("auto_generated_at") or "")
+    return ctx
+
+
+def ci_merged(ctx):
+    """The instructions generation follows: every line of yours first, then the auto lines that are
+    neither a duplicate of yours nor dismissed. Each item carries origin 'yours' / 'auto'."""
+    ctx = ctx if isinstance(ctx, dict) and "mine" in ctx else ci_load(ctx)
+    out, seen = [], set()
+    for it in ctx["mine"][:CI_MAX_MINE]:
+        seen.add(ci_norm(it["text"]))
+        out.append(dict(it, origin="yours"))
+    dismissed = set(ctx.get("dismissed") or [])
+    n = 0
+    for it in ctx["auto"]:
+        k = ci_norm(it["text"])
+        if k in seen or k in dismissed or n >= CI_MAX_AUTO:
+            continue
+        seen.add(k)
+        n += 1
+        out.append(dict(it, origin="auto"))
+    return out
+
+
+def ci_merge_state(stored, mine_texts=None, auto_items=None, dismissed=None):
+    """Apply an edit from the UI to the stored context, keeping every reading whose text is unchanged.
+    mine_texts — the textarea lines (None = keep stored). auto_items — the auto lines still shown
+    (None = keep stored); a stored auto line missing from it is DISMISSED, so regeneration never brings
+    it back. dismissed — extra texts to dismiss."""
+    ctx = ci_load(stored)
+    pool = {}
+    for it in ctx["auto"] + ctx["mine"]:   # mine readings win over auto readings of the same text
+        if it.get("kind"):
+            pool[ci_norm(it["text"])] = it
+    incoming_auto = None
+    if auto_items is not None:
+        incoming_auto = [x for x in (_ci_item(r) for r in auto_items) if x]
+        for it in incoming_auto:
+            if it.get("kind") and ci_norm(it["text"]) not in pool:
+                pool[ci_norm(it["text"])] = it
+    if mine_texts is not None:
+        new_mine, seen = [], set()
+        for t in mine_texts:
+            t = re.sub(r"\s+", " ", str(t or "")).strip()
+            k = ci_norm(t)
+            if not t or k in seen:
+                continue
+            seen.add(k)
+            new_mine.append(dict(pool[k], text=t) if k in pool else {"text": t, "kind": ""})
+        ctx["mine"] = [x for x in (_ci_item(m) for m in new_mine) if x][:CI_MAX_MINE]
+    mine_keys = {ci_norm(m["text"]) for m in ctx["mine"]}
+    dis = set(ctx["dismissed"])
+    if incoming_auto is not None:
+        kept = {ci_norm(a["text"]) for a in incoming_auto}
+        for a in ctx["auto"]:
+            k = ci_norm(a["text"])
+            if k not in kept and k not in mine_keys:
+                dis.add(k)
+        ctx["auto"] = [pool.get(ci_norm(a["text"]), a) for a in incoming_auto]
+    ctx["auto"] = [a for a in ctx["auto"] if ci_norm(a["text"]) not in mine_keys][:CI_MAX_AUTO]
+    for d in (dismissed or []):
+        if ci_norm(d):
+            dis.add(ci_norm(d))
+    ctx["dismissed"] = sorted(dis - mine_keys)
+    return ctx
+
+
+_CI_SOURCE_WORDS_RE = re.compile(r"\b(source|sources|sourced|sourcing|cite|cites|citing|citation|citations|"
+                                 r"reference|references|link to|according to)\b", re.IGNORECASE)
+
+
+def _ci_read_typed_domains(text):
+    """A line whose author typed the site(s) is read without the model: its domains are taken as written."""
+    doms = []
+    for m in _CI_DOMAIN_RE.finditer(text or ""):
+        d = ci_norm_domain(m.group(1))
+        if d and d not in doms:
+            doms.append(d)
+    if not doms:
+        return None
+    name = re.sub(r"https?://\S+", " ", text or "")
+    name = _CI_DOMAIN_RE.sub(" ", name)
+    name = re.sub(r"(?i)\b(should|must|always|please|only|for|the|a|an|on|in|about|to|and|or|pages?|"
+                  r"site|website|their|its|official)\b|\b(source|sources|sourced|cite|citations?|"
+                  r"reference|references|use|from|link to|according to)\b", " ", name)
+    name = re.sub(r"[()\[\],;:]+", " ", name)
+    # keep only the capitalized words (an organisation's name or acronym: "AAP", "Mayo Clinic"),
+    # otherwise the domain itself names the source
+    caps = [w for w in re.sub(r"\s+", " ", name).strip(" -–—.").split() if w[:1].isupper()]
+    name = " ".join(caps) if 0 < len(caps) <= 5 else doms[0]
+    return {"kind": "source", "sources": [{"name": name[:80], "domains": doms[:4]}]}
+
+
+def build_content_context(claude, brand, stored=None, mine_texts=None, regenerate_auto=False,
+                          vertical=None):
+    """Read the operator's unread lines and (when asked, or never done) propose the AUTO lines.
+
+    ONE model call covers both. A line with a typed domain is read without the model. A source whose
+    domains come back empty falls back to web-search domain resolution (at most 3 lookups). Never
+    raises: on any failure the stored context comes back unchanged (with `mine_texts` applied) and
+    `auto_generated_at` is NOT stamped, so the next generation retries."""
+    b = brand or {}
+    ctx = ci_load(stored if stored is not None else b.get("content_context"))
+    if mine_texts is not None:
+        ctx = ci_merge_state(ctx, mine_texts=mine_texts)
+    for it in ctx["mine"]:
+        if not it.get("kind") and _CI_SOURCE_WORDS_RE.search(it["text"]):
+            typed = _ci_read_typed_domains(it["text"])
+            if typed:
+                it.update(typed)
+    unread = [it for it in ctx["mine"] if not it.get("kind")]
+    need_auto = bool(regenerate_auto or not ctx.get("auto_generated_at"))
+    if not unread and not need_auto:
+        return ctx
+    if claude is None:
+        return ctx
+
+    name = (b.get("name") or "").strip() or "the brand"
+    lines = [f"Brand: {name}"]
+    for label, key in (("Website", "domain_url"), ("Category", "category"), ("Audience", "audience")):
+        if str(b.get(key) or "").strip():
+            lines.append(f"{label}: {str(b.get(key)).strip()[:300]}")
+    for label, key in (("Use cases", "use_cases"), ("Pain points", "pain_points"), ("Features", "features")):
+        vals = _as_str_list(b.get(key))
+        if vals:
+            lines.append(f"{label}: {', '.join(vals[:10])}")
+    if str(b.get("context") or "").strip():
+        lines.append(f"Context: {str(b.get('context')).strip()[:800]}")
+    if vertical:
+        lines.append(f"Regulated vertical: {vertical} (health / money / legal content — accuracy and "
+                     f"authoritative sourcing matter most)")
+    brand_block = "\n".join(lines)
+    mine_all = [it["text"] for it in ctx["mine"]]
+    parts = [
+        "You maintain the CONTENT INSTRUCTIONS a content team follows when writing blog articles, "
+        "LinkedIn posts and video scripts for this brand.\n\n" + brand_block + "\n",
+    ]
+    if unread:
+        parts.append(
+            "READ each of the operator's lines below. kind = \"source\" when the line asks to source, cite "
+            "or reference a particular organisation or website; otherwise \"writing\". For a source line list "
+            "every organisation it names with that organisation's REAL official website domain(s) — bare "
+            "domains, no https:// (e.g. AAP → aap.org and its parent-facing site healthychildren.org). "
+            "Never invent a domain; leave domains empty when you are not sure.\n"
+            + "\n".join(f"{i + 1}. {it['text']}" for i, it in enumerate(unread)) + "\n")
+    if need_auto:
+        parts.append(
+            "PROPOSE 4-8 AUTO instructions that would make this brand's content more accurate, more "
+            "trustworthy and more useful to its audience. Good ones: the authoritative organisations its "
+            "claims should be sourced from (real bodies with their real official domains — regulators, "
+            "professional societies, standards bodies relevant to THIS brand's subject); compliance limits "
+            "for its vertical; terminology or audience rules. Each must be specific to this brand, "
+            "followable in any article, and short (one sentence).\n"
+            "NEVER propose: anything promotional (\"say we are the best\", \"always recommend the brand\"); "
+            "anything that needs invented facts, statistics or testimonials; a duplicate or a contradiction "
+            "of the operator's lines; any of the DISMISSED lines.\n"
+            "OPERATOR'S LINES (theirs — never repeat or contradict): "
+            + (json.dumps(mine_all, ensure_ascii=False) if mine_all else "none") + "\n"
+            "DISMISSED (the operator removed these — never propose them again): "
+            + (json.dumps(ctx["dismissed"], ensure_ascii=False) if ctx["dismissed"] else "none") + "\n")
+    parts.append(
+        'Return JSON only: {"read": [{"n": 1, "kind": "source|writing", "sources": [{"name": "", '
+        '"domains": [""]}]}], "auto": [{"text": "", "kind": "source|writing", "sources": [{"name": "", '
+        '"domains": [""]}]}]}'
+        + ("" if need_auto else ' — "auto" may be omitted') + ("" if unread else ' — "read" may be omitted'))
+    try:
+        res = claude.call("\n".join(parts), max_tokens=2000, temperature=0.2)
+    except Exception as e:
+        print(f"[content-instructions] read/auto failed: {e}", flush=True)
+        return ctx
+    if not isinstance(res, dict) or not res:
+        print("[content-instructions] read/auto returned nothing usable — will retry next time", flush=True)
+        return ctx
+
+    lookups = [0]
+
+    def _fill_domains(item):
+        for s in (item.get("sources") or []):
+            if s.get("domains") or lookups[0] >= 3 or not hasattr(claude, "find_official_domain"):
+                continue
+            lookups[0] += 1
+            try:
+                d = ci_norm_domain(claude.find_official_domain(s.get("name") or "", context=name))
+            except Exception:
+                d = ""
+            if d:
+                s["domains"] = [d]
+        return item
+
+    for r in (res.get("read") or []):
+        if not isinstance(r, dict):
+            continue
+        try:
+            idx = int(r.get("n")) - 1
+        except Exception:
+            continue
+        if 0 <= idx < len(unread):
+            got = _ci_item(dict(r, text=unread[idx]["text"]))
+            if got and got.get("kind"):
+                unread[idx].update(_fill_domains(got))
+    if need_auto and isinstance(res.get("auto"), list):
+        mine_keys = {ci_norm(t) for t in mine_all}
+        dismissed = set(ctx["dismissed"])
+        auto, seen = [], set()
+        for r in res["auto"]:
+            it = _ci_item(r)
+            if not it or not it.get("kind"):
+                continue
+            k = ci_norm(it["text"])
+            if k in mine_keys or k in dismissed or k in seen:
+                continue
+            seen.add(k)
+            auto.append(_fill_domains(it))
+            if len(auto) >= CI_MAX_AUTO:
+                break
+        ctx["auto"] = auto
+        ctx["auto_generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        print(f"[content-instructions] {len(auto)} auto instruction(s) generated for {name}", flush=True)
+    return ctx
+
+
+def _as_str_list(raw):
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+        except Exception:
+            pass
+        return [s.strip() for s in raw.split(",") if s.strip()]
+    return []

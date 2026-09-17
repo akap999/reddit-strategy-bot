@@ -1965,6 +1965,35 @@ def _persist_brand_personas(db, brand_id, data):
             print(f"[add-brand] persona persist skipped: {e}", flush=True)
 
 
+def _content_context_from_payload(data, stored=None):
+    """FU212 — the Edit Brand / add-brand payload's `content_context` ({mine: [text], auto: [item],
+    dismissed: [text]}) merged onto the stored value, so every reading whose text is unchanged is kept
+    and an auto line removed in the UI is dismissed. Returns a JSON string, or None when absent."""
+    cc = (data or {}).get("content_context")
+    if not isinstance(cc, dict):
+        return None
+    from generators.brand_enrichment import ci_merge_state, ci_load
+    base = ci_load(stored)
+    if cc.get("auto_generated_at") and not base["auto_generated_at"]:
+        base["auto_generated_at"] = str(cc.get("auto_generated_at"))
+    merged = ci_merge_state(
+        base,
+        mine_texts=([str(t) for t in cc["mine"]] if isinstance(cc.get("mine"), list) else None),
+        auto_items=(cc["auto"] if isinstance(cc.get("auto"), list) else None),
+        dismissed=(cc["dismissed"] if isinstance(cc.get("dismissed"), list) else None))
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def _persist_content_context(db, brand_id, data):
+    """FU212: persist Auto-analyze's reviewed content instructions onto a new brand. Graceful."""
+    try:
+        cc = _content_context_from_payload(data)
+        if cc is not None:
+            db.update_brand(brand_id, content_context=cc)
+    except Exception as e:
+        print(f"[add-brand] content instructions persist skipped: {e}", flush=True)
+
+
 def _extract_brand_enrichment_fields(data):
     """Pull the 7 GEO enrichment fields out of a request payload.
 
@@ -2114,6 +2143,7 @@ def api_add_brand(sid):
             **enrich_fields,
         )
         _persist_brand_personas(db, bid, data)
+        _persist_content_context(db, bid, data)   # FU212
         return jsonify({"id": bid})
     finally:
         db.close()
@@ -2134,6 +2164,7 @@ def api_add_brand_standalone():
             **enrich_fields,
         )
         _persist_brand_personas(db, bid, data)
+        _persist_content_context(db, bid, data)   # FU212
         return jsonify({"id": bid})
     finally:
         db.close()
@@ -2144,6 +2175,13 @@ def api_update_brand(bid):
     try:
         data = request.json
         enrich_fields = _extract_brand_enrichment_fields(data)
+        # FU212: content instructions — merged onto the stored value (readings kept, removed auto lines dismissed)
+        try:
+            _cc = _content_context_from_payload(data, (db.get_brand(bid) or {}).get("content_context"))
+            if _cc is not None:
+                enrich_fields["content_context"] = _cc
+        except Exception as e:
+            print(f"[brands] content instructions merge skipped: {e}", flush=True)
         # FU210: "your competitors" is always a SUBSET of the full competitor list, so every other
         # consumer of `competitors` (posts, comments, blog curation) still sees them.
         if enrich_fields.get("manual_competitors") is not None:
@@ -2351,6 +2389,15 @@ def api_enrich_brand_draft():
             draft["logo_url"] = bl.get("logo_url", "")
         except Exception as e:
             print(f"[enrich] byline/logo fetch skipped: {e}", flush=True)
+        # FU212: propose the brand's AUTO content instructions for review (saved with the brand).
+        try:
+            from generators.brand_enrichment import build_content_context
+            from generators.blog_gen import _is_ymyl_brand
+            _db = dict(draft, name=eff_name, domain_url=domain_url)
+            draft["content_context"] = build_content_context(
+                claude, _db, stored={}, regenerate_auto=True, vertical=_is_ymyl_brand(_db))
+        except Exception as e:
+            print(f"[enrich] content instructions skipped: {e}", flush=True)
         return draft
 
     tid = start_task("enrich-brand", task)
@@ -2396,6 +2443,35 @@ def api_regenerate_brand_personas(bid):
             use_cases=brand.get("use_cases"), pain_points=brand.get("pain_points"))
         db.update_brand(bid, personas=json.dumps(personas))
         return jsonify({"personas": personas})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/content-context/regenerate", methods=["POST"])
+def api_regenerate_content_context(bid):
+    """FU212 — save the operator's current lines (+ dismissed), read them, and replace ONLY the auto
+    lines. Body: {mine: [text], dismissed: [text], auto: [item] (the auto lines still shown)}.
+    Returns the full content context for re-render. The operator's lines are never changed."""
+    from generators.brand_enrichment import build_content_context, ci_load, ci_merged
+    from generators.blog_gen import _is_ymyl_brand
+    data = request.json or {}
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        cc = _content_context_from_payload({"content_context": data}, brand.get("content_context"))
+        stored = cc if cc is not None else brand.get("content_context")
+        claude = ClaudeClient(ANTHROPIC_API_KEY)
+        before = ci_load(stored)
+        after = build_content_context(claude, brand, stored=stored, regenerate_auto=True,
+                                      vertical=_is_ymyl_brand(brand))
+        db.update_brand(bid, content_context=json.dumps(after, ensure_ascii=False))
+        out = {"content_context": after, "merged": ci_merged(after)}
+        if after.get("auto_generated_at") == before.get("auto_generated_at"):
+            out["warning"] = ("Couldn't generate auto instructions: "
+                              + (getattr(claude, "last_error", None) or "the model returned nothing usable"))
+        return jsonify(out)
     finally:
         db.close()
 
@@ -2593,6 +2669,27 @@ def _sub_link(text, url):
     return text.replace("{link}", "").replace("  ", " ")
 
 
+def _ensure_content_context(claude, db, brand):
+    """FU212 — lazily read the brand's unread content-instruction lines and, once, generate its AUTO
+    lines. A no-op (no model call) when every line is read and the auto lines exist. Persists and
+    returns the refreshed brand; never raises, never touches the operator's own lines."""
+    if not isinstance(brand, dict) or brand.get("id") is None:
+        return brand
+    try:
+        from generators.brand_enrichment import build_content_context, ci_load
+        from generators.blog_gen import _is_ymyl_brand
+        before = ci_load(brand.get("content_context"))
+        if before["auto_generated_at"] and all(it.get("kind") for it in before["mine"]):
+            return brand
+        after = build_content_context(claude, brand, vertical=_is_ymyl_brand(brand))
+        if after != before:
+            db.update_brand(brand["id"], content_context=json.dumps(after, ensure_ascii=False))
+            return db.get_brand(brand["id"]) or brand
+    except Exception as e:
+        print(f"[content-instructions] lazy fill skipped: {e}", flush=True)
+    return brand
+
+
 def _ensure_brand_byline_logo(claude, db, brand):
     """Lazy auto-fill of the brand LOGO (for publisher schema) from the brand's own site, with a
     NEGATIVE CACHE. FU152: the AUTHOR is NO LONGER auto-guessed — blogs render a generic
@@ -2742,6 +2839,7 @@ def api_blog_generate():
             # Lazily fill a missing author/logo from the brand's own site (once; negative-cached)
             # so the byline/schema are populated without the user re-enriching the brand.
             brand = _ensure_brand_byline_logo(claude, bg, brand)
+            brand = _ensure_content_context(claude, bg, brand)   # FU212: read new lines / auto once
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
@@ -2930,6 +3028,7 @@ def api_blog_regenerate(blog_id):
             except Exception:
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)   # lazy byline/logo (negative-cached)
+            brand = _ensure_content_context(claude, bg, brand)   # FU212
             _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
             if _wmode != "off":
                 _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
@@ -3563,6 +3662,7 @@ def api_blog_provide_sources(blog_id):
             except Exception:
                 pass
             brand = _ensure_brand_byline_logo(claude, bg, brand)
+            brand = _ensure_content_context(claude, bg, brand)   # FU212
             _writer, _wmode = _build_blog_writer(bg)   # FU153: resume path also runs the writer pass
             if _wmode != "off":
                 _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs

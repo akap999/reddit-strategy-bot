@@ -19,6 +19,7 @@ from difflib import SequenceMatcher as _SequenceMatcher   # FU167: longest-share
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
+from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
 
 PROMPT_VERSION = "blog-v2-evidence"
 
@@ -1224,6 +1225,72 @@ def _canonical_facts_block(name, key_facts, seed_products=None):
             + "\n".join(lines) + "\n")
 
 
+def _content_instructions(brand):
+    """FU212: the brand's content instructions generation follows — yours first, then the auto lines
+    that aren't a duplicate of yours or dismissed. [] when none (every prompt stays byte-identical)."""
+    try:
+        return ci_merged(ci_load((brand or {}).get("content_context")))
+    except Exception:
+        return []
+
+
+def _instruction_sources(brand):
+    """FU212: the organisations the source instructions name, as [{text, origin, name, domains}] —
+    yours first, deduped by domain set, at most CI_MAX_SOURCE_ORGS per generation."""
+    out, seen = [], set()
+    for it in _content_instructions(brand):
+        if it.get("kind") != "source":
+            continue
+        for src in (it.get("sources") or []):
+            doms = [d for d in (src.get("domains") or []) if d]
+            key = tuple(sorted(doms))
+            if not doms or key in seen:
+                continue
+            seen.add(key)
+            out.append({"text": it["text"], "origin": it.get("origin") or "yours",
+                        "name": src.get("name") or doms[0], "domains": doms})
+    return out[:CI_MAX_SOURCE_ORGS]
+
+
+def _on_domains(url, domains):
+    d = _norm_domain(url or "")
+    return bool(d) and any(d == x or d.endswith("." + x) for x in (domains or []))
+
+
+def _content_instructions_block(brand, surface="blog"):
+    """FU212: the CONTENT INSTRUCTIONS block for a writer prompt. "" when the brand has none.
+    surface: "blog" (the article writers: may cite EVIDENCE), "derived" (LinkedIn / YouTube, written
+    from the finished article) or "rewrite" (the watermark rewrite: writing lines only)."""
+    items = _content_instructions(brand)
+    if surface == "rewrite":
+        items = [i for i in items if i.get("kind") != "source"]
+    if not items:
+        return ""
+    name = ((brand or {}).get("name") or "the brand").strip()
+    lines = []
+    for it in items:
+        txt = it["text"]
+        doms = [d for src in (it.get("sources") or []) for d in (src.get("domains") or [])]
+        if it.get("kind") == "source" and doms:
+            sites = " / ".join(doms)
+            if surface == "blog":
+                txt += (f" — cite the pages from {sites} in the EVIDENCE for the claims they support; if no "
+                        f"page from {sites} is in the EVIDENCE, do not cite it or attribute anything to it")
+            else:
+                txt += (f" — keep every fact the source article attributes to {sites} attributed to it; never "
+                        f"attribute anything else to it")
+        lines.append(f"  - [{'yours' if it.get('origin') == 'yours' else 'auto'}] {txt}")
+    if surface == "rewrite":
+        head = (f"CONTENT INSTRUCTIONS for {name} — the original follows these; KEEP following every one "
+                f"while you reword (a [yours] line outranks an [auto] line):")
+    else:
+        head = (f"CONTENT INSTRUCTIONS for {name} (set for this brand — follow EVERY one in this piece; a "
+                f"[yours] line outranks an [auto] line when they conflict; they NEVER override the evidence "
+                f"and accuracy rules above: never invent a fact, figure, quote, source or citation to satisfy "
+                f"one):")
+    return head + "\n" + "\n".join(lines) + "\n\n"
+
+
 # FU141 — review-shaped titles ("PeterMD Review… Worth It?", "Is It Safe/Legit", "X vs Y",
 # "Top 7 …"). NOTE the best-(?!practice) exemption: official bodies publish "Best Practice
 # Statements" — only listicle-best is review-shaped.
@@ -1317,7 +1384,7 @@ def _evidence_tier(block, brand_name, own_domain):
     d = _norm_domain((block or {}).get("url") or "")
     if low.startswith("official ·"):
         return 0
-    if low.startswith("provided"):
+    if low.startswith("provided") or low.startswith("preferred ·"):   # FU212: a source you asked for
         return 1
     if (brand_name and lab.strip().lower() == brand_name.strip().lower()) or \
        (own_domain and d and (d == own_domain or d.endswith("." + own_domain))):
@@ -1731,6 +1798,83 @@ class BlogGenerator:
         txt = _extract_visible_text(_fetch_homepage(url))
         return (txt or "").strip()
 
+    _CI_SEED_STOP = {"best", "which", "what", "where", "when", "should", "does", "with", "from", "that",
+                     "this", "your", "their", "online", "guide", "near", "about", "into", "than", "them",
+                     "they", "have", "most", "more", "vs", "versus", "compare", "comparison", "review",
+                     "reviews", "top", "list", "2024", "2025", "2026", "2027"}
+
+    def _instruction_source_blocks(self, brand, seed, existing_urls=None):
+        """FU212 — fetch pages for the brand's SOURCE instructions ("should source from AAP"). The writer
+        may only cite pages in the EVIDENCE, so an instruction alone can't put AAP in the article.
+
+        One web search per organisation (max CI_MAX_SOURCE_ORGS, yours first), pinned to its domains and
+        anchored on this article's topic; up to 2 on-topic pages each. A page that passes the official
+        validator is `official ·`; any other site you asked for is `preferred · <org> ·` (a trusted source
+        is not passed off as an official one). An organisation the YMYL legs already search (all its
+        domains are vertical pins) is skipped. Never raises; logs every kept and rejected page."""
+        srcs = _instruction_sources(brand)
+        search = getattr(self.claude, "search_sources", None)
+        if not srcs or not callable(search):
+            return []
+        pins = _YMYL_OFFICIAL_DOMAINS.get(getattr(self, "_ci_ymyl", None) or "") or []
+        if pins:
+            _before = len(srcs)
+            srcs = [x for x in srcs if not all(_on_domains("https://" + d, pins) for d in x["domains"])]
+            if len(srcs) < _before:
+                print(f"[blog_gen] content-instructions: {_before - len(srcs)} source(s) already covered by "
+                      f"the YMYL official search — not searched twice", flush=True)
+        if not srcs:
+            return []
+        b = brand or {}
+        subject = (b.get("name") or "").strip()
+        own = _norm_domain(b.get("domain_url") or "")
+        toks = []
+        for w in re.findall(r"[a-z0-9]+", (seed or "").lower()):
+            if len(w) >= 4 and w not in self._CI_SEED_STOP:
+                toks.append(w[:-1] if (w.endswith("s") and len(w) > 4) else w)
+
+        def _one(x):
+            brief = (f"{seed} — {x['name']}'s OWN pages that are directly relevant to this topic (guidance, "
+                     f"recommendations, safety or standards information from {x['name']}), not unrelated "
+                     f"pages of the same site")
+            try:
+                return x, (search(brief, max_searches=2, allowed_domains=list(x["domains"])) or [])
+            except Exception as e:
+                print(f"[blog_gen] content-instructions: search for {x['name']} failed ({e})", flush=True)
+                return x, []
+
+        with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(srcs))) as _ex:
+            results = list(_ex.map(_one, srcs))
+        seen = {str(u or "").rstrip("/").lower() for u in (existing_urls or []) if u}
+        out = []
+        for x, res in results:
+            kept = 0
+            for r in res:
+                if kept >= 2:
+                    break
+                u = str(r.get("url") or "").strip()
+                ttl = str(r.get("title") or "").strip()
+                fct = str(r.get("fact") or "").strip()
+                uk = u.rstrip("/").lower()
+                if not u or uk in seen:
+                    continue
+                if not _on_domains(u, x["domains"]):
+                    print(f"[blog_gen] content-instructions {x['name']}: rejected off-site {u[:90]}", flush=True)
+                    continue
+                if toks and not any(t in (u + " " + ttl + " " + fct).lower() for t in toks):
+                    print(f"[blog_gen] content-instructions {x['name']}: rejected off-topic "
+                          f"'{(ttl or u)[:70]}'", flush=True)
+                    continue
+                seen.add(uk)
+                label = (f"official · {ttl or u}" if _official_source_ok(u, ttl, subject, own, pins)
+                         else f"preferred · {x['name']} · {ttl or u}")
+                out.append({"label": label, "url": u, "text": (fct or ttl)[:_EVIDENCE_TEXT_CAP]})
+                kept += 1
+                print(f"[blog_gen] content-instructions {x['name']}: kept {u[:120]}", flush=True)
+            print(f"[blog_gen] content-instructions: {x['name']} ({', '.join(x['domains'])}) → "
+                  f"{len(res)} returned, {kept} kept", flush=True)
+        return out
+
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
                          use_web_search=False, reddit_thread=None):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
@@ -1985,6 +2129,10 @@ class BlogGenerator:
                 "url": (reddit_thread.get("url") or "").strip(),
                 "text": reddit_thread["text"][:_EVIDENCE_TEXT_CAP],
             })
+
+        # ----- FU212: pages from the organisations the brand's source instructions name -----
+        # Before the generic sweep: an instruction the operator (or the auto list) set outranks it.
+        blocks.extend(self._instruction_source_blocks(b, seed, {bl.get("url") for bl in blocks}))
 
         # ----- optional: independent third-party sources via web search -----
         # Search the whole web but BLOCK the brands' own domains (subject + known competitor
@@ -2554,6 +2702,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
                         + "\n".join(f"- {k}" for k in kws) + "\n")
         evidence_block = f"\n{evidence}\n" if (evidence or "").strip() else ""
         kf_block = _canonical_facts_block(name, key_facts, key_facts_products)   # FU150 (#4): cluster-synced
+        ci_block = _content_instructions_block(brand, "blog")   # FU212: "" when the brand has none
         link = f" Link to {url} where it reads naturally." if url else ""
         # FU114 — opt-in internal linking + meta title. OFF → both strings empty → the
         # prompt is BYTE-IDENTICAL to today (the user's hard requirement).
@@ -2979,7 +3128,7 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
     services discussed."; otherwise adapt the clause to what {name} actually does. NEVER a claim that
     isn't true of {name}.
 
-{il_block}Return JSON only:
+{ci_block}{il_block}Return JSON only:
 {{"title": "the seed, verbatim",
   "meta_description": "under 160 chars",{il_schema}
   "keywords": ["target queries + key terms this page should be cited for"],
@@ -3116,7 +3265,7 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     or quote a page critical of {name}.
 Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
 
-Return JSON only:
+{_content_instructions_block(brand, "blog")}Return JSON only:
 {{"revised_body_markdown": "the corrected full Markdown body",
   "flagged": [{{"claim": "the unsupported claim", "reason": "why it isn't supported"}}]}}"""
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.3)
@@ -5123,7 +5272,7 @@ FRESH SOURCED FACTS:
 ARTICLE (Markdown):
 {body}
 
-Return JSON only:
+{_content_instructions_block(brand, "blog")}Return JSON only:
 {{"revised_body_markdown": "the corrected + completed full Markdown body",
   "flagged": [{{"claim": "", "action": "filled|confirmed|corrected|replaced|removed", "reason": ""}}]}}"""
         rres = self.claude.call(recon_prompt, max_tokens=6000, temperature=0.3)
@@ -5191,7 +5340,7 @@ Write the post:
   - 3-5 relevant hashtags at the end.
   - About 1300-1800 characters. Plain text only — no Markdown headings, no tables.
 
-Return JSON only: {{"linkedin_text": "the full post text"}}"""
+{_content_instructions_block(brand, "derived")}Return JSON only: {{"linkedin_text": "the full post text"}}"""
         res = self.claude.call(prompt, max_tokens=1500, temperature=0.8)
         if not res or not isinstance(res, dict):
             return ""
@@ -5324,7 +5473,7 @@ Rules:
   - End with 3-5 relevant hashtags.
   - About 800-1500 words. Markdown is allowed (subheads, bold, lists) — but NO tables and NO horizontal rules.
 
-Return JSON only: {{"title": "the article headline", "body_markdown": "the full article in Markdown"}}"""
+{_content_instructions_block(brand, "derived")}Return JSON only: {{"title": "the article headline", "body_markdown": "the full article in Markdown"}}"""
         res = self.claude.call(prompt, max_tokens=4000, temperature=0.75)
         if not res or not isinstance(res, dict):
             return {}
@@ -5635,7 +5784,7 @@ DESCRIPTION SUPPORT — also return, so the description + captions can be assemb
 Never put a Reddit link anywhere. START nothing with the disclosure (it is added deterministically) — but
 you MAY assume the description will carry: "{disc}".
 
-Return JSON only:
+{_content_instructions_block(brand, "derived")}Return JSON only:
 {{"title": "", "demo_title": "", "mini_answer": "", "script_markdown": "",
   "chapters": [{{"question": "", "ts": ""}}], "captions_transcript": "",
   "shot_list": [], "thumbnail_text": "", "cta": "",
@@ -5850,6 +5999,7 @@ Return JSON only:
             rymyl = _is_ymyl_brand(brand)
         if rymyl:
             print(f"[blog_gen] ymyl: '{rymyl}' vertical resolved — authoritative sourcing ON", flush=True)
+        self._ci_ymyl = rymyl   # FU212: instruction sources already covered by the YMYL legs aren't searched twice
         # FU56 PRIORITY BUDGETING: the low-priority independent-source sweep runs in _gather_evidence FIRST,
         # so cap this stage to a fraction of the budget; the rest is reserved for the higher-priority
         # official/vendor sourcing in verify_and_complete. Keeps a full gen under ~$2 WITHOUT a blunt cutoff
@@ -6493,7 +6643,7 @@ Return JSON only:
             segs.append((head, "\n".join(buf)))
         return segs
 
-    def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600):
+    def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600, extra_rules=""):
         """FU170: SECTION-CHUNKED rewrite — the structural lever for the residual verbatim runs.
         Rewriting a ~2,400-word article in ONE call forces the 72B to hold every constraint at once
         (23 citations + 15 headings + a table + every number/negation), so it anchors on the original
@@ -6537,7 +6687,8 @@ Return JSON only:
                 "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
                 "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
                 "schedule, or a safety negation whose scope you cannot preserve while rewording.\n"
-                "Do NOT add a heading. Return ONLY the rewritten section text.\n"
+                + (extra_rules or "")   # FU212: the brand's writing instructions ("" when none)
+                + "Do NOT add a heading. Return ONLY the rewritten section text.\n"
                 # FU193 — the generic "no preamble, no commentary" half of this rule lost EIGHT times
                 # across twelve live rewrites, so it is restated CONCRETELY, naming the exact shapes that
                 # shipped. Forbid-only: it cannot make the rewrite do anything new. The deterministic
@@ -7237,6 +7388,7 @@ Return JSON only:
                     "- DESCRIBE SOURCES HONESTLY: never upgrade a third-party or review source into "
                     "'independent audit' / 'independently verified' framing while rewording around its "
                     "citation.\n"
+                    + _content_instructions_block(brand, "rewrite")   # FU212: "" when none
                     + ("Return ONLY the rewritten Markdown article, nothing else.\n\n" if _is_blog else
                        f"Return ONLY the rewritten {_sf['label']}, nothing else.\n\n")
                     + (f"ARTICLE:\n{claude_body}{harder}" if _is_blog
@@ -7330,7 +7482,8 @@ Return JSON only:
                     _s0 = _t.time()
                     sec_out = self._rewrite_sections(
                         claude_body, name, temperature=1.1,
-                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")))
+                        timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")),
+                        extra_rules=_content_instructions_block(brand, "rewrite"))   # FU212
                     _sdt = _t.time() - _s0
                     secs += _sdt
                     _stage["sections"] = round(_sdt, 1)
@@ -7641,6 +7794,31 @@ Return JSON only:
         if not found:
             return list(fallback or [])
         return [found.get(i + 1, {"label": "", "url": "", "text": ""}) for i in range(max(found))]
+
+    def _content_instruction_warnings(self, brand, body):
+        """FU212: one note per source instruction the article does not meet — no page from that
+        organisation was found for this topic, or pages were found and none is cited in the body."""
+        srcs = _instruction_sources(brand)
+        if not srcs:
+            return []
+        parts = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", body or "", maxsplit=1)
+        cited_nums = {int(n) for n in re.findall(r"\[S(\d+)\]", parts[0])}
+        smap = self._blocks_from_sources(body, [])
+        cited_urls = [smap[n - 1].get("url") or "" for n in cited_nums if 0 < n <= len(smap)]
+        notes = []
+        for x in srcs:
+            sites = " / ".join(x["domains"])
+            have = [bl for bl in (getattr(self, "_evidence_blocks", None) or [])
+                    if _on_domains(bl.get("url"), x["domains"])]
+            if any(_on_domains(u, x["domains"]) for u in cited_urls):
+                continue
+            if not have:
+                notes.append(f'content-instruction: "{x["text"][:80]}" — no page from {sites} on this topic '
+                             f"was found, so the article can't cite {x['name']}")
+            else:
+                notes.append(f'content-instruction: "{x["text"][:80]}" — found {len(have)} page(s) from '
+                             f"{sites} but the article cites none — regenerate the article")
+        return notes
 
     def _citation_attribution_check(self, body, blocks, brand, tools):
         """FU204 Change 2 — a sentence that names exactly ONE brand (or one bare domain) but whose
@@ -8360,6 +8538,12 @@ Return JSON only:
                         + " as your competitor" + ("" if _one_z else "s") + " — regenerate the article")
                 print(f"[blog_gen] {_mzn}", flush=True)
                 self._warn(article, _mzn)
+        # FU212 — a SOURCE instruction ("should source from AAP") is met only when the finished body CITES
+        # a page from that organisation. Recomputed from the brand + evidence + final body, so it also
+        # holds on the FU79 resume path. Warning only — the operator chose "warn, don't pause".
+        for _ci in self._content_instruction_warnings(brand, article.get("body_markdown") or ""):
+            print(f"[blog_gen] {_ci}", flush=True)
+            self._warn(article, _ci)
         # FU205 (R7) — the two properties nothing verified: the answer-first guarantee that earns the
         # citation, and that the byline the client must replace actually survived the rewrites.
         _afn = self._answer_first_check(article.get("body_markdown") or "")
@@ -8695,7 +8879,8 @@ Return JSON only:
     # made by rewriting ONE sentence with what is already on the page; a missing link, a duplicated
     # section, a thin section or a claim its source cannot carry needs a FACT or a restructure, so
     # "repairing" it means inventing something.
-    _VF_FIXABLE = frozenset({"contradiction", "price", "brand", "typo", "readability"})
+    _VF_FIXABLE = frozenset({"contradiction", "price", "brand", "typo", "readability",
+                             "instruction"})   # FU212: a broken content instruction, fixed through the gate
     _VF_FLAG_ONLY = frozenset({"link", "duplicate", "structure", "claim", "thin"})
     _VF_CHUNK = int(os.environ.get("BLOG_VERIFY_CHUNK", "25000"))
 
@@ -8734,6 +8919,13 @@ Return JSON only:
                                for i in _kf_pricing_items((brand or {}).get("key_facts")) if i.get("value"))
         except Exception:
             _canon = ""
+        # FU212 — the brand's WRITING instructions (source instructions need citations, not a sentence
+        # fix). Both strings are "" when there are none, so the prompt stays byte-identical.
+        _ci_rules = [i for i in _content_instructions(brand) if i.get("kind") != "source"]
+        _ci_look = ("- instruction: the article breaks one of these CONTENT INSTRUCTIONS set for the brand "
+                    "(the fix must follow the instruction):\n"
+                    + "".join(f"    * {i['text']}\n" for i in _ci_rules)) if _ci_rules else ""
+        _ci_kind = "|instruction" if _ci_rules else ""
         chunks = self._verify_chunks(body)
         if not chunks:
             return [], {}
@@ -8756,7 +8948,7 @@ Return JSON only:
                     "- link: the article points the reader at a page ('see our guide', 'linked below', "
                     "'read more') but gives no link.\n"
                     "- thin: a section that is one sentence of filler, or a question heading whose first "
-                    "sentence does not answer it.\n"
+                    "sentence does not answer it.\n" + _ci_look +
                     "Do NOT report anything about whether a [S#] source supports its claim, and do NOT "
                     "report duplicate sources — those are out of scope for this pass.\n"
                     "RULES FOR YOUR FIXES — a fix breaking any of these will be discarded:\n"
@@ -8778,7 +8970,7 @@ Return JSON only:
                     f"BRAND: {name}\n" + (f"CANONICAL PRICING (authoritative): {_canon}\n" if _canon else "") +
                     part +
                     '\nReturn JSON ONLY: {"issues": [{"kind": "contradiction|price|brand|typo|readability|'
-                    'duplicate|link|thin", "quote": "<the exact sentence from the article>", '
+                    'duplicate|link|thin' + _ci_kind + '", "quote": "<the exact sentence from the article>", '
                     '"problem": "<what is wrong>", "fix": "<the corrected sentence, or \\"\\">"}], '
                     '"assessment": {"score": 0-100, "verdict": "<one sentence>", '
                     '"strengths": ["..."], "weaknesses": ["..."]}}\n\nARTICLE:\n' + chunk,

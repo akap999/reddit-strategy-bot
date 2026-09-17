@@ -6714,6 +6714,145 @@ Rules:
         return (f"the script runs ~{words / 145.0:.1f} min ({words} words) against a "
                 f"{cls._fmt_min(dm)} min target (~{budget} words)")
 
+    @staticmethod
+    def _spoken_text(script):
+        """FU215 - the SPOKEN sentences of a script (stage directions, headings and markdown are not
+        spoken), >= 4 words each. Same normalisation `_script_length_note` uses; deliberately NOT a
+        refactor of it, because tests/test_fu203.py binds `_script_length_note` directly and the
+        refactor buys nothing."""
+        txt = re.sub(r"\[[^\]]{0,120}\]", " ", script or "")
+        txt = re.sub(r"(?m)^\s{0,3}#{1,6}\s+.*$", " ", txt)
+        txt = re.sub(r"[*_`>#|]+", " ", txt)
+        out = []
+        for s in re.split(r"(?<=[.!?])\s+", txt):
+            s = " ".join(s.split())
+            if len(s.split()) >= 4:
+                out.append(s)
+        return out
+
+    @staticmethod
+    def _tradeoff_segment(script):
+        """FU215 - the trade-offs segment's text, or "" when the script has no such heading.
+
+        Reads the POST-scrub script: `_AI_DASH_RE` rewrites the model's em-dash, so one real package's
+        heading reads "SEGMENT 4, HONEST TRADE-OFFS" and a locator built against the raw JSON would
+        drift. A missing heading returns "" and is NOT warned about: the prompt has always mandated
+        the segment but only mandates its LABEL from FU215 on, so an older package must not be
+        flagged for a heading it was never told to write."""
+        m = _TRADEOFF_HEAD_RE.search(script or "")
+        if not m:
+            return ""
+        lvl = len(m.group(1))
+        rest = (script or "")[m.end():]
+        for h in re.finditer(r"(?m)^\s{0,3}(#{1,6})\s+", rest):
+            if len(h.group(1)) <= lvl:
+                return rest[:h.start()]
+        return rest
+
+    @classmethod
+    def _tradeoff_balance_note(cls, script, body_md, name, target_query="", title=""):
+        """FU215 - deterministic balance check on the YouTube trade-offs segment. Returns "" when the
+        segment is fine (or absent, or too short to judge), else ONE line for the operator. WARNING
+        ONLY: it never rewrites the script and never raises; every branch returns a string.
+
+        Four checks, each tied to a defect BOTH reviewed packages actually shipped:
+          (A1) the segment ends on a COMPETITOR (a last-mention ordering test),
+          (A2) it ends on neither the brand nor first person (the mandatory-conclusion test),
+          (B)  the brand's limit sits ON the deciding axis (the title's own question),
+          (D)  the segment slipped back into "we / our" instead of naming the brand,
+        plus (C) an unconditional hand-off of the purchase to a competitor.
+
+        Deliberately NOT checked: asymmetric framing and self-deprecation. They have no reliable
+        deterministic signature and inventing one would cry wolf on good segments; the PROMPT rule
+        carries them."""
+        try:
+            seg = cls._tradeoff_segment(script)
+            if not seg.strip():
+                return ""
+            sents = cls._spoken_text(seg)
+            notes = []
+            nm = (name or "").strip()
+            brand_re = _tradeoff_name_re(nm) if nm else None
+            comps, brand_in_table = _tradeoff_competitors(body_md, nm)
+            comp_res = [_tradeoff_name_re(c) for c in _tradeoff_match_names(comps)] \
+                if brand_in_table else []
+
+            def _names_comp(s):
+                return any(r.search(s) for r in comp_res)
+
+            def _names_brand(s):
+                return bool(brand_re and brand_re.search(s))
+
+            # ---- (D) first person inside the SEGMENT only (the rest of the script is legitimately
+            # first-person, so this is scoped, never whole-script).
+            _fp = _TRADEOFF_FIRST_PERSON_RE.search(seg)
+            if _fp:
+                notes.append('says "%s" instead of naming %s' % (_fp.group(0), nm or "the brand"))
+
+            # ---- (A) the mandatory, brand-favouring conclusion. Two sub-tests: the two real
+            # packages fail it two DIFFERENT ways, and neither single rule catches both.
+            if len(sents) >= 3:
+                last_c = max((i for i, s in enumerate(sents) if _names_comp(s)), default=-1)
+                last_b = max((i for i, s in enumerate(sents)
+                              if _names_brand(s)
+                              or (_TRADEOFF_FIRST_PERSON_RE.search(s) and not _names_comp(s))),
+                             default=-1)
+                # (A1) ends competitor-ward. Inert without a competitor list.
+                if comp_res and last_c > last_b and last_c >= len(sents) - 2:
+                    notes.append("the segment closes on a competitor, not on " + (nm or "the brand"))
+                # (A2) the final sentence resolves to nobody. Needs no competitor list, so it stays
+                # live even when the blog has no comparison table.
+                elif not _names_brand(sents[-1]) and not _TRADEOFF_FIRST_PERSON_RE.search(sents[-1]):
+                    notes.append("the last line names neither " + (nm or "the brand")
+                                 + " nor a resolution, so the segment ends on a shrug")
+
+            # ---- (B) the limit sits on the DECIDING AXIS (the title's own question). Candidate
+            # selection is BLOCK-based, not subject-based: with "we" banned, the natural limit reads
+            # "It isn't the fit for ...", which names neither the brand nor a person, so a
+            # subject-based selector would skip the very sentence this check exists to judge.
+            axis, cat = _tradeoff_axis_tokens(target_query, title)
+            if axis and cat:
+                block = next((i for i, s in enumerate(sents)
+                              if _names_brand(s) or _TRADEOFF_FIRST_PERSON_RE.search(s)), None)
+                if block is not None:
+                    strip_res = ([brand_re] if brand_re else []) + comp_res
+                    for s in sents[block:]:
+                        if not _TRADEOFF_LIMIT_CUE_RE.search(s) or _names_comp(s):
+                            continue          # a competitor's own conditioned win is not our limit
+                        span = s
+                        for pr in _TRADEOFF_PROFILE_RES:
+                            pm = pr.search(span)
+                            if pm:
+                                span = span[:pm.start()]
+                        for r in strip_res:
+                            span = r.sub(" ", span)
+                        toks = {_tradeoff_fold(t) for t in _biz_topic_tokens(span)}
+                        toks = {t for t in toks if t not in _TRADEOFF_QUERY_STOP and len(t) >= 3}
+                        hit = toks & axis
+                        if len(hit) >= 2 and (hit & cat):
+                            notes.append("the limit sits on the deciding axis (" + ", ".join(
+                                sorted(hit & axis)[:3]) + "), which is the question the title asks")
+                            break
+
+            # ---- (C) the purchase is routed away, unconditionally, to a named competitor.
+            if comp_res:
+                for s in sents:
+                    if not _names_comp(s):
+                        continue
+                    rm = next((r.search(s) for r in _TRADEOFF_ROUTE_RES if r.search(s)), None)
+                    if rm:
+                        notes.append('it routes the buyer to a competitor ("%s")' % rm.group(0))
+                        break
+
+            if not notes:
+                return ""
+            # No em-dash and no arrow: like `length_warning` this note does NOT pass through the
+            # FU185 symbol scrub, so a stray symbol would ship raw into the export doc.
+            return "tradeoff-check: " + "; ".join(notes)
+        except Exception as e:                                   # never break a generation
+            print(f"[blog_gen] youtube: tradeoff-check skipped ({e})", flush=True)
+            return ""
+
     def generate_youtube_script(self, brand, article, persona_voice="", disclosure="",
                                 target_query="", variant="question", geo="", duration_min=0):
         """FU80 — turn a saved blog into a full YouTube video PACKAGE (script + title + description +
@@ -6771,6 +6910,17 @@ Rules:
                         f"blog's {rgeo}-specific coverage/compliance facts in the script (never "
                         f"genericized, never hedged — no 'unverified' / 'coverage unknown'); "
                         f'include {rgeo} terms in `tags`.')
+        # FU215 - the trade-offs rule and the deterministic check must agree on WHO the
+        # competitors are. `generate_youtube_script` discards the brand block, so the model would
+        # otherwise re-derive them from the body while the check reads the first table. Inject the
+        # SAME list (the source blog's first comparison table, minus the brand). Gated on the brand
+        # being one of that table's entities, so a `| Metric | Value |` pricing table can never feed
+        # junk names into the prompt. Costs nothing.
+        _comps, _brand_in_table = _tradeoff_competitors(body, name)
+        _comp_line = ""
+        if _brand_in_table and _comps:
+            _comp_line = ("\n    The options the source blog compares, besides " + name + ": "
+                          + "; ".join(_comps) + ". Treat exactly these as the competitors.")
         # FU97 — operator-set target duration. 0 = today's model-decided length (byte-identical
         # prompt + token cap). Length is a WORD BUDGET only: the package's mandatory structure is
         # explicitly non-negotiable, so a short target compresses segments, never the purpose.
@@ -6790,7 +6940,10 @@ Rules:
                 f"NON-NEGOTIABLE AT ANY LENGTH (compress by using FEWER/LEANER segments and less "
                 f"elaboration, NEVER by dropping these): the answer-first opening, the spoken "
                 f"target-prompt language + section-transition questions, the claims discipline, "
-                f"and the honest-tradeoffs segment. ")
+                f"and the honest-tradeoffs segment IN THE SHAPE SPECIFIED ABOVE (conditioned "
+                f"competitor wins, {name}'s win on the deciding axis, {name}'s limit on a DIFFERENT "
+                f"dimension, {name} last and named in the third person, and a closing line that "
+                f"resolves the deciding axis to {name}). ")
             if dm <= 3:
                 # FU203 — a real SHORT-FORM STRUCTURE, not one sentence. The old clause said only
                 # what to DROP, so the model compressed by removing content (a named option, a figure)
@@ -6805,9 +6958,13 @@ Rules:
                     f"      * {_b[1]}-{_b[2]} THE COMPARISON — name each compared option and the ONE "
                     f"differentiator that decides it, with the blog's actual figure. No throat-clearing, "
                     f"no restatement.\n"
-                    f"      * {_b[2]}-{_b[3]} HONEST TRADEOFFS — where a competitor wins, and one of "
-                    f"{name}'s own limits.\n"
-                    f"      * {_b[3]}-{_b[4]} THE RECOMMENDATION — and who should choose otherwise.\n"
+                    f"      * {_b[2]}-{_b[3]} HONEST TRADEOFFS — open on the DECIDING AXIS with no "
+                    f"brand named; competitors first, each win CONDITIONED on the buyer's situation; "
+                    f"then {name} LAST in the SAME frame, its win ON the deciding axis and ONE limit "
+                    f"on a DIFFERENT dimension; close the beat by resolving the deciding axis to "
+                    f"{name}. Name {name} in the third person, never 'we'.\n"
+                    f"      * {_b[3]}-{_b[4]} THE RECOMMENDATION — {name} for the deciding axis, and "
+                    f"the narrower case where another option fits better.\n"
                     f"      * {_b[4]}-{_b[5]} CTA + the blog link.\n"
                     f"    DENSITY, NOT OMISSION: compress by cutting hedging, restatement and "
                     f"throat-clearing — NEVER by dropping a named option, a figure, a price or a "
@@ -6850,8 +7007,60 @@ SCRIPT (`script_markdown`)
     BLOG: same prices, same license terms, same platform coverage. Assert ONLY what the blog sources;
     demonstrate what's demonstrable (an uncut screen recording beats an edited montage). Never state a fact
     the blog doesn't support.
-  - MANDATORY HONEST-TRADEOFFS segment: name where competitors WIN and name your OWN limits (the on-camera
-    equivalent of the blog's "who should use an alternative" section). This is the credibility engine.
+  - MANDATORY HONEST-TRADEOFFS segment - label the heading exactly "HONEST TRADEOFFS". It is the
+    credibility engine (the on-camera equivalent of the blog's "who should use an alternative"
+    section) and it must be honest WITHOUT arguing the competitors' case.{_comp_line}
+      * DECIDING AXIS: whatever this video's title asks about. It is established earlier in the
+        script and held here. {name} must be shown to WIN or genuinely COMPETE on it, NEVER to
+        concede it.
+      * STATE {name}'s WIN ON THE DECIDING AXIS. Without it the segment can satisfy every other rule
+        and still never say where {name} stands on the title's own question.
+      * A COMPETITOR'S WIN IS REAL, NAMED, AND CONDITIONED ON THE BUYER'S SITUATION: "X is the better
+        fit IF what you need is <narrower thing>". Never a verdict on the competitor's capability
+        ("they have deeper legal expertise"), which is the same concession with an "if" bolted on,
+        and never an unconditional claim on the deciding axis.
+      * {name}'s LIMIT IS REAL, NAMED, AND ON A DIFFERENT DIMENSION from the deciding axis (scope,
+        engagement model, client size), stated as a design CHOICE with the reason, and NAMING the
+        buyer profile it is wrong for, where that profile is NOT the one the title asks about. Never
+        a shortfall, never a restatement of the video's own question, never a humblebrag ("our only
+        limit is that we care too much"). NOTE: "what we deliberately do not do" is not a safe
+        category on its own: "we are not a law-firm-exclusive agency" is exactly that shape and IS
+        the defect. What makes a limit legitimate is the DIMENSION, not the phrasing.
+      * SYMMETRY: every option INCLUDING {name} is framed "best fit when...". No "limits:" heading
+        that only {name} gets.
+      * NAME THE BRAND, never "we / our / us" inside this segment. {name} is referred to by NAME, in
+        the third person, exactly like every competitor: not "we're the better fit", "our own
+        numbers", "that's our lane", but "{name} is the better fit", "per {name}'s own numbers",
+        "that's the layer {name} builds". Second person for the VIEWER ("if what you need is...",
+        "your firm") is required and unaffected. Two reasons beyond style: an answer engine lifts
+        this segment as a chunk, and "we're the better fit" is unattributable once lifted while
+        "{name} is the better fit" carries the entity with it; and it completes the symmetry, one
+        narrator describing several named options rather than competitors plus a first-person pitch.
+        Anti-stuffing: name {name} at the START of its own entry and again in the conclusion; in
+        between use neutral third person ("the system", "that layer", "it").
+      * ORDER, {name} at the BOTTOM ONLY: competitors first, each conditioned; {name} LAST in the
+        list with its fit and its non-deciding limit. {name} must NOT be named before the competitors.
+      * MANDATORY CONCLUSION, AND IT RESOLVES IN {name}'s FAVOUR: the segment ALWAYS ends with a
+        conclusion line that lands the DECIDING AXIS on {name}'s lane. It may never end on a
+        competitor's name, on a neutral "it depends on your firm" shrug, or on {name}'s own limit.
+        The shape that keeps it both favourable and credible: concede the NON-deciding axis to the
+        field first, then resolve the deciding axis to {name} - "If the gap you're closing is
+        <non-deciding axis>, any of these will move it. If it's <deciding axis>, that's what {name}
+        is built for." (Named, not "that's our lane" - see NAME THE BRAND.) Honesty bound: the
+        resolution states {name}'s REAL position on the axis; it is not a licence for a superiority
+        claim the evidence does not support.
+      * THE OPENING LINE NAMES THE DECIDING AXIS AND NO BRAND. It must not be a stall ("it depends",
+        "the honest answer is...", "let's go through them") - state what the decision actually turns
+        on - but it must NOT name {name}, position {name}, or name a competitor. {name}'s first
+        mention in this segment is its own entry at the bottom.
+      * NEVER ROUTE THE PURCHASE AWAY. Banned: "will serve you better", "go with them instead",
+        "hire them alongside", "those two approaches can work together". The conditional "X is the
+        better fit if ..." form above is permitted and required; an UNCONDITIONAL hand-off is not.
+      * NEVER SELF-DEPRECATE: never disclaim an attribute you were not claiming and never narrate
+        what would be inaccurate. Banned shape: "we're not going to tell you X, that would be
+        inaccurate." State what is true and stop.
+      * RE-FRAME, DO NOT TRANSCRIBE: the source blog may concede the deciding axis. Keep its FACTS
+        exactly (claims discipline above) and apply this shape regardless.
   - NO MANUFACTURED SOCIAL PROOF: no staged reactions, no reading self-written "user testimonials", and do
     NOT cite the brand's OWN press releases / PR-wire syndication as if it were INDEPENDENT reporting. A
     vendor-sourced stat is attributed as yours ("our internal numbers show"), never "reports confirm".
@@ -6938,6 +7147,14 @@ you MAY assume the description will carry: "{disc}".
             if _len_note:
                 meta["length_warning"] = _len_note
                 print(f"[blog_gen] youtube: length-check — {_len_note}", flush=True)
+        # FU215 - the deterministic balance check on the trade-offs segment, OUTSIDE the `if dm:`
+        # guard: length is meaningless without a target, balance is not, and the duration box is
+        # blank by default, so gating it on `dm` would silently disable the check on the default
+        # path. Warning only; the operator decides whether to regenerate.
+        _tradeoff_warn = self._tradeoff_balance_note(script_txt, body, name, tq, title)
+        if _tradeoff_warn:
+            meta["tradeoff_warning"] = _tradeoff_warn
+            print(f"[blog_gen] youtube: {_tradeoff_warn}", flush=True)
         # FU185: every published YouTube field gets the symbol strip (this surface does not pass
         # through `_finalize_article`). The description is scrubbed AFTER assembly, which also clears
         # the em-dash our own chapter-line format emits.
@@ -11824,6 +12041,135 @@ def _first_table_entities(body_md):
         first = re.sub(r"[\*`\[\]]", "", (cells[0] if cells else "")).strip()
         if first and not re.fullmatch(r":?-{2,}:?", first):
             out.append(first)
+    return out
+
+
+# ------------------------------------------------------------ FU215: YouTube trade-offs balance
+# The trade-offs segment is the credibility engine, but the old one-line rule ("name where
+# competitors WIN and name your OWN limits") constrained nothing about the AXIS, the ORDER, the
+# SYMMETRY or the ROUTING, so both reviewed packages conceded the title's own question, closed on a
+# competitor and handed the viewer away. The prompt (Change 1) is the fix; the four checks below are
+# the deterministic backstop, because NOTHING checks the YouTube script today: `_finalize_article`
+# never runs on this surface. Warning only, never rewrites.
+_TRADEOFF_HEAD_RE = re.compile(
+    r"(?im)^\s{0,3}(#{1,6})\s*(?=[^\n]*\btrade\s*-?\s*offs?\b)[^\n]*$")
+
+# `us` is DELIBERATELY absent: the pattern is case-insensitive and a target query like "...for
+# California law firms in the US" makes "the best option for US law firms" read as a first-person
+# brand close, which would SILENCE a real (A2) failure. we/our/ours covers every real brand voice.
+_TRADEOFF_FIRST_PERSON_RE = re.compile(r"\b(?:we're|we'd|we'll|we've|we|ours|our)\b", re.I)
+
+_TRADEOFF_LIMIT_CUE_RE = re.compile(
+    r"\b(?:not|isn't|aren't|don't|doesn't|won't|can't|cannot|never|no|lack|lacks|limit|limits|"
+    r"limited|limitation|weak|weakness|less|fewer|without)\b", re.I)
+
+# UNCONDITIONAL routing only. `better (choice|fit|served) (for|by)` is SECOND-PERSON-SCOPED on
+# purpose: Change 1 REQUIRES the conditioned form "X is the better fit if/for ...", so an unscoped
+# pattern would fire on the exact shape the rule mandates.
+_TRADEOFF_ROUTE_RES = (
+    re.compile(r"\b(?:will|would)\s+serve\s+(?:\w+\s+){0,3}better\b", re.I),
+    re.compile(r"\bgo\s+with\s+them\b", re.I),
+    re.compile(r"\bhire\s+them\b", re.I),
+    re.compile(r"\bwork\s+together\b", re.I),
+    re.compile(r"\bbetter\s+(?:choice|fit|served)\s+(?:for|by)\s+(?:you|your)\b", re.I),
+)
+
+# Change 1 REQUIRES the limit to NAME the buyer profile it is wrong for, and for a "best <type> for
+# <buyer>" article that profile is built from the AXIS tokens themselves ("a firm that wants one
+# agency"). Cut the candidate sentence at the profile clause before tokenizing, or (B) cries wolf on
+# a rule-COMPLIANT limit. An axis concession has to state the axis BEFORE the profile clause, so
+# this cannot hide a real defect.
+_TRADEOFF_PROFILE_RES = (
+    re.compile(r"\bfor\s+(?:a|an|any|the)?\s*\w+s?\s+(?:that|who|which|wanting|needing)\b", re.I),
+    re.compile(r"\bfor\s+(?:you|your)\b", re.I),
+    re.compile(r"\bif\s+(?:you|your|what)\b", re.I),
+    re.compile(r"\bso\s+(?:a|an|any|the)\b", re.I),
+)
+
+# Query-shape words neither _PRODUCT_FILLER nor _BIZ_GENERIC_TOKENS drops. "are" alone would sink
+# (B): it matches "We ARE not a law-firm-exclusive agency" and is in the query "which agencies ARE
+# best for ...", so it counts as an axis hit on every sentence.
+_TRADEOFF_QUERY_STOP = {"which", "are", "who", "what", "where", "when", "how", "why", "best",
+                        "top", "vs", "versus", "near", "does", "should", "will", "can"}
+
+
+def _tradeoff_fold(tok):
+    """FU215: fold a plural so the QUERY's 'agencies'/'firms' matches a sentence's 'agency'/'firm'.
+    Unfolded, the reported defect sentence intersects the axis on ONE generic token, so no threshold
+    >= 2 could ever fire on the very sentence that motivated the check."""
+    t = (tok or "").lower()
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    if t.endswith("s") and not t.endswith("ss") and len(t) > 3:
+        return t[:-1]
+    return t
+
+
+def _tradeoff_axis_tokens(target_query, title):
+    """FU215: (axis tokens, category-side tokens), both plural-folded and stopword-stripped.
+    Category side = the query's LEFT span (what is being compared) so a legitimate PRICE concession
+    ("not the cheapest option for California law firms") scores axis hits but NO category hit and
+    stays silent. Uses `_biz_topic_tokens` for the axis (it drops the bare year that would otherwise
+    match every sentence of a dated article) and `_product_tokens` for the category side, where
+    'agencies'/'tools'/'providers' ARE the literal subject."""
+    def _clean(toks):
+        out = set()
+        for t in toks:
+            if t in _TRADEOFF_QUERY_STOP:
+                continue
+            f = _tradeoff_fold(t)
+            if f in _TRADEOFF_QUERY_STOP or len(f) < 3:
+                continue
+            out.add(f)
+        return out
+    tq = (target_query or "").strip() or (title or "").strip()
+    axis = _clean(_biz_topic_tokens(tq, title or ""))
+    left = re.split(r"\b(?:for|in|near|to|that|who|serving|across)\b", tq, maxsplit=1, flags=re.I)[0]
+    return axis, _clean(_product_tokens(left))
+
+
+def _tradeoff_name_re(n):
+    """FU215: word-boundary match that will not fire inside a URL or a longer token. The leading
+    lookbehind also excludes a dot so 'Rankings.io' does not match inside 'www.rankings.io'."""
+    return re.compile(r"(?<![\w.])" + re.escape(n) + r"(?![\w])", re.I)
+
+
+def _tradeoff_competitors(body_md, name):
+    """FU215: the options the source blog compares, from its FIRST table, minus the brand.
+    Returns (display_names, brand_is_one_of_the_entities).
+
+    Two fixes are applied AT THIS CALL SITE rather than inside `_first_table_entities`, which also
+    feeds `build_blog_jsonld` and is unit-tested as-is: a linked cell yields
+    "Rankings.io(https://...)", and a cell reads "Consultwebs, Inc." while the script says
+    "Consultwebs". The brand flag is the honesty gate: when the brand is NOT a row, the first table
+    is not the option comparison (a `| Metric | Value |` pricing table yields junk like
+    ['Monthly cost', 'Contract']), so the caller makes the name-dependent checks inert."""
+    ents = []
+    for e in _first_table_entities(body_md):
+        e = re.sub(r"\s*\([^)]*\)\s*$", "", (e or "")).strip()
+        if e:
+            ents.append(e)
+    slug = _kf_slug(name or "")
+    brand_in = bool(slug) and any(_kf_slug(e) == slug for e in ents)
+    seen, out = set(), []
+    for e in ents:
+        if slug and _kf_slug(e) == slug:
+            continue
+        if e.lower() not in seen:
+            seen.add(e.lower())
+            out.append(e)
+    return out, brand_in
+
+
+def _tradeoff_match_names(display_names):
+    """FU215: display names PLUS a first-word alias (>= 4 chars, capitalised) so "Consultwebs, Inc."
+    still matches a script that says "Consultwebs"."""
+    seen, out = set(), []
+    for e in display_names or []:
+        for cand in (e, (e.split() or [""])[0].strip(",.;:")):
+            if len(cand) >= 4 and cand[:1].isupper() and cand.lower() not in seen:
+                seen.add(cand.lower())
+                out.append(cand)
     return out
 
 

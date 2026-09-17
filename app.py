@@ -5042,9 +5042,11 @@ def api_blog_export(blog_id):
                  str(int(round(_dnum))) if abs(_dnum - round(_dnum)) < 1e-9 else f"{_dnum:g}")
         # FU203: the deterministic length check — warning only, the operator decides.
         _len_warn = (yt_meta.get("length_warning") or "").strip()
+        # FU215: the deterministic trade-offs balance check - warning only, same channel.
+        _tradeoff_warn = (yt_meta.get("tradeoff_warning") or "").strip()
         # FU203: the checklist also carries the target length + length warning, so it renders for a
         # package that has one even when FU82's pinned/tags/category are all absent.
-        if pinned or yt_tags or yt_category or _dtxt or _len_warn:
+        if pinned or yt_tags or yt_category or _dtxt or _len_warn or _tradeoff_warn:
             # {link} resolution check — computed at render; auto-flips to ✓ once the blog's website
             # URL is published (the _fill above substitutes it everywhere).
             unresolved = sum((s or "").count("{link}") for s in (yt_desc, pinned, cta))
@@ -5055,6 +5057,9 @@ def api_blog_export(blog_id):
                          f"budget)\n" if _dtxt else "")
             if _len_warn:
                 _dur_line += f"- [ ] \u26a0 Length check: {_len_warn} — regenerate if that matters\n"
+            if _tradeoff_warn:
+                _dur_line += (f"- [ ] \u26a0 {_tradeoff_warn} — the trade-offs segment should "
+                              f"close on this brand's lane; regenerate or edit before upload\n")
             md_src += ("\n## Upload settings & checklist\n\n"
                        + _dur_line +
                        f"- [ ] Links: {link_line}\n"

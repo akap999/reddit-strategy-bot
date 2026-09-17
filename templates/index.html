@@ -14304,6 +14304,7 @@ async function openBlog(id) {
     const _ytVariant = _ytMeta.variant || 'question';
     const _ytDuration = _ytMeta.duration_min || '';   // FU97: prefill the target-length input
     const _ytLenWarn = _blogEsc(_ytMeta.length_warning || '');   // FU203: deterministic length check
+    const _ytTradeoffWarn = _blogEsc(_ytMeta.tradeoff_warning || '');   // FU215: trade-offs balance check
     const _ytChapters = (_ytMeta.chapters || []).map(c => `${_blogEsc(c.ts || '00:00')} — ${_blogEsc(c.question || '')}`).join('<br>');
     const _ytShots = (_ytMeta.shot_list || []).map(s => `<li>${_blogEsc(s)}</li>`).join('');
     const _ytThumb = _blogEsc(_ytMeta.thumbnail_text || '');
@@ -14600,6 +14601,7 @@ async function openBlog(id) {
                 <textarea id="blog-e-yt-captions" rows="6">${_blogEsc(b.youtube_captions || '')}</textarea>
                 ${_ytChapters ? `<div class="text-xs text-gray-400 mt-2">Chapters<div class="text-gray-300 mt-1">${_ytChapters}</div></div>` : ''}
                 ${_ytLenWarn ? `<div class="text-xs mt-2" style="color:#fbbf24">⚠ ${_ytLenWarn} — regenerate if that matters</div>` : ''}
+                ${_ytTradeoffWarn ? `<div class="text-xs mt-2" style="color:#fbbf24">⚠ ${_ytTradeoffWarn} — the trade-offs segment should close on this brand's lane; regenerate or edit before upload</div>` : ''}
                 ${_ytShots ? `<div class="text-xs text-gray-400 mt-2">Shot list (demonstrate what's demonstrable)<ul class="list-disc ml-4 text-gray-300 mt-1">${_ytShots}</ul></div>` : ''}
                 ${_ytThumb ? `<div class="text-xs text-gray-400 mt-2">Thumbnail text: <span class="text-gray-300">${_ytThumb}</span></div>` : ''}
                 ${_ytCta ? `<div class="text-xs text-gray-400 mt-1">End-screen CTA: <span class="text-gray-300">${_ytCta}</span></div>` : ''}

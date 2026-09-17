@@ -13165,7 +13165,16 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning) {
         // FU204 (6c) — a PRICE-ONLY ask is not "couldn't find public info". We found the brand and
         // cited it; we are missing ONE number, and saying otherwise made the ask look wrong and vague.
         const isPrice = !!m.price_only;
-        const ask = isOpt
+        // FU206 — a THIN competitor is a different ask entirely. It IS sourced; it just cannot answer
+        // some dimensions, and because it is the ONLY one that cannot, keeping it costs those columns
+        // for every other brand. Measured on the real Osbornes table: keeping Withers ships 3
+        // dimensions × 5 firms; removing it ships 5 × 4 — more real data, one fewer firm. Neither is
+        // always right, so the operator decides, per blog.
+        const isThin = !!m.thin_coverage;
+        const blocked = (m.blocks_dims || []);
+        const ask = isThin
+            ? `<b>${_blogEsc(m.tool)}</b> covers only <b>${m.covered}/${m.total}</b> comparison dimensions, and it is the ONLY one missing <b>${_blogEsc(blocked.join(', '))}</b> — so keeping it drops ${blocked.length === 1 ? 'that column' : 'those ' + blocked.length + ' columns'} for every other brand too. Add a source below, or choose what to drop.`
+            : isOpt
             ? `No public reference found for <b>${_blogEsc(m.tool)}</b> — it's an option, not a company, so there's no page to link. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Type the facts below to keep it in the comparison.`
             : isPrice
             ? `Found <b>${_blogEsc(m.tool)}</b>, but couldn't confirm its <b>current price</b> from its own site or a reputable source${hint}. Paste a product/pricing link, or type the price below. Skip it and the price column is dropped from the comparison (a blank cell is never shipped).`
@@ -13178,9 +13187,21 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning) {
             <div class="text-xs text-gray-400 mb-2">${ask}</div>
             ${urlInput}
             <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : isPrice ? "…or type the price, e.g. '$24.99 for the 2-pack'" : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
+            ${isThin ? `
+            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+                <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
+                <label class="flex items-start gap-2 cursor-pointer mb-1">
+                    <input type="radio" name="blog-ps-thin-${i}" id="blog-ps-keep-${i}" value="keep" checked class="mt-0.5">
+                    <span><b>Keep ${_blogEsc(m.tool)}</b> — drop the ${blocked.length} dimension${blocked.length === 1 ? '' : 's'} it can't answer (${_blogEsc(blocked.join(', '))}). The comparison keeps every brand and loses depth.</span>
+                </label>
+                <label class="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="blog-ps-thin-${i}" id="blog-ps-remove-${i}" value="remove" class="mt-0.5">
+                    <span><b>Remove ${_blogEsc(m.tool)} from this blog entirely</b> — its row, every mention in the prose, and any FAQ entry about it. The comparison keeps its depth with ${m.remaining_if_removed} competitor${m.remaining_if_removed === 1 ? '' : 's'}.</span>
+                </label>
+            </div>` : `
             <label class="text-xs flex items-center gap-2 mt-1 cursor-pointer text-gray-400">
                 <input type="checkbox" id="blog-ps-skip-${i}"> Skip this one — ${isPrice ? 'drop the price column' : 'drop it from the comparison'}
-            </label>
+            </label>`}
         </div>`;
     }).join('');
     showModal(`<div style="max-width:640px">
@@ -13204,7 +13225,11 @@ function _blogSubmitSources(skipAll) {
             const skip = !!document.getElementById('blog-ps-skip-' + i)?.checked;
             const url = (document.getElementById('blog-ps-url-' + i)?.value || '').trim();
             const fact = (document.getElementById('blog-ps-fact-' + i)?.value || '').trim();
-            sources.push({ tool, url, fact, skip });
+            // FU206: a THIN competitor has a keep/remove radio instead of a skip box. "Remove" takes
+            // the brand out of the ENTIRE blog; "keep" is the current behaviour (its unanswered
+            // dimensions are dropped). A pasted source wins over either — it makes the choice moot.
+            const remove = !!document.getElementById('blog-ps-remove-' + i)?.checked && !url && !fact;
+            sources.push({ tool, url, fact, skip, remove });
         });
     }
     closeModal();

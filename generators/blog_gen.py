@@ -424,6 +424,11 @@ def scrub_markdown_formatting(body):
 
 
 _DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
+# FU105's comparison floor, as a named constant: a comparison needs at least this many non-subject
+# competitors to be a comparison at all. FU206 reads it to decide whether REMOVING a thin competitor
+# is even offerable — shrinking the field below the floor is the self-crowning failure the floor
+# exists to prevent, so the option is simply not offered there.
+_MIN_COMPARISON_BRANDS = int(os.environ.get("BLOG_MIN_COMPETITORS", "3"))
 _DIM_RESCUE_BUDGET = 6          # FU139: targeted (tool × dimension) rescue searches per generation —
 _SUBJ_RESCUE_BUDGET = 4         # FU142: RESERVED rescue searches for the SUBJECT's own missing cells
                                 # (its own row previously had no rescue path at all) — separate pool so
@@ -1366,6 +1371,8 @@ class BlogGenerator:
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
         self._article_tools = []      # FU204: the compared brand names, for the citation check
         self._budget_warn = ""        # FU205 (R6): a starvation note carried across a FU79 pause
+        self._removed_brands = []     # FU206: brands the operator removed from the whole blog
+        self._removed_refused = []    # FU206: removals refused because they would breach the floor
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -4402,6 +4409,50 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             print(f"[blog_gen] dim-rescue: budget exhausted with {_skipped} pair(s) left",
                   flush=True)
 
+        # ── FU206 — ONE thin competitor should not cost the whole field its dimensions ──────────
+        # FU200 locked "a thin row is never dropped": a badly-sourced competitor costs DIMENSIONS,
+        # never its seat, because shrinking the compared field is the self-crowning risk FU98 and the
+        # FU105 floor exist to prevent. Measured against the real Osbornes table that trade is
+        # sometimes clearly wrong: Withers has 7 of 10 cells empty and is the ONLY firm missing two
+        # dimensions the other four can all answer, so keeping it ships 3 dimensions × 5 rows where
+        # dropping it would ship 5 × 4 — 20 cells of real data instead of 15.
+        #
+        # It is NOT always right, which is why this asks instead of deciding. On the real Thyseed
+        # table the gaps are SCATTERED (three different bottles, all missing price), so removing rows
+        # would cost three competitors to save one column — the floor blocks it and the column drop
+        # is correct there. The operator makes the call, per blog, at the pause they already see.
+        #
+        # Detected HERE, not at table time: `tool_texts` is final, so we know exactly which
+        # (tool × dimension) cells are unfilled — the same coverage map the dim-rescue just used.
+        # The alternative (deciding on the literal rendered table) would need a SECOND checkpoint
+        # after the reconcile, and the resume path is already the riskiest part of the system.
+        _sole = {}
+        if len(tools) > _MIN_COMPARISON_BRANDS:
+            for d in dims:
+                ws = _dim_words(d)
+                if not ws:
+                    continue
+                _miss = [t for t in tools if not any(w in tool_texts.get(t, "") for w in ws)]
+                if len(_miss) == 1:   # exactly ONE tool is blocking this dimension for everyone
+                    _sole.setdefault(_miss[0], []).append(d)
+        for _t, _blocked in sorted(_sole.items(), key=lambda kv: -len(kv[1])):
+            # Never offer a removal that would breach the FU105 floor — the reason FU200 locked this
+            # in the first place. Offered only while enough competitors remain WITHOUT it.
+            if len(tools) - 1 < _MIN_COMPARISON_BRANDS:
+                break
+            _covered = [d for d in dims if any(w in tool_texts.get(_t, "") for w in _dim_words(d) or [""])]
+            unsourced.append({
+                "tool": _t, "thin_coverage": True,
+                "dom": (tool_state.get(_t) or {}).get("dom") or "",
+                "facts": [d for d in dims if d not in _covered],
+                "blocks_dims": _blocked,
+                "covered": len(_covered), "total": len(dims),
+                "remaining_if_removed": len(tools) - 1,
+            })
+            print(f"[blog_gen] thin-coverage: {_t} covers {len(_covered)}/{len(dims)} dimension(s) and "
+                  f"is the ONLY tool missing {', '.join(_blocked)} — asking the operator whether to "
+                  f"keep it (and drop those dimension(s)) or remove it from the blog", flush=True)
+
         # (c) INDEPENDENT corroboration for the SUBJECT's self-claims + risk narrative:
         # block ONLY the subject's own domain + already-used third-party URLs (NOT competitors).
         blocked = set()
@@ -4519,6 +4570,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         continue
                     _kept.append(_u)
                     continue
+                # FU206: a THIN-COVERAGE item is the FU204 Change 6 bug in a new shape. The
+                # entity-level test below asks "is this tool sourced at all?", which is ALWAYS true
+                # here — the tool IS sourced, it just cannot answer some dimensions — so the test
+                # would delete every thin-coverage ask ever queued, exactly as it once deleted every
+                # price ask. It also cannot be stale: the item is created AFTER the dim-rescue, so
+                # nothing between here and there can have filled the gap.
+                if _u.get("thin_coverage"):
+                    _kept.append(_u)
+                    continue
                 _toks = [x for x in _product_tokens(_t) if len(x) >= 3]
                 if _t and _toks and all(x in _blob for x in _toks) and not _u.get("ymyl_official"):
                     print(f"[blog_gen] verify+complete: {_t} was sourced by the dim-rescue after all "
@@ -4562,6 +4622,23 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # no vendor page and never will, so those rules have to be told it is exempt — otherwise fixing
         # the pause would simply trade it for a silently missing row. Emitted ONLY when the comparison
         # actually contains one, so an all-provider blog's prompt is byte-identical to before.
+        # FU206 — brands the OPERATOR removed at the pause. The reconcile is the writer that has to
+        # take them out of the PROSE the draft already contains; without this its PRESERVE SUBSTANCE
+        # rule would actively protect the sentences naming them, and "removed from the blog" would
+        # mean "removed from the table only". Empty (and byte-identical) when nothing was removed.
+        _rm = [str(x).strip() for x in (getattr(self, "_removed_brands", None) or []) if str(x).strip()]
+        _rm_line, _rm_rules = "", ""
+        if _rm:
+            _rm_line = ("\nREMOVED BY THE OPERATOR (see the REMOVED BRANDS rule): "
+                        + json.dumps(_rm, ensure_ascii=False))
+            _rm_rules = (
+                "\n  - REMOVED BRANDS (hard rule, OVERRIDES PRESERVE SUBSTANCE): the operator has "
+                "removed the brands listed under REMOVED BY THE OPERATOR from this article. Delete "
+                "EVERY trace of them — their comparison row, every sentence and clause naming them, "
+                "any FAQ entry about them, and any citation that exists only to support a claim about "
+                "them. Do NOT replace them with a substitute, do NOT say they were removed, and do "
+                "NOT leave a dangling comparison that still implies them. Rewrite the surrounding "
+                "sentence so it reads naturally without the name. Every OTHER brand stays.")
         _opt_line, _opt_rules = "", ""
         if _optnames:
             _opt_line = ("\nGENERIC OPTIONS (approaches/categories, NOT companies — see the GENERIC "
@@ -4814,12 +4891,12 @@ COMPLETE and every stated fact is sourced:
   - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}
+    invent.{unverified_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
-PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}
+PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}
@@ -7977,6 +8054,31 @@ Return JSON only:
                                 print(f"[blog_gen] {_cpn}", flush=True)
                                 self._warn(article, _cpn)
                                 break
+        # FU206 — a removal is from the ENTIRE blog, so verify it actually left. The reconcile is an
+        # LLM and PRESERVE SUBSTANCE pulls the other way; "removed from the comparison" quietly
+        # meaning "removed from the table only" is exactly the silent half-fix this round exists to
+        # stop. Warning, never a rewrite: deleting sentences deterministically would gut the prose.
+        _rmb = [x for x in (getattr(self, "_removed_brands", None) or []) if str(x).strip()]
+        if _rmb:
+            _still = [b for b in _rmb
+                      if re.search(r"\b" + re.escape(b) + r"\b", article.get("body_markdown") or "", re.I)]
+            if _still:
+                _rmn = ("removed-brand: " + ", ".join(_still) + " still appear(s) in the article after "
+                        "being removed — delete the remaining mention(s) before publishing, or "
+                        "regenerate")
+                print(f"[blog_gen] {_rmn}", flush=True)
+                self._warn(article, _rmn)
+            else:
+                print(f"[blog_gen] remove-brand: verified — {', '.join(_rmb)} no longer appear(s) "
+                      f"anywhere in the article", flush=True)
+        _rmr = [x for x in (getattr(self, "_removed_refused", None) or []) if str(x).strip()]
+        if _rmr:
+            _rrn = ("removed-brand: " + ", ".join(_rmr) + " could NOT be removed — doing so would "
+                    f"leave fewer than {_MIN_COMPARISON_BRANDS} competitors, and a comparison that "
+                    "thin reads as self-crowning; it was kept and its unanswered dimensions dropped "
+                    "instead")
+            print(f"[blog_gen] {_rrn}", flush=True)
+            self._warn(article, _rrn)
         # FU205 (R7) — the two properties nothing verified: the answer-first guarantee that earns the
         # citation, and that the byline the client must replace actually survived the rewrites.
         _afn = self._answer_first_check(article.get("body_markdown") or "")
@@ -8620,12 +8722,50 @@ Return JSON only:
                 f"verify {'it belongs' if _one_ck else 'they belong'} in this comparison, or add/remove "
                 "in Edit Brand")
 
+        # FU206 — the operator may REMOVE a thin competitor rather than let it cost the whole field
+        # its dimensions. The removal is from the ENTIRE blog, not just the table: its row, its
+        # evidence, its prose mentions and any FAQ entry naming it. The FU105 floor is re-checked
+        # here as well as at ask time, because the checkpoint is operator-editable and a removal that
+        # breaches the floor would hand back a self-crowning comparison — the exact failure the floor
+        # exists to prevent. A refused removal is REPORTED, never silently ignored.
+        _tools_now = [str(t).strip() for t in (sourcing.get("tools") or []) if str(t).strip()]
+        removed, refused = [], []
+        for item in (provided or []):
+            if not isinstance(item, dict) or not item.get("remove"):
+                continue
+            _t = str(item.get("tool") or "").strip()
+            if not _t:
+                continue
+            if len([x for x in _tools_now if x.lower() != _t.lower()]) < _MIN_COMPARISON_BRANDS:
+                refused.append(_t)
+                print(f"[blog_gen] remove-brand: REFUSED {_t} — removing it would leave fewer than "
+                      f"{_MIN_COMPARISON_BRANDS} competitors; kept in the comparison instead", flush=True)
+                continue
+            _tools_now = [x for x in _tools_now if x.lower() != _t.lower()]
+            removed.append(_t)
+        if removed:
+            _low = {r.lower() for r in removed}
+            sourcing["tools"] = _tools_now
+            sourcing["peers"] = [p for p in (sourcing.get("peers") or [])
+                                 if str(p).strip().lower() not in _low]
+            sourcing["fresh"] = [f for f in sourcing["fresh"]
+                                 if str(f.get("label") or "").strip().lower() not in _low]
+            sourcing["unsourced"] = [u for u in sourcing["unsourced"]
+                                     if str(u.get("tool") or "").strip().lower() not in _low]
+            self._evidence_blocks = [b for b in (self._evidence_blocks or [])
+                                     if str(b.get("label") or "").strip().lower() not in _low]
+            self._removed_brands = removed
+            print(f"[blog_gen] remove-brand: {', '.join(removed)} removed from the ENTIRE blog "
+                  f"(row, evidence and prose) — {len(_tools_now)} competitor(s) remain", flush=True)
+        if refused:
+            self._removed_refused = refused
+
         resolved = set()
         for item in (provided or []):
             if not isinstance(item, dict):
                 continue
             tool = str(item.get("tool") or "").strip()
-            if not tool or item.get("skip"):
+            if not tool or item.get("skip") or item.get("remove"):
                 continue
             url = str(item.get("url") or "").strip()
             fact = str(item.get("fact") or "").strip()
@@ -8645,7 +8785,9 @@ Return JSON only:
             sourcing["unsourced"] = [u for u in sourcing["unsourced"]
                                      if str(u.get("tool") or "").lower() not in resolved]
 
-        if sourcing.get("fresh"):
+        # FU206: a removal needs the reconcile to run even when nothing new was provided — it is the
+        # writer that has to take the brand out of the prose the draft already contains.
+        if sourcing.get("fresh") or removed:
             vc = self._reconcile_and_finish(brand, seed, article, sourcing)
             if vc:
                 article["body_markdown"] = vc["body_markdown"]

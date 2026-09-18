@@ -761,10 +761,38 @@ def _ci_item(raw):
             name = str(s.get("name") or "").strip() or (doms[0] if doms else "")
             if name:
                 sources.append({"name": name[:80], "domains": doms[:4]})
-    out = {"text": text[:300], "kind": kind}
+    out = {"text": text[:CI_MAX_TEXT], "kind": kind}
     if kind == "source":
         out["sources"] = sources[:CI_MAX_SOURCE_ORGS]
     return out
+
+
+CI_MAX_TEXT = 300
+
+
+def ci_mine_report(mine_texts):
+    """FU217 — what saving these lines as Content instructions keeps, and what it loses. Lines past
+    the first CI_MAX_MINE unique lines are not kept, a line that repeats an earlier one (ignoring case
+    and trailing punctuation) is merged into it, and a line over CI_MAX_TEXT characters is cut. Before
+    this all three happened silently. Returns {kept, limit, dropped, duplicates, truncated}."""
+    kept, dropped, dups, trunc, seen = 0, [], [], [], set()
+    for t in (mine_texts or []):
+        t = re.sub(r"\s+", " ", str(t or "")).strip()
+        if not t:
+            continue
+        k = ci_norm(t)
+        if k in seen:
+            dups.append(t)
+            continue
+        seen.add(k)
+        if kept >= CI_MAX_MINE:
+            dropped.append(t)
+            continue
+        kept += 1
+        if len(t) > CI_MAX_TEXT:
+            trunc.append(t)
+    return {"kept": kept, "limit": CI_MAX_MINE, "dropped": dropped, "duplicates": dups,
+            "truncated": trunc}
 
 
 def ci_load(raw):

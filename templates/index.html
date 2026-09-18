@@ -2059,6 +2059,8 @@ async function editBrandContext(brandName) {
     // FU212: content instructions — your lines (textarea) + the tool's auto lines (list), kept apart.
     const _ciStored = _ciParse(first.content_context);
     window._ciState = _ciStateFrom(first.id, _ciStored);
+    // FU217: verified facts, edited in place and saved once on Save (not per instance)
+    window._vfacts = { brandId: first.id, entities: _vfactsFromBrand(first), dropped: [], overlaps: [], dirty: false };
 
     showModal(`
         <h3 class="text-xl font-bold mb-4">Edit Brand: ${brandName}</h3>
@@ -2099,12 +2101,22 @@ async function editBrandContext(brandName) {
             <div>
                 <label class="text-xs text-gray-400"><b style="color:#c4b5fd">Content instructions</b> <span class="text-gray-600">(blogs, LinkedIn, YouTube — one instruction per line, followed by every generation. e.g. "Should source from AAP", "Say parents, never moms". Your lines always win over the auto lines.)</span></label>
                 <textarea id="edit-brand-ci-mine" rows="4" class="w-full" placeholder="Should source from AAP&#10;Say &quot;parents&quot;, never &quot;moms&quot;&#10;No medical dosing advice" style="font-family:inherit" oninput="_ciRender()">${_ciStored.mine.map(it => it.text).join('\n').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</textarea>
+                <div id="edit-brand-ci-count"></div>
                 <div id="edit-brand-ci-readings" class="mt-1"></div>
                 <div class="flex items-center justify-between mt-2">
                     <span class="text-xs text-gray-400">Auto instructions <span class="text-gray-600">(suggested by the tool from the brand's profile — ✕ removes one for good, "Keep as mine" moves it to your lines)</span></span>
                     <button type="button" id="edit-brand-ci-regen" class="btn btn-secondary btn-sm" onclick="_ciRegenerate()" title="Save your lines and replace only the auto instructions">↻ Regenerate auto</button>
                 </div>
                 <div id="edit-brand-ci-auto" class="mt-1"></div>
+            </div>
+            <div>
+                <label class="text-xs text-gray-400"><b style="color:#c4b5fd">Verified facts — yours and your competitors'</b> <span class="text-gray-600">(licence numbers, licence classes, certifications, scores, legal names, corrections, your own notes. Every blog that names one of these brands uses them word for word and cites the link you give. Paste them in any shape, click Analyse, check the rows, then Save.)</span></label>
+                <textarea id="edit-brand-vf-paste" rows="4" class="w-full" placeholder="CMK Construction, Inc.&#10;CGC 1516665 — State Certified General Contractor&#10;Sources: cmkconstructioninc.com/awards-licenses, BBB profile&#10;&#10;Revive Design and Renovation&#10;CBC1264856 — Certified Building Contractor" style="font-family:inherit"></textarea>
+                <div class="flex gap-2 items-center mt-1">
+                    <button type="button" id="edit-brand-vf-analyse" class="btn btn-sm btn-secondary" style="width:auto;flex:none" onclick="_vfactsParse()" title="Reads your paste into rows you can correct — one small call, no web search. A row is kept only if it reads exactly as your paste reads.">🔎 Analyse</button>
+                    <span class="text-xs text-gray-600">Licence numbers keep your exact spacing. A legal name that differs is added on first mention: “Name (licensed as Legal name)”.</span>
+                </div>
+                <div id="edit-brand-vf-rows" class="mt-1"></div>
             </div>
             <details class="mt-1" open>
                 <summary class="text-xs text-gray-400 cursor-pointer select-none">Blog byline & sources (EEAT — used on generated blogs)</summary>
@@ -2137,6 +2149,7 @@ async function editBrandContext(brandName) {
         </div>
     `);
     _ciRender();   // FU212
+    _vfactsRender();   // FU217
 }
 
 // ── FU212: content instructions ─────────────────────────────────────────────────────────────
@@ -2171,6 +2184,8 @@ function _ciRender() {
     const st = window._ciState; if (!st) return;
     const esc = x => String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     const mine = _ciMineLines();
+    const cEl = document.getElementById('edit-brand-ci-count');   // FU217: say what a save keeps
+    if (cEl) cEl.innerHTML = _ciCountHtml();
     const rEl = document.getElementById('edit-brand-ci-readings');
     if (rEl) rEl.innerHTML = mine.length ? mine.map(l => `<div class="text-xs py-0.5"><span class="text-gray-400">↳ ${esc(l.length > 60 ? l.slice(0, 60) + '…' : l)}</span> — ${_ciReadingText(st.readings[_ciNorm(l)])}</div>`).join('') : '';
     const mineKeys = new Set(mine.map(_ciNorm));
@@ -2214,6 +2229,13 @@ async function _ciRegenerate() {
         const all = (_brandsViewState && _brandsViewState._allBrands) || [];
         all.filter(b => b.id === st.brandId).forEach(b => { b.content_context = JSON.stringify(res.content_context); });
         toast(res.warning || `${ctx.auto.length} auto instruction(s) — your lines are unchanged`, res.warning ? 'error' : 'success');
+        if (res.content_instructions) {   // FU217
+            const r = res.content_instructions, bits = [];
+            if ((r.dropped || []).length) bits.push(`${r.dropped.length} line(s) past the ${r.limit}-line limit were not kept`);
+            if ((r.duplicates || []).length) bits.push(`${r.duplicates.length} duplicate line(s) merged`);
+            if ((r.truncated || []).length) bits.push(`${r.truncated.length} line(s) cut at 300 characters`);
+            if (bits.length) toast('Content instructions: ' + bits.join('; '), 'error', 12000);
+        }
     } catch (e) {
         toast(`Regenerate failed: ${e.message || e}`, 'error');
     } finally {
@@ -2227,6 +2249,175 @@ function _ciDraftHtml(ctx) {
     if (!c.auto.length) return '<p class="text-xs text-gray-500">No auto instructions suggested.</p>';
     return c.auto.map(it => `<div class="text-xs py-1" style="border-top:1px solid #2a2a2b"><span style="color:#e5e7eb">${esc(it.text)}</span> <span class="text-gray-500">— ${_ciReadingText(it)}</span></div>`).join('')
         + '<p class="text-xs text-gray-500 mt-1">Saved with the brand. Add your own lines or remove these in Edit Brand.</p>';
+}
+
+// ── FU217: verified facts — yours and your competitors' ─────────────────────────────────────
+// Paste in any shape -> Analyse -> rows grouped by brand you can correct -> saved with the brand.
+// The model only parses; the server keeps a row only if it reads exactly as your paste reads, and
+// every licence number keeps your spacing. Every blog that names one of these brands uses them.
+const _VF_KIND_OPTS = [['license', 'licence'], ['certification', 'certification'], ['rating', 'rating / score'],
+                      ['correction', 'correction'], ['note', 'note (your wording)']];
+function _vfactsFromBrand(b) {
+    let vf = {};
+    try { vf = JSON.parse((b || {}).verified_facts || '{}') || {}; } catch (_) { vf = {}; }
+    if (!vf || typeof vf !== 'object' || Array.isArray(vf)) vf = {};
+    const ents = Object.keys(vf).map(slug => {
+        const e = vf[slug] || {};
+        return { name: e.name || '', legal_name: e.legal_name || '', aliases: (e.aliases || []).slice(),
+                 subject: !!e.subject, sources: (e.sources || []).map(s => ({ url: s.url || '', name: s.name || '' })),
+                 rows: (e.rows || []).map(r => ({ fact: r.fact || '', kind: r.kind || 'note', wrong: r.wrong || '',
+                                                  source_url: r.source_url || '', raw: r.raw || '' })) };
+    }).filter(e => e.name);
+    ents.sort((a, b) => (b.subject ? 1 : 0) - (a.subject ? 1 : 0));
+    return ents;
+}
+function _vfactsSourcesText(e) {
+    return (e.sources || []).map(s => s.url && s.name ? `${s.name} | ${s.url}` : (s.url || s.name)).filter(Boolean).join('\n');
+}
+function _vfactsRender() {
+    const st = window._vfacts; const el = document.getElementById('edit-brand-vf-rows');
+    if (!st || !el) return;
+    const esc = _blogEsc;
+    const kindSel = (v, ei, ri) => `<select class="text-xs" style="width:auto;flex:none" onchange="_vfactsEdit(${ei},${ri},'kind',this.value)">`
+        + _VF_KIND_OPTS.map(([k, lbl]) => `<option value="${k}"${(v || 'note') === k ? ' selected' : ''}>${lbl}</option>`).join('')
+        + `</select>`;
+    const ents = st.entities.map((e, ei) => {
+        const rows = (e.rows || []).map((r, ri) => `
+            <div class="flex gap-1 items-center mt-1">
+                <input class="text-xs" style="flex:5;min-width:0" value="${esc(r.fact)}" title="${esc(r.fact)}" placeholder="The fact, exactly as you want it stated" oninput="_vfactsEdit(${ei},${ri},'fact',this.value)">
+                ${kindSel(r.kind, ei, ri)}
+                ${r.kind === 'correction' ? `<input class="text-xs" style="flex:1.5;min-width:0" value="${esc(r.wrong)}" placeholder="Wrong phrase — never write it" oninput="_vfactsEdit(${ei},${ri},'wrong',this.value)">` : ''}
+                <input class="text-xs" style="flex:1.5;min-width:0" value="${esc(r.source_url)}" placeholder="Link (optional)" oninput="_vfactsEdit(${ei},${ri},'source_url',this.value)">
+                <button type="button" class="btn btn-sm btn-secondary" style="padding:1px 8px;width:auto;flex:none" onclick="_vfactsRowDel(${ei},${ri})" title="Remove this fact">✕</button>
+            </div>`).join('');
+        return `<div style="border:1px solid #2a2a2b;border-radius:6px;padding:8px;margin-top:6px">
+            <div class="flex gap-2 items-center">
+                <input class="text-xs" style="flex:2" value="${esc(e.name)}" placeholder="Brand name as readers know it" oninput="_vfactsEdit(${ei},-1,'name',this.value)">
+                ${e.subject ? '<span class="badge" style="background:#10331f;color:#46d160">yours</span>' : ''}
+                ${e.unknown_brand ? '<span class="text-yellow-500 text-xs" title="This name matches none of your competitors — check the spelling">⚠ not a known competitor</span>' : ''}
+                <button type="button" class="btn btn-sm btn-secondary" style="padding:1px 8px;width:auto;flex:none" onclick="_vfactsEntDel(${ei})" title="Remove this brand and its facts">✕ brand</button>
+            </div>
+            <div class="grid gap-2 mt-1" style="grid-template-columns:1fr 1fr">
+                <input class="text-xs" value="${esc(e.legal_name)}" placeholder="Legal / licensed name (only if different)" oninput="_vfactsEdit(${ei},-1,'legal_name',this.value)" title="When this differs, the first mention reads “Name (licensed as Legal name)”">
+                <input class="text-xs" value="${esc((e.aliases || []).join(', '))}" placeholder="Other names, comma-separated" oninput="_vfactsEdit(${ei},-1,'aliases',this.value)">
+            </div>
+            <textarea class="text-xs mt-1" rows="2" placeholder="Sources — one per line: a link, a name (BBB profile), or Name | link" style="font-family:inherit" oninput="_vfactsEdit(${ei},-1,'sources',this.value)">${esc(_vfactsSourcesText(e))}</textarea>
+            ${rows}
+            <button type="button" class="btn btn-sm btn-secondary mt-1" style="padding:1px 8px" onclick="_vfactsRowAdd(${ei})">+ Add a fact</button>
+        </div>`;
+    }).join('');
+    const dropped = st.dropped || [];
+    const overlaps = st.overlaps || [];
+    el.innerHTML = ents
+        + `<div class="flex gap-2 mt-2"><button type="button" class="btn btn-sm btn-secondary" style="padding:1px 8px" onclick="_vfactsEntAdd()">+ Add a brand</button></div>`
+        + (dropped.length ? `<details class="mt-2" open><summary class="text-xs text-yellow-600 cursor-pointer">Not kept (${dropped.length})</summary><ul class="text-xs text-yellow-600 ml-4">`
+            + dropped.map(d => `<li>“${esc(String(d.raw || '').slice(0, 90))}” — ${esc(d.why || '')}</li>`).join('') + `</ul></details>` : '')
+        + (overlaps.length ? `<div class="text-xs text-gray-500 mt-1">Also in Brand facts below — keep one: ${overlaps.map(o => '“' + esc(o.slice(0, 60)) + '”').join(', ')}</div>` : '');
+}
+function _vfactsEdit(ei, ri, field, val) {
+    const st = window._vfacts; if (!st || !st.entities[ei]) return;
+    const e = st.entities[ei];
+    if (ri >= 0) { if (e.rows[ri]) e.rows[ri][field] = val; if (field === 'kind') _vfactsRender(); }
+    else if (field === 'aliases') e.aliases = String(val || '').split(',').map(s => s.trim()).filter(Boolean);
+    else if (field === 'sources') e.sources = String(val || '').split('\n').map(s => s.trim()).filter(Boolean).map(line => {
+        const i = line.indexOf('|');
+        if (i >= 0) return { name: line.slice(0, i).trim(), url: line.slice(i + 1).trim() };
+        return /^(https?:\/\/|[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$))/i.test(line) ? { url: line, name: '' } : { url: '', name: line };
+    });
+    else { e[field] = val; if (field === 'name') e.unknown_brand = false; }
+    st.dirty = true;
+}
+function _vfactsRowAdd(ei) {
+    const st = window._vfacts; if (!st || !st.entities[ei]) return;
+    st.entities[ei].rows.push({ fact: '', kind: 'note', wrong: '', source_url: '', raw: '' });
+    st.dirty = true; _vfactsRender();
+}
+function _vfactsRowDel(ei, ri) {
+    const st = window._vfacts; if (!st || !st.entities[ei]) return;
+    st.entities[ei].rows.splice(ri, 1); st.dirty = true; _vfactsRender();
+}
+function _vfactsEntAdd() {
+    const st = window._vfacts; if (!st) return;
+    st.entities.push({ name: '', legal_name: '', aliases: [], subject: false, sources: [],
+                       rows: [{ fact: '', kind: 'license', wrong: '', source_url: '', raw: '' }] });
+    st.dirty = true; _vfactsRender();
+}
+function _vfactsEntDel(ei) {
+    const st = window._vfacts; if (!st) return;
+    st.entities.splice(ei, 1); st.dirty = true; _vfactsRender();
+}
+async function _vfactsParse() {
+    const st = window._vfacts; if (!st) return;
+    const text = (document.getElementById('edit-brand-vf-paste')?.value || '').trim();
+    if (!text) { toast('Paste your facts first', 'error'); return; }
+    const btn = document.getElementById('edit-brand-vf-analyse');
+    if (btn) { btn.disabled = true; btn.textContent = 'Analysing…'; }
+    try {
+        const res = await api(`/api/brands/${st.brandId}/verified-facts/parse`, { method: 'POST', body: { text } });
+        const got = (res && res.entities) || [];
+        const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        got.forEach(g => {
+            const hit = st.entities.find(e => _kfSlug(e.name) === _kfSlug(g.name));
+            if (!hit) { st.entities.push({ name: g.name, legal_name: g.legal_name || '', aliases: g.aliases || [],
+                                           subject: !!g.subject, unknown_brand: !!g.unknown_brand,
+                                           sources: g.sources || [], rows: (g.rows || []).map(r => ({ fact: r.fact, kind: r.kind, wrong: r.wrong || '', source_url: r.source_url || '', raw: r.raw || '' })) });
+                        return; }
+            if (g.legal_name && !hit.legal_name) hit.legal_name = g.legal_name;
+            (g.aliases || []).forEach(a => { if (!hit.aliases.some(x => norm(x) === norm(a))) hit.aliases.push(a); });
+            (g.sources || []).forEach(s => { if (!hit.sources.some(x => (x.url && x.url === s.url) || (!s.url && x.name === s.name))) hit.sources.push(s); });
+            (g.rows || []).forEach(r => { if (!hit.rows.some(x => norm(x.fact) === norm(r.fact))) hit.rows.push({ fact: r.fact, kind: r.kind, wrong: r.wrong || '', source_url: r.source_url || '', raw: r.raw || '' }); });
+            hit.subject = hit.subject || !!g.subject;
+        });
+        st.entities.sort((a, b) => (b.subject ? 1 : 0) - (a.subject ? 1 : 0));
+        st.dropped = (res && res.dropped) || [];
+        st.overlaps = (res && res.overlaps) || [];
+        st.dirty = true;
+        _vfactsRender();
+        const nr = got.reduce((n, g) => n + (g.rows || []).length, 0);
+        toast(`Read ${nr} fact(s) across ${got.length} brand(s)` + (st.dropped.length ? ` · ${st.dropped.length} not kept` : '')
+              + (res && res.cost ? ` · ≈ $${Number(res.cost).toFixed(2)}` : '') + ' — check them, then Save',
+              nr ? 'success' : 'error', 9000);
+    } catch (e) { /* api() already toasted */ }
+    if (btn) { btn.disabled = false; btn.textContent = '🔎 Analyse'; }
+}
+function _vfactsCollect() {
+    const st = window._vfacts; if (!st) return [];
+    return st.entities.filter(e => (e.name || '').trim()).map(e => ({
+        name: e.name.trim(), legal_name: (e.legal_name || '').trim(), aliases: e.aliases || [], subject: !!e.subject,
+        sources: e.sources || [],
+        rows: (e.rows || []).filter(r => (r.fact || '').trim()).map(r => ({ fact: r.fact.trim(), kind: r.kind || 'note',
+            wrong: (r.wrong || '').trim(), source_url: (r.source_url || '').trim(), raw: r.raw || '' })),
+    }));
+}
+// A Content instructions line that reads like a verified fact belongs in the section below it.
+const _CI_FACTLIKE_RE = /(?:^|[^A-Za-z0-9])[A-Z]{2,5}[ -]?\d{5,9}(?![0-9])|buildzoom|\blicen[cs]ed\b|\blicen[cs]e (?:no|number|#)|\bscore\s*\d/i;
+function _ciMoveToFacts() {
+    const el = document.getElementById('edit-brand-ci-mine');
+    const pb = document.getElementById('edit-brand-vf-paste');
+    if (!el || !pb) return;
+    const lines = el.value.split('\n');
+    const facts = lines.filter(l => l.trim() && _CI_FACTLIKE_RE.test(l));
+    if (!facts.length) return;
+    el.value = lines.filter(l => !(l.trim() && _CI_FACTLIKE_RE.test(l))).join('\n');
+    pb.value = (pb.value.trim() ? pb.value.replace(/\s+$/, '') + '\n' : '') + facts.join('\n');
+    _ciRender();
+    pb.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast(`${facts.length} line(s) moved to Verified facts — click 🔎 Analyse`, 'success');
+}
+function _ciCountHtml() {
+    const el = document.getElementById('edit-brand-ci-mine');
+    const raw = (el ? el.value : '').split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const seen = new Set(); let dup = 0, long = 0, uniq = 0;
+    raw.forEach(l => { const k = _ciNorm(l); if (seen.has(k)) { dup++; return; } seen.add(k); uniq++; if (uniq <= 20 && l.length > 300) long++; });
+    const over = Math.max(0, uniq - 20);
+    const facts = raw.filter(l => _CI_FACTLIKE_RE.test(l)).length;
+    const bits = [`<span style="color:${over ? '#f87171' : '#9ca3af'}">${Math.min(uniq, 20)} / 20 lines${over ? ` — ${over} line(s) past 20 are NOT kept` : ''}</span>`];
+    if (dup) bits.push(`<span class="text-yellow-600">${dup} duplicate line(s) merged</span>`);
+    if (long) bits.push(`<span class="text-yellow-600">${long} line(s) over 300 characters are cut</span>`);
+    let html = `<div class="text-xs mt-1">${bits.join(' · ')}</div>`;
+    if (facts) html += `<div class="text-xs mt-1" style="color:#fcd34d">${facts} line(s) look like facts (licence numbers, scores). Content instructions are rules, not facts — put these in Verified facts below so every blog states them exactly.
+        <button type="button" class="btn btn-sm btn-secondary" style="padding:1px 8px;width:auto" onclick="_ciMoveToFacts()">Move to Verified facts</button></div>`;
+    return html;
 }
 
 function _renderPersonasList(personas) {
@@ -2321,9 +2512,23 @@ async function saveBrandContext(brandName) {
     // spelling/casing then flows verbatim into every future generation.
     const newName = (document.getElementById('edit-brand-name')?.value || '').trim();
 
+    // FU217: verified facts — saved ONCE, before the per-instance loop, so the server's fan-out to
+    // every copy of this brand still finds them by the current name even when the brand is renamed.
+    const _vf = window._vfacts;
+    if (_vf && _vf.dirty && brandInstances.length) {
+        try {
+            const vr = await api(`/api/brands/${brandInstances[0].id}/verified-facts`, { method: 'PUT', body: { entities: _vfactsCollect() } });
+            const vfBlob = JSON.stringify(vr.verified_facts || {});
+            brandInstances.forEach(b => { b.verified_facts = vfBlob; });
+            const vd = (vr.dropped || []).length;
+            toast(`Verified facts saved: ${vr.rows || 0} fact(s) across ${vr.brands || 0} brand(s)` + (vd ? ` · ${vd} not kept: ` + vr.dropped.slice(0, 2).map(d => d.why).join('; ') : ''), vd ? 'error' : 'success', 9000);
+        } catch (e) { /* api() already toasted */ }
+    }
+
     // Update all instances of this brand across subreddits
+    let _ciReport = null;
     for (const b of brandInstances) {
-        await api(`/api/brands/${b.id}`, { method: 'PUT', body: {
+        const _r = await api(`/api/brands/${b.id}`, { method: 'PUT', body: {
             name: newName || undefined,
             context,
             domain_url: domainUrl,
@@ -2349,9 +2554,17 @@ async function saveBrandContext(brandName) {
             ...(_hasMine ? { manual_competitors } : {}),   // FU210
             ...(_ciPayload() ? { content_context: _ciPayload() } : {}),   // FU212
         }});
+        if (!_ciReport && _r && _r.content_instructions) _ciReport = _r.content_instructions;
     }
 
     toast('Brand updated', 'success');
+    if (_ciReport) {   // FU217: Content instructions no longer lose lines silently
+        const bits = [];
+        if ((_ciReport.dropped || []).length) bits.push(`${_ciReport.dropped.length} line(s) past the ${_ciReport.limit}-line limit were not kept`);
+        if ((_ciReport.duplicates || []).length) bits.push(`${_ciReport.duplicates.length} duplicate line(s) merged`);
+        if ((_ciReport.truncated || []).length) bits.push(`${_ciReport.truncated.length} line(s) cut at 300 characters`);
+        if (bits.length) toast('Content instructions: ' + bits.join('; '), 'error', 12000);
+    }
     closeModal();
 
     // Refresh the brands page

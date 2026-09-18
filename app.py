@@ -2274,7 +2274,16 @@ def api_update_brand(bid):
             key_facts=kf_update,   # FU150
             **enrich_fields,
         )
-        return jsonify({"ok": True})
+        out = {"ok": True}
+        # FU217: say what the Content instructions save kept and what it could not — lines past the
+        # 20-line limit, merged duplicates and lines cut at 300 characters used to vanish silently.
+        _cc_in = (data or {}).get("content_context")
+        if isinstance(_cc_in, dict) and isinstance(_cc_in.get("mine"), list):
+            from generators.brand_enrichment import ci_mine_report
+            _rep = ci_mine_report(_cc_in["mine"])
+            if _rep["dropped"] or _rep["duplicates"] or _rep["truncated"]:
+                out["content_instructions"] = _rep
+        return jsonify(out)
     finally:
         db.close()
 
@@ -2637,6 +2646,176 @@ def api_brand_price_table(bid):
         db.close()
 
 
+# --------------------------------------------------------------- FU217: VERIFIED FACTS per brand
+# The operator's verified facts for their own brand AND the competitors it names — licence numbers,
+# classes, certifications, scores, legal names, corrections, notes. Before this they went into
+# Content instructions, which keeps 20 lines, merges near-duplicates and cuts long lines, and treats
+# what survives as a rule rather than a fact. Here they are stored per brand and used as cited facts.
+def _vfact_known_names(brand):
+    """The names a parsed brand is matched against: the brand's competitors (all and its own), the
+    brands it priced, and the brands already in its verified facts."""
+    from generators.blog_gen import _priced_competitor_names, _vfact_load
+    known = []
+    for col in ("competitors", "manual_competitors"):
+        try:
+            known += [str(c).strip() for c in json.loads(brand.get(col) or "[]") if str(c).strip()]
+        except Exception:
+            pass
+    try:
+        known += _priced_competitor_names(brand)
+    except Exception:
+        pass
+    for e in _vfact_load(brand).values():
+        if isinstance(e, dict) and not e.get("subject") and str(e.get("name") or "").strip():
+            known.append(str(e["name"]).strip())
+    seen, out = set(), []
+    for n in known:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def _vfact_brand_fact_lines(brand):
+    from generators.blog_gen import _kf_fact_items
+    try:
+        kf = json.loads(brand.get("key_facts") or "{}")
+    except Exception:
+        kf = {}
+    return [f"{it.get('label') or ''} {it.get('value') or ''}".strip() for it in _kf_fact_items(kf)]
+
+
+def _save_verified_facts(db, brand, entities):
+    """Save the reviewed entries on EVERY stored copy of this brand (same name). The entries sent are
+    the COMPLETE list — an entry not sent is removed. Hand-typed rows are not held to the paste."""
+    from generators.blog_gen import _vfact_clean
+    clean, dropped, flagged, overlaps = _vfact_clean(
+        entities or [], known_names=_vfact_known_names(brand), subject=(brand.get("name") or ""),
+        brand_fact_lines=_vfact_brand_fact_lines(brand))
+    blob = json.dumps(clean)
+    targets = [brand["id"]]
+    try:
+        targets = [b["id"] for b in db.get_all_brands()
+                   if (b.get("name") or "").strip().lower() == (brand.get("name") or "").strip().lower()] \
+            or targets
+    except Exception:
+        pass
+    for tid in targets:
+        try:
+            db.update_brand(tid, verified_facts=blob)
+        except Exception as e:
+            print(f"[verified-facts] save failed for brand {tid}: {e}", flush=True)
+    print(f"[verified-facts] saved {sum(len(v.get('rows') or []) for v in clean.values())} fact(s) "
+          f"across {len(clean)} brand(s) on {len(targets)} brand record(s); {len(dropped)} dropped",
+          flush=True)
+    return clean, dropped, flagged, overlaps
+
+
+@app.route("/api/brands/<int:bid>/verified-facts/parse", methods=["POST"])
+def api_brand_verified_facts_parse(bid):
+    """FU217 — paste verified facts in ANY shape; get back reviewable entries grouped by brand.
+    ONE small Claude call, NO web search: the model parses, and `_vfact_clean` keeps only what is
+    literally in the paste (licence numbers keep your exact spacing). Nothing is saved here."""
+    data = request.json or {}
+    text = str(data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "paste your facts first"}), 400
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        subject = (brand.get("name") or "").strip()
+        known = _vfact_known_names(brand)
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return jsonify({"error": "no API key configured"}), 400
+        claude = ClaudeClient(api_key)
+        claude.reset_usage()   # FU54: cost this parse from real API usage
+        prompt = (
+            "An operator pasted VERIFIED FACTS about their own company and about competitors — "
+            "licence numbers, licence classes, certifications, ratings/scores, legal names, "
+            "corrections and notes. It may be headed sections, lines, a table or prose.\n\n"
+            f"PASTED TEXT:\n{text[:12000]}\n\n"
+            f"THE OPERATOR'S OWN BRAND: {subject}\n"
+            + (f"COMPETITORS ALREADY KNOWN: {', '.join(known[:20])}\n" if known else "")
+            + "\nReturn ONE ENTRY PER COMPANY. For each give:\n"
+              "  name        - the company as the text heads it\n"
+              "  trade_name  - the name the company is known/marketed as, when the text says it "
+              "differs from the licensed entity ('' otherwise)\n"
+              "  legal_name  - the licensed / registered legal entity when the text gives one ('' "
+              "otherwise)\n"
+              "  aliases     - other names the text gives it, e.g. a d/b/a in brackets\n"
+              "  sources     - [{url, name}] from a 'Sources:' line or links given for this company; "
+              "a source with no link (e.g. 'BBB profile') has url ''\n"
+              "  rows        - [{fact, kind, wrong, source_url, raw}] one per fact line:\n"
+              "      fact       - the fact COPIED EXACTLY as the text writes it\n"
+              "      kind       - license | certification | rating | correction | note\n"
+              "      wrong      - for a correction only: the exact wrong phrase the text says must "
+              "not be used, else ''\n"
+              "      source_url - a link given for this one fact, else ''\n"
+              "      raw        - the pasted line this row came from, verbatim\n\n"
+              "RULES:\n"
+              "- Copy every fact, licence number, name and link EXACTLY as written, including the "
+              "spacing inside a licence number ('CGC 1516665' stays with its space, 'CBC1264856' "
+              "stays without). NEVER invent, reword, summarise, merge or add to a fact — a row not "
+              "in the text will be discarded.\n"
+              "- A heading that names several companies ('X and Y') becomes one entry PER company, "
+              "each with the same rows.\n"
+              "- A 'Sources:' line goes into sources, never into rows.\n"
+              "- A note about HOW the text is formatted (e.g. 'numbers carry the space') is not a "
+              "fact — leave it out.\n"
+              "- A sentence that only explains which name is the trade name and which the licensed "
+              "entity sets trade_name / legal_name and is not a row.\n"
+              "- A line can be split into rows at a sentence or ' — ' boundary; each row must still "
+              "read exactly as the text reads.\n"
+              'Respond with JSON ONLY (no prose, no code fences): {"brands": [{"name": "...", '
+              '"trade_name": "", "legal_name": "", "aliases": [], "sources": [{"url": "", '
+              '"name": ""}], "rows": [{"fact": "...", "kind": "license", "wrong": "", '
+              '"source_url": "", "raw": "..."}]}]}')
+        try:
+            out = claude.call(prompt, max_tokens=3500, temperature=0)
+        except Exception as e:
+            print(f"[verified-facts] parse call failed: {e}", flush=True)
+            out = None
+        parsed = (out or {}).get("brands") if isinstance(out, dict) else None
+        if parsed is None:
+            return jsonify({"error": "couldn't read those facts — try pasting them differently",
+                            "detail": (getattr(claude, "last_error", "") or "")[:200]}), 502
+        from generators.blog_gen import _vfact_clean
+        clean, dropped, flagged, overlaps = _vfact_clean(
+            parsed, known_names=known, subject=subject, verbatim_text=text,
+            brand_fact_lines=_vfact_brand_fact_lines(brand))
+        entities = [{"slug": sl, **e, "unknown_brand": e.get("name") in flagged}
+                    for sl, e in clean.items()]
+        entities.sort(key=lambda e: 0 if e.get("subject") else 1)
+        print(f"[verified-facts] parsed {sum(len(e.get('rows') or []) for e in entities)} fact(s) "
+              f"across {len(entities)} brand(s) for brand {bid}; {len(dropped)} dropped; "
+              f"{len(flagged)} unmatched name(s)", flush=True)
+        return jsonify({"ok": True, "entities": entities, "dropped": dropped, "flagged": flagged,
+                        "overlaps": overlaps, "cost": round(claude.usage_cost(), 4)})
+    finally:
+        db.close()
+
+
+@app.route("/api/brands/<int:bid>/verified-facts", methods=["PUT"])
+def api_brand_verified_facts(bid):
+    """FU217 — save the reviewed verified facts on the brand (every copy). The list sent is the
+    complete list."""
+    db = get_db()
+    try:
+        brand = db.get_brand(bid)
+        if not brand:
+            return jsonify({"error": "brand not found"}), 404
+        stored, dropped, flagged, overlaps = _save_verified_facts(
+            db, brand, (request.json or {}).get("entities") or [])
+        return jsonify({"ok": True, "verified_facts": stored, "brands": len(stored),
+                        "rows": sum(len(v.get("rows") or []) for v in stored.values()),
+                        "dropped": dropped, "flagged": flagged, "overlaps": overlaps})
+    finally:
+        db.close()
+
+
 @app.route("/api/brands/<int:bid>/price-links", methods=["PUT"])
 def api_brand_price_links(bid):
     """FU213 (Change 5): save the operator's per-brand price-page links (used by the blog generator
@@ -2936,6 +3115,11 @@ def api_regenerate_content_context(bid):
                                       vertical=_is_ymyl_brand(brand))
         db.update_brand(bid, content_context=json.dumps(after, ensure_ascii=False))
         out = {"content_context": after, "merged": ci_merged(after)}
+        if isinstance(data.get("mine"), list):   # FU217: report what the save could not keep
+            from generators.brand_enrichment import ci_mine_report
+            _rep = ci_mine_report(data["mine"])
+            if _rep["dropped"] or _rep["duplicates"] or _rep["truncated"]:
+                out["content_instructions"] = _rep
         if after.get("auto_generated_at") == before.get("auto_generated_at"):
             out["warning"] = ("Couldn't generate auto instructions: "
                               + (getattr(claude, "last_error", None) or "the model returned nothing usable"))
@@ -3887,7 +4071,7 @@ def api_blog_verify(blog_id):
             # 3. the guards this path does not get for free (it runs OUTSIDE _finalize_article):
             #    _rebuild_sources re-applies the punt scrub, the table resolver, the edit-narration
             #    scrub and the contiguous-[S#] renumber over whatever the repairs changed.
-            body = gen._rebuild_sources(gen._sa(body))
+            body = gen._rebuild_sources(gen._sa(body), brand)   # FU217: keeps the verified wording
             if _pin_h1:
                 body = gen._force_h1(body, blog.get("seed") or "")
 
@@ -7545,7 +7729,7 @@ def api_blog_rewrite(blog_id):
             # `_evidence_blocks` empty (this task never calls `_gather_evidence`) it applies those three
             # scrubs and returns before touching a single [S#]. Placed AFTER the fallback check so a
             # fallback (which stores nothing) is never touched.
-            new_body = gen._rebuild_sources(gen._sa(new_body))
+            new_body = gen._rebuild_sources(gen._sa(new_body), brand)   # FU217
             # FU201: the on-demand rewrite never passes through `_finalize_article`, so the
             # QWEN body — the one the Drive upload hands to a client — was the ONE body that
             # never got the formatting repair. Fix it at the SOURCE too (FU186: the stored

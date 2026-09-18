@@ -1815,6 +1815,476 @@ def _norm_domain(u):
     return d[4:] if d.startswith("www.") else d
 
 
+# ── FU217 ─────────────────────────────────────────────────────────────────────────────────────────
+# Operator-VERIFIED facts for the subject AND the competitors it names: licence numbers and classes,
+# certifications, scores, legal names, corrections and the operator's own notes. The operator's word
+# is the source of truth here, so the model only PARSES a paste and code checks that every row is
+# literally in it. Stored per brand slug in `brands.verified_facts`; every generation path reads it
+# through these helpers, and every one of them is inert (returns "" / [] / {}) when nothing is stored.
+_VFACT_LICENSE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2,5})[  -]?(\d{5,9})(?![0-9])")
+_VFACT_KINDS = ("license", "certification", "rating", "correction", "note")
+_VFACT_MAX_BRANDS = 12
+_VFACT_MAX_ROWS_PER_BRAND = 15
+_VFACT_MAX_ROWS = 60
+_VFACT_MAX_FACT = 240
+_VFACT_MAX_SOURCES = 4
+_VFACT_MAX_ALIASES = 4
+_VFACT_FETCH_CAP = 8
+_VFACT_LEGAL_SUFFIX = {"inc", "llc", "co", "corp", "corporation", "ltd", "limited", "pllc", "llp",
+                       "lp", "company", "incorporated", "pa", "pc", "the"}
+# A two-letter US state code followed by five digits is a ZIP code, not a licence number.
+_VFACT_US_STATES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
+    "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
+    "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC"}
+
+
+def _vfact_license_hits(text):
+    """Every licence-shaped token in `text` as (match, KEY) where KEY = PREFIX+DIGITS with no
+    separator, so "CGC 1516665", "CGC1516665" and "CGC-1516665" share one key. A state code + five
+    digits is a ZIP and is skipped."""
+    out = []
+    for m in _VFACT_LICENSE_RE.finditer(text or ""):
+        pre, dig = m.group(1), m.group(2)
+        if len(dig) == 5 and pre in _VFACT_US_STATES:
+            continue
+        out.append((m, pre + dig))
+    return out
+
+
+def _vfact_alnum(s):
+    """Letters and digits only, lowercased, with curly quotes folded — the form a paste and a parsed
+    row are compared in. Punctuation, spacing and dash style can differ; the WORDS and their order
+    cannot."""
+    s = (s or "").replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _vfact_norm_kind(k):
+    k = str(k or "").strip().lower()
+    if k.startswith("licen") or k in ("registration", "registered"):
+        return "license"
+    if k.startswith("cert") or k in ("award", "accreditation", "membership"):
+        return "certification"
+    if k in ("rating", "score", "ranking", "review", "reviews"):
+        return "rating"
+    if k in ("correction", "fix", "wrong", "incorrect"):
+        return "correction"
+    return "note"
+
+
+def _vfact_core_slug(name):
+    """The name with legal-form suffixes and punctuation removed: "CMK Construction, Inc." and
+    "CMK Construction" share one core."""
+    words = [w for w in _kf_slug(name or "").split("-") if w]
+    while words and words[-1] in _VFACT_LEGAL_SUFFIX:
+        words.pop()
+    while words and words[0] == "the":
+        words.pop(0)
+    return "-".join(words)
+
+
+def _vfact_legal_differs(name, legal):
+    """True when the licensed/legal name is a genuinely DIFFERENT name from the one readers know —
+    the Revive case — not the same name plus "Inc"/"LLC"."""
+    a, b = _vfact_core_slug(name), _vfact_core_slug(legal)
+    return bool(a and b and a != b)
+
+
+def _vfact_load(brand):
+    """The stored map, tolerant of every bad shape (None, "", "[]", garbage) — all read as empty."""
+    raw = (brand or {}).get("verified_facts")
+    try:
+        vf = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        vf = {}
+    return vf if isinstance(vf, dict) else {}
+
+
+def _vfact_names(e):
+    """Every name an entry answers to: the display name, the legal name and the other names."""
+    out, seen = [], set()
+    for n in [e.get("name"), e.get("legal_name")] + list(e.get("aliases") or []):
+        n = str(n or "").strip()
+        if n and _kf_slug(n) and _kf_slug(n) not in seen:
+            seen.add(_kf_slug(n))
+            out.append(n)
+    return out
+
+
+def _vfact_is_subject(e, brand):
+    return bool(e.get("subject")) or _is_priced((brand or {}).get("name") or "", _vfact_names(e))
+
+
+def _vfact_entries(brand, guide=False):
+    """The entries generation uses, the SUBJECT first. An entry needs at least one fact row or a
+    legal name that differs from its display name, otherwise it has nothing to say. In a general
+    guide only the subject's own facts are used — competitors are never named there."""
+    subj, comps = [], []
+    for slug, e in _vfact_load(brand).items():
+        if not isinstance(e, dict):
+            continue
+        nm = str(e.get("name") or "").strip()
+        rows = [dict(r) for r in (e.get("rows") or [])
+                if isinstance(r, dict) and str(r.get("fact") or "").strip()]
+        legal = str(e.get("legal_name") or "").strip()
+        if not legal or not _vfact_legal_differs(nm, legal):
+            legal = ""
+        if not nm or not (rows or legal):
+            continue
+        ent = {"slug": slug, "name": nm, "legal_name": legal,
+               "aliases": [str(a).strip() for a in (e.get("aliases") or []) if str(a).strip()],
+               "sources": [s for s in (e.get("sources") or []) if isinstance(s, dict)],
+               "rows": rows}
+        ent["subject"] = _vfact_is_subject(ent, brand) or bool(e.get("subject"))
+        (subj if ent["subject"] else comps).append(ent)
+    return subj if guide else subj + comps
+
+
+def _vfact_subject(brand):
+    ents = [e for e in _vfact_entries(brand) if e["subject"]]
+    return ents[0] if ents else None
+
+
+def _vfact_entry_for(entries, name):
+    """The entry a brand name refers to, by the same whole-word match the comparison field uses."""
+    for e in entries or []:
+        if _is_priced(name, _vfact_names(e)):
+            return e
+    return None
+
+
+def _vfact_tokens(entry):
+    """{KEY: canonical spelling} for every licence number in an entry, spelled exactly as entered."""
+    out = {}
+    for r in (entry or {}).get("rows") or []:
+        for m, key in _vfact_license_hits(str(r.get("fact") or "")):
+            out.setdefault(key, m.group(0))
+    return out
+
+
+def _vfact_has_license(entry):
+    return any((r.get("kind") == "license") or _vfact_license_hits(str(r.get("fact") or ""))
+               for r in (entry or {}).get("rows") or [])
+
+
+def _vfact_answers_license(entry):
+    """True when the operator's verified facts already answer a brand's LICENSING — a licence row, a
+    licence number, or a note about how it is licensed (the franchise case)."""
+    return _vfact_has_license(entry) or any(re.search(r"licen[cs]", str(r.get("fact") or ""), re.I)
+                                            for r in (entry or {}).get("rows") or [])
+
+
+def _vfact_coverage_text(entry):
+    """The words a verified entry contributes to the dimension-rescue coverage test, so a column the
+    facts already answer (License, Certifications, Rating) buys no search."""
+    out = []
+    for r in (entry or {}).get("rows") or []:
+        f = str(r.get("fact") or "").lower()
+        k = r.get("kind")
+        if k == "license" or _vfact_license_hits(str(r.get("fact") or "")) or re.search(r"licen[cs]", f):
+            out.append("license licence licensed licensing " + f)
+        elif k == "certification":
+            out.append("certified certification certifications " + f)
+        elif k == "rating":
+            out.append("rating ratings rated score " + f)
+        else:
+            out.append(f)
+    return " ".join(out)
+
+
+def _vfact_stated_in(row, text):
+    """A page states a licence row when every licence number on the row is on the page (spacing
+    ignored); any other row by the FU178 anchor test."""
+    fact = str((row or {}).get("fact") or "")
+    if not (text or "").strip():
+        return False
+    hits = _vfact_license_hits(fact)
+    if hits:
+        hay = re.sub(r"[\s -]+", "", text).upper()
+        return all(k in hay for _m, k in hits)
+    return _fact_stated_in(fact, text)
+
+
+def _vfact_url(u):
+    """A usable http(s) URL from what the operator typed ("cmkconstructioninc.com/awards" gets
+    https://), or ""."""
+    u = str(u or "").strip().strip(".,;)(<>[]\"'")
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, re.I):
+        if not re.match(r"^[a-z0-9-]+(\.[a-z0-9-]+)+(/\S*)?$", u, re.I):
+            return ""
+        u = "https://" + u
+    return u if re.match(r"^https?://[^\s/]+\.[^\s/]+", u, re.I) else ""
+
+
+def _vfact_clean(entities, known_names=None, subject="", verbatim_text=None,
+                 brand_fact_lines=None):
+    """Validate parsed or hand-edited entries into the stored shape, keyed by brand slug:
+    {slug: {name, legal_name, aliases, subject, sources:[{url,name}], rows:[{fact, kind, wrong,
+    source_url, raw, updated_at}], updated_at}}.
+
+    With `verbatim_text` (a paste) the model only PARSES and code decides, the FU214 discipline:
+      - every licence number must be in the paste (spacing ignored) and is rewritten to the paste's
+        exact spacing, so "CGC 1516665" keeps its space and an invented number is dropped;
+      - every row must read as the paste reads (same words, same order — punctuation and spacing
+        may differ), otherwise it is dropped as reworded;
+      - source links, legal names, other names and a correction's wrong phrase must be in the paste.
+    Every dropped row is reported with a reason. Returns (map, dropped[{raw, why}], flagged, overlaps)
+    where `flagged` = names that matched no known brand (kept, shown with ⚠) and `overlaps` = subject
+    rows already in Brand facts."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    known = [str(n).strip() for n in (known_names or []) if str(n).strip()]
+    subj = (subject or "").strip()
+    paste = verbatim_text if isinstance(verbatim_text, str) else None
+    pa = _vfact_alnum(paste) if paste is not None else ""
+    ptok = {}
+    if paste is not None:
+        for m, key in _vfact_license_hits(paste):
+            ptok.setdefault(key, m.group(0))
+
+    def _in_paste(s):
+        return paste is None or (_vfact_alnum(s) and _vfact_alnum(s) in pa)
+
+    def _match(nm):
+        if subj and _is_priced(nm, [subj]):
+            return subj, True
+        for k in known:
+            if _is_priced(nm, [k]):
+                return k, False
+        return "", False
+
+    out, dropped, flagged, overlaps = {}, [], [], []
+    total = 0
+    for ent in (entities or []):
+        if not isinstance(ent, dict):
+            continue
+        cands = [str(ent.get(k) or "").strip() for k in ("trade_name", "name", "legal_name")]
+        cands += [str(a or "").strip() for a in (ent.get("aliases") or [])]
+        cands = [c for c in cands if c]
+        if not cands:
+            continue
+        display, is_subj = "", bool(ent.get("subject"))
+        for c in cands:
+            hit, s_hit = _match(c)
+            if hit:
+                display, is_subj = hit, (is_subj or s_hit)
+                break
+        if not display:
+            display = cands[0]
+            if not is_subj:
+                flagged.append(display)
+        slug = _kf_slug(display)
+        if not slug:
+            continue
+        if slug not in out and len(out) >= _VFACT_MAX_BRANDS:
+            dropped.append({"raw": display, "why": f"more than {_VFACT_MAX_BRANDS} brands — "
+                                                   f"this one was not kept"})
+            continue
+        e = out.setdefault(slug, {"name": display, "legal_name": "", "aliases": [],
+                                  "subject": False, "sources": [], "rows": [], "updated_at": now})
+        e["subject"] = e["subject"] or is_subj
+        names_now = {_kf_slug(display)}
+        # the legal name: the entry's own, else a header name that is really the licensed entity
+        legal = str(ent.get("legal_name") or "").strip()
+        if not legal:
+            for c in cands[1:]:
+                if _vfact_legal_differs(display, c) and not _is_priced(c, [display]):
+                    legal = c
+                    break
+        if legal and _vfact_legal_differs(display, legal):
+            if _in_paste(legal):
+                e["legal_name"] = legal[:120]
+                names_now.add(_kf_slug(legal))
+            else:
+                dropped.append({"raw": legal, "why": "legal name is not in the text you pasted"})
+        for a in cands:
+            sa = _kf_slug(a)
+            if not sa or sa in names_now or sa in {_kf_slug(x) for x in e["aliases"]}:
+                continue
+            if not _vfact_legal_differs(display, a) or _vfact_core_slug(a) == _vfact_core_slug(e["legal_name"]):
+                continue
+            if len(e["aliases"]) < _VFACT_MAX_ALIASES and _in_paste(a):
+                e["aliases"].append(a[:120])
+        for s in (ent.get("sources") or [])[:8]:
+            if isinstance(s, str):
+                s = {"url": s, "name": ""}
+            if not isinstance(s, dict):
+                continue
+            su_raw = str(s.get("url") or "").strip()
+            sn = str(s.get("name") or "").strip()[:80]
+            su = _vfact_url(su_raw)
+            if su_raw and not su and not sn:
+                sn = su_raw[:80]
+            if su and paste is not None and _vfact_alnum(re.sub(r"^https?://(www\.)?", "", su, flags=re.I)) \
+                    not in pa:
+                dropped.append({"raw": su_raw, "why": "that link is not in the text you pasted"})
+                su = ""
+            if not (su or sn):
+                continue
+            if any((x.get("url") and x.get("url") == su) or (not su and x.get("name") == sn)
+                   for x in e["sources"]):
+                continue
+            if len(e["sources"]) < _VFACT_MAX_SOURCES:
+                e["sources"].append({"url": su, "name": sn})
+        all_names = {_vfact_core_slug(n) for n in [display, e["legal_name"]] + e["aliases"] if n}
+        for r in (ent.get("rows") or []):
+            if isinstance(r, str):
+                r = {"fact": r}
+            if not isinstance(r, dict):
+                continue
+            fact = re.sub(r"\s+", " ", str(r.get("fact") or "")).strip()
+            raw = str(r.get("raw") or "").strip()[:240]
+            if not fact:
+                continue
+            kind = _vfact_norm_kind(r.get("kind"))
+            if paste is not None:
+                bad = ""
+                for m, key in _vfact_license_hits(fact):
+                    if key not in ptok:
+                        bad = m.group(0)
+                        break
+                if bad:
+                    dropped.append({"raw": raw or fact, "why": f"{bad} is not in the text you pasted"})
+                    continue
+                for m, key in sorted(_vfact_license_hits(fact), key=lambda h: -h[0].start()):
+                    fact = fact[:m.start()] + ptok[key] + fact[m.end():]
+                if not _in_paste(fact):
+                    dropped.append({"raw": raw or fact,
+                                    "why": "reworded — edit it to your exact words"})
+                    continue
+            if len(fact) > _VFACT_MAX_FACT:
+                dropped.append({"raw": fact[:120] + "…",
+                                "why": f"longer than {_VFACT_MAX_FACT} characters — split or shorten it"})
+                continue
+            wrong = re.sub(r"\s+", " ", str(r.get("wrong") or "")).strip().strip("\"'“”")
+            if kind == "correction" and wrong:
+                if _vfact_core_slug(wrong) in all_names or _is_priced(wrong, [display] + e["aliases"]):
+                    # A brand's own name is never a banned phrase. When the legal name is known this
+                    # row only explains the naming, which the trade + legal name already carry.
+                    if e["legal_name"]:
+                        dropped.append({"raw": raw or fact, "why": "explains the brand's name — "
+                                        "kept as its trade name + legal name instead"})
+                        continue
+                    wrong = ""
+                    kind = "note"
+                elif paste is not None and not _in_paste(wrong):
+                    dropped.append({"raw": wrong, "why": "the wrong phrase is not in the text you pasted"})
+                    wrong = ""
+            elif kind != "correction":
+                wrong = ""
+            su = _vfact_url(r.get("source_url"))
+            if su and paste is not None and _vfact_alnum(re.sub(r"^https?://(www\.)?", "", su, flags=re.I)) \
+                    not in pa:
+                su = ""
+            if any(_vfact_alnum(x["fact"]) == _vfact_alnum(fact) for x in e["rows"]):
+                continue
+            if len(e["rows"]) >= _VFACT_MAX_ROWS_PER_BRAND:
+                dropped.append({"raw": raw or fact,
+                                "why": f"more than {_VFACT_MAX_ROWS_PER_BRAND} facts for {display}"})
+                continue
+            if total >= _VFACT_MAX_ROWS:
+                dropped.append({"raw": raw or fact, "why": f"more than {_VFACT_MAX_ROWS} facts in total"})
+                continue
+            e["rows"].append({"fact": fact, "kind": kind, "wrong": wrong[:120], "source_url": su,
+                              "raw": raw, "updated_at": now})
+            total += 1
+            if e["subject"] and brand_fact_lines:
+                if any(_fact_stated_in(fact, ln) for ln in brand_fact_lines if ln):
+                    overlaps.append(fact)
+    # an entry with neither facts nor a differing legal name has nothing to say
+    for slug in list(out):
+        if not out[slug]["rows"] and not out[slug]["legal_name"]:
+            out.pop(slug)
+    flagged = sorted({f for f in flagged if _kf_slug(f) in out})
+    return out, dropped, flagged, overlaps
+
+
+def _vfact_cites(entry, row, blocks):
+    """The [S#] a verified-fact row is cited to: the first `fact ·` block for that brand whose text
+    carries the row. Derived from the evidence list alone, so it survives a pause and a resume."""
+    want = _vfact_alnum(row.get("fact"))
+    for i, bl in enumerate(blocks or [], 1):
+        lab = str(bl.get("label") or "")
+        if not lab.startswith("fact ·"):
+            continue
+        parts = [p.strip() for p in lab.split("·")]
+        if len(parts) >= 2 and _kf_slug(parts[1]) == _kf_slug(entry["name"]) \
+                and want and want in _vfact_alnum(bl.get("text")):
+            return i
+    return 0
+
+
+def _vfact_prompt_block(brand, surface, blocks, guide=False, removed=()):
+    """FU217 — the operator's verified facts as ONE prompt block for a writer ("article"), the fact
+    check ("verify") or the reconcile ("reconcile"). Returns "" when nothing is stored, so every
+    prompt of a brand without verified facts stays byte-identical (the FU205 goldens).
+
+    These lines deliberately OVERRIDE, for these facts only, three rules the rest of the prompt
+    carries: {name}'s facts come only from its own site, a competitor's facts must cite its own page,
+    and the ban on "verify with…" wording (decision 4: the operator's note ships verbatim)."""
+    entries = _vfact_entries(brand, guide=guide)
+    if removed:
+        entries = [e for e in entries if not any(_is_priced(r, _vfact_names(e)) for r in removed)]
+    if not entries:
+        return ""
+    name = str((brand or {}).get("name") or "").strip()
+    out = []
+    lic_any = False
+    for e in entries:
+        head = f"- {e['name']}" + (" (the publisher of this article)" if e["subject"] else "")
+        if e["legal_name"]:
+            head += (f" — licensed as {e['legal_name']}. On its FIRST mention write "
+                     f"\"{e['name']} (licensed as {e['legal_name']})\"; after that write "
+                     f"\"{e['name']}\" only")
+        out.append(head + ":")
+        if e["aliases"]:
+            out.append(f"  (also known as: {', '.join(e['aliases'])})")
+        for r in e["rows"]:
+            fact = str(r.get("fact") or "").strip()
+            if not fact:
+                continue
+            n = _vfact_cites(e, r, blocks)
+            cite = f" [S{n}]" if n else " (no source — state it without a citation)"
+            tag = ""
+            if r.get("kind") == "note":
+                tag = " (publisher's note — use this wording as written where it applies)"
+            elif r.get("kind") == "correction":
+                tag = " (correction)"
+            out.append(f"  - {fact}{tag}{cite}")
+            if r.get("kind") == "correction" and (r.get("wrong") or "").strip():
+                out.append(f"    → never write \"{r['wrong'].strip()}\" about {e['name']}")
+            if r.get("kind") == "license" or _vfact_license_hits(fact):
+                lic_any = True
+    listing = "\n".join(out)
+    rules = (
+        "  - Use these EXACT values wherever this article names these brands: licence numbers with "
+        "their exact spacing and letters, licence classes, certifications, ratings/scores and legal "
+        "names. Never alter one, never re-space a licence number, and never state a licence, class, "
+        "certification or score for these brands that is not listed here.\n"
+        f"  - These lines OVERRIDE, for these facts only, the rule that {name}'s facts may come only "
+        f"from {name}'s own website, the rule that a competitor's facts must cite that competitor's "
+        "own page, and the ban on 'verify with…' wording. A line marked (publisher's note) is the "
+        "publisher's own wording: use it as written where it applies, it is not a punt.\n"
+        "  - Cite the [S#] shown after each line. A line marked (no source) is stated without a "
+        "citation.\n"
+        "  - These facts never add a brand to the article: use a brand's lines only where the "
+        "article already names that brand.\n")
+    if lic_any:
+        rules += ("  - A comparison-table column for licensing is allowed only when EVERY compared "
+                  "brand has a line here that answers licensing (a licence number or a publisher's "
+                  "note about it); otherwise state each brand's licence in its own prose.\n")
+    if surface == "verify":
+        rules += ("  - These facts are SUPPORTED — never hedge, soften or remove them. Where the draft "
+                  "states one differently (a re-spaced licence number, another class, another score, "
+                  "a missing \"(licensed as …)\" on first mention), correct it to the exact value here "
+                  "and list the change in `flagged`.\n")
+    return f"\nVERIFIED FACTS (supplied by the publisher — authoritative):\n{listing}\nRULES FOR THESE FACTS:\n{rules}"
+
+
+
 class BlogGenerator:
     def __init__(self, claude, db, writer=None, writer_mode="off"):
         self.claude = claude
@@ -1865,6 +2335,10 @@ class BlogGenerator:
         self._guide_places = []
         self._guide_keep_urls = set()
         self._service_area_cache = {}
+        # FU217 — the operator's verified facts: the warning note from resolving their sources, and
+        # the brand they belong to (so `_rebuild_sources` can protect the operator's own wording).
+        self._vfact_note = ""
+        self._vfact_brand = None
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -2093,7 +2567,10 @@ class BlogGenerator:
         b = brand or {}
         own = (b.get("name") or "").strip().lower()
         out = []
-        for c in _as_list(b.get("competitors")) + _manual_competitors(b):
+        # FU217: a competitor's verified names (its legal name, its other names) are competitor names
+        # too, so the guide-check catches one that slips in under its licensed name.
+        _vnames = [n for e in _vfact_entries(b) if not e["subject"] for n in _vfact_names(e)]
+        for c in _as_list(b.get("competitors")) + _manual_competitors(b) + _vnames:
             c = str(c or "").strip()
             if len(c) >= 2 and c.lower() != own and c.lower() not in {x.lower() for x in out}:
                 out.append(c)
@@ -2458,6 +2935,135 @@ class BlogGenerator:
                   f"{len(res)} returned, {kept} kept", flush=True)
         return out
 
+    def _vfact_blocks(self, brand, blocks, prefetched=None):
+        """FU217 — the operator's VERIFIED FACTS as citable evidence blocks, one per (brand, page).
+
+        Called by `_gather_evidence` AFTER the authority sort, so these blocks are APPENDED LAST and
+        every existing [S#] keeps its number (the FU213 price-ledger precedent). Each row is cited to:
+          1. a page of that brand the run already fetched, when it states the fact (the brand's own
+             site is preferred, operator decision 1);
+          2. otherwise the row's link, else the brand's source links — fetched, capped at 8 pages;
+          3. when none of those shows the fact, the operator's link anyway, with a warning that says
+             whether the page could not be read or was read but does not show it (decision 2);
+          4. with no link at all, no block: the fact still reaches the writer, marked "(no source)",
+             with a warning.
+        Returns [] (and leaves every prompt untouched) when nothing is stored."""
+        self._vfact_note = ""
+        b = brand or {}
+        guide = bool(getattr(self, "_guide", False))
+        entries = _vfact_entries(b, guide=guide)
+        if not entries:
+            return []
+        places = list(getattr(self, "_guide_places", None) or []) if guide else []
+        own_dom = _norm_domain(b.get("domain_url") or "")
+        try:
+            cdoms = json.loads(b.get("competitor_domains") or "{}")
+        except Exception:
+            cdoms = {}
+        cdoms = cdoms if isinstance(cdoms, dict) else {}
+        pre = dict(prefetched or {})
+
+        def _entry_dom(e):
+            if e["subject"]:
+                return own_dom
+            for k, v in cdoms.items():
+                if _is_priced(k, _vfact_names(e)):
+                    return _norm_domain(str(v or ""))
+            return ""
+
+        def _brand_pages(e):
+            """(url, full text) of every page of this brand the run already fetched."""
+            dom, out = _entry_dom(e), []
+            for bl in blocks or []:
+                lab, u = str(bl.get("label") or ""), str(bl.get("url") or "")
+                if not u or "·" in lab:
+                    continue
+                if _is_priced(lab, _vfact_names(e)) or (dom and _norm_domain(u) == dom):
+                    out.append((u, pre.get(u) or bl.get("text") or ""))
+            return out
+
+        plan = []      # (entry, row, [(url, text)] already fetched, [candidate urls])
+        to_fetch = []
+        for e in entries:
+            rows = e["rows"]
+            if places:
+                rows = [r for r in rows if not _mentions_area(str(r.get("fact") or ""), places)]
+            srcs = [s.get("url") for s in e["sources"] if s.get("url")]
+            if e["subject"] and own_dom:
+                srcs = sorted(srcs, key=lambda u: 0 if _norm_domain(u) == own_dom else 1)
+            for r in rows:
+                cands = [u for u in ([r.get("source_url")] + srcs) if u]
+                cands = list(dict.fromkeys(cands))
+                for u in cands:
+                    if u not in pre and u not in to_fetch:
+                        to_fetch.append(u)
+                plan.append((e, r, _brand_pages(e), cands))
+        if len(to_fetch) > _VFACT_FETCH_CAP:
+            print(f"[blog_gen] verified-facts: {len(to_fetch)} source pages, fetching the first "
+                  f"{_VFACT_FETCH_CAP}", flush=True)
+            to_fetch = to_fetch[:_VFACT_FETCH_CAP]
+        got = {}
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(to_fetch))) as ex:
+                for u, t in zip(to_fetch, ex.map(self._fetch_url, to_fetch)):
+                    got[u] = t or ""
+
+        groups, order, warns = {}, [], []
+        for e, r, pages, cands in plan:
+            url, how = "", ""
+            for u, t in pages:
+                if _vfact_stated_in(r, t):
+                    url, how = u, "confirmed"
+                    break
+            if not url:
+                for u in cands:
+                    if _vfact_stated_in(r, pre.get(u) or got.get(u) or ""):
+                        url, how = u, "confirmed"
+                        break
+            if not url and cands:
+                url = cands[0]
+                t0 = pre.get(url) or got.get(url)
+                how = "unread" if not (t0 or "").strip() else "unconfirmed"
+                warns.append((e["name"], _norm_domain(url) or url, how))
+            if not url:
+                warns.append((e["name"], "", "nolink"))
+                continue
+            key = (e["slug"], url)
+            if key not in groups:
+                groups[key] = {"entry": e, "url": url, "rows": [], "confirmed": True}
+                order.append(key)
+            groups[key]["rows"].append(r)
+            groups[key]["confirmed"] = groups[key]["confirmed"] and how == "confirmed"
+
+        out = []
+        for key in order:
+            g = groups[key]
+            e = g["entry"]
+            head = e["name"] + (f" (licensed as {e['legal_name']})" if e["legal_name"] else "")
+            lines = "\n".join(f"- {r['fact']}" for r in g["rows"])
+            out.append({"label": f"fact · {e['name']} · {_norm_domain(g['url']) or g['url'][:50]}",
+                        "url": g["url"],
+                        "text": (f"{head} — verified facts supplied by the publisher; use them exactly "
+                                 f"as written:\n{lines}")[:_EVIDENCE_TEXT_CAP]})
+        if warns:
+            bits, seen = [], set()
+            for nm, dom, how in warns:
+                if (nm, dom, how) in seen:
+                    continue
+                seen.add((nm, dom, how))
+                if how == "unread":
+                    bits.append(f"{nm}: couldn't read {dom} — cited your link anyway")
+                elif how == "unconfirmed":
+                    bits.append(f"{nm}: {dom} was read but doesn't show the fact — cited your link anyway")
+                else:
+                    bits.append(f"{nm}: no link given — stated without a citation")
+            self._vfact_note = ("verified-facts: " + "; ".join(bits[:4])
+                                + (f" (+{len(bits) - 4} more)" if len(bits) > 4 else ""))
+        print(f"[blog_gen] verified-facts: {sum(len(g['rows']) for g in groups.values())} fact(s) "
+              f"in {len(out)} block(s) across {len({k[0] for k in order})} brand(s); "
+              f"{len(warns)} warning(s)", flush=True)
+        return out
+
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
                          use_web_search=False, reddit_thread=None):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
@@ -2776,6 +3382,11 @@ class BlogGenerator:
         # habit of citing the earliest support lands on the strongest source. Stable sort keeps
         # each tier's internal order.
         blocks.sort(key=lambda _bl: _evidence_tier(_bl, _subj_name, _own_dom))
+        # FU217: the operator's verified facts, APPENDED LAST so every [S#] above keeps its number.
+        # They enter after the guide filter, the review cap and the sort, so none of those can drop
+        # them. Nothing is appended when no facts are stored.
+        blocks.extend(self._vfact_blocks(b, blocks, _fetched))
+        self._vfact_brand = b
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
         # from a prior call on this instance can't leak in.
@@ -3459,8 +4070,8 @@ class BlogGenerator:
             for r in data:
                 for ci in range(1, min(len(r), ncols)):
                     parts = re.split(r"\s*(?:;|—|--)\s*", r[ci])
-                    kept = [p for p in parts if p and not self._PUNT_MEANING_RE.search(p)
-                            and not self._PUNT_CELL_RE.match(p)]
+                    kept = [p for p in parts if p and (self._VFACT_SENT in p or (   # FU217: protected
+                            not self._PUNT_MEANING_RE.search(p) and not self._PUNT_CELL_RE.match(p)))]
                     r[ci] = "; ".join(kept).strip(" ;")
             # 2. drop ANY column with an empty cell (skip col 0 and any Source column)
             drop = set()
@@ -3521,6 +4132,271 @@ class BlogGenerator:
             print(f"[blog_gen] table-punts: {self._table_punt_note}", flush=True)
         return "\n".join(out)
 
+    # ── FU217 — deterministic backstops for the operator's verified facts ───────────────────────────
+    # The prompt tells every writer to use the exact values; these make the ones code CAN guarantee
+    # hold regardless (the rewriters — the self-hosted writer pass, the FU202 repair — can re-space a
+    # licence number or drop a parenthetical). All are inert when nothing is stored.
+    _VFACT_SENT = ""
+    _VFACT_SENT_END = ""
+
+    @staticmethod
+    def _vfact_respace(text, toks):
+        """Rewrite every spelling of a verified licence number ("CGC1516665", "cgc-1516665") to the
+        exact form the operator entered. Returns (text, n_changed)."""
+        n = 0
+        for key, canon in (toks or {}).items():
+            m = re.match(r"([A-Z]+)(\d+)$", key)
+            if not m:
+                continue
+            rx = re.compile(r"(?<![A-Za-z0-9])" + m.group(1) + r"[ \t -]*" + m.group(2) + r"(?![0-9])",
+                            re.IGNORECASE)
+
+            def _fix(mm, canon=canon):
+                nonlocal n
+                if mm.group(0) != canon:
+                    n += 1
+                    return canon
+                return mm.group(0)
+            text = rx.sub(_fix, text)
+        return text, n
+
+    @staticmethod
+    def _vfact_prose_lines(lines):
+        """Indexes of the PROSE lines of a Markdown body: not a heading, a table row, a code block,
+        a whole-line italic byline/disclosure, or anything inside ## Sources."""
+        out, in_src, in_code = [], False, False
+        for i, ln in enumerate(lines):
+            st = ln.strip()
+            if st.startswith("```") or st.startswith("~~~"):
+                in_code = not in_code
+                continue
+            if in_code or not st:
+                continue
+            if re.match(r"^#{1,6}\s", st):
+                in_src = bool(re.match(r"^#{1,6}\s+sources\b", st, re.I))
+                continue
+            if in_src or st.startswith("|"):
+                continue
+            if st.startswith("*") and st.endswith("*") and not st.startswith("**") and len(st) > 2:
+                continue
+            out.append(i)
+        return out
+
+    def _vfact_enforce(self, body, brand, guide=False):
+        """Make the verified facts hold in the finished body. Idempotent.
+          1. every spelling of a verified licence number becomes the entered form (prose AND tables;
+             never headings or ## Sources);
+          2. the FIRST prose mention of a brand whose licensed name differs gets
+             " (licensed as <legal name>)" when the writer left it out — never in a heading or table,
+             never twice, and not at all when the legal name is already in the prose.
+        Returns (body, n_fixed)."""
+        ents = _vfact_entries(brand, guide=guide)
+        if not body or not ents:
+            return body, 0
+        toks = {}
+        for e in ents:
+            for k, v in _vfact_tokens(e).items():
+                toks.setdefault(k, v)
+        lines = body.split("\n")
+        n = 0
+        in_src = in_code = False
+        for i, ln in enumerate(lines):
+            st = ln.strip()
+            if st.startswith("```") or st.startswith("~~~"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            if re.match(r"^#{1,6}\s", st):
+                in_src = bool(re.match(r"^#{1,6}\s+sources\b", st, re.I))
+                continue
+            if in_src:
+                continue
+            new, k = self._vfact_respace(ln, toks)
+            if k:
+                lines[i] = new
+                n += k
+        prose = self._vfact_prose_lines(lines)
+        for e in ents:
+            legal = e["legal_name"]
+            if not legal:
+                continue
+            if any(re.search(re.escape(legal), lines[i], re.I) for i in prose):
+                continue
+            trx = re.compile(r"(?<![A-Za-z0-9])" + re.escape(e["name"]) + r"(?![A-Za-z0-9])(\*\*|__)?",
+                             re.IGNORECASE)
+            done = False
+            for i in prose:
+                for m in trx.finditer(lines[i]):
+                    rest = lines[i][m.end():]
+                    if rest.startswith(("'s", "’s", "'S")):
+                        continue
+                    lines[i] = lines[i][:m.end()] + f" (licensed as {legal})" + rest
+                    n += 1
+                    done = True
+                    break
+                if done:
+                    break
+        return "\n".join(lines), n
+
+    def _vfact_checks(self, body, brand, guide=False):
+        """Read-only warnings on the finished body. Per prose sentence or table row naming a verified
+        brand: a licence-shaped number that is not that brand's (and whose it is, when it belongs to
+        another verified brand); the phrase the operator marked wrong. Across the prose: the legal name
+        standing on its own, or "(licensed as …)" repeated. Returns [note, …]."""
+        ents = _vfact_entries(brand, guide=guide)
+        if not body or not ents:
+            return []
+        prose = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b.*", body, maxsplit=1)[0]
+        units = []
+        for ln in prose.split("\n"):
+            st = ln.strip()
+            if not st or st.startswith("#"):
+                continue
+            if st.startswith("|"):
+                if not re.match(r"^\|[\s:|-]+\|?$", st):
+                    units.append(st)
+            else:
+                units += [u for u in re.split(r"(?<=[.!?])\s+", st) if u.strip()]
+        owner = {}
+        for e in ents:
+            for k in _vfact_tokens(e):
+                owner.setdefault(k, e["name"])
+        nrx = {e["slug"]: re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(
+            re.escape(x) for x in _vfact_names(e)) + r")(?![A-Za-z0-9])", re.I) for e in ents}
+        lic, wrongs = [], []
+        for u in units:
+            named = [e for e in ents if nrx[e["slug"]].search(u)]
+            if not named:
+                continue
+            mine = set()
+            for e in named:
+                mine |= set(_vfact_tokens(e))
+            for m, key in _vfact_license_hits(u):
+                if key in mine:
+                    continue
+                tok = m.group(0)
+                if key in owner:
+                    lic.append(f"{tok} appears with {named[0]['name']} but is {owner[key]}'s licence")
+                elif len(named) == 1 and _vfact_has_license(named[0]):
+                    lic.append(f"{tok} is stated for {named[0]['name']} but is not among its verified "
+                               f"licences")
+            for e in named:
+                for r in e["rows"]:
+                    w = (r.get("wrong") or "").strip()
+                    if r.get("kind") == "correction" and w and re.search(
+                            r"(?<![A-Za-z0-9])" + re.escape(w) + r"(?![A-Za-z0-9])", u, re.I):
+                        wrongs.append(f"\"{w}\" appears with {e['name']} — you marked it wrong")
+        notes = []
+        items = list(dict.fromkeys(lic + wrongs))
+        if items:
+            notes.append("license-check: " + "; ".join(items[:4])
+                         + (f" (+{len(items) - 4} more)" if len(items) > 4 else ""))
+        names = []
+        for e in ents:
+            legal = e["legal_name"]
+            if not legal:
+                continue
+            occ = list(re.finditer(re.escape(legal), prose, re.I))
+            tagged = [m for m in occ
+                      if re.search(r"licensed\s+as\s*$", prose[max(0, m.start() - 16):m.start()], re.I)]
+            if len(occ) > len(tagged):
+                names.append(f"\"{legal}\" is used on its own — write \"{e['name']}\" (the licensed "
+                             f"name belongs only in the first mention's parenthetical)")
+            if len(tagged) > 1:
+                names.append(f"\"(licensed as {legal})\" appears {len(tagged)}× — only the first "
+                             f"mention of {e['name']} should carry it")
+        if names:
+            notes.append("name-check: " + "; ".join(names[:3]))
+        return notes
+
+    def _vfact_protected_phrases(self, brand):
+        """[(name regex, [phrase, …])] — the operator's own row text (and its clauses) that a punt
+        scrub would otherwise delete. Decision 4: the operator's wording ships verbatim, even
+        "verify with the specific franchisee"; the punt ban still applies to everything the model
+        writes."""
+        out = []
+        for e in _vfact_entries(brand, guide=bool(getattr(self, "_guide", False))):
+            phrases = []
+            for r in e["rows"]:
+                fact = str(r.get("fact") or "").strip().rstrip(".")
+                pieces = [fact] + [p.strip() for p in re.split(r"\s*(?:;|,|—|–|--)\s*", fact)]
+                for p in pieces:
+                    if len(re.findall(r"[A-Za-z0-9]+", p)) < 3:
+                        continue
+                    if (self._PUNT_MEANING_RE.search(p) or self._PUNT_CELL_RE.match(p)
+                            or self._PUNT_SENT_RE.search(p + ".") or self._PUNT_URL_SENT_RE.search(p)
+                            or self._PUNT_PROSE_RE.search(p)):
+                        if p not in phrases:
+                            phrases.append(p)
+            if phrases:
+                nrx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(
+                    re.escape(x) for x in _vfact_names(e)) + r")(?![A-Za-z0-9])", re.I)
+                out.append((nrx, sorted(phrases, key=len, reverse=True)))
+        return out
+
+    def _vfact_protect(self, body, brand):
+        """Swap the operator's own punt-shaped wording for sentinels before the punt scrubs run — only
+        on a line that names that brand, so a model-written "verify on their site" elsewhere (or in
+        another row of the same table) is still removed. Returns (body, saved)."""
+        saved = []
+        if not body or not brand:
+            return body, saved
+        prot = self._vfact_protected_phrases(brand)
+        if not prot:
+            return body, saved
+        lines = body.split("\n")
+        for i, ln in enumerate(lines):
+            for nrx, phrases in prot:
+                if not nrx.search(ln):
+                    continue
+                for p in phrases:
+                    toks = re.findall(r"[A-Za-z0-9]+", p)
+                    rx = re.compile(r"(?<![A-Za-z0-9])" + r"[^A-Za-z0-9\n|]{1,4}".join(
+                        re.escape(t) for t in toks) + r"(?![A-Za-z0-9])", re.I)
+
+                    def _sub(m):
+                        saved.append(m.group(0))
+                        return f"{self._VFACT_SENT}{len(saved) - 1}{self._VFACT_SENT_END}"
+                    ln = rx.sub(_sub, ln)
+            lines[i] = ln
+        return "\n".join(lines), saved
+
+    def _vfact_restore(self, body, saved):
+        if not saved or not body:
+            return body
+        return re.sub(re.escape(self._VFACT_SENT) + r"(\d+)" + re.escape(self._VFACT_SENT_END),
+                      lambda m: saved[int(m.group(1))] if int(m.group(1)) < len(saved) else "", body)
+
+    def _vfact_gate(self, quote, fix, brand):
+        """FU217 — a verify repair may not re-space or drop a verified licence number, strip the
+        "(licensed as …)" parenthetical, or delete the operator's own wording. "" when it may."""
+        ents = _vfact_entries(brand, guide=bool(getattr(self, "_guide", False)))
+        if not ents:
+            return ""
+        for e in ents:
+            for canon in _vfact_tokens(e).values():
+                if canon in quote and canon not in fix:
+                    return f"the fix changed or removed the verified licence number {canon}"
+            if e["legal_name"]:
+                lp = f"(licensed as {e['legal_name']})".lower()
+                if lp in quote.lower() and lp not in fix.lower():
+                    return f"the fix removed \"(licensed as {e['legal_name']})\""
+        qa, fa = _vfact_alnum(quote), _vfact_alnum(fix)
+        for _nrx, phrases in self._vfact_protected_phrases(brand):
+            for p in phrases:
+                pa = _vfact_alnum(p)
+                if pa and pa in qa and pa not in fa:
+                    return "the fix removed the publisher's own verified wording"
+        return ""
+
+    @classmethod
+    def _vfact_keep_or_blank(cls, m):
+        """FU217: the punt scrubs' replacement — blank the match unless it carries the operator's
+        protected wording (then leave it exactly as it is). For a body with no protected wording this
+        is the old `" "` replacement, byte for byte."""
+        return m.group(0) if cls._VFACT_SENT in m.group(0) else " "
+
     def _scrub_punts(self, body):
         """FU47 guarantee: never SHIP a reader-directed 'go verify it yourself' cop-out (the fallback
         the model reaches for when it can't source a value). In a Markdown TABLE row, a cell that STARTS
@@ -3536,17 +4412,19 @@ class BlogGenerator:
             if s.startswith("|") and s.count("|") >= 2:   # markdown table row
                 cells = line.split("|")
                 for i, c in enumerate(cells):
-                    if self._PUNT_CELL_RE.match(c.strip() or ""):
+                    # FU217: a cell carrying the operator's protected wording is never blanked
+                    if self._VFACT_SENT not in c and self._PUNT_CELL_RE.match(c.strip() or ""):
                         cells[i] = " — "
                 line = "|".join(cells)
             lines.append(line)
         body = "\n".join(lines)
-        body = self._PUNT_SENT_RE.sub(" ", body)          # drop pure go-verify-yourself sentences
-        body = self._PUNT_URL_SENT_RE.sub(" ", body)      # FU78: URL-bearing "see <site> for pricing" pointers
+        _keep = self._vfact_keep_or_blank   # FU217: a match holding protected wording is left as it is
+        body = self._PUNT_SENT_RE.sub(_keep, body)          # drop pure go-verify-yourself sentences
+        body = self._PUNT_URL_SENT_RE.sub(_keep, body)      # FU78: URL-bearing "see <site> for pricing" pointers
         # FU204: drop a whole SENTENCE that narrates our own failed lookup ("prices are not confirmed
         # from a first-party source in the available evidence", "… was not retrievable"). Same
         # sentence-shaped sub `_scrub_meta` already uses for edit-narration.
-        body = re.sub(r"[^.\n]*(?:" + self._PUNT_PROSE_RE.pattern + r")[^.\n]*\.", " ", body,
+        body = re.sub(r"[^.\n]*(?:" + self._PUNT_PROSE_RE.pattern + r")[^.\n]*\.", _keep, body,
                       flags=re.IGNORECASE)
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
@@ -3572,13 +4450,14 @@ class BlogGenerator:
         for line in body.split("\n"):
             s = line.strip()
             # a table row or blockquote line that is pure edit-narration → drop the whole line
-            if (s.startswith("|") or s.startswith(">")) and self._META_RE.search(s):
+            if (s.startswith("|") or s.startswith(">")) and self._META_RE.search(s) \
+                    and self._VFACT_SENT not in s:
                 continue
             kept.append(line)
         body = "\n".join(kept)
         # a standalone prose sentence that narrates an edit → drop just that sentence
-        body = re.sub(r"[^.\n]*(?:" + self._META_RE.pattern + r")[^.\n]*\.", " ", body,
-                      flags=re.IGNORECASE)
+        body = re.sub(r"[^.\n]*(?:" + self._META_RE.pattern + r")[^.\n]*\.", self._vfact_keep_or_blank,
+                      body, flags=re.IGNORECASE)
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
@@ -3691,7 +4570,7 @@ class BlogGenerator:
             print(f"[blog_gen] sources: un-map skipped ({exc})", flush=True)
             return body
 
-    def _rebuild_sources(self, body):
+    def _rebuild_sources(self, body, brand=None):
         """Deterministically rebuild the article's ## Sources from the evidence map captured by
         the last `_gather_evidence` call. Renumbers the [S#] markers the model actually used to a
         contiguous [S1..Sn] (in order of first appearance), rewrites them inline, drops any
@@ -3700,9 +4579,15 @@ class BlogGenerator:
         what guarantees every cited source — brand site, competitor site, Reddit, third-party —
         appears with the right URL and no numbering gaps. No-op when there's no evidence or
         nothing was cited."""
+        # FU217: the operator's own verified wording that a punt scrub would delete ("verify with the
+        # specific franchisee") is swapped for sentinels around the three scrubs and put back after —
+        # only on a line naming that brand. Nothing is swapped when no facts are stored.
+        _vb = brand if brand is not None else getattr(self, "_vfact_brand", None)
+        body, _vsaved = self._vfact_protect(body or "", _vb)
         body = self._resolve_table_punts(body or "")   # FU138: structural table punt resolution
         body = self._scrub_punts(body)         # FU47: kill reader-directed punts on every path
         body = self._scrub_meta(body)          # FU55: drop leaked edit-narration (broken table rows/notes)
+        body = self._vfact_restore(body, _vsaved)
         body = self._split_grouped_citations(body)   # FU167: [S1, S2, S3] → [S1][S2][S3] so the renumber sees them
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not body or not blocks:
@@ -3929,6 +4814,11 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
     different comparison dimension the evidence can actually answer."""
         kf_block = _canonical_facts_block(name, key_facts, key_facts_products)   # FU150 (#4): cluster-synced
         ci_block = _content_instructions_block(brand, "blog")   # FU212: "" when the brand has none
+        # FU217: the operator's verified facts (yours + competitors'), "" when none are stored.
+        vfact_block = _vfact_prompt_block(
+            brand, "article", getattr(self, "_evidence_blocks", None) or [],
+            guide=bool(getattr(self, "_guide", False)),
+            removed=getattr(self, "_removed_brands", None) or [])
         link = f" Link to {url} where it reads naturally." if url else ""
         # FU114 — opt-in internal linking + meta title. OFF → both strings empty → the
         # prompt is BYTE-IDENTICAL to today (the user's hard requirement).
@@ -4176,7 +5066,7 @@ SEED TOPIC (what the reader is asking): {seed}
 {kw_block}{sibling_block}
 BRAND (first-party — you MAY name and recommend {name}):
 {block}
-{kf_block}{evidence_block}
+{kf_block}{evidence_block}{vfact_block}
 EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
   - You may NAME any brand freely (listing it as an option / alternative needs no source).
   - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
@@ -4456,12 +5346,17 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
                    + (f"; never reintroduce {name}'s service area ({', '.join(_gpl)}) — it belongs ONLY in "
                       f"the closing call-to-action paragraph" if _gpl else "")
                    + ". These changes MUST appear in `flagged`.\n\n")
+        # FU217: the operator's verified facts — supported, never hedged. "" when none are stored.
+        vfact_block = _vfact_prompt_block(
+            brand, "verify", getattr(self, "_evidence_blocks", None) or [],
+            guide=bool(getattr(self, "_guide", False)),
+            removed=getattr(self, "_removed_brands", None) or [])
         prompt = f"""Fact-check a FIRST-PARTY article about {name} against the brand context + evidence below.
 Accuracy is what keeps the page citable by AI engines.
 
 BRAND CONTEXT (source of truth for {name}'s own claims):
 {block}
-{evidence_block}
+{evidence_block}{vfact_block}
 ARTICLE (Markdown):
 {body}
 
@@ -5472,9 +6367,19 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         if any(_LICENSE_DIM_RE.search(d or "") for d in dims):
             _active_facts.add("license")
 
-        def _missing_facts(blocks):
+        # FU217 (E) — a brand whose licensing the operator VERIFIED needs no licence rescue: the FU78
+        # licence brief is worded for software (commercial use, royalties) and would buy a search for a
+        # fact the verified-facts block already carries. Inert with nothing stored.
+        _vfx_all = _vfact_entries(brand, guide=_guide)
+        _vfx_lic = [e for e in _vfx_all if _vfact_answers_license(e)]
+
+        def _vfact_licensed(tool):
+            return bool(tool) and any(_is_priced(tool, _vfact_names(e)) for e in _vfx_lic)
+
+        def _missing_facts(blocks, tool=""):
             t = " ".join(b.get("text", "") for b in (blocks or []))
-            return [k for k in _active_facts if not _FACT_SIGNALS[k].search(t)]
+            return [k for k in _active_facts if not _FACT_SIGNALS[k].search(t)
+                    and not (k == "license" and _vfact_licensed(tool))]
 
         def _fetch_product_price(dd, brand_name, product):
             """FU161: web_search READS a vendor page even when a direct fetch 403s — fetch the OWN site
@@ -5686,7 +6591,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             st = tool_state[t]
             if not st["blocks"]:
                 return 0                                   # zero-block — highest priority
-            return 1 if _missing_facts(st["blocks"]) else 2   # 2 = fully sourced, skip
+            return 1 if _missing_facts(st["blocks"], t) else 2   # 2 = fully sourced, skip
         def _do_rescue(tool):
             st = tool_state[tool]
             if st.get("cached"):
@@ -5775,8 +6680,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # (iii) FU78 key-fact rescue — while a KEY fact (price/license) is still missing, escalate
             # with up to _FACT_RESCUE_TRIES BROAD searches TARGETING it, keeping only fact-carrying hits.
             rescue_tries = 0
-            while rescue_tries < _FACT_RESCUE_TRIES and _missing_facts(blocks):
-                miss = _missing_facts(blocks)
+            while rescue_tries < _FACT_RESCUE_TRIES and _missing_facts(blocks, tool):
+                miss = _missing_facts(blocks, tool)
                 wants = []
                 if "price" in miss:
                     wants.append("pricing — plan names and the exact monthly cost (e.g. $X/month), any free tier")
@@ -5885,7 +6790,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} "
                       f"{'(cache) ' if st.get('cached') else ''}"
                       f"t1={st['t1']} t2={int(st['t2'])} t3={st['t3']} rescue={st['rescue']} "
-                      f"missing={','.join(_missing_facts(blocks)) or 'none'} -> "
+                      f"missing={','.join(_missing_facts(blocks, tool)) or 'none'} -> "
                       f"{'vendor' if _has_vendor(blocks, st['dom']) else 'third-party'} <- "
                       f"{', '.join(b['url'] for b in blocks)}", flush=True)
                 # FU161: when the article compares PRICING and this competitor has NO price from its OWN
@@ -6039,9 +6944,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     print(f"[blog_gen] brand-facts: could not read {_ou} ({_e})", flush=True)
             if _src:
                 _fact_tiers[_tier] += 1
-                if not any(str(b.get("label") or "").strip().lower() == name.strip().lower()
+                _flab, _fbody = name, _ftext
+                # FU217: a page the operator linked OFF the brand's own site (BuildZoom, a BBB profile) is
+                # not "{name}'s own site" — label and describe it as what it is. The own-domain path is
+                # byte-identical.
+                _sd = _dom(_src)
+                if _tier == "operator" and own_dom_s and _sd and not (
+                        _sd == own_dom_s or _sd.endswith("." + own_dom_s)):
+                    _flab = f"fact · {name} · {_sd}"
+                    _fbody = (f"{_fl}: {_fv}" if _fl else _fv) + f" (per {_sd}, the page the publisher linked)"
+                if not any(str(b.get("label") or "").strip().lower() == _flab.strip().lower()
                            and _fv[:24].lower() in str(b.get("text") or "").lower() for b in fresh):
-                    fresh.append({"label": name, "url": _src, "text": _ftext[:_EVIDENCE_TEXT_CAP]})
+                    fresh.append({"label": _flab, "url": _src, "text": _fbody[:_EVIDENCE_TEXT_CAP]})
             else:
                 _fact_tiers["unverified"] += 1
                 _unverified_facts.append(f"{_fl}: {_fv}" if _fl else _fv)
@@ -6085,6 +6999,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                                 f"cell stays honest (\"see {name}'s site\").")
             print(f"[blog_gen] subject-price: unconfirmed for {', '.join(_subj_unpriced)}", flush=True)
 
+        # FU217 (E): what the operator verified already answers its columns — no rescue search for them.
+        for _e in _vfx_all:
+            for _t in [name] + tools:
+                if (_t == name and _e["subject"]) or (
+                        _t != name and not _e["subject"] and _is_priced(_t, _vfact_names(_e))):
+                    tool_texts[_t] = tool_texts.get(_t, "") + " " + _vfact_coverage_text(_e)
         _pairs = []
         # FU216: the dimension rescue fills COMPARISON cells; a guide has no provider comparison to fill.
         for d in ([] if _guide else dims):
@@ -6590,6 +7510,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "contradict the table. A brand NOT listed here has no verified price — do NOT invent "
                 "one, and do NOT copy a figure from a review, roundup or listicle.\n" + _plines)
 
+        # FU217 — the operator's verified facts, "" when none are stored (byte-identical reconcile).
+        vfact_rules = _vfact_prompt_block(
+            brand, "reconcile", getattr(self, "_evidence_blocks", None) or [],
+            guide=bool(sourcing.get("guide")),
+            removed=getattr(self, "_removed_brands", None) or [])
+
         # FU135 — source honesty + internal consistency (all blogs).
         honesty_rules = f"""
   - SOURCE HONESTY: never describe a "third-party ·" source as an "independent audit / analysis /
@@ -6809,7 +7735,7 @@ COMPLETE and every stated fact is sourced:
 {_floor_rule}  - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}
+    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}{vfact_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -9976,7 +10902,7 @@ you MAY assume the description will carry: "{disc}".
     # so without this every check that depends on it silently reports clean on a resumed blog.
     _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
                     "_table_punt_note", "_core_mechanics", "_subject_phrase", "_subject_peers",
-                    "_budget_warn")
+                    "_budget_warn", "_vfact_note")
 
     def _check_notes(self):
         """JSON-safe snapshot of the deterministic checks' state, for the pause checkpoint."""
@@ -10008,6 +10934,7 @@ you MAY assume the description will carry: "{disc}".
         # FU206b: strip an operator-removed brand's ROW and its SECTIONS from the draft AND the revision
         # BEFORE the substance guard runs. Stripping only the revision is not enough — the guard compares
         # the two, and would restore a section about the removed brand straight from the draft.
+        self._vfact_brand = brand   # FU217: `_rebuild_sources` protects this brand's verified wording
         _rm206 = [x for x in (getattr(self, "_removed_brands", None) or []) if str(x).strip()]
         if _rm206:
             draft_body, _, _ = self._strip_removed_brands(draft_body, _rm206)
@@ -10051,6 +10978,18 @@ you MAY assume the description will carry: "{disc}".
                 article[_mf] = self._sa(article[_mf])   # a meta field is published text too
         if any(_n_sym.values()):
             article["ai_symbols_removed"] = _n_sym
+        # FU217 — the operator's verified facts, enforced where code can: every licence number in its
+        # exact entered spacing, and "(licensed as …)" on a brand's first prose mention. Runs again
+        # after the verification pass below, because a repair can undo it. Inert with nothing stored.
+        article["body_markdown"], _nvf = self._vfact_enforce(article["body_markdown"], brand, guide=guide)
+        if (article.get("meta_description") or "").strip():
+            _vtoks = {k: v for _e in _vfact_entries(brand, guide=guide) for k, v in _vfact_tokens(_e).items()}
+            article["meta_description"], _nvm = self._vfact_respace(article["meta_description"], _vtoks)
+            _nvf += _nvm
+        if _nvf:
+            article["verified_facts_fixed"] = _nvf
+            print(f"[blog_gen] verified-facts: {_nvf} fix(es) applied (licence spacing / licensed-as)",
+                  flush=True)
         # FU213 (Change 6): pricing OFF → no price column, and a warning if a figure survived.
         if not include_pricing:
             article["body_markdown"], _dropped_px = self._strip_price_columns(article["body_markdown"])
@@ -10099,7 +11038,7 @@ you MAY assume the description will carry: "{disc}".
                 print(f"[blog_gen] {_nn}", flush=True)
                 self._warn(article, _nn)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
-        article["body_markdown"] = self._rebuild_sources(article["body_markdown"])
+        article["body_markdown"] = self._rebuild_sources(article["body_markdown"], brand)
         # FU205 (R3): `_resolve_table_punts` RESETS `self._table_punt_note` on every call, and the
         # verification pass below re-runs `_rebuild_sources` after a prose repair. Capture the note
         # from THIS rebuild so a column dropped here is still reported even when the second rebuild
@@ -10127,6 +11066,11 @@ you MAY assume the description will carry: "{disc}".
         _vrep = self._verify_final_article(brand, article)
         if _vrep:
             article["verify_report"] = _vrep
+        # FU217: the verification repair may have re-spaced a licence number or dropped the
+        # "(licensed as …)" parenthetical — put them back (idempotent; a no-op when nothing changed).
+        article["body_markdown"], _nvf2 = self._vfact_enforce(article["body_markdown"], brand, guide=guide)
+        if _nvf2:
+            article["verified_facts_fixed"] = article.get("verified_facts_fixed", 0) + _nvf2
         # FU90 — geo-check (soft signal, never blocks): a geo page whose BODY barely mentions its
         # geography is the doorway pattern; warn the operator immediately instead of at review.
         rgeo = (geo or "").strip() or _seed_geo(seed)
@@ -10233,6 +11177,15 @@ you MAY assume the description will carry: "{disc}".
         _fn = getattr(self, "_facts_note", "")
         if _fn:  # FU178: canonical brand facts that earned no citation (stated as positioning instead)
             self._warn(article, _fn)
+        # FU217 — the operator's verified facts: sources that could not confirm them, and any licence
+        # number, wrong phrase or legal name that slipped. Warnings only; the body is never rewritten.
+        _vfn = getattr(self, "_vfact_note", "")
+        if _vfn:
+            print(f"[blog_gen] {_vfn}", flush=True)
+            self._warn(article, _vfn)
+        for _vc in self._vfact_checks(article.get("body_markdown") or "", brand, guide=guide):
+            print(f"[blog_gen] {_vc}", flush=True)
+            self._warn(article, _vc)
         # FU135 — source-authority check (all blogs): "independent audit/analysis" framing beside a
         # third-party (review/affiliate) citation is authority laundering — warn, never rewrite.
         _bf = article.get("body_markdown") or ""
@@ -10526,6 +11479,10 @@ you MAY assume the description will carry: "{disc}".
         if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring
             article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo,   # FU91
                                                               guide=guide)   # FU216
+            if article.get("linkedin_text"):   # FU217: licence numbers in their entered spacing
+                _vtoks = {k: v for _e in _vfact_entries(brand, guide=guide)
+                          for k, v in _vfact_tokens(_e).items()}
+                article["linkedin_text"], _ = self._vfact_respace(article["linkedin_text"], _vtoks)
         article["prompt_version"] = PROMPT_VERSION
         # FU205 (R2): the pricing-conflict alert (FU150) was toast-only — never persisted, never folded
         # into the warning list, so `_quality_report` could not see it and it vanished on reload.
@@ -10887,6 +11844,18 @@ you MAY assume the description will carry: "{disc}".
                     "(the fix must follow the instruction):\n"
                     + "".join(f"    * {i['text']}\n" for i in _ci_rules)) if _ci_rules else ""
         _ci_kind = "|instruction" if _ci_rules else ""
+        # FU217 — the operator's verified names and licence numbers, so the proof-read neither calls a
+        # "(licensed as …)" parenthetical a naming inconsistency nor "fixes" a licence number's spacing.
+        # "" when nothing is stored, so the prompt stays byte-identical.
+        _vx = _vfact_entries(brand, guide=bool(getattr(self, "_guide", False)))
+        _vf_names = "".join(
+            f"NAMES: \"{e['name']} (licensed as {e['legal_name']})\" on first mention and "
+            f"\"{e['name']}\" after that is CORRECT — the operator's verified legal name, not a naming "
+            f"inconsistency.\n" for e in _vx if e["legal_name"])
+        _vf_toks = [t for e in _vx for t in _vfact_tokens(e).values()]
+        if _vf_toks:
+            _vf_names += ("VERIFIED LICENCE NUMBERS (exact — never re-space or change one): "
+                          + ", ".join(_vf_toks[:20]) + "\n")
         chunks = self._verify_chunks(body)
         if not chunks:
             return [], {}
@@ -10929,7 +11898,7 @@ you MAY assume the description will carry: "{disc}".
                     "brand, and does it read as though a person wrote it. Score it 0-100 and be honest — a "
                     "competent but unremarkable article is a 70.\n"
                     f"BRAND: {name}\n" + (f"CANONICAL PRICING (authoritative): {_canon}\n" if _canon else "") +
-                    part +
+                    _vf_names + part +
                     '\nReturn JSON ONLY: {"issues": [{"kind": "contradiction|price|brand|typo|readability|'
                     'duplicate|link|thin' + _ci_kind + '", "quote": "<the exact sentence from the article>", '
                     '"problem": "<what is wrong>", "fix": "<the corrected sentence, or \\"\\">"}], '
@@ -11011,6 +11980,9 @@ you MAY assume the description will carry: "{disc}".
         ok, missing = self._facts_preserved(quote, fix, brand)
         if not ok:
             return f"the fix dropped {', '.join(missing[:3])}"
+        _vg = self._vfact_gate(quote, fix, brand)   # FU217: verified licence numbers + legal names hold
+        if _vg:
+            return _vg
         return ""
 
     def _verify_apply_repairs(self, body, issues, brand, repair="claude", timeout=600):

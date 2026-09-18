@@ -368,7 +368,7 @@ class Database:
                      disclosure=None, logo_url=None, known_sources=None,
                      meta_autofetched_at=None, key_facts=None, competitor_facts=None,
                      name=None, manual_competitors=None, content_context=None,
-                     price_links=None, price_table=None):
+                     price_links=None, price_table=None, verified_facts=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
@@ -393,6 +393,7 @@ class Database:
             "content_context": content_context,   # FU212: content instructions (yours + auto) JSON
             "price_links": price_links,   # FU213: operator price-page links per compared brand JSON
             "price_table": price_table,   # FU214: operator-pasted PRICE ROWS per compared brand JSON
+            "verified_facts": verified_facts,   # FU217: operator-verified facts per brand (yours + competitors') JSON
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2457,6 +2458,10 @@ class Database:
             # {slug: {name, rows: [{product, kind, value, value_max, basis, url, raw, updated_at}]}}.
             # OPERATOR INPUT — never evicted (unlike competitor_facts, a 45-day TTL cache).
             "price_table":       "ALTER TABLE brands ADD COLUMN price_table TEXT",
+            # FU217: operator-VERIFIED facts per brand (licences, certifications, scores, legal
+            # names, corrections) for the subject AND named competitors. Operator input — never
+            # evicted, and "Clear all cached data" leaves it alone.
+            "verified_facts":    "ALTER TABLE brands ADD COLUMN verified_facts TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

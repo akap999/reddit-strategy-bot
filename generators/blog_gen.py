@@ -100,6 +100,45 @@ _MAX_WEB_SOURCES = 5             # FU56: cap independent third-party sources fol
 _VERIFY_MAX_SEARCHES = 5         # FU56: cap on deep independent re-check web searches (was 8 — cost)
 _VERIFY_MAX_BRANDS = 4           # FU56: cap on competitor tools sourced per article (was 6 — cost)
 _MAX_TOOL_PAGES = 2              # FU52: cap on distinct per-tool source PAGES (deep-linked citations)
+_ANSWER_EVIDENCE_CAP = 4         # FU218: blocks kept from a general guide's answer-evidence search
+
+# FU218 — a seed that asks WHICH option is best / better, or compares options. Read from the question's
+# SHAPE, never its topic, so it is the same test for a treatment, a sealer, a platform or a loan type.
+_COMPARATIVE_SEED_RE = re.compile(
+    r"\b(?:which|best|better|vs\.?|versus|compared?|comparison|most\s+effective)\b|\btop\s+\d",
+    re.IGNORECASE)
+
+# FU218 — a MEASURED figure: a percentage, a currency amount, a decimal, a multiple, or a number with a
+# unit of measure. Identifiers ("Model-3", "ISO 9001", "Type 2") and bare years carry none of these, so they
+# never count as an answer.
+_MEASURED_FIG_RE = re.compile(
+    r"\d[\d,]*(?:\.\d+)?\s?%|[$€£¥₹]\s?\d|\b\d+\.\d+\b|\b\d[\d,.]*\s?(?:x|×|times)\b|"
+    r"\b\d[\d,.]*\s?(?:mg|mcg|g|kg|lbs?|ml|l|mm|cm|m|km|ft|psi|mpa|kwh|kw|w|mph|°[cf]|"
+    r"hours?|hrs?|days?|weeks?|months?|years?|minutes?|mins?|seconds?|points?|bps|apr|"
+    r"participants?|patients?|people|subjects?|users?|respondents?)\b", re.IGNORECASE)
+
+
+def _answer_evidence_brief(seed, geo=""):
+    """FU218 — the search brief for a general guide's answer evidence. Vertical-neutral: it asks for the
+    kind of evidence that settles a question in ANY field, with examples from several fields so the
+    search never assumes one. No geography → national or general sources, never a local page (the
+    FU216 rule for a location-free guide)."""
+    q = (seed or "").strip()
+    g = (geo or "").strip()
+    where = (f" Prefer sources that apply to {g}." if g else
+             " Prefer national or general sources — never a single city's or county's page.")
+    comparative = (" The question compares options, so return the COMPARATIVE results: name each option "
+                   "compared and its measured outcome (head-to-head studies or tests, pooled analyses, "
+                   "rankings from a standards body or independent tester)."
+                   if _COMPARATIVE_SEED_RE.search(q) else "")
+    return (f'Find the best INDEPENDENT evidence that ANSWERS the question "{q}": published studies or '
+            "trials, independent tests, benchmarks, standards-body or regulator data, and the measured "
+            "ratings, rates or figures they report (for example: a published study comparing two "
+            "treatments, an independent test of two sealers, a benchmark of two platforms, a regulator's "
+            "published rates for two loan types)." + comparative + where
+            + " Return the page that REPORTS the figures, with the figure itself in the fact. NOT a "
+              "provider's or seller's own marketing page, NOT an affiliate 'best of' list, NOT a "
+              "negative roundup.")
 # FU179 — the watermark rewrite runs on the BLOG and on the two derived LinkedIn surfaces. Everything
 # that matters (fact extraction, the fact + price-cadence gates, the attempt loop, the section pass,
 # residual polish, semantic verification, the grade) is surface-agnostic; only the PRESERVE list and the
@@ -2335,6 +2374,9 @@ class BlogGenerator:
         self._guide_places = []
         self._guide_keep_urls = set()
         self._service_area_cache = {}
+        # FU218 — a guide's effective geography (what the operator entered or the seed names; "" when
+        # location-free), read by the answer-evidence search that replaces the skipped sweep.
+        self._guide_geo = ""
         # FU217 — the operator's verified facts: the warning note from resolving their sources, and
         # the brand they belong to (so `_rebuild_sources` can protect the operator's own wording).
         self._vfact_note = ""
@@ -2491,10 +2533,12 @@ class BlogGenerator:
         stays location-free except for the closing call-to-action. Off → no call, no state."""
         self._guide = bool(guide)
         self._guide_places = []
+        self._guide_geo = ""
         if not self._guide:
             return geo
         if (geo or "").strip() or _seed_geo(seed):
-            print(f"[blog_gen] guide: geography entered ({(geo or '').strip() or _seed_geo(seed)}) — "
+            self._guide_geo = (geo or "").strip() or _seed_geo(seed)
+            print(f"[blog_gen] guide: geography entered ({self._guide_geo}) — "
                   f"the service-area rules stand down", flush=True)
             return geo
         places = self._brand_service_area(brand)
@@ -2502,6 +2546,7 @@ class BlogGenerator:
         if m:
             hit = next((p for p in places if _mentions_area(m.group(0), [p])), m.group(0))
             print(f"[blog_gen] guide: the seed names {hit!r} — that is this guide's geography", flush=True)
+            self._guide_geo = hit
             return hit
         self._guide_places = list(places)
         return geo
@@ -2667,6 +2712,46 @@ class BlogGenerator:
         if not parts:
             return ""
         return "guide-check: " + ", and ".join(parts) + " — edit before publishing, or regenerate"
+
+    @staticmethod
+    def _answer_check(article, brand, seed):
+        """FU218 — a which / best / vs GUIDE must ANSWER its question with evidence (warning only).
+
+        Fires when the seed is comparative by SHAPE and no prose sentence or table row carries a measured
+        figure (a %, currency, decimal, multiple, or a number with a unit) cited to a source that is NOT
+        the brand's own site. The brand's own stats ("served 400,000 customers") are not the answer, and
+        identifiers ("Model-3", "ISO 9001", "Type 2") are not figures. Vertical-neutral. "" when it answers."""
+        q = (seed or "").strip()
+        if not q or not _COMPARATIVE_SEED_RE.search(q):
+            return ""
+        body = (article or {}).get("body_markdown") or ""
+        parts = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", body, maxsplit=1)
+        prose = parts[0]
+        srcs = parts[1] if len(parts) > 1 else ""
+        b = brand or {}
+        bn = (b.get("name") or "").strip().lower()
+        own = _norm_domain(b.get("domain_url") or "")
+        own_idx = set()
+        for m in re.finditer(r"(?m)^\s*[-*]\s*\[S(\d+)\]\s*(.*?)\s+[—-]\s+<?(\S+?)>?\s*$", srcs):
+            lab = m.group(2).strip().lower()
+            d = _norm_domain(m.group(3))
+            if (bn and (lab == bn or lab.startswith(bn + " ") or lab.startswith(f"fact · {bn}"))) or \
+                    (own and d and (d == own or d.endswith("." + own))):
+                own_idx.add(int(m.group(1)))
+        units = []
+        for ln in prose.splitlines():
+            if re.match(r"^\s*#", ln) or re.match(r"^\s*\|?\s*:?-{3,}", ln):
+                continue
+            units.extend([ln] if ln.lstrip().startswith("|") else re.split(r"(?<=[.!?])\s+", ln))
+        for u in units:
+            idx = [int(x) for x in re.findall(r"\[S(\d+)\]", u)]
+            if not idx or all(i in own_idx for i in idx):
+                continue
+            if _MEASURED_FIG_RE.search(re.sub(r"\[S\d+\]", " ", u)):
+                return ""
+        return (f"answer-check: this guide asks {q!r} but states no measured result (a study, test or "
+                f"figure) from an independent source — the answer defers instead of answering; "
+                f"regenerate, or add a source that reports the outcome")
 
     # ------------------------------------------------------------ evidence sourcing
     def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None,
@@ -2839,6 +2924,89 @@ class BlogGenerator:
         else:
             print("[blog_gen] evidence: NO independent third-party sources found", flush=True)
         return out[:_MAX_WEB_SOURCES]
+
+    def _guide_answer_evidence(self, brand, seed, blocked_domains=None):
+        """FU218 — the evidence that ANSWERS a general guide's question, fetched before the draft.
+
+        A guide skips the competitor / peer sweep (it compares no providers), which left its draft with
+        nothing but the brand's own pages and the YMYL labels — no study, test or measured figure, so a
+        which-is-best guide could only defer. This runs ONE search for the question itself.
+
+        Vertical-neutral: the only per-vertical data is the existing `_YMYL_OFFICIAL_DOMAINS` map. A YMYL
+        page tries its vertical's pins first and then the open web, keeping only results that pass
+        `_official_source_ok`; any other page searches the open web and keeps what passes the existing
+        accept-point filters (`official ·` when it earns the badge, `third-party ·` otherwise). The brand's
+        own and competitors' domains are excluded. Capped at `_ANSWER_EVIDENCE_CAP`; never raises."""
+        search = getattr(self.claude, "search_sources", None)
+        q = (seed or "").strip()
+        if not q or not callable(search):
+            return []
+        b = brand or {}
+        bn = (b.get("name") or "").strip()
+        own = _norm_domain(b.get("domain_url") or "")
+        vertical = getattr(self, "_ci_ymyl", None) or ""
+        pins = list(_YMYL_OFFICIAL_DOMAINS.get(vertical) or []) if vertical else []
+        blocked = sorted({_norm_domain(d) or str(d).strip().lower()
+                          for d in (list(blocked_domains or []) + ([own] if own else [])) if str(d).strip()})
+        brief = _answer_evidence_brief(q, getattr(self, "_guide_geo", "") or "")
+        toks = [w for w in re.findall(r"[a-z0-9]{3,}", q.lower())
+                if w not in self._CI_SEED_STOP and w not in _PRODUCT_FILLER]
+        attempts = ([("pinned", pins)] if pins else []) + [("open", None)]
+        out, seen = [], set()
+        for tag, allowed in attempts:
+            if out:
+                break
+            try:
+                if allowed:
+                    res = search(brief, max_searches=2, allowed_domains=allowed)
+                else:
+                    res = search(brief, max_searches=2, blocked_domains=(blocked or None))
+            except Exception as e:
+                print(f"[blog_gen] guide: answer evidence ({tag}) search failed: {e}", flush=True)
+                res = []
+            kept = 0
+            for s in (res or []):
+                if len(out) >= _ANSWER_EVIDENCE_CAP:
+                    break
+                u = (s.get("url") or "").strip()
+                ttl = (s.get("title") or "").strip()
+                fact = (s.get("fact") or ttl or "").strip()
+                d = _norm_domain(u)
+                key = u.lower().split("?")[0].rstrip("/")
+                if not u or not fact or key in seen:
+                    continue
+                why = ""
+                if d and any(d == x or d.endswith("." + x) for x in blocked):
+                    why = "the brand's or a competitor's own site"
+                elif _is_non_evidence(s):
+                    why = "not evidence (hit-piece / job listing)"
+                elif _is_negative_about(s, bn):
+                    why = "negative about the brand"
+                elif d in _STALE_AGGREGATORS or _source_class(u) or _is_affiliate_review(s):
+                    why = "affiliate / rating / retail page"
+                elif toks and not any(t in f"{u} {ttl} {fact}".lower() for t in toks):
+                    why = "off-topic"
+                if why:
+                    print(f"[blog_gen] guide: answer evidence ({tag}) rejected {d or u[:60]} "
+                          f"'{ttl[:60]}' — {why}", flush=True)
+                    continue
+                official = _official_source_ok(u, ttl, bn, own, pins)
+                if vertical and not official:
+                    # A YMYL page's regulated claims may only rest on `official ·` sources (FU133);
+                    # the same rule FU141 applies to the legacy official search.
+                    print(f"[blog_gen] guide: answer evidence ({tag}) rejected {d or u[:60]} "
+                          f"'{ttl[:60]}' — not an official source on a {vertical} page", flush=True)
+                    continue
+                seen.add(key)
+                out.append({"label": f"{'official' if official else 'third-party'} · {ttl or u}",
+                            "url": u, "text": fact[:_EVIDENCE_TEXT_CAP]})
+                kept += 1
+            print(f"[blog_gen] guide: answer evidence ({tag}) → {len(res or [])} returned, {kept} kept",
+                  flush=True)
+        if not out:
+            print(f"[blog_gen] guide: answer evidence found nothing for {q!r} — the draft relies on the "
+                  f"brand's pages and the options' sources", flush=True)
+        return out
 
     @staticmethod
     def _force_h1(body, seed):
@@ -3339,6 +3507,10 @@ class BlogGenerator:
         if use_web_search and _guide_e:
             print("[blog_gen] guide: independent competitor/peer sweep skipped — a general guide "
                   "compares no providers", flush=True)
+            # FU218: in its place, the evidence that ANSWERS the question (studies, tests, measured
+            # figures). The brand's own site and any known competitor site are excluded.
+            _gdoms = [d for d in (list(cached.values()) + [b.get("domain_url") or ""]) if str(d or "").strip()]
+            blocks.extend(self._guide_answer_evidence(b, seed, _gdoms))
         if use_web_search and not _guide_e:
             comp_names = _as_list(b.get("competitors"))
             own = []
@@ -5012,8 +5184,10 @@ extractable answer), still under 160 chars.
 """
         _guide_block = ""
         if self._guide:
-            _qa_rule = """  - Open with a "Quick answer" — a 2-3 sentence direct, GENERIC answer to the seed that holds for
-    any reader, wherever they are and whoever they hire. (AI engines lift this as the extractable answer.)
+            _qa_rule = """  - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that holds for any reader,
+    wherever they are and whoever they hire. When the seed asks which option is best / better or compares
+    options, the Quick answer NAMES the option the EVIDENCE favours, by how much (the cited figure) and for
+    whom. (AI engines lift this as the extractable answer.)
 """
             _field_rule = ""
             _rec_rule = f"""  - Be specific and accurate; no fluff, no hype. Mention {name} only as the GENERAL GUIDE block
@@ -5045,12 +5219,28 @@ extractable answer), still under 160 chars.
                          "state local rules as general guidance (\"check with your local building "
                          "department\") — never a named county or city office, phone number or permit "
                          "portal. (If the SEED itself names a place, that place is the article's geography.)\n")
-            _guide_block = f"""GENERAL GUIDE (FU216 — this article is a GENERIC how-to / informational guide, NOT a comparison. This
-block OVERRIDES every rule above that asks you to compare providers, name competitors, or recommend {name}):
-  - THE ANSWER: a generic, audience-wide answer — the steps, principles, decisions and trade-offs that apply
+            _guide_block = f"""GENERAL GUIDE (FU216 — this article is a GENERAL guide that answers the reader's question for anyone —
+NOT a comparison of PROVIDERS. This block OVERRIDES every rule above that asks you to compare providers, name
+competitors, or recommend {name}):
+  - THE ANSWER: an audience-wide answer — the steps, principles, decisions, options and trade-offs that apply
     to ANY reader asking this. NO provider comparison, NO table or list of companies, and NEVER name a
     competitor or any other service provider. A table is welcome for NON-provider dimensions (phases,
     materials, options, typical costs by item).
+  - ANSWER THE QUESTION WITH EVIDENCE (FU218): when the seed asks which option is best / better, or compares
+    options (product types, methods, materials, plans, approaches, treatments), COMPARE THOSE OPTIONS on the
+    OUTCOME the question is about, using the measured figures in the EVIDENCE — named studies or tests,
+    head-to-head or pooled results, measured values — each cited [S#]. Options are not providers: naming
+    and comparing them is the point of this page.
+  - NO DEFERRAL: "it depends", "ask a professional" or "there is no one-size-fits-all answer" is NOT an
+    answer. State what the evidence shows first; a professional-judgement caveat may follow only as a
+    trailing clause (every safety rule above still applies).
+  - OUTCOME COLUMN: a table comparing options must include the outcome the question is about (e.g. a
+    measured result reported by a study, cure time or strength for a material, APR and fees for a loan
+    type, uptime or a benchmark result for a platform) — never characteristics alone.
+  - SCOPE: cover every current option in the category that the EVIDENCE documents, not only the two
+    best-known ones; never name an option the EVIDENCE does not document.
+  - DEPTH: every section carries at least one sourced specific (a figure, a named study or test, a
+    threshold) — no generic filler section.
   - {name} IS THE EXPERT VOICE, NOT THE SUBJECT: never name {name} in the Quick answer, any heading, the FAQ
     or the meta_description. You MAY mention {name} at most TWICE in the body, and only where its own
     documented practice (from {name}'s own site in the EVIDENCE) illustrates a step. End the body with ONE
@@ -5340,9 +5530,10 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
         _gv = ""
         if getattr(self, "_guide", False):
             _gpl = list(getattr(self, "_guide_places", None) or [])
-            _gv = ("GENERAL GUIDE: this article is a generic guide, NOT a comparison. Never reintroduce a "
-                   "competitor or any other provider's name from the brand context, and remove a provider "
-                   "comparison that slipped in"
+            _gv = ("GENERAL GUIDE: this article is a generic guide, NOT a comparison of providers. Never "
+                   "reintroduce a competitor or any other provider's name from the brand context, and remove a "
+                   "provider comparison that slipped in. The OPTIONS the question compares are not providers: "
+                   "never hedge, soften or remove a sourced outcome figure or a named study or test about them"
                    + (f"; never reintroduce {name}'s service area ({', '.join(_gpl)}) — it belongs ONLY in "
                       f"the closing call-to-action paragraph" if _gpl else "")
                    + ". These changes MUST appear in `flagged`.\n\n")
@@ -5899,6 +6090,13 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         _ct_guide = ("\n    FU216: this article is a GENERAL GUIDE with NO geography — the authority must be NATIONAL "
                      "or GENERAL (a national code body, a federal agency, a standards or trade body), never a "
                      "single city's or county's office." if _gnat else "")
+        # FU218: a guide's comparison is of OPTIONS, which never "perform the brand's function" — without
+        # this the rule above would keep them out of TOOLS, and nothing would source them. "" when off.
+        _ct_gopts = ("\n    FU218: this article is a GENERAL GUIDE — the entities it compares are the OPTIONS its "
+                     "question is about (product types, methods, materials, plans, approaches, treatments), NOT "
+                     f"things that do what {name} does. List every such option under TOOLS regardless of the "
+                     "core-function rule above, AND under GENERIC_OPTIONS. A company or provider named in the "
+                     "draft still goes under TOOLS, never under GENERIC_OPTIONS." if _guide else "")
         # (a) extract comparison tools + dimensions + high-risk claims
         claim_prompt = f"""From this article about {name}, extract for verification:
   - TOOLS: every product/tool named in the comparison table(s) or compared in prose, EXCLUDING "{name}".
@@ -5915,7 +6113,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
     company does; a category does not. Examples across different industries: a loan TYPE compared
     among lenders; a building MATERIAL compared among suppliers; an employment MODEL compared among
     HR platforms; a course of TREATMENT compared among clinics; "build in-house" compared among
-    vendors. Leave EMPTY when every compared entity is a named provider.
+    vendors. Leave EMPTY when every compared entity is a named provider.{_ct_gopts}
   - DIMENSIONS: the comparison columns / attributes being compared (e.g. pricing, commercial license,
     royalty-free, imitates real artists, all-in-one).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
@@ -6004,15 +6202,25 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] {self._peer_note}", flush=True)
         tools = [str(t).strip() for t in (cres.get("tools") or [])
                  if str(t).strip() and str(t).strip().lower() != name.lower()]
-        if _guide and tools:
-            print(f"[blog_gen] guide: {len(tools)} provider name(s) in the draft NOT sourced — a general "
-                  f"guide compares nobody ({', '.join(tools[:6])})", flush=True)
-        if _guide:
-            tools = []
         dims = [str(d).strip() for d in (cres.get("dimensions") or []) if str(d).strip()]
         claims = [c for c in (cres.get("claims") or []) if isinstance(c, dict)]
         # FU189: which compared entities are generic OPTIONS (no website) rather than PROVIDERS.
         _opt_names = [str(o).strip() for o in (cres.get("generic_options") or []) if str(o).strip()]
+        # FU216 dropped every compared entity in a guide. FU218: a guide compares no PROVIDERS, but the
+        # OPTIONS its question is about (a treatment, material, method, plan or loan type) are the
+        # answer — drop the providers only. An option is one the extraction named as such, or one of
+        # the article's own products (the FU189 backstop); both are vertical-neutral.
+        if _guide:
+            _g_opts = [t for t in tools if _named_as_option(t, _opt_names) or _matches_a_product(t, products)]
+            _g_prov = [t for t in tools if t not in _g_opts]
+            if _g_prov:
+                print(f"[blog_gen] guide: {len(_g_prov)} provider name(s) in the draft NOT sourced — a "
+                      f"general guide compares no providers ({', '.join(_g_prov[:6])})", flush=True)
+            if _g_opts:
+                print(f"[blog_gen] guide: {len(_g_opts)} option(s) the question compares are sourced "
+                      f"on outcomes ({', '.join(_g_opts[:6])})", flush=True)
+            _opt_names = _opt_names + [t for t in _g_opts if not _named_as_option(t, _opt_names)]
+            tools = _g_opts
         # de-dupe tools (case-insensitive), then cap EACH KIND separately. A provider costs ~13
         # searches (domain hunt + tiers + key-fact rescue), an option costs ONE reference search, so
         # sharing a single cap let a website-less entity evict a real competitor from sourcing
@@ -6140,7 +6348,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # call, not from thin air — flagging it as invented would be noise.
         _peer_slugs = {_kf_slug(n) for n in (getattr(self, "_subject_peers", None) or {}) if _kf_slug(n)}
         _invented = []
-        for _t in tools:
+        # FU218: a guide's remaining tools are the OPTIONS its question compares, never competitors —
+        # "named by the model, not from the competitor list" would be noise about every one of them.
+        for _t in ([] if _guide else tools):
             if _is_curated(_kf_slug(_t)) or _kf_slug(_t) in _peer_slugs:
                 continue                                   # curated, or a found subject specialist
             _tok = (_t.lower().split() or [""])[0]
@@ -6491,7 +6701,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # selected `refresh_competitor_slugs` set → skip the cache for THAT competitor (re-source live);
         # the rest still take their cached blocks. The UI sends the exact cache-key slugs.
         _refresh_slugs = {str(s).strip().lower() for s in (refresh_competitor_slugs or []) if str(s).strip()}
-        for tool in tools:
+        # FU218: a guide's option evidence answers THIS question, so it neither reads nor writes the
+        # competitor cache (a cached entry was sourced for a different brief, and would leak into it).
+        for tool in ([] if _guide else tools):
             if refresh_competitor_facts or _kf_slug(tool) in _refresh_slugs:
                 continue
             _e = _cfacts.get(_kf_slug(tool))
@@ -6606,21 +6818,40 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # domain and labelling that site's pages as the entity's own. ONE reference search instead.
             if _is_option(tool):
                 _want = "; ".join([d for d in dims if d.strip()][:4]) or "how it works and what it costs"
+                if _guide:
+                    # FU218: a guide's options are compared on the OUTCOME its question asks about —
+                    # anchor on the question, not the brand's category (a clinic's category says nothing
+                    # about a treatment's results, a contractor's nothing about a sealer's).
+                    _obrief = (f"{tool} for the question \"{seed}\": the MEASURED outcomes that answer it "
+                               f"— named studies, trials or independent tests, head-to-head or pooled "
+                               f"results, and the specific figures they report"
+                               + (f" (also: {_want})" if [d for d in dims if d.strip()] else "")
+                               + " — from AUTHORITATIVE or REFERENCE sources (a regulator, a standards "
+                                 "body, a published study, an independent tester, or a reputable "
+                                 "independent publication), NOT a vendor sales page or an affiliate list")
+                else:
+                    _obrief = (f"{tool} in the context of {cat or 'this category'}: what it is, how it works, "
+                               f"and the specific current values for {_want} — from AUTHORITATIVE or REFERENCE "
+                               f"sources (a regulator, a standards body, manufacturer or product documentation, "
+                               f"professional or industry guidance, or a reputable independent publication), "
+                               f"NOT a vendor sales page")
                 try:
-                    rs = self.claude.search_sources(
-                        f"{tool} in the context of {cat or 'this category'}: what it is, how it works, "
-                        f"and the specific current values for {_want} — from AUTHORITATIVE or REFERENCE "
-                        f"sources (a regulator, a standards body, manufacturer or product documentation, "
-                        f"professional or industry guidance, or a reputable independent publication), "
-                        f"NOT a vendor sales page", max_searches=1)
+                    rs = self.claude.search_sources(_obrief, max_searches=(2 if _guide else 1))
                 except Exception:
                     rs = []
+                _opins = (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if (ymyl and _guide) else []
                 for _s in (rs or []):
                     u, fct = (_s.get("url") or "").strip(), (_s.get("fact") or "").strip()
                     blob = ((_s.get("title") or "") + " " + fct + " " + u).lower()
                     if (u and fct and _option_keep(tool, blob) and not _is_non_evidence(_s)
                             and _dom(u) not in _STALE_AGGREGATORS):
-                        blocks.append({"label": f"reference · {(_s.get('title') or _dom(u))[:70]}",
+                        _olab = "reference"
+                        # FU218: in a guide the same labelling rule as the answer evidence — a page that
+                        # earns the official badge carries it, so a YMYL page's regulated claims can cite it.
+                        if _guide and _official_source_ok(u, _s.get("title") or "", name,
+                                                          _dom(brand.get("domain_url") or ""), _opins):
+                            _olab = "official"
+                        blocks.append({"label": f"{_olab} · {(_s.get('title') or _dom(u))[:70]}",
                                        "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
                 st["blocks"] = blocks
                 st["t3"] = len(blocks)
@@ -6780,7 +7011,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if blocks:
                 fresh.extend(blocks)
                 # FU151 (A): write LIVE-sourced competitors back to the per-brand cache (skip cache hits).
-                if not st.get("cached"):
+                if not st.get("cached") and not _guide:   # FU218: a guide's option evidence is question-bound
                     _cfacts[_kf_slug(tool)] = {
                         "domain": st.get("dom") or "",
                         "blocks": [{"label": b["label"], "url": b["url"], "text": b["text"]}
@@ -7007,17 +7238,22 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     tool_texts[_t] = tool_texts.get(_t, "") + " " + _vfact_coverage_text(_e)
         _pairs = []
         # FU216: the dimension rescue fills COMPARISON cells; a guide has no provider comparison to fill.
-        for d in ([] if _guide else dims):
+        # FU218: …but it does compare OPTIONS on outcomes, so in a guide it runs for the options only —
+        # never the subject (the brand is the expert voice, not a row) and never a provider (dropped above).
+        for d in dims:
             ws = _dim_words(d)
             if not ws:
                 continue
             # FU161: the SUBJECT is always handled by the per-product price fetch above — never by the
             # generic own-domain price dim-rescue (which grabbed the first "{name}" page, e.g. /how-it-works/).
             if _PRICE_DIM_RE.search(d or ""):
-                if not _px:   # FU162: pricing OFF ⇒ no price-dimension rescue at all
+                if not _px or _guide:   # FU162: pricing OFF ⇒ no price-dimension rescue at all (FU216: nor a guide)
                     continue
                 miss = [t for t in tools
                         if not any(w in tool_texts.get(t, "") for w in ws)]
+            elif _guide:
+                miss = [t for t in tools if t.lower() in _options
+                        and not any(w in tool_texts.get(t, "") for w in ws)]
             else:
                 miss = [t for t in [name] + tools
                         if not any(w in tool_texts.get(t, "") for w in ws)]
@@ -7060,11 +7296,17 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # SUBJECT fact must stay FIRST-PARTY (never a third-party source about {name}).
             if not rs and not _is_subj:
                 try:
-                    rs = self.claude.search_sources(
-                        f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
-                        f"reputable source (not a hit-piece or 'brands to avoid' roundup)"
-                        + _subj_brief,   # FU198: subject-scoped
-                        max_searches=1)
+                    if _guide:
+                        # FU218: an option has no site of its own — ask for the measured value that
+                        # answers THIS question, from a study, test, standards body or regulator.
+                        _dbrief = (f"{t}: {d} — the measured value for the question \"{seed}\", from a "
+                                   f"published study, an independent test, a standards body or a "
+                                   f"regulator (not a vendor page, an affiliate list or a hit-piece)")
+                    else:
+                        _dbrief = (f"{t}: {d} — the specific, current value/details, from {t}'s own site or a "
+                                   f"reputable source (not a hit-piece or 'brands to avoid' roundup)"
+                                   + _subj_brief)   # FU198: subject-scoped
+                    rs = self.claude.search_sources(_dbrief, max_searches=1)
                 except Exception:
                     rs = []
             kb = []
@@ -7088,6 +7330,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     # that is how an affiliate review became a competitor's sole price citation.
                     _lbl = t if (_tdom and _same_site(u, _tdom)) else \
                         f"{_source_class(u) or 'third-party'} · {(s.get('title') or _dom(u) or 'source')[:70]}"
+                    # FU218: in a guide, a page that earns the official badge carries it (the same rule as
+                    # the answer evidence), so a YMYL page's regulated claims can cite the figure.
+                    if _guide and _lbl.startswith("third-party ·") and _official_source_ok(
+                            u, s.get("title") or "", name, own_dom_s,
+                            (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if ymyl else []):
+                        _lbl = f"official · {(s.get('title') or _dom(u) or 'source')[:70]}"
                     kb.append({"label": _lbl, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
             return t, d, kb
 
@@ -7578,12 +7826,22 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             _floor_rule = ""
             _peers_seg = "PEERS: none — a general guide compares no provider (see GENERAL GUIDE)"
             _neutral_rule = (
-                f"  - GENERAL GUIDE (FU216 — a generic how-to / informational guide, NOT a comparison; this "
-                f"OVERRIDES every rule here about tools, rows, competitors and the comparison field): keep the "
-                f"answer generic and audience-wide. Do NOT add or keep a provider comparison, a table or list "
-                f"of companies, or ANY competitor / other provider name — remove one the draft contains, and "
-                f"delete a section that exists only to profile providers (an explicit exception to PRESERVE "
-                f"SUBSTANCE). A table of NON-provider dimensions (phases, materials, options) stays. {name} is "
+                f"  - GENERAL GUIDE (FU216 — a general guide that answers the reader's question for anyone, NOT "
+                f"a comparison of PROVIDERS; this OVERRIDES every rule here about providers, competitors and the "
+                f"provider field): keep the answer audience-wide. Do NOT add or keep a provider comparison, a "
+                f"table or list of companies, or ANY competitor / other provider name — remove one the draft "
+                f"contains, and delete a section that exists only to profile providers (an explicit exception "
+                f"to PRESERVE SUBSTANCE). A table of NON-provider dimensions (phases, materials, options) stays.\n"
+                f"    ANSWER THE QUESTION (FU218): the GENERIC OPTIONS are NOT providers. When the question "
+                f"asks which option is best / better or compares options, COMPARE them on the OUTCOME it asks "
+                f"about with the measured figures in the FRESH FACTS and EVIDENCE (named studies or tests, "
+                f"head-to-head or pooled results, measured values), each cited [S#] — never remove an option's "
+                f"row or its figures. The Quick answer NAMES the option the evidence favours, by how much and "
+                f"for whom; \"it depends\", \"ask a professional\" or \"no one-size-fits-all\" is NOT an "
+                f"answer (a professional-judgement caveat may only trail it, and every safety rule still "
+                f"applies). A table of options includes the outcome column, not characteristics alone. Cover "
+                f"every option the evidence documents, name none it does not, and keep at least one sourced "
+                f"specific in every section.\n    {name} is "
                 f"the expert voice: never in the Quick answer, a heading, the FAQ or the meta description; at "
                 f"most TWO body mentions, where its own documented practice illustrates a step; and ONE "
                 f"closing call-to-action paragraph immediately before the FAQ. The balance section is \"when "
@@ -11476,6 +11734,12 @@ you MAY assume the description will carry: "{disc}".
             if _gcn:
                 print(f"[blog_gen] {_gcn}", flush=True)
                 self._warn(article, _gcn)
+            # FU218 — a which / best / vs guide that ships without a single measured, independently
+            # sourced result has deferred instead of answering. Warning only.
+            _acn = self._answer_check(article, brand, seed)
+            if _acn:
+                print(f"[blog_gen] {_acn}", flush=True)
+                self._warn(article, _acn)
         if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring
             article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo,   # FU91
                                                               guide=guide)   # FU216

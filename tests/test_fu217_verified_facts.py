@@ -222,6 +222,39 @@ def test_the_parse_endpoint_refuses_an_empty_paste():
     db.close()
 
 
+# ── a failed API call is reported as itself, never as a problem with the paste ───────────────
+_CREDIT = ("Anthropic credit balance is too low to complete this request. Top up the account at "
+           "https://console.anthropic.com/settings/billing.")
+
+
+def _failing_stub(last_error):
+    stub = StubClaude()
+
+    def _h(p):
+        stub.last_error = last_error
+        return None
+    stub._call_handler = _h
+    return stub
+
+
+@pytest.mark.parametrize("url", ["/api/brands/1/verified-facts/parse", "/api/brands/1/price-table/parse"])
+def test_an_api_failure_is_shown_instead_of_blaming_the_paste(url):
+    db = _db()
+    r = _with_db(db, lambda c: c.post(url, json={"text": PASTE}), _failing_stub(_CREDIT))
+    assert r.status_code == 502 and r.get_json()["error"] == _CREDIT
+    db.close()
+
+
+@pytest.mark.parametrize("url,msg", [("/api/brands/1/verified-facts/parse", "try pasting them differently"),
+                                     ("/api/brands/1/price-table/parse", "try pasting it differently")])
+def test_an_unreadable_reply_still_asks_for_a_different_paste(url, msg):
+    db = _db()
+    r = _with_db(db, lambda c: c.post(url, json={"text": PASTE}),
+                 _failing_stub("JSON parse error: Expecting value: line 1 column 1 (char 0)"))
+    assert r.status_code == 502 and msg in r.get_json()["error"]
+    db.close()
+
+
 def test_saving_fans_out_to_every_copy_and_the_list_sent_is_the_complete_list():
     db = _db()
     ents = [{"name": "CMK Construction", "subject": True,

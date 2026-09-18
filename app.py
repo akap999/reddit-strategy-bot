@@ -2480,6 +2480,16 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
     return out, dropped, sorted(set(flagged))
 
 
+def _parse_failure_message(claude, fallback):
+    """What to tell the operator when a paste-parse call returns nothing usable. When the API itself
+    failed (no credit, a bad key, an outage) that is the message — blaming the paste sends them off
+    re-formatting text that was never the problem. Only an unreadable reply blames the paste."""
+    le = (getattr(claude, "last_error", "") or "").strip()
+    if le and not le.startswith("JSON parse error"):
+        return le
+    return fallback
+
+
 def _save_price_table(db, brand, rows, subject=""):
     """FU214 (Change 1) — persist the rows on EVERY stored copy of this brand (same name), the way
     `_save_price_links` already does, and route the SUBJECT's own rows into the CANONICAL price store.
@@ -2611,7 +2621,8 @@ def api_brand_price_table_parse(bid):
             out = None
         parsed = (out or {}).get("rows") if isinstance(out, dict) else None
         if parsed is None:
-            return jsonify({"error": "couldn't read that pricing — try pasting it differently",
+            return jsonify({"error": _parse_failure_message(
+                                claude, "couldn't read that pricing — try pasting it differently"),
                             "detail": (getattr(claude, "last_error", "") or "")[:200]}), 502
         clean, dropped, flagged = _clean_price_rows(
             parsed, known_names=names, subject=subject, verbatim_text=text)
@@ -2780,7 +2791,8 @@ def api_brand_verified_facts_parse(bid):
             out = None
         parsed = (out or {}).get("brands") if isinstance(out, dict) else None
         if parsed is None:
-            return jsonify({"error": "couldn't read those facts — try pasting them differently",
+            return jsonify({"error": _parse_failure_message(
+                                claude, "couldn't read those facts — try pasting them differently"),
                             "detail": (getattr(claude, "last_error", "") or "")[:200]}), 502
         from generators.blog_gen import _vfact_clean
         clean, dropped, flagged, overlaps = _vfact_clean(

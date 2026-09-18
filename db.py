@@ -1291,7 +1291,8 @@ class Database:
                    "verify_report",     # FU205 (R2): computed every run, previously never stored
                    "warnings",          # FU205 (R2): the structured warning list behind the toast
                    "verified_body", "verified_meta_description", "verified_at",   # FU208
-                   "verify_session", "verified_report", "verified_cost"}          # FU208
+                   "verify_session", "verified_report", "verified_cost",          # FU208
+                   "guide"}             # FU216: a generic how-to guide — no comparison, no service area
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
         # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
@@ -2527,6 +2528,9 @@ class Database:
             self.conn.commit()
         if "include_pricing" not in blog_cols:   # FU162: default ON — legacy rows keep today's pricing
             self.conn.execute("ALTER TABLE blogs ADD COLUMN include_pricing INTEGER DEFAULT 1")
+            self.conn.commit()
+        if "guide" not in blog_cols:   # FU216: default OFF — every existing blog stays a comparison
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN guide INTEGER DEFAULT 0")
             self.conn.commit()
         if "writer_secs" not in blog_cols:   # FU164: self-hosted writer-pass duration (visibility)
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_secs REAL DEFAULT 0")

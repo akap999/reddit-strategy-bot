@@ -1758,6 +1758,41 @@ def _seed_qualifier(seed):
     return ""
 
 
+# ── FU216 — "general guide" blogs ──────────────────────────────────────────────────────────────
+# A generic how-to seed ("in what order should you renovate a house?") written for a LOCAL brand came
+# back revolving around the brand's service area and comparing its local rivals, although the operator
+# entered no geography. The brand's service area lives only in free text, so it leaks in through a dozen
+# paths. These helpers name it once (verified against the brand's own words) and match it everywhere.
+_GUIDE_AREA_STOP = {"nationwide", "national", "local", "locally", "online", "statewide", "worldwide",
+                    "global", "area", "areas", "region", "regions", "county", "counties", "city",
+                    "cities", "state", "states", "metro", "surrounding", "nearby", "communities"}
+
+
+def _area_regex(places):
+    """One word-boundary pattern for a list of place names. The words of a multi-word place may be
+    joined by a space, hyphen, dot or nothing, so "Tampa Bay" also matches a `tampa-bay` URL slug and a
+    `tampabay.com` domain. None when there is nothing to match."""
+    alts = []
+    for p in (places or []):
+        toks = re.findall(r"[A-Za-z0-9]+", str(p or ""))
+        if toks:
+            alts.append(r"[\s_.-]*".join(re.escape(t) for t in toks))
+    if not alts:
+        return None
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(sorted(set(alts), key=len, reverse=True))
+                      + r")(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _area_hits(text, places):
+    """Every occurrence of a service-area place in `text` (a list — its length is the count)."""
+    rx = _area_regex(places)
+    return rx.findall(text or "") if rx else []
+
+
+def _mentions_area(text, places):
+    return bool(_area_hits(text, places))
+
+
 def _brand_in_comparison(body, name):
     """FU84 — True when the brand appears in a Markdown TABLE ROW of the body, i.e. the brand is one
     of the options being COMPARED. Drives the factually-safe disclosure fallback wording."""
@@ -1822,6 +1857,14 @@ class BlogGenerator:
         self._removed_brands = []     # FU206: brands the operator removed from the whole blog
         self._removed_refused = []    # FU206: removals refused because they would breach the floor
         self._removed_protected = []  # FU210: removals refused because the brand is one of the operator's
+        # FU216 — "General guide" mode (the operator's toggle, default off). `_guide_places` is the
+        # brand's own service area, verified against its own words, and is non-empty ONLY for a guide
+        # with no geography entered — that is when the article must stay location-free. URLs the
+        # operator typed for THIS blog are never filtered out, even when they are local.
+        self._guide = False
+        self._guide_places = []
+        self._guide_keep_urls = set()
+        self._service_area_cache = {}
         # Reuse the embedding relevance helpers (graceful no-op without an OPENAI key)
         # to filter fan-out queries to the seed. Cheap to construct.
         self._pg = PostGenerator(claude, db)
@@ -1850,15 +1893,19 @@ class BlogGenerator:
         # every article. The operator's list is brand-level by nature; when this article has a NARROWER
         # subject, say so and offer the specialists found for it. Byte-identical when inert.
         _comp = _as_list(b.get("competitors"))
-        # FU210 — the operator's OWN competitors get their own line and are taken out of the general
-        # list below, so the subject-fit wording there can never talk the writer out of naming them.
-        _mine = _manual_competitors(b)
+        # FU216 — a general guide compares nobody, so it is not shown anybody to compare: every
+        # competitor line (yours, the brand list, the specialists, the priced field) is left out.
+        # Category and context stay — the writer still needs to know what the brand does.
+        _guide_b = bool(getattr(self, "_guide", False))
+        if _guide_b:
+            _comp = []
+        _mine = [] if _guide_b else _manual_competitors(b)
         if _mine:
             lines.append("Competitors YOU MUST COMPARE (set by the operator — include EVERY one in the "
                          "comparison and the prose, whatever the article's subject): " + ", ".join(_mine))
             _comp = [c for c in _comp if not _matches_competitor(c, _mine)]
         _sphr = getattr(self, "_subject_phrase", "") or ""
-        _speers = getattr(self, "_subject_peers", None) or {}
+        _speers = {} if _guide_b else (getattr(self, "_subject_peers", None) or {})
         if _sphr and (_comp or _speers):
             if _comp:
                 lines.append(f"Competitors (the operator's brand-level list — name one ONLY if it "
@@ -1871,7 +1918,7 @@ class BlogGenerator:
         # FU214 (Change 5) — when the operator priced a set of brands, THAT is the comparison field.
         # Said here (in the brand context every writer prompt carries) so the DRAFT already names them
         # and the reconcile is not left deleting rows a prompt talked the model into.
-        _priced_b = getattr(self, "_priced_names", None) or []
+        _priced_b = [] if _guide_b else (getattr(self, "_priced_names", None) or [])
         if _priced_b:
             lines.append(f"MUST BE COMPARED (the operator supplied their prices — every one of these "
                          f"gets a comparison row and a prose profile): {', '.join(_priced_b)}. You may "
@@ -1902,6 +1949,247 @@ class BlogGenerator:
         if disc:
             out.append(f"*{disc}*")
         return ("\n\n".join(out) + "\n\n") if out else ""
+
+    # ------------------------------------------------------------ FU216: general guides
+    def _brand_service_area(self, brand):
+        """FU216 — the places the brand SERVES (cities, metros, counties, regions, states), read once
+        from its own description. No brand field holds this; it lives only in free text ("serving
+        Tampa Bay, Pinellas and Pasco"), which is exactly how it leaked into a generic guide.
+
+        One small call proposes the places; CODE keeps only the ones that appear verbatim in the brand's
+        own text (the FU172 verify-don't-trust rule), so a guessed place can never become a filter.
+        Countries and generic words are dropped — a national brand has no local area to hide. Cached
+        per brand on the instance; [] on any failure. Never raises."""
+        b = brand or {}
+        key = str(b.get("id") or b.get("name") or "")
+        cache = getattr(self, "_service_area_cache", None)
+        if cache is None:
+            cache = self._service_area_cache = {}
+        if key in cache:
+            return list(cache[key])
+        parts = [str(b.get(k) or "") for k in ("category", "audience", "context", "learned_context")]
+        for k in ("use_cases", "pain_points", "features"):
+            parts.extend(_as_list(b.get(k)))
+        text = "\n".join(p for p in parts if p.strip())
+        places = []
+        if text.strip():
+            prompt = ("From this brand's OWN description, list the PLACES it serves — cities, metro areas, "
+                      "counties, regions, states or provinces — copied exactly as they are written in the "
+                      "text. When the text names a metro area or region after its core city, ALSO list that "
+                      "city on its own (a local page is usually titled with the city, not the metro). Do "
+                      "NOT include countries, and do NOT include generic words such as \"nationwide\", "
+                      "\"local\" or \"online\". Return [] when the text names no specific area.\n\n"
+                      "BRAND TEXT:\n" + text[:4000] + '\n\nReturn JSON only: {"places": ["..."]}')
+            try:
+                res = self.claude.call(prompt, max_tokens=300, temperature=0)
+            except Exception as e:
+                print(f"[blog_gen] guide: service-area lookup failed ({e})", flush=True)
+                res = None
+            raw = (res or {}).get("places") if isinstance(res, dict) else None
+            seen = set()
+            for p in (raw if isinstance(raw, list) else []):
+                # "Tampa Bay, Pinellas & Pasco" → three places, each verified on its own
+                for part in re.split(r"\s*(?:,|;|/|&|\band\b)\s*", str(p or "")):
+                    part = re.sub(r"\s+", " ", part).strip(" .'\"")
+                    low = part.lower()
+                    if (len(part) < 3 or low in seen or _seed_geo(part)
+                            or all(w in _GUIDE_AREA_STOP for w in low.split())):
+                        continue
+                    if not _mentions_area(text, [part]):
+                        print(f"[blog_gen] guide: dropped proposed place {part!r} — not in the brand's "
+                              f"own text", flush=True)
+                        continue
+                    seen.add(low)
+                    places.append(part)
+            places = places[:8]
+        cache[key] = list(places)
+        print(f"[blog_gen] guide: service area = {places or 'none'} (verified in the brand's own text)",
+              flush=True)
+        return list(places)
+
+    def _prepare_guide(self, brand, seed, geo="", guide=False):
+        """FU216 — set the general-guide state for this generation and return the EFFECTIVE geography.
+
+        A guide's geography comes only from what the operator enters when generating, never from the
+        brand: the Geography field, a common geography the seed names (FU90), or one of the brand's own
+        service-area places named in the seed itself. With a geography, the normal geo machinery applies
+        and the service-area rules stand down. Without one, `_guide_places` is filled and the article
+        stays location-free except for the closing call-to-action. Off → no call, no state."""
+        self._guide = bool(guide)
+        self._guide_places = []
+        if not self._guide:
+            return geo
+        if (geo or "").strip() or _seed_geo(seed):
+            print(f"[blog_gen] guide: geography entered ({(geo or '').strip() or _seed_geo(seed)}) — "
+                  f"the service-area rules stand down", flush=True)
+            return geo
+        places = self._brand_service_area(brand)
+        m = _area_regex(places).search(seed or "") if places else None
+        if m:
+            hit = next((p for p in places if _mentions_area(m.group(0), [p])), m.group(0))
+            print(f"[blog_gen] guide: the seed names {hit!r} — that is this guide's geography", flush=True)
+            return hit
+        self._guide_places = list(places)
+        return geo
+
+    def _guide_local(self, title, url, text):
+        """FU216 — True when a NON-first-party page belongs to the brand's service area (a county
+        permit office, a local contractor). Title or URL naming a place is enough; the body has to name
+        one at least twice, so a national page that mentions a state once in passing survives. Inert
+        unless this is a guide with no geography."""
+        places = getattr(self, "_guide_places", None) or []
+        if not (getattr(self, "_guide", False) and places):
+            return False
+        if _mentions_area(f"{title or ''} {url or ''}", places):
+            return True
+        return len(_area_hits(text or "", places)) >= 2
+
+    def _guide_filter_blocks(self, blocks, brand, where):
+        """FU216 — drop the service-area pages from a list of evidence blocks. Kept: the brand's own
+        pages (its first-party facts), and anything the operator deliberately supplied for THIS blog
+        (typed source URLs, research notes, the attached Reddit thread). Every drop is logged."""
+        places = getattr(self, "_guide_places", None) or []
+        if not (getattr(self, "_guide", False) and places):
+            return list(blocks or [])
+        b = brand or {}
+        name = (b.get("name") or "").strip().lower()
+        own = _norm_domain(b.get("domain_url") or "")
+        keep_urls = getattr(self, "_guide_keep_urls", None) or set()
+        out = []
+        for bl in (blocks or []):
+            lbl = str(bl.get("label") or "")
+            u = str(bl.get("url") or "")
+            d = _norm_domain(u)
+            if (lbl.strip().lower() == name or (own and d and (d == own or d.endswith("." + own)))
+                    or lbl.lower().startswith(("research notes", "community discussion"))
+                    or (u and u.rstrip("/").lower() in keep_urls)):
+                out.append(bl)
+                continue
+            ttl = lbl.split("·", 1)[-1] if "·" in lbl else lbl
+            if self._guide_local(ttl, u, bl.get("text")):
+                print(f"[blog_gen] guide: dropped local source at {where} — '{ttl.strip()[:70]}' "
+                      f"({u[:80]}) is about the brand's service area, not this guide", flush=True)
+                continue
+            out.append(bl)
+        return out
+
+    def _guide_filter_keywords(self, kws):
+        """FU216 — a guide with no geography targets no place: drop a keyword that names the service
+        area ("remodeling order Tampa") and keep the rest ("house renovation order")."""
+        places = getattr(self, "_guide_places", None) or []
+        if not (getattr(self, "_guide", False) and places):
+            return list(kws or [])
+        kept, dropped = [], []
+        for k in (kws or []):
+            (dropped if _mentions_area(str(k), places) else kept).append(k)
+        if dropped:
+            print(f"[blog_gen] guide: dropped location keyword(s) {dropped} — this guide has no "
+                  f"geography", flush=True)
+        return kept
+
+    @staticmethod
+    def _guide_competitor_names(brand):
+        """FU216 — every competitor the brand has on file (the stored list + the operator's own)."""
+        b = brand or {}
+        own = (b.get("name") or "").strip().lower()
+        out = []
+        for c in _as_list(b.get("competitors")) + _manual_competitors(b):
+            c = str(c or "").strip()
+            if len(c) >= 2 and c.lower() != own and c.lower() not in {x.lower() for x in out}:
+                out.append(c)
+        return out
+
+    @staticmethod
+    def _guide_names_in(text, names):
+        return [n for n in (names or [])
+                if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", text or "", re.IGNORECASE)]
+
+    def _guide_strip_sections(self, draft, brand):
+        """FU216 — remove from the DRAFT any ## / ### section whose heading names the brand's service
+        area (a guide with no geography) or one of its competitors, so the FU54 substance guard cannot
+        restore a "How do Tampa Bay contractors approach sequencing?" section the reconcile deleted."""
+        places = list(getattr(self, "_guide_places", None) or [])
+        comps = self._guide_competitor_names(brand)
+        out = draft or ""
+        for title, block in self._split_sections(out):
+            head = block.splitlines()[0] if block.splitlines() else title
+            if (places and _mentions_area(head, places)) or self._guide_names_in(head, comps):
+                out = out.replace(block, "", 1)
+                print(f"[blog_gen] guide: {head.strip()[:80]!r} left the draft — a guide profiles no "
+                      f"provider and no locality, so the substance guard must not restore it", flush=True)
+        return re.sub(r"\n{3,}", "\n\n", out)
+
+    @staticmethod
+    def _md_zone(body, pat):
+        """The text under the first heading matching `pat` (up to the next heading of the same or a
+        higher level), else the first paragraph that OPENS with that label ("**Quick answer:** …")."""
+        lines = (body or "").splitlines()
+        for i, ln in enumerate(lines):
+            m = re.match(r"^\s*(#{1,6})\s+(.*)$", ln)
+            if m and re.search(pat, m.group(2), re.IGNORECASE):
+                lvl, out = len(m.group(1)), []
+                for l2 in lines[i + 1:]:
+                    m2 = re.match(r"^\s*(#{1,6})\s", l2)
+                    if m2 and len(m2.group(1)) <= lvl:
+                        break
+                    out.append(l2)
+                return "\n".join(out)
+        for para in re.split(r"\n\s*\n", body or ""):
+            if re.match(r"^\s*[*_]*\s*(?:" + pat + r")", para, re.IGNORECASE):
+                return para
+        return ""
+
+    def _guide_check(self, article, brand, seed, geo=""):
+        """FU216 — a GENERAL GUIDE's two deterministic signals (warning only, never a rewrite):
+          • with no geography: the brand's service area in the title, the meta description, a heading,
+            the Quick answer or the FAQ — or in MORE than one body paragraph (the one allowed is the
+            closing call-to-action);
+          • any competitor on file named anywhere in the body.
+        Returns the note, or "" when the guide is clean."""
+        body = article.get("body_markdown") or ""
+        prose = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", body, maxsplit=1)[0]
+        rgeo = (geo or "").strip() or _seed_geo(seed)
+        places = [] if rgeo else list(getattr(self, "_guide_places", None) or [])
+        parts = []
+        if places:
+            zones = []
+            if _mentions_area(article.get("title") or "", places):
+                zones.append("the title")
+            if _mentions_area(article.get("meta_description") or "", places):
+                zones.append("the meta description")
+            _nh = sum(1 for ln in prose.splitlines()
+                      if re.match(r"^\s*#{1,6}\s", ln) and _mentions_area(ln, places))
+            if _nh:
+                zones.append(f"{_nh} heading{'s' if _nh != 1 else ''}")
+            qa = self._md_zone(prose, r"quick answer|short answer|tl;?dr")
+            if qa and _mentions_area(qa, places):
+                zones.append("the Quick answer")
+            faq = self._md_zone(prose, r"faq|frequently asked")
+            if faq and _mentions_area(faq, places):
+                zones.append("the FAQ")
+            rest = prose
+            for z in (qa, faq):
+                if z:
+                    rest = rest.replace(z, "\n\n")
+            _paras = []
+            for para in re.split(r"\n\s*\n", rest):
+                txt = "\n".join(ln for ln in para.splitlines() if not re.match(r"^\s*#{1,6}\s", ln))
+                if txt.strip() and _mentions_area(txt, places):
+                    _paras.append(txt)
+            if len(_paras) > 1:
+                zones.append(f"{len(_paras)} body paragraphs")
+            if zones:
+                _all = " ".join([body, article.get("meta_description") or "", article.get("title") or ""])
+                _named = [p for p in places if _mentions_area(_all, [p])] or places
+                parts.append(f"it names {', '.join(_named)} in {', '.join(zones)}, but a guide keeps the "
+                             f"brand's service area to the one closing call-to-action paragraph")
+        comps = self._guide_names_in(prose, self._guide_competitor_names(brand))
+        if comps:
+            parts.append(f"it names competitor{'s' if len(comps) != 1 else ''} {', '.join(comps)}, but a "
+                         f"guide compares nobody")
+        if not parts:
+            return ""
+        return "guide-check: " + ", and ".join(parts) + " — edit before publishing, or regenerate"
 
     # ------------------------------------------------------------ evidence sourcing
     def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None,
@@ -2206,6 +2494,12 @@ class BlogGenerator:
         _mine_e = _manual_competitors(b)   # FU210: the operator's own competitors are fetched first
         if _mine_e:
             comp_names = _mine_e + [c for c in comp_names if not _matches_competitor(c, _mine_e)]
+        # FU216: a general guide compares nobody — no stored, manual or cached competitor is fetched.
+        # A brand or product the SEED itself names still resolves below, so a guide about a named
+        # product keeps its manufacturer's page.
+        _guide_e = bool(getattr(self, "_guide", False))
+        if _guide_e:
+            comp_names = []
         seed_low = (seed or "").lower()
 
         def _in_seed(nm):
@@ -2221,7 +2515,8 @@ class BlogGenerator:
         to_resolve = [c for c in comp_names if (c not in cached) or _in_seed(c)]
         resolved = self._resolve_brand_domains(
             to_resolve, seed=seed, subject=subject, subject_category=b.get("category"),
-            want_subject=True)   # FU199: learn the article's subject + its specialists here
+            want_subject=not _guide_e)   # FU199: learn the article's subject + its specialists here
+        #                                  (FU216: a guide has no specialists to compare, so none are asked for)
         # Web-search-backed resolution for seed-named comparison brands: the training-
         # knowledge resolver tends to pick the famous SAME-NAME domain (e.g. profound.com)
         # for a niche brand; a live search finds the actual peer site (tryprofound.com).
@@ -2388,7 +2683,8 @@ class BlogGenerator:
         # run back onto the brand, so its competitor set grows (idempotent; validated only,
         # never a wrong guess). Best-effort — write-back must never break generation.
         new_doms = {k: v for k, v in validated.items() if stored_domains.get(k) != v}
-        if new_doms and b.get("id") is not None:
+        # FU216: a product a guide happens to name is not a competitor — never add it to the brand's list.
+        if new_doms and b.get("id") is not None and not _guide_e:
             try:
                 merged = {**stored_domains, **new_doms}
                 names = _as_list(b.get("competitors"))
@@ -2434,7 +2730,10 @@ class BlogGenerator:
         # domains) so results are genuinely independent (reviews/news/forums), not the brands'
         # own marketing. The brand's OWN testimonials still come from the first-party fetch
         # above, so nothing is lost when web search returns little.
-        if use_web_search:
+        if use_web_search and _guide_e:
+            print("[blog_gen] guide: independent competitor/peer sweep skipped — a general guide "
+                  "compares no providers", flush=True)
+        if use_web_search and not _guide_e:
             comp_names = _as_list(b.get("competitors"))
             own = []
             if b.get("domain_url"):
@@ -2446,6 +2745,12 @@ class BlogGenerator:
             own = sorted(set(d for d in own if d))
             blocks.extend(self._gather_independent_sources(
                 subject, comp_names, seed, b.get("category") or "", own))
+
+        # FU216: a guide with no geography keeps the brand's service area out of the evidence — a
+        # county permit office or a local contractor page (hcfl.gov "Inspections | Hillsborough
+        # County" was labelled official and cited twice). Covers the fetched pages, the FU212
+        # instruction sources and the FU134 known sources in one place. Inert otherwise.
+        blocks = self._guide_filter_blocks(blocks, b, "evidence")
 
         # FU141 — tag reviews OF the subject (`review ·`, machine-readable so the rules can key
         # on them) and CAP them at 2 per generation: review pileup (5 affiliate reviews of one
@@ -3546,7 +3851,8 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
     def generate_article(self, brand, seed, extra_keywords=None, evidence="", geo="",
                          include_pricing=True,
                          sibling_titles=None, qualifier="", internal_links=False,
-                         link_targets=None, ymyl=None, key_facts=None, key_facts_products=None):
+                         link_targets=None, ymyl=None, key_facts=None, key_facts_products=None,
+                         guide=False):
         """GEO-first first-party article. `extra_keywords` (the reviewed query set) are
         the target queries the article MUST answer (each becomes a question heading + FAQ
         entry) and are merged into the returned keywords. `evidence` is the formatted
@@ -3559,6 +3865,11 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         seed = (seed or "").strip()
         if not seed:
             return None
+        # FU216: the brand block reads this, so it is set before the block is rendered. The service
+        # area itself (`_guide_places`) is prepared once per generation by `_prepare_guide`.
+        self._guide = bool(guide)
+        if not self._guide:
+            self._guide_places = []
         # FU214 (Change 5) — resolve the PRICED comparison field before the brand block is rendered
         # (it carries the "compare exactly these" line) so a regenerate that builds a fresh generator
         # scopes the same way a first generation does.
@@ -3568,7 +3879,7 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         else:
             self._priced_names = []
         name, url, block = self._brand_block(brand)
-        kws = _as_list(extra_keywords)
+        kws = self._guide_filter_keywords(_as_list(extra_keywords))   # FU216: no-op unless a guide
         kw_block = ""
         if kws:
             kw_block = ("\nTARGET QUERIES — the article MUST answer EACH of these. Make each a "
@@ -3771,6 +4082,91 @@ extractable answer), still under 160 chars.
                              f"dedicated guide on ...\", no \"refer to {name}'s published guidance "
                              f"on ...\". Any such page does not exist, and promising one sends the "
                              f"reader and the answer engine nowhere.\n")
+        # FU216 — the four backbone rules a GENERAL GUIDE must not follow (the provider-type match, the
+        # 3-competitor floor, "names {name} as a fit" in the Quick answer, "who might prefer an
+        # alternative"), held as variables whose OFF value is the EXACT original text — the FU205 inert
+        # goldens prove it — plus ONE guide block that states what a guide does instead.
+        _qa_rule = f"""  - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names {name}
+    as a fit. (AI engines lift this as the extractable answer.)
+"""
+        _field_rule = f"""  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
+    platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
+    AT LEAST 3 real entities of THAT type besides {name} — {name}'s direct competitors — profiled
+    fairly with their genuine wins credited; {name} wins on its actual differentiators, never by
+    default. A DIFFERENT entity type (e.g. self-serve tools when AGENCIES are asked for) may appear
+    ONLY as a clearly-labeled supplementary category and NEVER substitutes for peers. A page where
+    {name} is the only entity of the asked-for type is a self-crowning comparison that answer engines
+    discount and readers distrust — do not ship it.
+  - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
+    (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
+    {name} itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
+{_priced_step}{_mine_step}      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
+         this article's angle before you consider any other name. These are the operator's own list;
+         they are the peers the reader expects to see.
+      2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
+      3. ONLY IF the floor is still short after 1 and 2, name a real, well-known alternative yourself.
+         A name you add this way MUST be a CURRENT, actively-operating provider of the SAME service
+         model as {name} today — not a company that has pivoted away from it, wound down, or only ever
+         offered an adjacent product. If you are not confident it still operates in this exact model,
+         do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
+{_sfit}    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
+    evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+"""
+        _rec_rule = f"""  - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
+    it genuinely fits, citing its real differentiators.{link}
+"""
+        _balance_rule = """  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
+    section (and an honest limitation or trade-off where one exists). Naming your own non-fit
+    is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
+    REFERENCE, not a fake-neutral "independent review".
+"""
+        _guide_block = ""
+        if self._guide:
+            _qa_rule = """  - Open with a "Quick answer" — a 2-3 sentence direct, GENERIC answer to the seed that holds for
+    any reader, wherever they are and whoever they hire. (AI engines lift this as the extractable answer.)
+"""
+            _field_rule = ""
+            _rec_rule = f"""  - Be specific and accurate; no fluff, no hype. Mention {name} only as the GENERAL GUIDE block
+    below allows.{link}
+"""
+            _balance_rule = """  - INCLUDE GENUINE BALANCE: add a short "When this does not apply / when to call a professional"
+    section (and an honest limitation or trade-off where one exists) — never "who might prefer an
+    alternative", and never with a competitor or provider name.
+"""
+            _gplaces = list(getattr(self, "_guide_places", None) or [])
+            if rgeo:
+                _ggeo = (f"  - GEOGRAPHY: {rgeo} was entered for this guide — it is the article's geography "
+                         f"and the GEOGRAPHY / QUALIFIER section above applies to it. {name}'s own service "
+                         f"area plays no part in choosing it.\n")
+            elif _gplaces:
+                _ggeo = (f"  - NO GEOGRAPHY — {name}'s SERVICE AREA IS NOT THIS ARTICLE'S GEOGRAPHY: {name} "
+                         f"operates in {', '.join(_gplaces)}. That is where {name} works; it is NOT this "
+                         f"article's geography, and this article has none. Never write those places — or any "
+                         f"other city, county, region or state — anywhere except the ONE closing "
+                         f"call-to-action paragraph. State local rules as GENERAL guidance (\"check with your "
+                         f"local building department\", \"your local permitting office\") — NEVER a specific "
+                         f"county or city office, phone number or permit portal. The keywords and the "
+                         f"meta_description carry no location. This overrides the sibling-pages block's "
+                         f"\"add its own geography\" line. (If the SEED itself names a place, that place is "
+                         f"the article's geography — cover it; this rule is only about {name}'s own area.)\n")
+            else:
+                _ggeo = ("  - NO GEOGRAPHY: none was entered, so this article has none. Never write a "
+                         "specific city, county, region or state except in the closing call-to-action, and "
+                         "state local rules as general guidance (\"check with your local building "
+                         "department\") — never a named county or city office, phone number or permit "
+                         "portal. (If the SEED itself names a place, that place is the article's geography.)\n")
+            _guide_block = f"""GENERAL GUIDE (FU216 — this article is a GENERIC how-to / informational guide, NOT a comparison. This
+block OVERRIDES every rule above that asks you to compare providers, name competitors, or recommend {name}):
+  - THE ANSWER: a generic, audience-wide answer — the steps, principles, decisions and trade-offs that apply
+    to ANY reader asking this. NO provider comparison, NO table or list of companies, and NEVER name a
+    competitor or any other service provider. A table is welcome for NON-provider dimensions (phases,
+    materials, options, typical costs by item).
+  - {name} IS THE EXPERT VOICE, NOT THE SUBJECT: never name {name} in the Quick answer, any heading, the FAQ
+    or the meta_description. You MAY mention {name} at most TWICE in the body, and only where its own
+    documented practice (from {name}'s own site in the EVIDENCE) illustrates a step. End the body with ONE
+    short closing call-to-action paragraph naming {name}, placed IMMEDIATELY BEFORE the FAQ.
+{_ggeo}
+"""
         prompt = f"""You are writing a FIRST-PARTY article published on {name}'s own site. The ONLY
 goal is for AI answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews) to RETRIEVE
 and CITE this page when someone asks about the seed topic, AND for that answer to name {name}.
@@ -3942,33 +4338,9 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
     medical/financial/legal-grade claim still follows the cite-a-primary-source rule above.
 
 WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
-  - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names {name}
-    as a fit. (AI engines lift this as the extractable answer.)
-  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
+{_qa_rule}  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
-    platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
-    AT LEAST 3 real entities of THAT type besides {name} — {name}'s direct competitors — profiled
-    fairly with their genuine wins credited; {name} wins on its actual differentiators, never by
-    default. A DIFFERENT entity type (e.g. self-serve tools when AGENCIES are asked for) may appear
-    ONLY as a clearly-labeled supplementary category and NEVER substitutes for peers. A page where
-    {name} is the only entity of the asked-for type is a self-crowning comparison that answer engines
-    discount and readers distrust — do not ship it.
-  - MINIMUM COMPETITORS (FU105, hard rule): whenever this article carries a comparison of any kind
-    (a table OR an options roundup), it must profile AT LEAST 3 REAL competitors of {name} besides
-    {name} itself. SOURCE THEM IN THIS ORDER (FU184) — do not skip a step to reach the floor faster:
-{_priced_step}{_mine_step}      1. the brand context's "Competitors:" line — name EVERY curated competitor that genuinely fits
-         this article's angle before you consider any other name. These are the operator's own list;
-         they are the peers the reader expects to see.
-      2. the EVIDENCE (including third-party / peer sources) — competitors the sourcing actually found.
-      3. ONLY IF the floor is still short after 1 and 2, name a real, well-known alternative yourself.
-         A name you add this way MUST be a CURRENT, actively-operating provider of the SAME service
-         model as {name} today — not a company that has pivoted away from it, wound down, or only ever
-         offered an adjacent product. If you are not confident it still operates in this exact model,
-         do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
-{_sfit}    Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
-    evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
-  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
+{_field_rule}  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
     fill for EVERY option in the table. If one option cannot answer a dimension, choose a DIFFERENT
     dimension that they all can — never leave a cell blank, never write "—", and never add a note under
     the table apologising that a value could not be found. A blank cell does not read as "not found",
@@ -3984,9 +4356,7 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     not about {name}), followed IMMEDIATELY by a 1-3 sentence answer paragraph. One H3 per question. (Keep
     this exact format — it is parsed into FAQPage structured data.)
 {pricing_rules}
-  - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
-    it genuinely fits, citing its real differentiators.{link}
-  - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
+{_rec_rule}  - MARKDOWN FORMATTING: put a BLANK LINE before the first item of any bulleted or numbered list
     (including a list that follows a bold lead-in like "**Best fit for:**"). A list placed on the
     line directly under text does NOT render as a list — it collapses into one run-on paragraph.
   - First-party brand voice (owned media), but credible and useful — never a hard pitch.
@@ -4002,17 +4372,13 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - STAY CREDIBLE, NOT PROMOTIONAL — a relentlessly self-praising page reads as marketing and
     gets cited LESS. Present {name} as *a* strong fit backed by specifics, not as an
     unqualified winner. Do NOT stack praise ("best / strongest / ranks first") on it.
-  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
-    section (and an honest limitation or trade-off where one exists). Naming your own non-fit
-    is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
-    REFERENCE, not a fake-neutral "independent review".
-  - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
+{_balance_rule}  - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
     inline (a study, regulator, or guideline) and frame contested or off-label uses as such
     ("used off-label", "studied in the … trial") rather than as asserted benefits.
   - If you cited any external sources, END the body with a "## Sources" section listing them
     (title + URL). Omit this section entirely if there were no external claims to cite.
 
-TITLE — THE TITLE IS FIXED (FU88: it is the user's exact target prompt — a top retrieval signal and a
+{_guide_block}TITLE — THE TITLE IS FIXED (FU88: it is the user's exact target prompt — a top retrieval signal and a
 strong "this page answers this exact question" citation signal):
   - The title IS the seed, EXACTLY as entered: "{seed}". Return it as `title` verbatim — do NOT
     rewrite, trim, re-case, "clean up", or otherwise modify it in any way. Write the article to
@@ -4047,7 +4413,7 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.7)
         if not res or not isinstance(res, dict) or not (res.get("body_markdown") or "").strip():
             return None
-        model_kws = _as_list(res.get("keywords"))
+        model_kws = self._guide_filter_keywords(_as_list(res.get("keywords")))   # FU216
         merged, seen = [], set()
         for k in kws + model_kws:  # user-seeded first, then model-derived
             kk = k.lower()
@@ -4080,6 +4446,16 @@ DISCLOSURE (FU84 — must be FACTUALLY ACCURATE for {name}, not a template):
             return None
         evidence_block = (f"\nEVIDENCE (admissible support for claims — cite as [S#]):\n{evidence}\n"
                           if (evidence or "").strip() else "")
+        # FU216 — one line for a general guide, "" otherwise (the FU205 golden stays byte-identical).
+        _gv = ""
+        if getattr(self, "_guide", False):
+            _gpl = list(getattr(self, "_guide_places", None) or [])
+            _gv = ("GENERAL GUIDE: this article is a generic guide, NOT a comparison. Never reintroduce a "
+                   "competitor or any other provider's name from the brand context, and remove a provider "
+                   "comparison that slipped in"
+                   + (f"; never reintroduce {name}'s service area ({', '.join(_gpl)}) — it belongs ONLY in "
+                      f"the closing call-to-action paragraph" if _gpl else "")
+                   + ". These changes MUST appear in `flagged`.\n\n")
         prompt = f"""Fact-check a FIRST-PARTY article about {name} against the brand context + evidence below.
 Accuracy is what keeps the page citable by AI engines.
 
@@ -4168,7 +4544,7 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     or quote a page critical of {name}.
 Anything you change for these reasons MUST appear in `flagged` so the count is accurate.
 
-{_content_instructions_block(brand, "blog")}Return JSON only:
+{_gv}{_content_instructions_block(brand, "blog")}Return JSON only:
 {{"revised_body_markdown": "the corrected full Markdown body",
   "flagged": [{{"claim": "the unsupported claim", "reason": "why it isn't supported"}}]}}"""
         res = self.claude.call(prompt, max_tokens=6000, temperature=0.3)
@@ -4216,7 +4592,7 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
         }
 
     def verify_and_complete(self, brand, seed, article, deep=False, geo="", qualifier="", include_pricing=True,
-                            allow_pause=False, draft_body=None, part=None):
+                            allow_pause=False, draft_body=None, part=None, guide=False):
         """FU49 — the always-on VERIFY + COMPLETE agent: source every named competitor's OWN public facts,
         then reconcile the article (FILL the comparison, no "—", correct wrong values, cite). Split (FU79)
         into `_source_for_completion` (phases a-c: gather + surface any unsourceable tools) and
@@ -4227,7 +4603,7 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
         variant qualifier ("financing", "free shipping") — same explicit-wins rule. Returns
         {body_markdown, flagged} or None (draft unchanged). Never raises."""
         sr = self._source_for_completion(brand, seed, article, deep=deep, geo=geo, qualifier=qualifier,
-                                         include_pricing=include_pricing)
+                                         include_pricing=include_pricing, guide=guide)
         if not sr:
             return None
         # FU207 — REGENERATE asks too. Until now only the first Generate could pause, so on
@@ -4591,7 +4967,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
 
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
                                ymyl=None, refresh_competitor_facts=False, refresh_competitor_slugs=None,
-                               include_pricing=True):
+                               include_pricing=True, guide=False):
         """FU79 — phases (a-c) of verify+complete. Extract the comparison TOOLS/DIMENSIONS/high-risk
         claims, SOURCE each tool's OWN public facts (pricing / license / royalty-free / capability) with
         the FU78 key-fact rescue, and run the independent corroboration search. FU90: when a geography
@@ -4610,6 +4986,12 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
         self._price_warn = ""   # FU161: subject price could-not-confirm note (folded into geo_warning)
         _px = bool(include_pricing)   # FU162: pricing OFF ⇒ skip ALL pricing searches / injection / flag-and-ask
         rgeo = (geo or "").strip() or _seed_geo(seed)   # FU90: explicit wins, lexicon fallback
+        # FU216 — a GENERAL GUIDE compares nobody: no competitor is extracted into `tools`, so there is
+        # no per-tool sourcing, no price ledger and no competitor pause — the dominant generation cost.
+        # Claims corroboration, the official-source search and the YMYL legs still run. With no
+        # geography entered, their briefs ask for a NATIONAL / general authority, never a county page.
+        _guide = bool(guide)
+        _gnat = bool(_guide and not rgeo)   # a guide with no geography — the location-free case
         rqual = (qualifier or "").strip() or _seed_qualifier(seed)   # FU93: same rule for the qualifier
         body = (article or {}).get("body_markdown") or ""
         if not body.strip():
@@ -4618,6 +5000,10 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
 
         _dom = _norm_domain   # FU54: registrable domain (scheme/path/www. stripped) — see module helper
 
+        # FU216: "" unless a guide with no geography (then the authority must be national / general).
+        _ct_guide = ("\n    FU216: this article is a GENERAL GUIDE with NO geography — the authority must be NATIONAL "
+                     "or GENERAL (a national code body, a federal agency, a standards or trade body), never a "
+                     "single city's or county's office." if _gnat else "")
         # (a) extract comparison tools + dimensions + high-risk claims
         claim_prompt = f"""From this article about {name}, extract for verification:
   - TOOLS: every product/tool named in the comparison table(s) or compared in prose, EXCLUDING "{name}".
@@ -4651,7 +5037,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
     UK, the ATO for Australia). FU93: likewise, when the article targets a purchasing/commercial
     QUALIFIER (financing, leasing, tax treatment, …), the authority is the one governing THAT mechanism
     in the target market (e.g. IRS Section 179 for US equipment-financing write-offs). Empty if the
-    article has no such external authority.
+    article has no such external authority.{_ct_guide}
   - SUBJECT (FU198): the specific offering / practice area / product line THIS article is about, as a
     SHORT noun phrase (2-6 words, no brand names, no "best"/"top"). It is usually NARROWER than the
     brand's own category above — a full-service provider writes one article about ONE of the things it
@@ -4711,6 +5097,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         _m_bt = re.search(r"\b(?:best|top)\s+[\w /&-]*?(agencies|platforms|tools|companies|"
                           r"providers|services|firms|clinics|apps|software|retailers|vendors)\b",
                           seed or "", re.I)
+        if _guide:
+            peers, _m_bt = [], None   # FU216: a guide has no peer field to check
         if _m_bt:
             _peers = peers
             if len(_peers) < 2:
@@ -4721,6 +5109,11 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] {self._peer_note}", flush=True)
         tools = [str(t).strip() for t in (cres.get("tools") or [])
                  if str(t).strip() and str(t).strip().lower() != name.lower()]
+        if _guide and tools:
+            print(f"[blog_gen] guide: {len(tools)} provider name(s) in the draft NOT sourced — a general "
+                  f"guide compares nobody ({', '.join(tools[:6])})", flush=True)
+        if _guide:
+            tools = []
         dims = [str(d).strip() for d in (cres.get("dimensions") or []) if str(d).strip()]
         claims = [c for c in (cres.get("claims") or []) if isinstance(c, dict)]
         # FU189: which compared entities are generic OPTIONS (no website) rather than PROVIDERS.
@@ -4737,7 +5130,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU210 — the operator's own competitors are ALWAYS sourced and compared, whether or not the
         # draft named them and whatever the extraction thought of their category fit. They never count
         # against the per-kind cap, so they can never evict (or be evicted by) a discovered name.
-        _mine = _manual_competitors(brand)
+        _mine = [] if _guide else _manual_competitors(brand)   # FU216: a guide compares nobody
         _mine_in = []
         for _m in _mine:
             _hit = next((t for t in tools_u if _matches_competitor(t, [_m])), "")
@@ -4760,8 +5153,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # pause never asks about one, and the cells/prose scope to the same set the draft names.
         # Scoped to PROVIDERS: a generic OPTION (FU189 — a method/material/plan type) is not a brand
         # and has no price page, so it is neither priced nor excluded by the price table.
-        _priced_s = (getattr(self, "_priced_names", None) or []) if _px else []
-        if _px and not _priced_s:
+        _priced_s = (getattr(self, "_priced_names", None) or []) if (_px and not _guide) else []
+        if _px and not _guide and not _priced_s:
             # regenerate part=article/verify builds a fresh generator, so resolve the priced field
             # here too — the scope must not silently widen just because the entry point differed.
             _priced_s = _priced_competitor_names(brand, name)
@@ -4868,7 +5261,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 f"in Edit Brand")
             print(f"[blog_gen] {self._invented_note}", flush=True)
 
-        if not tools and not claims:
+        if not tools and not claims and not _guide:
             return None  # nothing to source or check
 
         fresh = []   # each: {"label","url","text"} — appended to _evidence_blocks in [S#] order
@@ -4885,7 +5278,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             prim = self.claude.search_sources(
                 f"the OFFICIAL primary source documenting {core_q} — the platform's / regulator's / "
                 f"standard-body's OWN policy, documentation or help page (NOT a third-party blog or "
-                f"review). Return the official page URL + the exact rule / requirement it states.",
+                f"review). Return the official page URL + the exact rule / requirement it states."
+                + (" It must be a NATIONAL or GENERAL authority (a national code body, federal agency, "
+                   "or standards / trade body) — NEVER a single city's or county's page." if _gnat else ""),
                 max_searches=2)
         except Exception:
             prim = []
@@ -4935,6 +5330,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] c2: '{(ttl or u)[:70]}' failed official validation — "
                       f"dropped (ymyl page)", flush=True)
 
+        # FU216: a county permit page is not a guide's authority — drop it BEFORE the YMYL gap check
+        # below counts the official sources (inert unless a guide with no geography).
+        fresh = self._guide_filter_blocks(fresh, brand, "official search")
+
         # FU133 (c2b): YMYL pages need REAL authoritative grounding — regulator labels +
         # professional guidelines — retrieved with validation + retries. If nothing validated
         # comes back, add a PAUSE item so the operator supplies the official URL (or skips)
@@ -4942,7 +5341,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         if ymyl:
             auth = self._gather_authoritative_sources(brand, seed, core_topic, ymyl,
                                                         products=products)
-            fresh.extend(auth)
+            fresh.extend(self._guide_filter_blocks(auth, brand, "YMYL official legs"))   # FU216
             # FU142: the pause now also fires when officials exist but NONE names the PRIMARY
             # product — six adjacent-molecule labels must never again count as "sourced".
             # Checked across ALL official blocks in fresh (the legacy c2 result included).
@@ -5437,7 +5836,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # figure, a PMC study). From here on CODE fills those cells, and only from an accepted entry.
         _price_ledger, _price_missing = {}, []
         _price_links_map = self._brand_price_links(brand)
-        if _px and any(_PRICE_DIM_RE.search(d or "") for d in dims):
+        if _px and not _guide and any(_PRICE_DIM_RE.search(d or "") for d in dims):
             # FU189: a generic OPTION (a method / material / plan type) is not a company and has no
             # price page — never buy a price search for one.
             _price_tools = [t for t in tools if not (tool_state.get(t) or {}).get("option")]
@@ -5453,7 +5852,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU213 (Change 5) — the SUBJECT's own price link: fetched and added as a first-party block so
         # the article cites it like the brand's own site. Code never writes the subject's own cell.
         _subj_dom213 = _dom(brand.get("domain_url") or "")
-        if _px and _subj_dom213:
+        if _px and not _guide and _subj_dom213:
             for _u in [str(x).strip() for x
                        in ((_price_links_map.get(_kf_slug(name)) or {}).get("urls") or [])
                        if str(x).strip()][:2]:
@@ -5587,7 +5986,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             _kf = {}
         _op_items = ([it for it in _kf_pricing_items(_kf)
                       if it.get("operator_set") and str(it.get("value") or "").strip()]
-                     if _px else [])   # FU162: pricing OFF ⇒ inject no operator price
+                     if (_px and not _guide) else [])   # FU162: pricing OFF ⇒ inject no operator price
+        #                                                  FU216: a guide prices no provider, the brand included
         for _it in _op_items:
             _cv = str(_it.get("value")).strip()
             _cp = str(_it.get("product") or "").strip()
@@ -5659,7 +6059,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
 
         _op_prod_slugs = {_kf_slug(it.get("product")) for it in _op_items}
         _subj_unpriced = []
-        for prod in (_products if (own_dom_s and _px) else []):   # FU162: no subject price search when OFF
+        for prod in (_products if (own_dom_s and _px and not _guide) else []):   # FU162 / FU216
             if not prod or _kf_slug(prod) in _op_prod_slugs:
                 continue   # operator value already injected — authoritative, don't auto-fetch
             _ptoks = _product_tokens(prod)
@@ -5686,7 +6086,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             print(f"[blog_gen] subject-price: unconfirmed for {', '.join(_subj_unpriced)}", flush=True)
 
         _pairs = []
-        for d in dims:
+        # FU216: the dimension rescue fills COMPARISON cells; a guide has no provider comparison to fill.
+        for d in ([] if _guide else dims):
             ws = _dim_words(d)
             if not ws:
                 continue
@@ -5848,7 +6249,26 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         _corr_claims = [c for c in claims[:20]
                         if (c.get("brand") or "").strip().lower() != name.lower()]
         corr = []
-        if _corr_claims or tools:
+        if _guide:
+            # FU216 — a guide's substance is the TOPIC, not the providers: corroborate the claims against
+            # standards, government guidance, trade associations and reputable publications. With no
+            # geography, national guidance only — never a single city's or county's page.
+            _gclaims = "; ".join(
+                f'{(c.get("dimension") or "")} = {(c.get("value") or c.get("claim") or "")}'.strip(" =")
+                for c in _corr_claims)
+            try:
+                corr = self.claude.search_sources(
+                    f"Find reputable INDEPENDENT sources (standards and code bodies, government guidance, trade "
+                    f"associations, reputable publications) about {core_topic or seed}, returning a factual "
+                    f"value + a source URL for each. Do NOT return company or provider pages, contractor "
+                    f"listings or 'best companies' roundups, and do NOT return pages that criticize {name}."
+                    + (" Seek NATIONAL or general guidance — never a single city's or county's page."
+                       if _gnat else f" Focus on {rgeo}-specific guidance where available.")
+                    + f" Claims: {_gclaims or seed}",
+                    max_searches=(_VERIFY_MAX_SEARCHES if deep else 3), blocked_domains=(blocked or None))
+            except Exception:
+                corr = []
+        elif _corr_claims or tools:
             claim_lines = "; ".join(
                 f'{(c.get("brand") or "?")}: {(c.get("dimension") or "")} = '
                 f'{(c.get("value") or c.get("claim") or "")}'.strip() for c in _corr_claims)
@@ -5976,6 +6396,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 _kept.append(_u)
             unsourced = _kept
 
+        # FU216: the corroboration and qualifier searches can return local pages too — one last pass.
+        fresh = self._guide_filter_blocks(fresh, brand, "corroboration")
+
         # FU204: the compared brand names, stashed for the citation-attribution check in
         # `_finalize_article` (which runs later and has no access to the extraction). Mirrors how
         # `_peer_note` / `_invented_note` / `_price_warn` already ride the instance.
@@ -6007,6 +6430,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 # FU184: competitors the model named itself (no curated entry, no evidence) — surfaced
                 # to the operator; rides the checkpoint so a FU79 resume keeps the flag.
                 "invented_tools": _invented,
+                # FU216: the guide choice + the verified service area ride the FU79 checkpoint, so the
+                # reconcile and a resumed blog follow the same rules. Absent (byte-identical) when off.
+                **({"guide": True, "service_area": list(getattr(self, "_guide_places", None) or [])}
+                   if _guide else {}),
                 "ymyl": ymyl or ""}  # FU133: vertical — reconcile rules + FU79 resume stay YMYL-aware
 
     def _reconcile_and_finish(self, brand, seed, article, sourcing):
@@ -6200,6 +6627,48 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     comparison sentence cites each side's own source; re-cite or generalize any claim currently
     resting on the wrong product's document."""
 
+        # FU216 — a GENERAL GUIDE (the flag rides `sourcing`, the checkpoint included). Three rules that
+        # would push a comparison back in — STAY NEUTRAL's "name the POOL", ENTITY-TYPE and the
+        # COMPETITOR FLOOR — are held as variables whose OFF value is the exact original text (the FU205
+        # golden proves it), and the guide gets ONE rule mirroring the writer's.
+        _peers_seg = f"PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}"
+        _neutral_rule = f"""  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
+    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
+    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
+    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
+"""
+        _floor_rule = f"""  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
+    comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
+    a supplementary category, and NEVER remove same-type competitors so that fewer than 3 same-type
+    competitors remain.
+  - COMPETITOR FLOOR (FU105): the comparison must KEEP AT LEAST 3 non-{name} competitors. When an
+    unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
+    offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
+    from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
+    value to hold the floor.
+"""
+        if sourcing.get("guide"):
+            _gpl = [str(x).strip() for x in (sourcing.get("service_area") or []) if str(x).strip()]
+            _floor_rule = ""
+            _peers_seg = "PEERS: none — a general guide compares no provider (see GENERAL GUIDE)"
+            _neutral_rule = (
+                f"  - GENERAL GUIDE (FU216 — a generic how-to / informational guide, NOT a comparison; this "
+                f"OVERRIDES every rule here about tools, rows, competitors and the comparison field): keep the "
+                f"answer generic and audience-wide. Do NOT add or keep a provider comparison, a table or list "
+                f"of companies, or ANY competitor / other provider name — remove one the draft contains, and "
+                f"delete a section that exists only to profile providers (an explicit exception to PRESERVE "
+                f"SUBSTANCE). A table of NON-provider dimensions (phases, materials, options) stays. {name} is "
+                f"the expert voice: never in the Quick answer, a heading, the FAQ or the meta description; at "
+                f"most TWO body mentions, where its own documented practice illustrates a step; and ONE "
+                f"closing call-to-action paragraph immediately before the FAQ. The balance section is \"when "
+                f"this does not apply / when to call a professional\", never alternatives. Do NOT stack "
+                f"praise or superlatives on {name}."
+                + (f"\n    NO GEOGRAPHY: {name} operates in {', '.join(_gpl)} — that is NOT this article's "
+                   f"geography. Never write those places (or any other city, county, region or state) "
+                   f"anywhere except the closing call-to-action; state local rules as general guidance "
+                   f"(\"check with your local building department\") — never a county or city office, phone "
+                   f"number or permit portal." if _gpl else "")
+                + "\n")
         # (d) reconcile: FILL the comparison from the fetched facts; no "—"; keep/expand dimensions
         start_idx = len(getattr(self, "_evidence_blocks", None) or []) + 1
         fresh_lines = "\n".join(
@@ -6317,11 +6786,7 @@ COMPLETE and every stated fact is sourced:
   - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
     facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
     that tool's whole row — never ship a kept row with a blank or "—" cell.
-  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
-    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
-    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
-    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
-  - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
+{_neutral_rule}  - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
     subject's MECHANICS (the rules, procedures and constraints that determine the outcome). Never
     trade a mechanic for more rankings, awards or accreditations — those are commodity content and
     must not grow at the expense of substance.
@@ -6341,16 +6806,7 @@ COMPLETE and every stated fact is sourced:
   - Never STRENGTHEN a conditioned commerce claim by dropping its condition — keep "on qualifying
     purchases" / "in most states" / "up to $N" attached EVERYWHERE the claim is restated, including the
     Quick answer.
-  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
-    comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
-    a supplementary category, and NEVER remove same-type competitors so that fewer than 3 same-type
-    competitors remain.
-  - COMPETITOR FLOOR (FU105): the comparison must KEEP AT LEAST 3 non-{name} competitors. When an
-    unsourceable CELL would force a row-drop that leaves fewer than 3 competitors, PREFER dropping the
-    offending COLUMN (allowed when a dimension can't be sourced for most tools) or filling the cell
-    from the FRESH FACTS — drop the row only when that tool has NO usable facts at all. NEVER invent a
-    value to hold the floor.
-  - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
+{_floor_rule}  - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
     invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}
@@ -6358,7 +6814,7 @@ COMPLETE and every stated fact is sourced:
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
 TOOLS: {json.dumps(tools, ensure_ascii=False)}
-PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}{_opt_line}{_rm_line}{_mine_line}{_priced_line}
+{_peers_seg}{_opt_line}{_rm_line}{_mine_line}{_priced_line}
 DIMENSIONS (keep all): {json.dumps(dims, ensure_ascii=False)}
 CLAIMS TO VERIFY:
 {json.dumps(claims[:20], ensure_ascii=False)}
@@ -6386,7 +6842,7 @@ ARTICLE (Markdown):
               f"{changed} cell(s)/claim(s) filled-or-changed, {len(fresh)} fresh source(s)", flush=True)
         return {"body_markdown": rres["revised_body_markdown"], "flagged": flagged}
 
-    def generate_linkedin(self, brand, seed, article, geo=""):
+    def generate_linkedin(self, brand, seed, article, geo="", guide=False):
         """LinkedIn-native adaptation of the article. Returns the post text or "".
 
         FU87 — the post is a RETRIEVAL asset, not a teaser: it opens with the target query as a
@@ -6407,6 +6863,25 @@ ARTICLE (Markdown):
                 f"already contain it); prefer the article's {rgeo}-specific facts for the nugget "
                 f"and the body lines. NEVER write hedge language ('unverified', 'coverage unknown', "
                 f"'not confirmed for this region').")
+        # FU216 — a GENERAL GUIDE post: a generic answer with nobody named in it, no against-interest line
+        # (that line NAMES an alternative), and the service area only in the call-to-action. The OFF
+        # values below are the exact original lines, so a comparison post is byte-identical.
+        _li_answer = ("    LINE 2: the direct ANSWER with the specific tools/platforms/options NAMED — a complete,\n"
+                      "    self-contained answer; keep any nuance as a SECOND clause AFTER the named answer.\n")
+        _li_against = (f"\n  - AGAINST-INTEREST LINE (mandatory): one sentence naming where an ALTERNATIVE beats {name}\n"
+                       f"    (\"If you want X, <alternative> is the better pick — that's not what we optimized for\").\n"
+                       f"    This is what makes a brand post shareable instead of scrollable.")
+        _li_name = f"name {name} once as the natural recommendation"
+        if guide:
+            _li_answer = ("    LINE 2: the direct, GENERIC ANSWER — the steps or principles that hold for any reader.\n"
+                          "    Name no company, provider or competitor; keep any nuance as a SECOND clause.\n")
+            _li_against = ""
+            _li_name = f"name {name} once, in the closing call-to-action only"
+            _gpl = [] if rgeo else list(getattr(self, "_guide_places", None) or [])
+            if _gpl:
+                geo_rule = (f"\n  - NO GEOGRAPHY: this is a general guide. {name} operates in {', '.join(_gpl)} — "
+                            f"that is NOT the post's geography. Never write those places, or any other locality, "
+                            f"except in the call-to-action line.")
         prompt = f"""Adapt this article into a LinkedIn-native post for {name} (first-party company voice).
 The post's job is RETRIEVAL for the target query below — a self-contained citation candidate —
 as well as being useful and shareable to humans.
@@ -6419,19 +6894,14 @@ ARTICLE (the ONLY admissible facts — carry facts over, do NOT copy its wording
 Write the post:
   - OPENING = THE LIFTABLE CHUNK (engines and LinkedIn's "see more" fold both cut here):
     LINE 1: the target query as a natural QUESTION (verbatim or a close natural variant).
-    LINE 2: the direct ANSWER with the specific tools/platforms/options NAMED — a complete,
-    self-contained answer; keep any nuance as a SECOND clause AFTER the named answer.
-    NEVER open with a teaser, a stall, or a curiosity hook ("The honest answer is: it depends…",
+{_li_answer}    NEVER open with a teaser, a stall, or a curiosity hook ("The honest answer is: it depends…",
     "Let me break down…", "I'm excited to share", "Hot take:").
   - ONE CONCRETE NUGGET: include exactly ONE specific, quotable datum in the visible text — a
     number, a price, a license clause, or a specific capability claim — taken ONLY from the
-    ARTICLE's facts. Never invent it and never strengthen it beyond what the article states.
-  - AGAINST-INTEREST LINE (mandatory): one sentence naming where an ALTERNATIVE beats {name}
-    ("If you want X, <alternative> is the better pick — that's not what we optimized for").
-    This is what makes a brand post shareable instead of scrollable.{geo_rule}
+    ARTICLE's facts. Never invent it and never strengthen it beyond what the article states.{_li_against}{geo_rule}
   - Then 3-6 short, skimmable lines (line breaks, NOT Markdown headings) — same facts as the
     article, DIFFERENT words.
-  - First-party company voice ("we"); name {name} once as the natural recommendation. NEVER use
+  - First-party company voice ("we"); {_li_name}. NEVER use
     fake-discovery framing about {name} ("just found this tool…") and no manufactured social proof.
   - A soft CTA with a link placeholder written exactly as {{link}}.
   - 3-5 relevant hashtags at the end.
@@ -7345,7 +7815,7 @@ you MAY assume the description will carry: "{disc}".
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
                       qualifier="", internal_links=False, sibling_links=None, ymyl=None,
                       refresh_competitor_facts=False, refresh_competitor_slugs=None,
-                      include_pricing=True):
+                      include_pricing=True, guide=False):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -7374,12 +7844,20 @@ you MAY assume the description will carry: "{disc}".
         if rymyl:
             print(f"[blog_gen] ymyl: '{rymyl}' vertical resolved — authoritative sourcing ON", flush=True)
         self._ci_ymyl = rymyl   # FU212: instruction sources already covered by the YMYL legs aren't searched twice
+        # FU216 — GENERAL GUIDE (the operator's toggle). Prepared BEFORE evidence is gathered: the local
+        # filter there needs the brand's service area. Returns the effective geography — the operator's
+        # entry, or one of the brand's own places when the seed itself names it. The URLs typed for THIS
+        # blog are remembered so they are never filtered (the brand's stored known sources are).
+        geo = self._prepare_guide(brand, seed, geo, guide=guide)
+        self._guide_keep_urls = {str(u).strip().rstrip("/").lower() for u in (source_urls or [])
+                                 if str(u).strip()}
         # FU214 (Change 5) — the brands the operator PRICED become this article's comparison field.
         # Resolved before the writer runs so the DRAFT already names exactly them (the brand block +
         # the MINIMUM COMPETITORS override both read this), instead of the reconcile deleting rows.
         # Ignored when "Include pricing" is off — there is no comparison on price to scope.
+        # FU216: and ignored for a general guide, which compares nobody.
         self._priced_names = _priced_competitor_names(brand, (brand or {}).get("name") or "") \
-            if include_pricing else []
+            if (include_pricing and not guide) else []
         self._priced_excluded_mine, self._priced_topups, self._priced_over_cap = [], [], []
         if self._priced_names:
             print(f"[blog_gen] price-table: {len(self._priced_names)} priced brand(s) lead the "
@@ -7433,7 +7911,8 @@ you MAY assume the description will carry: "{disc}".
                                         qualifier=qualifier,   # FU93
                                         internal_links=internal_links, link_targets=link_targets,
                                         ymyl=rymyl,   # FU133
-                                        key_facts=key_facts, key_facts_products=seed_products)   # FU150
+                                        key_facts=key_facts, key_facts_products=seed_products,   # FU150
+                                        guide=guide)   # FU216
         if not article:
             return None
         if kf_warning:
@@ -7454,7 +7933,8 @@ you MAY assume the description will carry: "{disc}".
                                                ymyl=rymyl,   # FU133
                                                refresh_competitor_facts=refresh_competitor_facts,   # FU151
                                                refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
-                                               include_pricing=include_pricing)   # FU162
+                                               include_pricing=include_pricing,   # FU162
+                                               guide=guide)   # FU216
         if allow_pause and sourcing and sourcing.get("unsourced"):
             return {"_pending": self._pause_sentinel(sourcing, article, draft_body)}
         if sourcing and sourcing.get("fresh"):
@@ -7466,7 +7946,8 @@ you MAY assume the description will carry: "{disc}".
                                       qualifier=qualifier,   # FU93
                                       ymyl=rymyl,   # FU133
                                       include_pricing=include_pricing,   # FU213 (Change 6)
-                                      link_targets=link_targets)   # FU151 (D): internal-link honesty
+                                      link_targets=link_targets,   # FU151 (D): internal-link honesty
+                                      guide=guide)   # FU216
 
     # ------------------------------------------------------------------ FU153 writer pass
     @staticmethod
@@ -9512,7 +9993,8 @@ you MAY assume the description will carry: "{disc}".
                 setattr(self, k, v)
 
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
-                          ymyl=None, link_targets=None, with_linkedin=True, include_pricing=True):
+                          ymyl=None, link_targets=None, with_linkedin=True, include_pricing=True,
+                          guide=False):
         """FU79 — the shared TAIL of generate_blog / finish_pending_blog: substance guard → deterministic
         ## Sources rebuild → LinkedIn adaptation → prompt version + real dollar cost. FU90: also runs the
         geo-check — a WARNING (never a block) when a geo page barely mentions its geography. FU151 (D):
@@ -9534,6 +10016,11 @@ you MAY assume the description will carry: "{disc}".
             if _nr or _ns:
                 print(f"[blog_gen] remove-brand: stripped {_nr} table row(s) and {_ns} section(s) "
                       f"naming {', '.join(_rm206)}", flush=True)
+        # FU216: a GENERAL GUIDE's reconcile deletes a section that exists only to profile providers or a
+        # locality. The substance guard below would restore it straight from the draft, so those sections
+        # leave the DRAFT first (the FU206b precedent). Inert unless a guide.
+        if guide:
+            draft_body = self._guide_strip_sections(draft_body, brand)
         # FU54 substance guard: restore any whole section the verify/reconcile rewrite dropped (source-first
         # — the official primary source is force-kept regardless), and log any concrete stat that went missing.
         article["body_markdown"] = self._restore_dropped_sections(draft_body, article.get("body_markdown") or "")
@@ -9683,10 +10170,10 @@ you MAY assume the description will carry: "{disc}".
                      "client's actual tax policy and qualify before publishing")
             print(f"[blog_gen] {cnote}", flush=True)
             self._warn(article, cnote)
-        _pn = getattr(self, "_peer_note", "")
+        _pn = "" if guide else getattr(self, "_peer_note", "")   # FU216: a guide has no peer field
         if _pn:   # FU98: surfaced on the same toast channel as the geo/qualifier/claim checks
             self._warn(article, _pn)
-        _in184 = getattr(self, "_invented_note", "")
+        _in184 = "" if guide else getattr(self, "_invented_note", "")
         if _in184:  # FU184: a compared competitor the model named itself (not curated, not evidenced)
             self._warn(article, _in184)
         # FU138: unsourced-table resolution outcome. FU205 (R3): the union of BOTH rebuilds — the
@@ -9865,7 +10352,8 @@ you MAY assume the description will carry: "{disc}".
             _data = _rows[1:] if len(_rows) > 1 else []   # drop the header row
             _nm_re = re.compile(r"\b" + re.escape(_bname) + r"\b", re.I) if _bname else None
             _comp_rows = [r for r in _data if not (_nm_re and _nm_re.search(r))]
-            if len(_comp_rows) < _MIN_COMPARISON_BRANDS:
+            # FU216: a guide's table compares phases or materials, not providers — no floor applies.
+            if len(_comp_rows) < _MIN_COMPARISON_BRANDS and not guide:
                 # FU214 (Change 5) — when the operator priced the field, the floor YIELDS. Padding a
                 # short field with a brand they did not price is what the price table exists to stop,
                 # so this reports the choice instead of demanding more competitors. Any of YOUR
@@ -9988,7 +10476,7 @@ you MAY assume the description will carry: "{disc}".
                     + f"{_PRICED_FIELD_MAX} brands to stay readable")
             print(f"[blog_gen] {_ozn}", flush=True)
             self._warn(article, _ozn)
-        _mine_z = [m for m in _manual_competitors(brand)
+        _mine_z = [] if guide else [m for m in _manual_competitors(brand)   # FU216: a guide names none
                    if not _matches_competitor(m, getattr(self, "_removed_brands", None) or [])]
         if _mine_z:
             _bz = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", article.get("body_markdown") or "",
@@ -10027,8 +10515,17 @@ you MAY assume the description will carry: "{disc}".
         if _bnote:
             print(f"[blog_gen] {_bnote}", flush=True)
             self._warn(article, _bnote)
+        # FU216 — the guide-check (warning only, never a rewrite): the service area outside the closing
+        # call-to-action, or a competitor named anywhere in the body.
+        if guide:
+            article["guide"] = True
+            _gcn = self._guide_check(article, brand, seed, geo=geo)
+            if _gcn:
+                print(f"[blog_gen] {_gcn}", flush=True)
+                self._warn(article, _gcn)
         if with_linkedin:   # FU205 (R1): off for the partial-regenerate paths — see the docstring
-            article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo)   # FU91
+            article["linkedin_text"] = self.generate_linkedin(brand, seed, article, geo=geo,   # FU91
+                                                              guide=guide)   # FU216
         article["prompt_version"] = PROMPT_VERSION
         # FU205 (R2): the pricing-conflict alert (FU150) was toast-only — never persisted, never folded
         # into the warning list, so `_quality_report` could not see it and it vanished on reload.
@@ -11760,7 +12257,7 @@ you MAY assume the description will carry: "{disc}".
         add("question_headings", "Question-shaped headings", _qh >= 1, f"{_qh} found")
         add("faq", "FAQ section present",
             bool(re.search(r"(?im)^#{1,4}\s*(faq|frequently asked)", body)) or bool(_parse_faq_pairs(body)))
-        _ents = _first_table_entities(body)
+        _ents = [] if article.get("guide") else _first_table_entities(body)   # FU216: a guide compares nobody
         if _ents:
             _comp = [e for e in _ents if not (name and name.lower() in e.lower())]
             add("comparison", "Comparison names ≥3 competitors", len(_comp) >= 3,
@@ -11837,6 +12334,11 @@ you MAY assume the description will carry: "{disc}".
         # FU213: the verified price ledger rides the checkpoint, so a RESUMED blog writes the same
         # code-written cells as an unpaused one.
         self._price_ledger = dict(sourcing.get("prices") or {})
+        # FU216: a paused GENERAL GUIDE resumes as a guide — same brand block, same service area (no
+        # second lookup), same reconcile rule, same finalize checks.
+        self._guide = bool(sourcing.get("guide"))
+        self._guide_places = [str(x).strip() for x in (sourcing.get("service_area") or [])
+                              if str(x).strip()] if self._guide else []
         # FU214: the priced comparison field rides the checkpoint too, so a RESUMED blog keeps the
         # same scope (the brand block, the reconcile rule and the floor warning all read these).
         self._priced_names = [str(x).strip() for x in (sourcing.get("priced") or []) if str(x).strip()]
@@ -12004,7 +12506,8 @@ you MAY assume the description will carry: "{disc}".
                                       # checkpoint, so a RESUMED blog writes the same cells and
                                       # obeys the same "no pricing" rule as an unpaused one.
                                       include_pricing=bool(sourcing.get("include_pricing", True)),
-                                      with_linkedin=ck.get("part") in (None, "all"))
+                                      with_linkedin=ck.get("part") in (None, "all"),
+                                      guide=bool(sourcing.get("guide")))   # FU216
 
 
 # ----------------------------------------------------------------------------- JSON-LD
@@ -12389,7 +12892,8 @@ def build_blog_jsonld(blog, brand=None, page_url=""):
                                     "name": (re.split(r"[.:]", s)[0] or s)[:80], "text": s}
                                    for s in steps]})
     # FU151 (C) — ItemList: the compared entities when a comparison table exists.
-    entities = _first_table_entities(body_md)
+    # FU216: a general guide's table lists phases or materials, never providers — no ItemList.
+    entities = [] if blog.get("guide") in (1, "1", True) else _first_table_entities(body_md)
     if len(entities) >= 2:
         graph.append({"@type": "ItemList",
                       "itemListElement": [{"@type": "ListItem", "position": i + 1, "name": e}

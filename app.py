@@ -3280,6 +3280,7 @@ def api_blog_generate():
     qualifier = (data.get("qualifier") or "").strip()   # FU93: explicit variant qualifier — wins too
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
     include_pricing = bool(data.get("include_pricing", True))   # FU162: default ON; unchecked = skip ALL pricing
+    guide = bool(data.get("guide", False))   # FU216: a generic how-to guide — default OFF (a comparison)
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
                                 if str(s).strip()]   # FU160: selectively refresh only these competitors
@@ -3354,7 +3355,8 @@ def api_blog_generate():
                 ymyl=ymyl_arg,                               # FU133
                 refresh_competitor_facts=refresh_competitor_facts,   # FU151 (A)
                 refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
-                include_pricing=include_pricing)   # FU162
+                include_pricing=include_pricing,   # FU162
+                guide=guide)   # FU216
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -3382,6 +3384,8 @@ def api_blog_generate():
                     gen_cost=gcost, **byline,
                 )
                 bg.update_blog(blog_id, pending_state=json.dumps(pending))
+                if guide:
+                    bg.update_blog(blog_id, guide=1)   # FU216: resume + regenerate reuse it
                 bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else   # FU133
                                               (pending.get("checkpoint", {}).get("sourcing", {}).get("ymyl") or "")))
                 if geo:
@@ -3423,6 +3427,8 @@ def api_blog_generate():
             )
             if geo:
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
+            if guide:
+                bg.update_blog(blog_id, guide=1)   # FU216: persisted → regenerate reuses it
             # FU133: persist the RESOLVED vertical ('off' when the user explicitly unticked).
             bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else (blog.get("ymyl") or "")))
             if qualifier:
@@ -3528,6 +3534,13 @@ def api_blog_regenerate(blog_id):
             stored_ymyl = (False if _sy == "off" else (_sy or None))
             stored_il = bool(blog.get("internal_links"))   # FU114: reuse the linking choice
             stored_px = (blog.get("include_pricing", 1) != 0)   # FU162: reuse the pricing choice
+            stored_guide = bool(blog.get("guide"))   # FU216: reuse the general-guide choice
+            # FU216: prepared BEFORE the evidence fetch below (its local filter needs the service area).
+            # The effective geography may be a place the seed names; this blog's own stored source
+            # URLs are the operator's input for THIS blog, so they are never filtered out.
+            stored_geo = gen._prepare_guide(brand, seed, stored_geo, guide=stored_guide)
+            gen._guide_keep_urls = {str(u).strip().rstrip("/").lower() for u in (stored_urls or [])
+                                    if str(u).strip()}
             sib_links = []
             try:   # FU90: sibling titles (excluding this blog) so the regen stays differentiated
                 _sibs = bg.get_all_blogs(brand_id=blog.get("brand_id"))
@@ -3583,6 +3596,7 @@ def api_blog_regenerate(blog_id):
                                           internal_links=stored_il, sibling_links=sib_links,  # FU114
                                           ymyl=stored_ymyl,                            # FU133
                                           include_pricing=stored_px,                   # FU162
+                                          guide=stored_guide,                          # FU216
                                           allow_pause=True)                            # FU207: ask, like Generate
                 if fresh and fresh.get("_pending"):
                     fresh["_pending"]["checkpoint"]["part"] = "all"
@@ -3623,7 +3637,8 @@ def api_blog_regenerate(blog_id):
                 a = gen.generate_article(brand, seed, extra_keywords=keywords, evidence=evidence,
                                          geo=stored_geo, sibling_titles=sib_titles,   # FU90
                                          qualifier=stored_qual,                       # FU93
-                                         internal_links=stored_il, link_targets=_lt)  # FU114
+                                         internal_links=stored_il, link_targets=_lt,  # FU114
+                                         guide=stored_guide)                          # FU216
                 if not a:
                     raise ValueError(claude.last_error or "Article regeneration failed")
                 # FU205 (R1): keep the pre-rewrite draft. `verify_claims` and the reconcile inside
@@ -3639,7 +3654,8 @@ def api_blog_regenerate(blog_id):
                 a["claims_flagged"] = flagged   # FU207: carried through a pause, so the resume keeps it
                 vc = gen.verify_and_complete(brand, seed, a, deep=stored_deep, geo=stored_geo,
                                              qualifier=stored_qual, include_pricing=stored_px,   # FU93/162
-                                             allow_pause=True, draft_body=_draft, part="article")   # FU207
+                                             allow_pause=True, draft_body=_draft, part="article",   # FU207
+                                             guide=stored_guide)   # FU216
                 if vc and vc.get("_pending"):
                     return _park(vc["_pending"])
                 if vc:
@@ -3650,7 +3666,8 @@ def api_blog_regenerate(blog_id):
                 # instead of the lone `_rebuild_sources` this branch used to hand-roll.
                 gen._finalize_article(brand, seed, a, _draft, geo=stored_geo, qualifier=stored_qual,
                                       ymyl=stored_ymyl, link_targets=_lt, with_linkedin=False,
-                                      include_pricing=stored_px)   # FU213
+                                      include_pricing=stored_px,   # FU213
+                                      guide=stored_guide)   # FU216
                 body = a.get("body_markdown", "")
                 _part_warn = a.get("geo_warning", "")
                 _part_qr = a.get("quality_report") or {}
@@ -3679,7 +3696,8 @@ def api_blog_regenerate(blog_id):
                                              {**article, "body_markdown": body_md, "claims_flagged": flagged},
                                              deep=stored_deep, geo=stored_geo,
                                              qualifier=stored_qual, include_pricing=stored_px,   # FU93/162
-                                             allow_pause=True, draft_body=_draft, part="verify")   # FU207
+                                             allow_pause=True, draft_body=_draft, part="verify",   # FU207
+                                             guide=stored_guide)   # FU216
                 if vc and vc.get("_pending"):
                     return _park(vc["_pending"])
                 if vc:
@@ -3689,7 +3707,8 @@ def api_blog_regenerate(blog_id):
                 _fa = {**article, "body_markdown": body_md}
                 gen._finalize_article(brand, seed, _fa, _draft, geo=stored_geo,
                                       qualifier=stored_qual, ymyl=stored_ymyl, with_linkedin=False,
-                                      include_pricing=stored_px)   # FU213
+                                      include_pricing=stored_px,   # FU213
+                                      guide=stored_guide)   # FU216
                 _part_warn = _fa.get("geo_warning", "")
                 _part_qr = _fa.get("quality_report") or {}
                 _part_warnings = _fa.get("warnings") or []
@@ -3698,7 +3717,8 @@ def api_blog_regenerate(blog_id):
                                claims_flagged=flagged,
                                prompt_version=_bg_prompt_version)   # FU183: no longer "imported"
             elif part == "linkedin":
-                li = gen.generate_linkedin(brand, seed, article, geo=stored_geo)   # FU91
+                li = gen.generate_linkedin(brand, seed, article, geo=stored_geo,   # FU91
+                                           guide=stored_guide)   # FU216
                 bg.update_blog(blog_id, linkedin_text=_sub_link(li or "",
                                                                 _blog_link_target(blog, brand)))   # FU81
             # FU207: a regenerate that completed supersedes any pause still sitting on this blog —
@@ -4399,8 +4419,11 @@ def api_blog_patch(blog_id):
                # so a manual edit to the watermark-free version was silently discarded on save.
                "rewritten_body",
                "linkedin_rewritten", "linkedin_article_rewritten",   # FU179
-               "verified_body", "verified_meta_description")         # FU208
+               "verified_body", "verified_meta_description",         # FU208
+               "guide")                                              # FU216: flip, then regenerate
               if k in data}
+    if "guide" in fields:
+        fields["guide"] = 1 if fields["guide"] in (True, 1, "1", "true", "on") else 0
     if not fields:
         return jsonify({"error": "no editable fields supplied"}), 400
     db = get_db()

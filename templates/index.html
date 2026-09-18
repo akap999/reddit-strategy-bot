@@ -13100,6 +13100,11 @@ async function renderBlogs(c) {
                 <span class="text-gray-600">— research &amp; compare per-product prices, canonical prices and price cells (default on). UNCHECK for a non-pricing blog (how-to, doctor-led comparison) to skip ALL pricing work — no pricing searches, no price cells, cheaper.</span>
             </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
+                <input type="checkbox" id="blog-gen-guide">
+                📘 General guide
+                <span class="text-gray-600">— a generic how-to / informational article: no competitor comparison, and your service area only in the closing call-to-action (default off). A Geography you enter above still applies. Skips all competitor sourcing, so it is cheaper.</span>
+            </label>
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
                 <input type="checkbox" id="blog-gen-refresh-competitors" onchange="_blogRefreshCbToggle()">
                 🔄 Refresh competitor data
                 <a href="javascript:void(0)" onclick="event.preventDefault();blogCompetitorCacheModal(+document.getElementById('blog-gen-brand').value, 'refresh')" class="underline text-blue-400">choose / view…</a>
@@ -13798,6 +13803,7 @@ function blogGenerate() {
     const deep_verify = !!document.getElementById('blog-gen-deepverify')?.checked;
     const internal_links = !!document.getElementById('blog-gen-internal-links')?.checked;   // FU114
     const include_pricing = document.getElementById('blog-gen-pricing')?.checked !== false;   // FU162: default ON
+    const guide = !!document.getElementById('blog-gen-guide')?.checked;   // FU216: default OFF
     // FU160: selective competitor-cache refresh — a per-competitor selection from the popup wins;
     // else the plain checkbox = refresh ALL (back-compat).
     const _rs = window._blogRefreshSel || { all: false, slugs: [] };
@@ -13817,7 +13823,7 @@ function blogGenerate() {
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, guide, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -14286,6 +14292,8 @@ async function openBlog(id) {
         redNote = ` · <span class="${cls}" title="${_blogEsc(b.reddit_url)}">Reddit ${label}</span>`;
     }
     const dvNote = b.deep_verify ? ` · <span class="text-cyan-400" title="Facts were independently re-checked via a separate web search">🔍 deep-verified</span>` : '';
+    // FU216: a general guide — no comparison, service area only in the closing call-to-action.
+    const guideNote = Number(b.guide || 0) ? ` · <span class="text-sky-400" title="General guide: no competitor comparison; the brand's service area appears only in the closing call-to-action">📘 general guide</span>` : '';
     const _gc = Number(b.gen_cost || 0);
     const costNote = _gc > 0 ? ` · <span class="text-gray-400" title="Approx. API cost (tokens + web searches) to generate this blog">≈ $${_gc.toFixed(2)} to generate</span>` : '';
     // FU59: LinkedIn Article — persona voice-seed dropdown from the brand's fit(yes/maybe) personas.
@@ -14475,7 +14483,7 @@ async function openBlog(id) {
     }
     showModal(`
         <div class="flex justify-between items-center mb-2"><h3 class="text-lg font-bold" style="color:#c084fc">Blog</h3><button onclick="closeModal()" class="text-gray-400 text-xl leading-none">&times;</button></div>
-        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${costNote}</p>
+        <p class="text-xs text-gray-500 mb-2">Seed: ${_blogEsc(b.seed || '')} · ${claimNote}${srcNote}${redNote}${dvNote}${guideNote}${costNote}</p>
         ${qualityPanel}
         ${pendBanner}
         ${vxBanner}
@@ -14629,6 +14637,7 @@ async function openBlog(id) {
                 <div class="mt-2"><label class="text-xs text-gray-400">Article image URL <span class="text-gray-600">(Article schema image)</span></label><input id="blog-e-image" value="${_blogEsc(b.image_url || '')}" placeholder="https://…/hero.jpg"></div>
                 <div class="mt-2"><label class="text-xs text-gray-400">Geography <span class="text-gray-600">(the page's target geo — drives geo-specific sourcing + content on regenerate; blank = auto-detect from the seed)</span></label><input id="blog-e-geo" value="${_blogEsc(b.geo || '')}" placeholder="e.g. US · California · London"></div>
                 <div class="mt-2"><label class="text-xs text-gray-400">Focus / qualifier <span class="text-gray-600">(the page's variant angle — drives qualifier-specific sourcing + substance on regenerate; blank = auto-detect from a trailing "with …")</span></label><input id="blog-e-qualifier" value="${_blogEsc(b.qualifier || '')}" placeholder="e.g. financing · free shipping"></div>
+                <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer"><input type="checkbox" id="blog-e-guide" style="width:auto;flex:none" ${Number(b.guide || 0) ? 'checked' : ''}> <span>📘 General guide <span class="text-gray-600">— no competitor comparison, service area only in the closing call-to-action. Save, then Regenerate to apply.</span></span></label>
             </details>
             <div class="card p-2" style="background:#1a1030"><div class="text-xs text-gray-400 mb-1">Publish (paste the live URL after you post it)</div>${platRows}</div>
             <div id="blog-backlinks-note"></div>
@@ -14694,6 +14703,8 @@ async function blogSave(id) {
             youtube_persona: _v('blog-e-yt-persona'),
             geo: _v('blog-e-geo'),
             qualifier: _v('blog-e-qualifier'),
+            // FU216: only sent when the modal's checkbox is showing (never flips a blog by accident)
+            ...(document.getElementById('blog-e-guide') ? { guide: !!document.getElementById('blog-e-guide').checked } : {}),
             rewritten_body: _v('blog-e-rw'),   // FU154: watermark-free version (manual edits persist)
             // FU208: the verified version — only sent when its card is showing (never blanks it)
             ...(document.getElementById('blog-e-vf') ? { verified_body: _v('blog-e-vf'),

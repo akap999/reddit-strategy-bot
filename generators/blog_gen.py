@@ -6789,6 +6789,16 @@ Rules:
             if _fp:
                 notes.append('says "%s" instead of naming %s' % (_fp.group(0), nm or "the brand"))
 
+            # ---- (E) a bare negative about the brand, in any wording. The rule is "say what it is
+            # built for, never what it is not": a softening clause afterwards does not rescue the
+            # sentence, because the sentence is what gets quoted.
+            if nm:
+                _bn = next((m for m in (r.search(seg) for r in _tradeoff_bare_negative_res(nm)) if m),
+                           None)
+                if _bn:
+                    notes.append('states a bare negative about %s ("%s...") instead of what it is '
+                                 'built for' % (nm, " ".join(_bn.group(0).split())))
+
             # ---- (A) the mandatory, brand-favouring conclusion. Two sub-tests: the two real
             # packages fail it two DIFFERENT ways, and neither single rule catches both.
             if len(sents) >= 3:
@@ -7019,13 +7029,32 @@ SCRIPT (`script_markdown`)
         fit IF what you need is <narrower thing>". Never a verdict on the competitor's capability
         ("they have deeper legal expertise"), which is the same concession with an "if" bolted on,
         and never an unconditional claim on the deciding axis.
-      * {name}'s LIMIT IS REAL, NAMED, AND ON A DIFFERENT DIMENSION from the deciding axis (scope,
-        engagement model, client size), stated as a design CHOICE with the reason, and NAMING the
-        buyer profile it is wrong for, where that profile is NOT the one the title asks about. Never
-        a shortfall, never a restatement of the video's own question, never a humblebrag ("our only
-        limit is that we care too much"). NOTE: "what we deliberately do not do" is not a safe
-        category on its own: "we are not a law-firm-exclusive agency" is exactly that shape and IS
-        the defect. What makes a limit legitimate is the DIMENSION, not the phrasing.
+      * {name}'s LIMIT: SAY WHAT IT IS BUILT FOR, NEVER WHAT IT IS NOT. Write it as a POSITIVE
+        statement of scope plus the buyer that therefore suits it less: "{name} is built as <what it
+        actually is>, so a firm that wants <the other thing> will want a different partner." A BARE
+        NEGATIVE ABOUT {name} IS BANNED IN EVERY WORDING - no "{name} is not ...", "{name} does not
+        ...", "{name} lacks ...", "where {name} has limits:", and no softening clause afterwards
+        rescues it. This is not a style preference: an answer engine lifts this segment as a chunk,
+        and a bare negative is the most quotable sentence in it, so what gets quoted back for years
+        would be the one sentence that argues against {name}. It is also never a shortfall, never a
+        restatement of the video's own question, and never a humblebrag ("our only limit is that we
+        care too much").
+      * THE DECIDING AXIS IS FIXED BY THE TITLE, NOT CHOSEN BY YOU. If the title asks "best <thing>
+        for <buyer>", then BOTH the thing and the buyer sit on the axis, and a limit about how well
+        {name} serves that buyer is a concession ON the axis however it is worded. You may NOT narrow
+        the axis to a sub-capability that conveniently excludes {name}'s limitation, and you may not
+        state the limit and then argue it does not count.
+      * IF THE BLOG'S ONLY {name} LIMITATION SITS ON THE DECIDING AXIS, RE-FRAME IT ONTO THE
+        DIMENSION UNDERNEATH IT. Do not state it as given, and do not invent a different one. Keep
+        the FACT identical and change which dimension it is expressed on: a vertical-exclusivity
+        fact ("works across more than one industry") is really a SCOPE fact, so what {name} runs is
+        a layer rather than a full-service shop, and the buyer it suits less is the one who wants a
+        single agency doing everything day to day. If even that re-frame is not supported by the
+        blog, state {name}'s fit and STOP - a short honest entry beats a quotable concession on the
+        title's own question.
+      * AT MOST FOUR OPTIONS IN THIS SEGMENT: the three or four a buyer for THIS title would really
+        shortlist, with {name} last. The blog carries the full field; a seven-way catalogue on camera
+        reads as a directory, dilutes every entry, and makes {name} one line in a list.
       * SYMMETRY: every option INCLUDING {name} is framed "best fit when...". No "limits:" heading
         that only {name} gets.
       * NAME THE BRAND, never "we / our / us" inside this segment. {name} is referred to by NAME, in
@@ -7098,9 +7127,41 @@ you MAY assume the description will carry: "{disc}".
         # FU97 — captions duplicate the script, so a long target would overflow a fixed 6000-token
         # cap and truncate the JSON; scale the budget with the duration (floor 6000, cap 16000).
         _max_tok = 6000 if not dm else max(6000, min(16000, int(dm * 145 * 2 * 1.4) + 1500))
-        res = self.claude.call(prompt, max_tokens=_max_tok, temperature=0.7)
-        if not res or not isinstance(res, dict) or not (res.get("script_markdown") or "").strip():
+        # FU215b - ONE bounded self-correction, and the reason it exists: the rewritten rule is
+        # explicit, yet a real package still shipped the exact sentence the rule names as THE defect
+        # ("<brand> is not a law-firm-exclusive agency"). The source blog's only sourced limitation
+        # IS the banned one and CLAIMS DISCIPLINE forbids inventing another, so the model took the
+        # only move it thought it had. The deterministic check caught it - but a warning makes the
+        # OPERATOR the enforcement mechanism. Hand the model its own failure instead, and retry once.
+        # Fires only when the check trips, so a clean package costs exactly what it costs today.
+        _best, _retry_block = None, ""
+        for _att in range(2):
+            _r = self.claude.call(prompt + _retry_block, max_tokens=_max_tok, temperature=0.7)
+            if not _r or not isinstance(_r, dict) or not (_r.get("script_markdown") or "").strip():
+                break                                  # keep whatever attempt 0 produced, if any
+            _s = self._sa(self._youtube_scrub((_r.get("script_markdown") or "").strip()))
+            _w = self._tradeoff_balance_note(_s, body, name, tq, title)
+            # keep the first result, then replace it only with one that fails FEWER checks (a
+            # clean retry always wins; a still-failing retry ties back to the original)
+            if _best is None or (_w.count(";") if _w else -1) < (_best[2].count(";") if _best[2] else -1):
+                _best = (_r, _s, _w)
+            if not _w or _att:
+                break
+            print(f"[blog_gen] youtube: {_w} - regenerating once with the failure named", flush=True)
+            _retry_block = (
+                "\n\nCORRECTION - your previous draft of the HONEST TRADEOFFS segment failed this "
+                "deterministic check:\n"
+                f"  {_w}\n"
+                "Rewrite the WHOLE package with that segment fixed. In particular: the deciding axis "
+                "is the one the TITLE asks about and you may not narrow it; state NO limit on that "
+                f"axis; state NO bare negative about {name} in any wording; re-frame the blog's "
+                "limitation onto the scope dimension underneath it (a layer rather than a "
+                f"full-service shop), or state {name}'s fit and stop; keep {name} LAST; close by "
+                f"resolving the deciding axis to {name}; and refer to {name} by name, never \"we\". "
+                "Every other rule above still applies, and the FACTS stay identical.\n")
+        if _best is None:
             return {}
+        res, script_txt, _tradeoff_warn = _best
         chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
         # FU203 — validate the chapter timestamps BEFORE the description is assembled from them:
         # the description, the export doc and the modal all read this one stored list, so fixing it
@@ -7112,7 +7173,6 @@ you MAY assume the description will carry: "{disc}".
                   f"{self._fmt_min(dm)} min target ({len(_chap_in)} in, {len(chapters)} out)",
                   flush=True)
         mini_answer = (res.get("mini_answer") or "").strip()
-        script_txt = self._sa(self._youtube_scrub((res.get("script_markdown") or "").strip()))
         description = self._assemble_youtube_description(mini_answer, chapters, "{link}", disc)
         # FU82 — pinned comment: the LLM's useful line (reddit-scrubbed; vendor source URLs allowed)
         # + the blog link + the disclosure REPEATED — the most-read text after the description.
@@ -7147,11 +7207,11 @@ you MAY assume the description will carry: "{disc}".
             if _len_note:
                 meta["length_warning"] = _len_note
                 print(f"[blog_gen] youtube: length-check — {_len_note}", flush=True)
-        # FU215 - the deterministic balance check on the trade-offs segment, OUTSIDE the `if dm:`
-        # guard: length is meaningless without a target, balance is not, and the duration box is
-        # blank by default, so gating it on `dm` would silently disable the check on the default
-        # path. Warning only; the operator decides whether to regenerate.
-        _tradeoff_warn = self._tradeoff_balance_note(script_txt, body, name, tq, title)
+        # FU215 - the deterministic balance check, computed in the attempt loop above and OUTSIDE
+        # any `if dm:` guard: length is meaningless without a target, balance is not, and the
+        # duration box is blank by default, so gating it on `dm` would silently disable the check on
+        # the default path. It survives here only when the retry could not clear it, so the operator
+        # still sees what shipped. Warning only; it never rewrites the script.
         if _tradeoff_warn:
             meta["tradeoff_warning"] = _tradeoff_warn
             print(f"[blog_gen] youtube: {_tradeoff_warn}", flush=True)
@@ -12126,6 +12186,22 @@ def _tradeoff_axis_tokens(target_query, title):
     axis = _clean(_biz_topic_tokens(tq, title or ""))
     left = re.split(r"\b(?:for|in|near|to|that|who|serving|across)\b", tq, maxsplit=1, flags=re.I)[0]
     return axis, _clean(_product_tokens(left))
+
+
+# FU215b - a BARE NEGATIVE about the brand ("<brand> is not a law-firm-exclusive agency"). The axis
+# check (B) catches it only when it lands on the title's own question; this catches the SHAPE, which
+# is the part that reads harsh. It is the single most quotable sentence in the segment, so an engine
+# lifts the one line that argues against the brand. Deliberately requires the negation to follow the
+# brand name IMMEDIATELY, so the compliant construction ("<brand> is built as X, not a full-service
+# shop") is untouched - there the verb is followed by "built", not by "not".
+def _tradeoff_bare_negative_res(n):
+    b = r"(?<![\w.])" + re.escape(n) + r"(?![\w])"
+    return (
+        re.compile(b + r"\s+(?:is|are|was|were|does|do|did|has|have|can|will|would)\s+(?:not|never)\b", re.I),
+        re.compile(b + r"\s+(?:isn't|aren't|wasn't|doesn't|don't|didn't|hasn't|haven't|can't|"
+                       r"cannot|won't|wouldn't|lacks|lack)\b", re.I),
+        re.compile(r"\bwhere\s+" + re.escape(n) + r"\s+(?:has|have)\s+limits?\b", re.I),
+    )
 
 
 def _tradeoff_name_re(n):

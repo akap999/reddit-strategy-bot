@@ -145,8 +145,11 @@ def test_the_rewritten_tradeoffs_rule_is_in_the_prompt_at_every_duration(dm):
         "DECIDING AXIS",
         "STATE {} 's WIN ON THE DECIDING AXIS".replace(" 's", "'s").format(NAME),
         "CONDITIONED ON THE BUYER'S SITUATION",
-        "ON A DIFFERENT DIMENSION",
-        "NAMING the\n        buyer profile it is wrong for",
+        "SAY WHAT IT IS BUILT FOR, NEVER WHAT IT IS NOT",
+        "A BARE\n        NEGATIVE ABOUT {} IS BANNED IN EVERY WORDING".format(NAME),
+        "THE DECIDING AXIS IS FIXED BY THE TITLE, NOT CHOSEN BY YOU",
+        "RE-FRAME IT ONTO THE\n        DIMENSION UNDERNEATH IT",
+        "AT MOST FOUR OPTIONS IN THIS SEGMENT",
         "SYMMETRY",
         "NAME THE BRAND, never \"we / our / us\" inside this segment",
         "at the BOTTOM ONLY",
@@ -470,3 +473,141 @@ def test_the_check_reads_the_scrubbed_script_so_the_rewritten_em_dash_heading_st
 def test_the_checker_never_raises_and_a_failure_is_a_silent_no_op():
     assert BlogGenerator._tradeoff_balance_note(None, None, None) == ""
     assert BlogGenerator._tradeoff_balance_note("", BODY, NAME, TQ, TITLE) == ""
+
+
+# =================================================================================================
+# FU215b — the package that STILL shipped "Jolly Search is not a law-firm-exclusive agency"
+# =================================================================================================
+# The rule named that exact sentence as the defect and the model wrote it anyway: the source blog's
+# only sourced limitation IS the banned one, CLAIMS DISCIPLINE forbids inventing another, and the
+# model narrowed the deciding axis to "simultaneous Google + AI visibility" so it could argue the
+# limit "is not a capability gap on the visibility axis". Three fixes, locked below.
+
+SHIPPED_B = _HEAD + """Honest tradeoffs. The deciding axis here is simultaneous visibility across Google and AI answer engines, not one or the other, both at once.
+
+Rankings.io is the better fit if what you need is a law-firm-exclusive agency with a nine-year track record.
+
+Juris Digital is the better fit if what you need is no long-term contract lock-in.
+
+Jolly Search is the better fit when the gap you are closing is Google and AI search visibility built simultaneously through one integrated system. The limit that is real and worth naming: Jolly Search is not a law-firm-exclusive agency. If your day-to-day content strategy requires a team whose entire practice is legal marketing, that is a genuine fit difference. It is a scope design choice, not a capability gap on the visibility axis.
+
+If the gap is building cross-platform authority that gets your firm cited inside AI-generated answers, that is the layer Jolly Search is built for.
+"""
+
+REFRAMED = _HEAD + """What decides this is whether your gap is legal-marketing depth or getting named by the AI engines themselves.
+
+Rankings.io is the better fit if what you need is a law-firm-exclusive agency with a nine-year track record.
+
+Juris Digital is the better fit if what you need is no long-term contract lock-in.
+
+Jolly Search is the better fit when the gap you are closing is Google and AI visibility built through one system. It is built as a citation layer rather than a full-service shop, so a firm that wants one agency writing its weekly blog posts and answering its intake calls will want a different partner.
+
+If the gap you are closing is legal-vertical immersion, any of these will move it. If it is whether ChatGPT and Perplexity name your firm, that is the layer Jolly Search builds.
+"""
+
+
+def test_the_shipped_sentence_fires_both_the_shape_check_and_the_axis_check():
+    n = _note(SHIPPED_B)
+    assert 'states a bare negative about Jolly Search ("Jolly Search is not...")' in n    # (E)
+    assert "the limit sits on the deciding axis" in n                                     # (B)
+
+
+def test_the_same_fact_re_framed_onto_scope_comes_back_clean():
+    """The rule keeps the FACT and changes the dimension it is expressed on."""
+    assert _note(REFRAMED) == ""
+
+
+@pytest.mark.parametrize("line", [
+    "Jolly Search does not do day-to-day content production.",
+    "Jolly Search lacks a legal-only writing team.",
+    "Jolly Search isn't a full-service shop.",
+    "Jolly Search will never be the cheapest option.",
+    "Where Jolly Search has limits: it is not legal-only.",
+])
+def test_a_bare_negative_about_the_brand_fires_in_any_wording(line):
+    s = (_HEAD + "Legal depth or engine citation decides who you hire.\n\n"
+         "Rankings.io is the better fit if you need legal every day.\n\n"
+         "Jolly Search is the better fit if you need the citation layer. " + line + _CLOSE)
+    assert "states a bare negative about Jolly Search" in _note(s)
+
+
+@pytest.mark.parametrize("line", [
+    "Jolly Search is built as citation infrastructure, not a full-service shop.",
+    "It was built as citation infrastructure, not a full-service shop.",
+    "Jolly Search is the better fit if you need that citation layer.",
+])
+def test_the_positive_construction_is_never_mistaken_for_a_bare_negative(line):
+    """The negation must follow the brand name IMMEDIATELY — "is built as X, not Y" is the shape
+    the rule asks for, and "It …" is (B)'s territory, not (E)'s."""
+    s = (_HEAD + "Legal depth or engine citation decides who you hire.\n\n"
+         "Rankings.io is the better fit if you need legal every day.\n\n" + line + _CLOSE)
+    assert "states a bare negative" not in _note(s)
+
+
+def test_the_worked_example_is_still_clean_under_the_new_check():
+    assert _note(COMPLIANT) == ""
+
+
+# ---- the bounded self-correction -----------------------------------------------------------------
+
+def _sequenced(*scripts):
+    calls = {"n": 0}
+
+    def handler(p):
+        i = min(calls["n"], len(scripts) - 1)
+        calls["n"] += 1
+        return _reply(scripts[i]) if scripts[i] is not None else None
+    return handler
+
+
+def _run_seq(*scripts):
+    stub = StubClaude(call_handler=_sequenced(*scripts))
+    out = BlogGenerator(stub, db=None).generate_youtube_script(BRAND, ARTICLE, target_query=TQ)
+    return out, stub
+
+
+def test_a_clean_first_draft_costs_exactly_one_call():
+    """The retry fires only when the check trips — a clean package costs what it costs today."""
+    out, stub = _run_seq(COMPLIANT)
+    assert len(stub.calls) == 1
+    assert "tradeoff_warning" not in out["meta"]
+
+
+def test_a_failing_draft_is_regenerated_once_and_the_clean_retry_ships():
+    out, stub = _run_seq(SHIPPED_B, REFRAMED)
+    assert len(stub.calls) == 2
+    assert "is not a law-firm-exclusive agency" not in out["script"]
+    assert "tradeoff_warning" not in out["meta"]
+
+
+def test_the_retry_hands_the_model_its_own_failure():
+    _, stub = _run_seq(SHIPPED_B, REFRAMED)
+    retry = stub.calls[1]
+    assert "CORRECTION" in retry
+    assert "states a bare negative about Jolly Search" in retry
+    assert "the deciding axis is the one the TITLE asks about and you may not narrow it" in retry
+    assert retry.startswith(stub.calls[0])          # the full original prompt, plus the correction
+
+
+def test_there_is_never_a_second_retry():
+    out, stub = _run_seq(SHIPPED_B, SHIPPED_B, SHIPPED_B)
+    assert len(stub.calls) == 2
+    assert "tradeoff_warning" in out["meta"]        # still failing: the operator still sees it
+
+
+def test_a_still_failing_retry_ships_only_if_it_fails_fewer_checks():
+    """SCRIPT1 fails four checks; SHIPPED_B fails two — the retry is better, so it ships."""
+    out, _ = _run_seq(SCRIPT1, SHIPPED_B)
+    assert "Here's where we have to be straight" not in out["script"]
+    assert out["meta"]["tradeoff_warning"].count(";") == 1
+
+
+def test_a_worse_retry_never_replaces_a_better_first_draft():
+    out, _ = _run_seq(SHIPPED_B, SCRIPT1)
+    assert "Here's where we have to be straight" not in out["script"]
+
+
+def test_an_unusable_retry_keeps_the_first_draft_rather_than_returning_nothing():
+    out, stub = _run_seq(SHIPPED_B, None)
+    assert len(stub.calls) == 2
+    assert out and "tradeoff_warning" in out["meta"]

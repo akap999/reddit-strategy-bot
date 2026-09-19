@@ -3283,6 +3283,17 @@ def _blog_reddit_evidence(claude, db, reddit_url):
     return {"subreddit": sub, "title": title, "url": url, "text": "\n".join(parts)}, "ok"
 
 
+def _save_blog_evidence(bg, blog_id, gen):
+    """FU220: persist the evidence snapshot of the blog `gen` just finished (see
+    BlogGenerator.evidence_snapshot). Best-effort — a failure here never fails the generation."""
+    try:
+        snap = gen.evidence_snapshot() if gen is not None else {}
+        if snap and blog_id:
+            bg.save_blog_evidence(blog_id, snap)
+    except Exception as e:
+        print(f"[blog] evidence snapshot for #{blog_id} not saved: {e}", flush=True)
+
+
 def _reddit_status_note(status):
     """Human-readable note for a _blog_reddit_evidence status, surfaced in the generate/
     regenerate task result so an attached-but-unfetchable Reddit URL isn't a silent no-op.
@@ -3559,7 +3570,8 @@ def api_blog_generate():
             _writer, _wmode = _build_blog_writer(bg)   # FU153: off/None unless operator enabled it
             if _wmode != "off":
                 _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
-            blog = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode).generate_blog(
+            _bgen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
+            blog = _bgen.generate_blog(
                 brand, seed, extra_keywords=keywords,
                 source_urls=source_urls, research_notes=research_notes,
                 use_web_search=use_web_search, reddit_thread=reddit_thread,
@@ -3640,6 +3652,7 @@ def api_blog_generate():
                 include_pricing=(1 if include_pricing else 0),   # FU162
                 gen_cost=blog.get("gen_cost", 0), **byline,
             )
+            _save_blog_evidence(bg, blog_id, _bgen)   # FU220: the evidence this blog was written from
             if geo:
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
             if guide:
@@ -3941,6 +3954,7 @@ def api_blog_regenerate(blog_id):
             # banner would keep asking, and answering it would overwrite this fresh result with the
             # stale checkpoint's. A blog that was only ever a paused draft is now a finished draft.
             if part in ("all", "article", "verify"):
+                _save_blog_evidence(bg, blog_id, gen)   # FU220: the evidence this version was written from
                 if blog.get("pending_state"):
                     bg.update_blog(blog_id, pending_state="")
                 if blog.get("status") == "awaiting_sources":
@@ -4401,6 +4415,7 @@ def api_blog_provide_sources(blog_id):
             art = gen.finish_pending_blog(brand, seed, checkpoint, sources)
             if not art:
                 raise ValueError(claude.last_error or "Finishing the blog failed")
+            _save_blog_evidence(bg, blog_id, gen)   # FU220: incl. the operator's provided sources
             resume_cost = round(claude.usage_cost(), 4)
             # FU207: a regenerate reports what the REGENERATE cost (its partial run + this resume),
             # exactly as the regenerate endpoint does; a first Generate adds to the paused draft's cost.

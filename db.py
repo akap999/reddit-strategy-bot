@@ -242,6 +242,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_blogs_brand ON blogs(brand_id);
             CREATE INDEX IF NOT EXISTS idx_blogs_status ON blogs(status);
             CREATE INDEX IF NOT EXISTS idx_blog_platforms_blog ON blog_platforms(blog_id);
+
+            -- FU220: the evidence the writer actually saw (page text included), kept per blog so it
+            -- can be re-scored — and its writing steps replayed — against the same sources. A side
+            -- table, not a blogs column, so `SELECT b.*` (the blog modal) never carries it.
+            CREATE TABLE IF NOT EXISTS blog_evidence (
+                blog_id     INTEGER PRIMARY KEY REFERENCES blogs(id) ON DELETE CASCADE,
+                snapshot    TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
         """)
             self.conn.commit()
             self._run_migrations()
@@ -1330,9 +1339,36 @@ class Database:
         """Delete a blog; blog_platforms cascade via FK (PRAGMA foreign_keys = ON).
         Belt-and-suspenders: clear platform rows first in case the cascade is off."""
         self.conn.execute("DELETE FROM blog_platforms WHERE blog_id = ?", (blog_id,))
+        self.conn.execute("DELETE FROM blog_evidence WHERE blog_id = ?", (blog_id,))
         cur = self.conn.execute("DELETE FROM blogs WHERE id = ?", (blog_id,))
         self.conn.commit()
         return cur.rowcount
+
+    def save_blog_evidence(self, blog_id, snapshot):
+        """FU220: store (replace) the evidence snapshot of a blog's latest generation. Never raises:
+        a snapshot is a measurement aid, and losing one must not fail a generation."""
+        try:
+            self.conn.execute(
+                "INSERT INTO blog_evidence (blog_id, snapshot, created_at) VALUES (?, ?, datetime('now')) "
+                "ON CONFLICT(blog_id) DO UPDATE SET snapshot = excluded.snapshot, "
+                "created_at = excluded.created_at",
+                (blog_id, json.dumps(snapshot or {})))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"[db] save_blog_evidence #{blog_id} failed: {e}", flush=True)
+            return False
+
+    def get_blog_evidence(self, blog_id):
+        """FU220: the stored evidence snapshot ({} when none)."""
+        row = self.conn.execute("SELECT snapshot FROM blog_evidence WHERE blog_id = ?",
+                                (blog_id,)).fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row["snapshot"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     def _roll_blog_status(self, blog_id):
         """Set blogs.status to 'published' when >=1 platform is published, else back to

@@ -11,7 +11,8 @@ The operator's four decisions, each locked below:
   1. a verified fact may cite ANY source the operator gives (BuildZoom, BBB, the state registry),
      the brand's own site preferred when it states the fact;
   2. an unreadable source is cited anyway, with a warning;
-  3. a differing legal name reads "Trade (licensed as Legal)" on first mention, the trade name after;
+  3. a differing legal name is KNOWN to the writer (FU219: as context — it is no longer forced onto a
+     first mention; the facts are background, and mandatory wording belongs in Content instructions);
   4. the operator's own wording ships verbatim — "verify with the specific franchisee" included —
      while the punt ban still applies to everything the model writes.
 
@@ -426,12 +427,17 @@ def test_the_article_prompt_carries_the_facts_their_citations_and_the_overrides(
     g.generate_article(_brand(_store()), "kitchen remodel contractors in Tampa")
     p = g._article_prompt
     n = next(i for i, b in enumerate(blocks, 1) if b["label"] == "fact · Revive Kitchen & Bath · buildzoom.com")
-    assert "VERIFIED FACTS (supplied by the publisher" in p
+    assert "VERIFIED FACTS (from the publisher — background context" in p
     assert f"CBC1264856 — Certified Building Contractor, Current/Active, licensed 07/22/2021 [S{n}]" in p
-    assert "\"Revive Kitchen & Bath (licensed as Revive Design and Renovation)\"" in p
+    # FU219: context, not content — the legal name is known, never forced onto a first mention
+    assert "its licensed (legal) name is Revive Design and Renovation" in p
+    assert "FIRST mention" not in p and "Use these EXACT values wherever" not in p
+    assert "BACKGROUND CONTEXT, not content" in p and "never run through a brand's facts as a list" in p
+    assert "must match the line here exactly" in p
+    assert "may be stated wherever it is relevant, without a citation" in p
     assert "OVERRIDE, for these facts only" in p
     assert "never write \"General Building Contractor\" about S&W Kitchens" in p
-    assert "(publisher's note — use this wording as written" in p
+    assert "(publisher's note — if the article covers this point" in p
     assert "comparison-table column for licensing is allowed only when EVERY compared" in p
     assert "never add a brand to the article" in p
 
@@ -442,7 +448,8 @@ def test_the_fact_check_is_told_the_facts_are_supported():
     g = BG(stub, db=None)
     g._evidence_blocks = blocks
     g.verify_claims(_brand(_store()), {"body_markdown": "# t\n\nCMK Construction holds CGC1516665."})
-    assert "These facts are SUPPORTED — never hedge" in stub.calls[-1]
+    assert "it is SUPPORTED — never hedge" in stub.calls[-1]
+    assert "Never ADD one the draft does not state" in stub.calls[-1]
 
 
 def test_the_reconcile_carries_the_block_and_drops_a_removed_brand():
@@ -454,7 +461,7 @@ def test_the_reconcile_carries_the_block_and_drops_a_removed_brand():
     g._removed_brands = ["Revive Kitchen & Bath"]
     g._reconcile_and_finish(_brand(_store()), "seed", dict(ARTICLE), json.loads(json.dumps(SOURCING)))
     p = stub.calls[-1]
-    assert "VERIFIED FACTS (supplied by the publisher" in p and "CGC 1516665" in p
+    assert "VERIFIED FACTS (from the publisher" in p and "CGC 1516665" in p
     assert "CBC1264856" not in p, "a brand the operator removed from the blog is not re-injected"
 
 
@@ -462,7 +469,8 @@ def test_the_proof_read_knows_the_licensed_name_is_not_an_inconsistency():
     stub = StubClaude(call_handler=lambda p: {"issues": [], "assessment": {}})
     g = BG(stub, db=None)
     g._verify_content(_brand(_store()), "# t\n\nBody.")
-    assert "NAMES: \"Revive Kitchen & Bath (licensed as Revive Design and Renovation)\"" in stub.calls[-1]
+    assert ("NAMES: \"Revive Design and Renovation\" is the licensed (legal) name of "
+            "\"Revive Kitchen & Bath\"") in stub.calls[-1]
     assert "VERIFIED LICENCE NUMBERS" in stub.calls[-1] and "CGC 1516665" in stub.calls[-1]
     stub2 = StubClaude(call_handler=lambda p: {"issues": [], "assessment": {}})
     BG(stub2, db=None)._verify_content(dict(BRAND), "# t\n\nBody.")
@@ -516,23 +524,14 @@ def test_licence_spacing_is_normalised_everywhere_but_sources_and_it_is_idempote
     assert again == out and n2 == 0
 
 
-def test_licensed_as_is_added_once_to_the_first_prose_mention_only():
+def test_the_backstop_adds_nothing_it_only_respaces_what_the_article_states():
+    # FU219: the facts are context — the old forced "(licensed as …)" on a first mention is gone.
     g = BG(StubClaude(), db=None)
-    out, _ = g._vfact_enforce(BODY, _brand(_store()))
-    assert out.count("(licensed as Revive Design and Renovation)") == 1
-    assert "**Revive Kitchen & Bath** (licensed as Revive Design and Renovation) both" in out
-    assert "| Revive Kitchen & Bath | CBC1264856 |" in out, "never inside a table"
-    already = BODY.replace("**Revive Kitchen & Bath** both",
-                           "**Revive Kitchen & Bath** (Revive Design and Renovation) both")
-    out2, _ = g._vfact_enforce(already, _brand(_store()))
-    assert "(licensed as" not in out2, "the legal name is already there — nothing added"
-
-
-def test_a_possessive_first_mention_is_skipped_for_the_next_one():
-    body = "# t\n\nRevive Kitchen & Bath's showroom is new. Revive Kitchen & Bath remodels baths.\n"
-    out, _ = BG(StubClaude(), db=None)._vfact_enforce(body, _brand(_store()))
-    assert "Revive Kitchen & Bath's showroom" in out
-    assert "Revive Kitchen & Bath (licensed as Revive Design and Renovation) remodels" in out
+    out, n = g._vfact_enforce(BODY, _brand(_store()))
+    assert "(licensed as" not in out
+    assert n > 0 and "CGC 1516665" in out and "CGC1516665" not in out, "respacing still applies"
+    body = "# t\n\nRevive Kitchen & Bath remodels baths. S&W Kitchens builds kitchens.\n"
+    assert g._vfact_enforce(body, _brand(_store())) == (body, 0), "no fact is inserted into prose"
 
 
 def test_the_warnings_name_a_wrong_licence_a_borrowed_one_and_the_banned_phrase():
@@ -545,8 +544,13 @@ def test_the_warnings_name_a_wrong_licence_a_borrowed_one_and_the_banned_phrase(
     assert "CGC 9999999 is stated for CMK Construction but is not among its verified licences" in lic
     assert "\"General Building Contractor\" appears with S&W Kitchens" in lic
     assert "ER 13016498" not in lic, "a sentence naming no verified brand is not judged"
-    name = next(n for n in notes if n.startswith("name-check:"))
-    assert "\"Revive Design and Renovation\" is used on its own" in name
+    assert not any(n.startswith("name-check:") for n in notes), "FU219: names are not policed"
+
+
+def test_a_licence_given_without_a_link_may_be_stated_with_no_warning():
+    # FU219 (operator): a fact with no link is stated wherever it is relevant, without a citation.
+    body = "# t\n\nS&W Kitchens holds CBC1262059.\n"
+    assert BG(StubClaude(), db=None)._vfact_checks(body, _brand(_store())) == []
 
 
 def test_a_clean_body_has_no_verified_facts_warning():
@@ -575,7 +579,7 @@ def test_your_wording_survives_the_punt_scrub_and_a_model_punt_does_not():
     assert plain.count("Check the local franchisee") == 0, "without the stored note it is a punt"
 
 
-def test_the_repair_gate_refuses_a_respaced_number_and_a_dropped_licensed_as():
+def test_the_repair_gate_refuses_a_respaced_number_but_lets_the_legal_name_go():
     g = BG(StubClaude(), db=None)
     b = _brand(_store())
     body = ("# t\n\nCMK Construction holds CGC 1516665.\n\n"
@@ -585,12 +589,12 @@ def test_the_repair_gate_refuses_a_respaced_number_and_a_dropped_licensed_as():
     assert "CGC 1516665" in why
     why2 = g._verify_repair_gate(body, "Revive Kitchen & Bath (licensed as Revive Design and Renovation) remodels.",
                                  "Revive Kitchen & Bath remodels.", b)
-    assert "licensed as" in why2
+    assert why2 == "", "FU219: the legal name is context — a fix may drop the parenthetical"
     assert g._verify_repair_gate(body, "CMK Construction holds CGC 1516665.",
                                  "CMK Construction, a remodeler, holds CGC 1516665.", b) == ""
 
 
-def test_the_finished_blog_carries_the_exact_values_and_one_licensed_as():
+def test_the_finished_blog_carries_the_exact_values_and_adds_nothing():
     blocks = _blocks_after_gather()
     n = next(i for i, x in enumerate(blocks, 1) if x["label"] == "fact · Revive Kitchen & Bath · buildzoom.com")
     body = ("*[Add author byline before publishing]*\n\n# kitchen remodel contractors in Tampa\n\n"
@@ -605,7 +609,7 @@ def test_the_finished_blog_carries_the_exact_values_and_one_licensed_as():
     g._finalize_article(b, "kitchen remodel contractors in Tampa", art, body, with_linkedin=False)
     out = art["body_markdown"]
     assert "CGC 1516665" in out and "CGC1516665" not in out
-    assert out.count("(licensed as Revive Design and Renovation)") == 1
+    assert "(licensed as" not in out, "FU219: nothing is inserted — the facts are context"
     assert "https://www.buildzoom.com/contractor/revive" in out.split("## Sources")[1]
     assert art["meta_description"] == "CMK Construction CGC 1516665 and more."
     assert "license-check" not in _joined(art) and "name-check" not in _joined(art)

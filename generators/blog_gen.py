@@ -1082,6 +1082,15 @@ def _drop_nameless_when_named(items):
     return items, False
 
 
+def _has_table(text):
+    """Does this block contain a Markdown comparison table (a header row plus its separator)?"""
+    try:
+        from generators.blog_eval import _tables
+    except Exception:
+        return False
+    return bool(_tables(text or ""))
+
+
 def _headings_match(a, b):
     """FU220: do two headings name the same section (typo, parenthetical alias, reordered words, or
     the same name with a new tagline)? Shared with the scoreboard's duplicate-section check."""
@@ -2567,6 +2576,7 @@ class BlogGenerator:
         self._price_warn = ""         # FU161: the subject's price could not be confirmed
         self._invented_note = ""      # FU184: a competitor the model named itself
         self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
+        self._dup_table_note = ""     # FU228: a draft comparison section the guard did not restore
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
         self._article_tools = []      # FU204: the compared brand names, for the citation check
@@ -4883,6 +4893,29 @@ class BlogGenerator:
                       f"draft's {title!r}", flush=True)
                 continue
             restored.append(block)
+        # FU228: the guard re-adds the DRAFT's copy of a section, so when the reconcile RENAMED a
+        # section while CORRECTING its facts, the stale copy lands beside the corrected one and the
+        # page states two values for the same metric — on a medical page, the worst failure there is.
+        # Neither heading text nor content overlap can tell that apart from a genuinely new section:
+        # measured on the article that exposed this, the stale duplicate's heading differed by one
+        # noun ("GLP-1 agonists" -> "semaglutide", which reads exactly like "Kitchen" -> "Bathroom")
+        # and its content overlap was 0.66, while legitimately distinct sections of the same article
+        # scored up to 0.88. What IS unambiguous is the comparison TABLE: a blog has exactly one, by
+        # construction (the dimension cap, the competitor floor and the price-cell writer all address
+        # "the first table"). So a restored section never brings a second one.
+        if restored and _has_table(revised):
+            keep = []
+            for block in restored:
+                if _has_table(block):
+                    head = (block.splitlines() or ["?"])[0].strip()
+                    print(f"[blog_gen] substance-guard: NOT restoring {head!r} — the article already "
+                          f"has a comparison table, and a second one states the draft's older facts "
+                          f"beside the rewrite's corrected ones", flush=True)
+                    self._dup_table_note = ("substance-check: a draft comparison section was dropped "
+                                            "rather than restored — the rewrite already carries one")
+                    continue
+                keep.append(block)
+            restored = keep
         if not restored:
             return revised
         for block in restored:
@@ -5064,6 +5097,10 @@ class BlogGenerator:
         prose = re.sub(r"\[S(\d+)\]",
                        lambda m: (f"[S{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else ""),
                        prose)
+        # FU228: two markers that pointed at the SAME document now carry the same number, so a
+        # sentence that cited both routes to a paper comes out reading "[S2][S2]". Collapse a run of
+        # one repeated marker — it is the same citation, made twice.
+        prose = re.sub(r"(\[S\d+\])\1+", r"\1", prose)
         lines = ["", "## Sources", ""]
         for old in render:
             bl = blocks[old - 1]
@@ -11711,7 +11748,8 @@ you MAY assume the description will carry: "{disc}".
     # FU205 (R4) — the check notes that survive a FU79 pause. Sourcing does not re-run on resume,
     # so without this every check that depends on it silently reports clean on a resumed blog.
     _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
-                    "_table_punt_note", "_core_mechanics", "_subject_phrase", "_subject_peers",
+                    "_table_punt_note", "_dup_table_note", "_core_mechanics", "_subject_phrase",
+                    "_subject_peers",
                     "_budget_warn", "_vfact_note")
 
     def _check_notes(self):
@@ -11986,6 +12024,9 @@ you MAY assume the description will carry: "{disc}".
         # verification pass below re-runs `_rebuild_sources` after a prose repair. Capture the note
         # from THIS rebuild so a column dropped here is still reported even when the second rebuild
         # finds nothing left to drop and clears it.
+        _dtn = getattr(self, "_dup_table_note", "")
+        if _dtn:
+            self._warn(article, _dtn)
         _tpn_first = getattr(self, "_table_punt_note", "")
         # FU167 (Change 6): strip invisible/zero-width/bidi carrier chars from EVERY final body (belt-and-
         # suspenders — the invisible-CHARACTER watermark class + stray chars from any source). NOT Claude's

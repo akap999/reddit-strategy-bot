@@ -1105,7 +1105,10 @@ class ClaudeClient:
                   + f"\n\nRespond with JSON only (no prose, no code fences): "
                     f'{{"pages": ["https://...", "..."]}} — at most {int(max_pages)} distinct page URLs '
                     "on that site, the most useful first. Product, pricing, plans, features, about and "
-                    "policy pages beat blog posts and news. Return an empty list if none exist.")
+                    "policy pages beat blog posts and news. NEVER return an affiliate, partner-signup, "
+                    "press, newsroom, investor or careers page — those are written for recruiters and "
+                    "reporters, and the fact a reader needs is on the product or policy page. Return "
+                    "an empty list if none exist.")
         try:
             message = self.client.messages.create(
                 model=self.model, max_tokens=800, tools=[tool],
@@ -1196,6 +1199,11 @@ class ClaudeClient:
               "required\", \"2-pack, 5.4 oz\". Never add a unit, term or condition the page does "
               "not state; empty when it states none, and for anything that is not a price.\n"
               "- A price is the REGULAR price, never a sale / deal / discounted figure.\n"
+              "- When an item names a specific product, plan or line, answer ONLY from facts about "
+              "THAT one. If the page states the fact for a DIFFERENT product or plan of the same "
+              "brand (a separate subscription, another tier, another size), answer \"not found\" "
+              "rather than crossing them — its price, what it includes, and where it is available "
+              "all belong to it, not to the item you were asked about.\n"
               "- When a price item has SEVERAL figures (an introductory price and the ongoing one, "
               "or several plans, tiers, terms or pack sizes), return a SEPARATE object for EACH "
               "figure — the same `need` number, its own `answer`, its own exact `quote`, its own "

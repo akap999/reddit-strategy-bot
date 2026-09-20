@@ -48,8 +48,17 @@ _MAX_TIERS = 3
 _MAX_RUNG_LABEL = 30   # a plan name labels a rung; a full SKU title just bloats it
 
 
+# FU223 — availability is asked PER PRODUCT, and a product named "the Pro plan" would otherwise
+# trip PRICE_NEED_RE and send its availability question into the price search.
+AVAIL_NEED_RE = re.compile(r"\b(availab\w*|coverage|eligib\w*|offered)\b", re.I)
+
+
+def is_availability_need(need):
+    return bool(AVAIL_NEED_RE.search(need or ""))
+
+
 def is_price_need(need):
-    return bool(PRICE_NEED_RE.search(need or ""))
+    return bool(PRICE_NEED_RE.search(need or "")) and not is_availability_need(need)
 
 
 def norm(s):
@@ -137,6 +146,64 @@ def figure_is_sale(answer, text, window=30):
     return True
 
 
+# FU225 — scope words the PAGE puts in front of a figure. Anchored to the few characters directly
+# before it (the `figure_is_sale` pattern), so "Save $50 from the list price of $499" cannot match:
+# there, "of" is what precedes the figure, not "from".
+_FROM_BEFORE_RE = re.compile(r"\b(from|starting at|starts at|start at|as low as|beginning at)"
+                             r"\W{0,3}$", re.I)
+_UPTO_BEFORE_RE = re.compile(r"\b(up to|as much as|maximum of|max of|no more than)\W{0,3}$", re.I)
+
+
+def scope_on_page(answer, text, window=40):
+    """The scope word the PAGE attaches to this figure — "from", "upto", or "".
+
+    A scope word LIMITS a claim, and dropping one states the claim more broadly than its source
+    does: "starting at $149" becoming "$149" turns a floor into a fixed price. `kind` was read off
+    the model's own answer only, so a scope word the model left out was simply lost."""
+    figs = _figures(answer)
+    if not figs:
+        return ""
+    num = re.sub(r"[^\d.,]", "", figs[0]).rstrip(".,")
+    if not num:
+        return ""
+    for m in re.finditer(r"(?<![\d.,])" + re.escape(num) + r"(?!\d)", text or ""):
+        before = (text or "")[max(0, m.start() - window): m.start()]
+        if _FROM_BEFORE_RE.search(before):
+            return "from"
+        if _UPTO_BEFORE_RE.search(before):
+            return "upto"
+    return ""
+
+
+def split_clauses(basis):
+    """Split a basis into its clauses on commas — but NOT on a thousands separator. "$1,094 for
+    120mg" is one clause, not "$1" and "094 for 120mg"; splitting it the naive way made a real
+    figure look like an unsupported condition."""
+    return [c.strip() for c in re.split(r"(?<!\d),|,(?!\d)", basis or "") if c.strip()]
+
+
+def unsupported_basis_clauses(basis, text):
+    """Basis clauses carrying a NUMBER that is nowhere on the page.
+
+    Deliberately numeric only. The extractor is told to build a basis from the page's own words,
+    and checking WORDS against the page is where false rejections live — a condition is routinely
+    stated a sentence away from the figure, or as "/mo" where the basis says "per month". A NUMBER
+    is exact: "12-month plan" or "3-pack" with no 12 or 3 anywhere on the page was not read off it.
+    Returns the clauses to drop; the figure itself is untouched, because it passed the quote gate."""
+    out = []
+    for clause in split_clauses(basis):
+        nums = re.findall(r"\d[\d,]*(?:\.\d+)?", clause)
+        if not nums:
+            continue                      # words-only clause: never judged here
+        for n in nums:
+            plain = n.replace(",", "")
+            if not any(re.search(r"(?<![\d.,])" + re.escape(v) + r"(?!\d)", text or "")
+                       for v in {n, plain}):
+                out.append(clause)
+                break
+    return out
+
+
 def _jsonld_offers(html):
     """Product data from the page's JSON-LD (and bare `"price":` fields): lines like
     'PRODUCT DATA: Anti-colic bottle 9oz — price 8.99 USD'. Some stores render the price only here."""
@@ -211,10 +278,111 @@ def read_page(url, claude=None, cache=None, max_chars=20000):
     return out
 
 
+# FU224 — page classes that must never be cited as evidence for a reader-facing claim, even on the
+# brand's own site. An affiliate-registration or press page is written for recruiters and reporters,
+# not buyers: the same fact sits on the product or policy page, and a source list handed to a client
+# that cites "become an affiliate" reads as unserious. Matched as WHOLE path segments on purpose —
+# a prefix match would take "/careers-in-medical-coding" and "/pressure-washers" with it.
+_EXCLUDED_PAGE_RE = re.compile(
+    r"/(affiliate|affiliates|affiliate-program|affiliate-programme|become-an-affiliate"
+    r"|press|press-kit|press-kits|press-room|pressroom|press-release|press-releases"
+    r"|newsroom|news-room|media-kit|media-kits"
+    r"|investor|investors|investor-relations"
+    r"|career|careers|job|jobs|hiring|work-with-us|join-our-team"
+    r"|become-a-partner|partner-program|partner-programme|partner-with-us|reseller|resellers)"
+    r"(?:/|$|\?|#)", re.I)
+
+
+def page_class_excluded(url):
+    """The excluded page class this URL belongs to, or "" when it is fine to read and cite.
+
+    Deliberately NOT a quality judgement — it names page TYPES whose facts always live somewhere
+    better on the same site. A product, pricing, plan, feature, policy, terms, shipping or support
+    page is never matched; those are exactly the pages a claim should rest on."""
+    path = re.sub(r"^https?://[^/]*", "", (url or "").strip(), flags=re.I)
+    if not path.startswith("/"):
+        path = "/" + path
+    m = _EXCLUDED_PAGE_RE.search(path)
+    return m.group(1).lower() if m else ""
+
+
 def _url_key(u):
     """One comparison key for a page URL (case, trailing slash and #fragment ignored), so a page is
     never fetched twice because two searches spelled its link differently."""
     return (u or "").strip().lower().split("#")[0].rstrip("/")
+
+
+def need_product(need, products):
+    """FU223 — which compared product a need is about. `build_needs` writes the product name into
+    the need text verbatim ("Pricing Structure for tirzepatide - ..."), so this reads it back.
+    Longest match wins, so "semaglutide 2.5 mg" beats "semaglutide"."""
+    n = norm(need)
+    best = ""
+    for p in (products or []):
+        p = str(p or "").strip()
+        if p and norm(p) in n and len(p) > len(best):
+            best = p
+    return best
+
+
+# Words that never say WHICH product something is. Everything else a compared set has in common
+# is removed per-set below, so this list stays tiny and vertical-neutral.
+_PRODUCT_STOP = {"the", "a", "an", "and", "or", "for", "with", "our", "its", "of"}
+_URL_MIN_TOKEN = 4   # a URL is noisy ("/2024/08/"), so only a distinctive word counts there
+
+
+def _ptokens(s):
+    """Identity tokens for a product NAME. Unlike `_tokens` (built for price matching) this keeps
+    numbers and short words: "5.4 oz" versus "8.1 oz" IS the difference between two products."""
+    return {t for t in re.findall(r"[a-z0-9]+", (s or "").lower()) if t not in _PRODUCT_STOP}
+
+
+def _discriminators(products):
+    """What actually tells the compared products APART: each one's tokens minus the ones they all
+    share. "the 5.4 oz bottle" / "the 8.1 oz bottle" discriminate on {5,4} and {8,1}, not on
+    "oz bottle"; "the Pro plan" / "the Business plan" on {pro} and {business}, not on "plan"."""
+    toks = {p: _ptokens(p) for p in (products or []) if str(p or "").strip()}
+    if len(toks) < 2:
+        return {p: set() for p in toks}
+    common = set.intersection(*toks.values())
+    return {p: (t - common) for p, t in toks.items()}
+
+
+def product_conflict(mine, fact, products):
+    """FU223 — the OTHER compared product this fact is actually about, or "" when there is none.
+
+    The audit's biggest cluster: one brand, two products, facts crossed between them — a
+    tirzepatide plan given the separate subscription's price, its perks and its eight-state
+    exclusion list, telling readers in two states they could not buy something they can. The quote
+    gate cannot see this: the page IS the brand's own and the quote IS on it. Only the product is
+    wrong.
+
+    Deliberately narrow, because a rejection costs a real fact. It fires ONLY when the evidence
+    (the product the extractor named, plus the page's own URL) points at a DIFFERENT product the
+    article compares AND does not point at this need's product. A fact with no product named, a
+    brand name for the same thing ("Zepbound" for tirzepatide), a page that mentions both, or any
+    product outside the compared set is left alone — rejecting on ABSENCE would throw away correct
+    facts from pages that simply do not repeat the name."""
+    mine = (mine or "").strip()
+    if not mine:
+        return ""
+    disc = _discriminators(products)
+    my_d = disc.get(mine) or set()
+    others = {p: d for p, d in disc.items() if norm(p) != norm(mine) and d}
+    if not my_d or not others:
+        return ""
+    named = _ptokens((fact or {}).get("product") or "")
+    # The URL is corroborating, not primary: a date path or an id can collide with a one-character
+    # size token, so only a distinctive WORD in it counts.
+    from_url = {t for t in _ptokens(re.sub(r"[^A-Za-z0-9]+", " ", (fact or {}).get("url") or ""))
+                if len(t) >= _URL_MIN_TOKEN}
+    seen = named | from_url
+    if not seen or (seen & my_d):
+        return ""                       # it names OUR product (or nothing) - never a conflict
+    for o, d in others.items():
+        if seen & d:
+            return o                    # it names another compared product, and not ours
+    return ""
 
 
 def price_queries(brand, products=None, limit=3):
@@ -236,7 +404,7 @@ def price_queries(brand, products=None, limit=3):
     return out
 
 
-def build_needs(dims=None, products=None, include_pricing=True, geo="", subject="", max_needs=6):
+def build_needs(dims=None, products=None, include_pricing=True, geo="", subject="", max_needs=8):
     """The questions to research for one brand, from what the ARTICLE uses: its comparison columns,
     a price need per compared product when pricing is on, availability for a geo page. No vertical
     words — the column names are the article's own."""
@@ -268,7 +436,13 @@ def build_needs(dims=None, products=None, include_pricing=True, geo="", subject=
             add(("Price" + (f" of {p}" if p else " of the comparable offering"))
                 + " — the regular price with its unit, term or pack and any condition")
     if geo:
-        add(f"Availability or coverage in {geo}")
+        # FU223 — PER PRODUCT. Availability is not a brand fact: a brand's two products can have
+        # different state, region and eligibility limits, and carrying one across to the other is
+        # how a draft told readers in two states they could not buy something they can. Splitting
+        # it is only safe because a fact about the other product is now refused (product_conflict).
+        for p in [x for x in (products or []) if str(x).strip()][:2] or [""]:
+            add(f"Availability or coverage in {geo}" + (f" for {p}" if p else "")
+                + " — where it is offered and any eligibility or coverage limit that applies to it")
     return needs
 
 
@@ -308,9 +482,15 @@ def research_brand(claude, brand, domains, needs, context="", guidance="", page_
             urls, _seen_u = [], set()
             for u in _found:
                 k = _url_key(u)
-                if k and k not in _seen_u and k not in read_urls:
+                if not k or k in _seen_u or k in read_urls:
+                    continue
+                _cls = page_class_excluded(u)
+                if _cls:   # FU224: never cite a recruitment / press / investor page to a reader
+                    log(f"[research] {brand}: skipped a {_cls} page — {u[:70]}")
                     _seen_u.add(k)
-                    urls.append(u)
+                    continue
+                _seen_u.add(k)
+                urls.append(u)
             pages = {}
             for u in urls:
                 read_urls.add(_url_key(u))
@@ -328,6 +508,7 @@ def research_brand(claude, brand, domains, needs, context="", guidance="", page_
                 # the rest away. Each candidate still stands or falls on its OWN quote, so nothing
                 # reaches a cell that is not on the page.
                 kept, seen_ans = [], set()
+                _np = need_product(need, products)
                 for f in [x for x in facts if x.get("need") == i]:
                     if len(kept) >= _MAX_FACTS_PER_NEED:
                         break
@@ -343,6 +524,11 @@ def research_brand(claude, brand, domains, needs, context="", guidance="", page_
                             if quote_on_page(f.get("quote"), pt):
                                 f["url"], page = pu, pt
                                 break
+                    _other = product_conflict(_np, f, products)
+                    if _other:
+                        log(f"[research] {brand}: rejected '{ans[:50]}' — it is about {_other}, "
+                            f"not {_np}")
+                        continue
                     if is_price_need(need) and (figure_is_sale(ans, f.get("quote") or "")
                                                 or figure_is_sale(ans, page)):
                         log(f"[research] {brand}: rejected '{ans[:60]}' — a SALE price, not the "
@@ -356,7 +542,22 @@ def research_brand(claude, brand, domains, needs, context="", guidance="", page_
                         how = "price-on-page"
                     if how:
                         seen_ans.add(key)
-                        kept.append(dict(f, need=need, verified_by=how))
+                        _extra = {}
+                        if is_price_need(need):
+                            # FU225: the page's own scope word, when the answer dropped it
+                            _sc = (scope_on_page(ans, f.get("quote") or "")
+                                   or scope_on_page(ans, page))
+                            if _sc and not _FROM_RE.search(ans):
+                                _extra["scope"] = _sc
+                                log(f"[research] {brand}: '{ans[:34]}' is a {_sc.upper()} price on "
+                                    f"the page — the answer had dropped that")
+                        _bad = unsupported_basis_clauses(f.get("basis"), page)
+                        if _bad:
+                            _extra["basis"] = ", ".join(c for c in split_clauses(f.get("basis"))
+                                                        if c not in _bad)
+                            log(f"[research] {brand}: dropped unsupported condition(s) "
+                                f"{_bad} — no such number on {(f.get('url') or '?')[-44:]}")
+                        kept.append(dict(f, need=need, verified_by=how, **_extra))
                     else:
                         log(f"[research] {brand}: unverified '{need[:50]}' — quote not on "
                             f"{(f.get('url') or '?')[:70]}")
@@ -475,7 +676,10 @@ def price_entry(fact, checked_at=""):
         return None
     val = figs[0]
     basis = _trim_basis((fact.get("basis") or "").strip() or (fact.get("product") or "").strip())
-    return {"value": val, "value_max": "", "kind": "from" if _FROM_RE.search(fact["answer"]) else "exact",
+    _scope = str(fact.get("scope") or "").strip().lower()      # FU225: the PAGE's scope word
+    _kind = ("from" if (_FROM_RE.search(fact["answer"]) or _scope == "from")
+             else ("upto" if _scope == "upto" else "exact"))
+    return {"value": val, "value_max": "", "kind": _kind,
             "basis": basis, "per_unit": "", "url": fact["url"], "source": "own",
             "quote": re.sub(r"\s+", " ", fact.get("quote") or "")[:220],
             "checked_at": checked_at, "via": "research"}

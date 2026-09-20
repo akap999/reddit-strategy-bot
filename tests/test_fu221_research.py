@@ -78,8 +78,9 @@ def test_build_needs_follows_the_articles_columns_and_the_pricing_switch():
     assert not any(R.is_price_need(n) for n in off) and len(off) == 2                 # FU162: no price asked
     no_col = R.build_needs(["Contract length", "Coverage area"], [], include_pricing=True)
     assert any(n.startswith("Price of the comparable offering") for n in no_col)
-    assert R.build_needs(["Coverage area"], [], include_pricing=False, geo="Florida")[-1] == \
-        "Availability or coverage in Florida"
+    # FU223: availability is asked PER PRODUCT; with no products named it stays brand-level
+    assert R.build_needs(["Coverage area"], [], include_pricing=False, geo="Florida")[-1] \
+        .startswith("Availability or coverage in Florida")
 
 
 # --------------------------------------------------------------------------- A–D end to end

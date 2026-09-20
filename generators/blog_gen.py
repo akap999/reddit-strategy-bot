@@ -1410,7 +1410,7 @@ def _format_price_value(entry):
     if len(tiers) > 1:
         # Conditions the rungs SHARE are stated once at the end: live, every Ro rung repeated
         # "per month, cash pay only, membership required", which made a 230-character cell.
-        _cl = [[c.strip() for c in (t.get("basis") or "").split(",") if c.strip()] for t in tiers]
+        _cl = [_research.split_clauses(t.get("basis")) for t in tiers]
         _shared = [c for c in _cl[0] if all(c in o for o in _cl[1:])] if all(_cl) else []
         _tail = ", ".join(_shared)
         parts = [_one((t.get("value") or "").strip(), t.get("kind"),

@@ -199,3 +199,19 @@ def test_without_pypdf_the_ladder_degrades_instead_of_shipping_the_container(mon
                         lambda *a, **k: _Resp(make_pdf()))
     assert P.pdf_text(make_pdf()) == ""
     assert _fetch_page("https://x.gov/label/2026/1lbl.pdf") == ("", "thin")
+
+
+def test_a_client_challenge_page_is_recognised_as_blocked():
+    """FU230: Cloudflare's "Client Challenge" interstitial renders 226 visible characters on
+    link.springer.com -- 26 over the thin-content floor -- and its title matches none of the older
+    wordings, so it was accepted as a real page and the web-fetch fallback never ran. That hid the
+    review whose HbA1c range a blog then got wrong."""
+    from generators.brand_enrichment import _looks_blocked
+    page = ("<html><head><title>Client Challenge</title></head><body><h1>Client Challenge</h1>"
+            "<p>A required part of this site couldn’t load. This may be due to a browser "
+            "extension, network issues, or browser settings. Please check your connection, disable "
+            "any ad blockers, or try using a different browser.</p></body></html>")
+    assert _looks_blocked(page) == "challenge-page"
+    real = ("<html><head><title>A review</title></head><body><p>"
+            + ("Genuine article content follows here. " * 40) + "</p></body></html>")
+    assert _looks_blocked(real) == ""

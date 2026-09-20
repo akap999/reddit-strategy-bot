@@ -61,6 +61,11 @@ _CHALLENGE_TEXT_MARKERS = (
     "just a moment", "attention required", "enable javascript and cookies",
     "checking your browser", "verify you are a human", "access denied",
     "you have been blocked", "captcha", "ddos protection by",
+    # FU230: Cloudflare's "Client Challenge" interstitial. Measured on link.springer.com it renders
+    # 226 visible characters — 26 over the thin-content floor — and its title matches none of the
+    # wordings above, so it was accepted as a real page and the web-fetch fallback never ran. The
+    # review it hid is the one that states the HbA1c range a blog then got wrong.
+    "client challenge", "required part of this site couldn",
 )
 _CHALLENGE_MARKERS = _CHALLENGE_CODE_MARKERS + _CHALLENGE_TEXT_MARKERS   # back-compat name
 _CHALLENGE_SHORT_PAGE = 1500   # visible chars — challenge / block pages are shorter than this

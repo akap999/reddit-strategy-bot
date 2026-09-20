@@ -266,3 +266,103 @@ def test_a_quoted_sale_price_is_rejected_even_though_the_quote_is_on_the_page(mo
     res = R.research_brand(stub, "Pigeon", ["p.com"], ["Starting price — the regular price"], log=lambda m: None)
     assert [f["answer"] for f in res["facts"]] == ["$39.99 for the PPSU 2-pack"]   # the sale figure was refused
     assert R.figure_is_sale("$35.99", page) and not R.figure_is_sale("$39.99", page)
+
+
+# ------------------------------------------------- a host that walls us is only discovered once
+import pytest                                                   # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _forget_walls():
+    """The wall note is process-wide by design, so each test starts with no assumptions."""
+    BE.forget_walled_domains()
+    yield
+    BE.forget_walled_domains()
+
+
+def _recording_get(monkeypatch, handler):
+    calls = []
+
+    class _R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text = code, text
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=True, proxies=None):
+        calls.append((url, bool(proxies)))
+        return _R(*handler(url))
+    monkeypatch.setattr(BE.requests, "get", fake_get)
+    monkeypatch.setattr(BE.time, "sleep", lambda s: None)
+    monkeypatch.setenv("REDDIT_HTTP_PROXY", "http://proxy:1")
+    return calls
+
+
+def test_a_walled_host_costs_one_ladder_not_one_per_page(monkeypatch):
+    """jollysearch.com had 7 cited pages in the 19 Sep run; each paid a certain-to-403 residential
+    fetch. The wall is learned once and the rest of its pages go straight to the caller's fallback."""
+    calls = _recording_get(monkeypatch, lambda u: (403,))
+    assert BE._fetch_page("https://walled.com/a") == ("", "blocked")
+    first = len(calls)
+    assert any(proxied for _u, proxied in calls), "the first page still earns a residential attempt"
+    for p in ("/b", "/c", "/d", "/e", "/f", "/g"):
+        assert BE._fetch_page("https://walled.com" + p) == ("", "blocked")
+    assert len(calls) == first, "no further page on that host touched the network at all"
+
+
+def test_the_wall_note_expires_so_a_transient_block_does_not_stick(monkeypatch):
+    calls = _recording_get(monkeypatch, lambda u: (403,))
+    BE._fetch_page("https://flaky.com/a")
+    n = len(calls)
+    monkeypatch.setattr(BE, "_WALLED_TTL", 0)                   # as if the note had aged out
+    BE._fetch_page("https://flaky.com/b")
+    assert len(calls) > n, "an expired note is re-probed rather than trusted forever"
+
+
+def test_only_a_wall_is_remembered_not_a_missing_page_or_a_network_error(monkeypatch):
+    calls = _recording_get(monkeypatch, lambda u: (404,) if "missing" in u else (500,))
+    BE._fetch_page("https://a.com/missing")
+    BE._fetch_page("https://b.com/broken")
+    n = len(calls)
+    BE._fetch_page("https://a.com/other")
+    BE._fetch_page("https://b.com/other")
+    assert len(calls) > n, "404 and 500 are not walls — those hosts are still probed"
+
+
+def test_a_caller_can_insist_on_probing_a_known_wall(monkeypatch):
+    calls = _recording_get(monkeypatch, lambda u: (403,))
+    BE._fetch_page("https://walled.com/a")
+    n = len(calls)
+    BE._fetch_page("https://walled.com/b", ignore_wall=True)
+    assert len(calls) > n
+
+
+def test_the_second_page_of_a_walled_host_still_gets_read_through_web_fetch(monkeypatch):
+    """The saving must not cost us the page: the caller sees "blocked" and falls back as before."""
+    _recording_get(monkeypatch, lambda u: (403,))
+    stub = ResearchStub(fetch_handler=lambda u: ("# Pricing\nPro is $49 per user per month.", "ok"))
+    gen = BlogGenerator(stub, db=None)
+    gen._must_read_urls = {"https://walled.com/a", "https://walled.com/b"}
+    assert "Pro is $49" in gen._fetch_url("https://walled.com/a")
+    assert "Pro is $49" in gen._fetch_url("https://walled.com/b")
+    assert stub.fetch_calls == ["https://walled.com/a", "https://walled.com/b"]
+    assert gen._fetch_reasons["https://walled.com/b"] == "blocked; read via web fetch"
+
+
+def test_a_403_from_the_residential_rung_is_a_wall_not_a_network_error(monkeypatch):
+    """jollysearch.com answers 202 to the datacenter IP and 403 to the residential one. The reason
+    used to come out "error" — so the scoreboard blamed the network and the wall was never learned."""
+    def handler(url):
+        return (403,) if "proxy" in url else (202, "")
+    calls = []
+
+    class _R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text = code, text
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=True, proxies=None):
+        calls.append(bool(proxies))
+        return _R(403) if proxies else _R(202, "")
+    monkeypatch.setattr(BE.requests, "get", fake_get)
+    monkeypatch.setattr(BE.time, "sleep", lambda s: None)
+    monkeypatch.setenv("REDDIT_HTTP_PROXY", "http://proxy:1")
+    assert BE._fetch_page("https://odd.com/a", retries=0) == ("", "blocked")
+    assert BE._walled("https://odd.com/b"), "and the host is remembered as walled"

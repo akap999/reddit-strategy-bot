@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from html.parser import HTMLParser
 
@@ -102,7 +103,56 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
     return _fetch_page(domain_url, timeout=timeout, retries=retries)[0]
 
 
-def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2):
+# FU221 — which hosts have already walled us THIS RUN. A walled site walls every page on it, so
+# without this each page pays a direct attempt AND a metered residential attempt that is certain to
+# fail before the caller falls back to Anthropic's web fetch: jollysearch.com's 7 cited pages burned
+# 7 guaranteed-403 residential fetches in the 19 Sep scoreboard run. A host is recorded only after
+# the FULL ladder (direct retries + residential) concluded "blocked", and the note expires, so a
+# transient block cannot poison a host for long.
+_WALLED_TTL = float(os.environ.get("WALLED_DOMAIN_TTL", "1800"))   # seconds
+_WALLED = {}
+_WALLED_LOCK = threading.Lock()
+
+
+def _host(url):
+    m = re.match(r"^(?:https?://)?([^/?#]+)", (url or "").strip(), re.I)
+    return (m.group(1).lower().lstrip("www.") if m else "")
+
+
+def _walled(url):
+    """Has this host already walled us, recently enough to believe it?"""
+    h = _host(url)
+    if not h:
+        return False
+    with _WALLED_LOCK:
+        ts = _WALLED.get(h)
+        if ts is None:
+            return False
+        if time.time() - ts > _WALLED_TTL:
+            _WALLED.pop(h, None)          # expired — probe it properly again
+            return False
+    return True
+
+
+def _mark_walled(url):
+    h = _host(url)
+    if not h:
+        return
+    with _WALLED_LOCK:
+        first = h not in _WALLED
+        _WALLED[h] = time.time()
+    if first:
+        print(f"[brand_enrichment] {h} walls us — later pages on it skip straight to the web-fetch "
+              f"fallback (no direct attempt, no residential GB)", flush=True)
+
+
+def forget_walled_domains():
+    """Test/ops hook: start again with no assumptions about who walls us."""
+    with _WALLED_LOCK:
+        _WALLED.clear()
+
+
+def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wall: bool = False):
     """FU221 — `_fetch_homepage` that also says WHY a fetch failed: returns (html, reason) with reason
     one of "ok", "not-found" (404/410 — the page does not exist), "blocked" (403/401/429/503, or a
     200 challenge page), "thin" (a JS shell with no text), "error" (timeout / network / other status),
@@ -112,6 +162,10 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2):
     page is missing, not walled, and residential GB is metered."""
     if not domain_url:
         return "", "no-url"
+    if not ignore_wall and _walled(domain_url):
+        # Known wall: say so at once. The caller reads it through web fetch instead, and we keep the
+        # metered residential GB (and the timeout) that a certain 403 would have cost.
+        return "", "blocked"
     reason = "error"
     url = domain_url.strip()
     if not url.startswith(("http://", "https://")):
@@ -169,12 +223,21 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2):
                 print(f"[brand_enrichment] residential fetch 200-but-blocked ({blocked}) "
                       f"for {url}", flush=True)
             else:
+                # FU221: classify the RESIDENTIAL status too. It used to override the reason only for
+                # 404/410, so a 403 here was reported as whatever the direct attempt happened to set —
+                # jollysearch.com answers 202 to the datacenter IP and 403 to the residential one, and
+                # came out as "error". The scoreboard then calls a walled page a network fault, and the
+                # wall is never learned.
                 if resp.status_code in (404, 410):
                     reason = "not-found"
+                elif resp.status_code in (401, 403, 429, 503):
+                    reason = "blocked"
                 print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
                       flush=True)
         except requests.exceptions.RequestException as e:
             print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
+    if reason == "blocked":
+        _mark_walled(url)     # the whole ladder failed on a wall — do not pay for it again this run
     return "", reason
 
 

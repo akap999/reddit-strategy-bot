@@ -3403,7 +3403,9 @@ def api_blog_import():
     Multipart: `file` + `brand_id`, plus OPTIONAL `title` / `seed` / `meta_title` /
     `meta_description` / `keywords`. An operator value always WINS; anything left blank is detected
     from the file (<h1> -> title, <title> -> meta_title, meta description, meta keywords; for a
-    .docx, the Heading 1 or first line). Synchronous — parsing is local and fast, no LLM."""
+    .docx, the Heading 1 or first line). Synchronous: parsing is local and fast; the ONE LLM call is
+    FU221's label pass (a few seconds) that marks the lead-in labels an outside file wrote without the
+    bold — it is skipped on any failure, and the deterministic rule stands in for it."""
     from generators.blog_import import import_blog_file, BlogImportError
 
     f = request.files.get("file")
@@ -3437,19 +3439,36 @@ def api_blog_import():
     try:
         if not db.get_brand(brand_id):
             return jsonify({"error": "brand not found"}), 404
+        # FU221: an imported article usually carries the label CONTENT without our bold, so its
+        # sections do not read (or rewrite) like a generated one. Adding the two asterisks is a
+        # formatting repair — the words are the author's and are never changed.
+        from generators.blog_gen import BlogGenerator, promote_bold_labels
+        # FU221: the model MARKS the lead-in labels an imported file wrote without bold; code applies the
+        # asterisks (a phrase that is not the verbatim start of its line is dropped). The colon-shaped
+        # rule below still runs as the fallback when the call is off or unavailable.
+        _body, _n_lab = detected["body_markdown"], 0
+        try:
+            _gen = BlogGenerator(ClaudeClient(ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")),
+                                 db)
+            _body, _n_lab = _gen.mark_bold_labels(_body, seed, db.get_brand(brand_id))
+        except Exception as _e:
+            print(f"[blog_import] label pass skipped ({_e})", flush=True)
+        if not _n_lab:
+            _body, _n_lab = promote_bold_labels(_body)
         blog_id = db.save_blog(brand_id, seed, title=title, meta_description=meta_description,
-                               keywords=keywords, body_markdown=detected["body_markdown"],
+                               keywords=keywords, body_markdown=_body,
                                status="draft", prompt_version="imported")
         if meta_title:
             db.update_blog(blog_id, meta_title=meta_title)
     finally:
         db.close()
     print(f"[blog_import] blog #{blog_id} from {f.filename!r} ({detected['format']}, "
-          f"{len(detected['body_markdown'])} chars) for brand {brand_id}", flush=True)
+          f"{len(detected['body_markdown'])} chars, {_n_lab} label(s) bolded) for brand {brand_id}",
+          flush=True)
     return jsonify({"blog_id": blog_id, "format": detected["format"],
                     "title": title, "meta_title": meta_title,
                     "meta_description": meta_description, "keywords": keywords,
-                    "chars": len(detected["body_markdown"]),
+                    "chars": len(detected["body_markdown"]), "labels_bolded": _n_lab,
                     # which fields the FILE supplied (so the UI can say what it detected)
                     "detected": {k: bool(detected.get(k)) for k in
                                  ("title", "meta_title", "meta_description", "keywords")}})
@@ -7752,6 +7771,15 @@ def api_blog_rewrite(blog_id):
                 if _vfx:
                     print(f"[blog_gen] verify: {len(_vfx)} formatting fix(es) on the "
                           f"{_surface} rewrite", flush=True)
+                # FU221: the table rules inside `_rebuild_sources` re-ran on a FINISHED article and
+                # dropped #158's pricing column (one "-" cell). The rewrite may reword prose, never
+                # reshape a table, so the input's tables go back verbatim. Safe to do after the rebuild
+                # here: with no evidence loaded this task never renumbers a single [S#].
+                from generators.rewrite_guard import restore_tables
+                new_body, _n_tab = restore_tables(body, new_body)
+                if _n_tab:
+                    print(f"[rewrite-guard] restored {_n_tab} table(s) the cleanup had reshaped",
+                          flush=True)
             import time as _t
             secs = float(article.get("writer_secs") or 0)
             cost = round(secs * WRITER_GPU_HOURLY / 3600.0, 4)   # FU155: rough GPU-time cost estimate

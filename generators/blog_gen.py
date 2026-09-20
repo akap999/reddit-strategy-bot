@@ -258,6 +258,62 @@ _VF_NBSP_RE = re.compile("[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
 # before, so a model timing a 90-second script out to 5:00 shipped broken chapters.
 _YT_TS_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$")
 
+# FU221 — an IMPORTED article often carries the label CONTENT ("Hematocrit elevation: TRT can raise…")
+# without the bold our own articles use. Promoting it is a formatting repair, not a rewrite: the words
+# never change, only the two asterisks are added, and a lead-in that is already bold is never touched.
+# Deliberately deterministic — a model asked to "add labels" would also reword the sentence, which on an
+# imported (often client-written) article is not ours to do.
+# first words that mean the line is a sentence, not a label ("In short:", "She said:", "The result:")
+_NOT_A_LABEL_WORD = {
+    "i", "we", "you", "he", "she", "they", "it", "this", "that", "these", "those", "there", "here",
+    "in", "on", "at", "for", "after", "before", "with", "without", "however", "instead", "also",
+    "then", "so", "but", "and", "because", "since", "while", "although", "overall", "finally",
+    "meanwhile", "still", "yet", "today", "now", "again", "otherwise", "remember", "imagine",
+    "consider", "think", "look", "see", "let", "the", "a", "an", "my", "our", "your", "their",
+}
+_LABEL_LEAD_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)?([A-Z][^:\n*_`.!?]{1,58}?):\s+(?=\S)")
+
+
+def promote_bold_labels(body):
+    """Bold a label-shaped lead-in that is not bold yet. Returns (body, n_added); idempotent."""
+    out, n, fence, in_sources = [], 0, None, False
+    for ln in (body or "").split("\n"):
+        st = ln.strip()
+        f = re.match(r"(```|~~~)", st)
+        if fence is not None:
+            out.append(ln)
+            if st.startswith(fence):
+                fence = None
+            continue
+        if f:
+            fence = f.group(1)
+            out.append(ln)
+            continue
+        if re.match(r"#{1,6}\s", st):
+            in_sources = bool(re.match(r"#{1,6}\s+Sources\s*$", st, re.I))
+            out.append(ln)
+            continue
+        if in_sources or st.startswith(("|", ">")) or "**" in ln or not st:
+            out.append(ln)
+            continue
+        m = _LABEL_LEAD_RE.match(ln)
+        phrase = m.group(2).strip() if m else ""
+        rest = ln[m.end():] if m else ""
+        # A colon is not enough: "In short:", "She said:" and "The result:" open ordinary prose. A label
+        # is a LIST ITEM (where labels actually live) whose phrase does not open like a sentence.
+        if m and m.group(1) and phrase.split()[0].lower() not in _NOT_A_LABEL_WORD \
+                and 1 <= len(phrase.split()) <= 6 and len(rest.strip()) >= 20 and "http" not in phrase:
+            out.append(f"{m.group(1) or ''}**{phrase}:** {rest.lstrip()}")
+            n += 1
+        else:
+            out.append(ln)
+    # the same consistency rule the model pass ends with: a list that labels some of its points labels
+    # the rest. Keeps the fallback (no API key / pass switched off) as close to the real thing as a
+    # rule can get.
+    n += BlogGenerator._label_siblings(out)
+    return "\n".join(out), n
+
+
 def scrub_markdown_formatting(body):
     """Deterministic FORMATTING repair of the FINISHED body. Every rule below was confirmed against
         python-markdown before being included — a defect that renders correctly is NOT 'fixed', and is
@@ -650,6 +706,8 @@ _BLOG_FETCH_WORKERS = int(os.environ.get("BLOG_FETCH_WORKERS", "5"))   # FU151 (
 # ONE GPU container (deploy.py max_containers=1), so the cap is about that GPU's batch/KV-cache headroom
 # for ~3k-token generations, not about politeness to a remote host.
 _WRITER_WORKERS = int(os.environ.get("WRITER_WORKERS", "6"))
+# FU221: how many rejected paragraphs get a second attempt before the input simply stands
+_GUARD_RETRY_MAX = int(os.environ.get("GUARD_RETRY_MAX", "24"))
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
@@ -9732,7 +9790,9 @@ you MAY assume the description will carry: "{disc}".
                 "PRESERVE EXACTLY: every [S#] citation marker (keep each on the claim it supports); every "
                 "number, dose, %, price and date; every product/drug/brand name; every Markdown table "
                 "(structure and cell values, verbatim); every heading line and every line that is entirely "
-                "bold text (a section label) character-for-character; and every NEGATION or clinical "
+                "bold text (a section label) character-for-character; every BOLD LEAD-IN LABEL at the START of a "
+                "paragraph or list item (\"**Quick answer:**\", \"- **Hematocrit Elevation:**\") — keep "
+                "the bold and its EXACT words, reword only the text after it; and every NEGATION or clinical "
                 "directive with its exact scope ('not', 'no', 'contraindicated', 'only', 'required', "
                 "'not FDA-approved', 'not a controlled substance').\n"
                 "Descriptive factual and regulatory sentences (definitions, eligibility ranges, "
@@ -9818,6 +9878,112 @@ you MAY assume the description will carry: "{disc}".
                     out.append(sent)
         return out
 
+    def _guard_retry(self, todo, brand=None, extracted=None, timeout=None):
+        """FU221 — ask the REWRITE model to redo the paragraphs its first attempt broke, naming exactly
+        what it must keep. Returns {original_paragraph: new_text}; the guard re-checks every answer and
+        still falls back to the input when the second attempt fails too. Never raises."""
+        if not todo or not self.writer:
+            return {}
+        timeout = timeout or int(os.environ.get("WRITER_CALL_TIMEOUT", "600"))
+
+        def _one(item):
+            src, why = item["orig"], "; ".join(item["problems"])
+            cites = " ".join(sorted(set(re.findall(r"\[S\d+\]", src)))) or "none"
+            figs = ", ".join(sorted({m.group(0) for m in re.finditer(r"\d[\d,]*(?:\.\d+)?%?", src)})) or "none"
+            lab = re.match(r"^\s*(?:[-*+]|\d+[.)])?\s*\*\*([^*\n]{1,90}?)\*\*", src)
+            try:
+                got = self.writer.call_text(
+                    "Reword this paragraph again. Your previous attempt was rejected because it "
+                    f"{why}.\n\n"
+                    "Rewrite it COMPLETELY in your own words — different structure, different "
+                    "connectives — but it MUST keep, exactly as written here:\n"
+                    f"- these citation markers, each on the claim it supports: {cites};\n"
+                    f"- these figures: {figs};\n"
+                    + (f"- the bold label at the start, word for word: **{lab.group(1)}:**;\n" if lab else
+                       "- no bold label at the start (this paragraph has none);\n")
+                    + "- every product, brand, place and technical term the paragraph uses.\n"
+                    "Add NOTHING: no new citation, no placeholder like [S#], no bracketed note.\n"
+                    "Return ONLY the rewritten paragraph.\n\n"
+                    f"PARAGRAPH:\n{src}",
+                    max_tokens=1200, temperature=0.9, timeout=timeout)
+            except Exception:
+                return src, None
+            return src, _strip_model_preamble((got or "").strip()) or None
+
+        out = {}
+        try:
+            if len(todo) > 1:
+                with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(todo))) as _ex:
+                    pairs = list(_ex.map(_one, todo))
+            else:
+                pairs = [_one(todo[0])]
+            for src, got in pairs:
+                if got and got != src:
+                    out[src] = got
+            print(f"[rewrite-guard] retried {len(todo)} paragraph(s), {len(out)} came back", flush=True)
+        except Exception as e:
+            print(f"[rewrite-guard] retry skipped ({e})", flush=True)
+        return out
+
+    def _guard_surgical(self, todo, brand=None, extracted=None, timeout=None):
+        """FU221 — the LAST rung before a paragraph would be handed back unreworded. The model gets its
+        OWN rewritten paragraph and the one thing still missing from it, and is asked for the SMALLEST
+        possible edit — not another re-reword, which just re-rolls the wording that already failed.
+        The base text stays the model's, so the strip survives. Returns {original: patched}. Never raises."""
+        if not todo or not self.writer:
+            return {}
+        timeout = timeout or int(os.environ.get("WRITER_CALL_TIMEOUT", "600"))
+
+        def _one(item):
+            src, mine = item["orig"], item.get("rewrite") or ""
+            if not mine:
+                return src, None
+            want, figs = [], False
+            for p in item["problems"]:
+                if p.startswith("term lost:"):
+                    want += [t.strip() for t in p[10:].split(",") if t.strip()]
+                elif p.startswith("figures"):
+                    figs = True
+            need = ""
+            if want:
+                need += ("- put these EXACT words back, spelled exactly like this, where you wrote your "
+                         "own phrasing for them: " + "; ".join(f'"{w}"' for w in want) + ";\n")
+            if figs:
+                need += ("- restore every figure exactly as the ORIGINAL had it: "
+                         + (", ".join(sorted({m.group(0) for m in re.finditer(r"\d[\d,]*(?:\.\d+)?%?", src)})) or "none")
+                         + ";\n")
+            if not need:
+                return src, None
+            try:
+                got = self.writer.call_text(
+                    "Below is a paragraph YOU rewrote. It is almost right. Make the SMALLEST possible "
+                    "edit to fix what is listed, and change NOTHING else — keep your own sentences, "
+                    "your own structure and your own wording everywhere else, word for word.\n\n"
+                    f"WHAT TO FIX:\n{need}"
+                    "Do NOT rewrite the paragraph again. Do NOT add a citation, a placeholder or a note.\n"
+                    "Return ONLY the corrected paragraph.\n\n"
+                    f"YOUR PARAGRAPH:\n{mine}",
+                    max_tokens=1200, temperature=0.3, timeout=timeout)
+            except Exception:
+                return src, None
+            return src, _strip_model_preamble((got or "").strip()) or None
+
+        out = {}
+        try:
+            if len(todo) > 1:
+                with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(todo))) as _ex:
+                    pairs = list(_ex.map(_one, todo))
+            else:
+                pairs = [_one(todo[0])]
+            for src, got in pairs:
+                if got and got != src:
+                    out[src] = got
+            print(f"[rewrite-guard] surgical fix on {len(todo)} paragraph(s), {len(out)} came back",
+                  flush=True)
+        except Exception as e:
+            print(f"[rewrite-guard] surgical fix skipped ({e})", flush=True)
+        return out
+
     def _residual_polish(self, claude_body, out, brand=None, extracted=None, verdicts=None, timeout=600):
         """FU172 Change 4 — surgical pass over ONLY the sentences still carrying DISCRETIONARY verbatim
         wording (the sole part that can hold a watermark). One small call instead of another ~700s re-roll.
@@ -9853,7 +10019,8 @@ you MAY assume the description will carry: "{disc}".
                 "different connectives, different sentence openers. Share no run of more than 4 consecutive "
                 "words with the original.\n"
                 "KEEP EXACT: every [S#] marker, every number/price/date with its unit, every product, brand or "
-                "company name, every code, and the exact scope of every negation.\n"
+                "company name, every code, a BOLD LEAD-IN LABEL at the start of a sentence "
+                "(\"**Quick answer:**\") with its exact words, and the exact scope of every negation.\n"
                 "Return ONLY the rewritten sentences, numbered the same way, same count, one per line.\n\n"
                 + numbered, max_tokens=2000, temperature=1.0, timeout=timeout)
         except Exception as e:
@@ -9932,7 +10099,8 @@ you MAY assume the description will carry: "{disc}".
                     rep = self.writer.call_text(
                         "Rewrite this sentence in your own words, but fix the factual error described.\n"
                         f"PROBLEM: {why}\nMUST MATCH THIS FACT EXACTLY: {orig}\n"
-                        "Keep every [S#] marker. Return ONLY the corrected sentence.\n\n"
+                        "Keep every [S#] marker, and keep any BOLD LEAD-IN LABEL at the start (\"**Quick answer:**\") "
+                        "with its exact words. Return ONLY the corrected sentence.\n\n"
                         f"SENTENCE: {bad}", max_tokens=600, temperature=0.7, timeout=timeout)
                 except Exception:
                     rep = None
@@ -10134,8 +10302,14 @@ you MAY assume the description will carry: "{disc}".
                 "Also return up to 8 WHOLE sentences that cannot be safely reworded at all because their "
                 "meaning turns on scope: a contraindication, a dosing schedule, a safety negation, a "
                 "regulatory obligation, an eligibility rule, a licence restriction, or quoted/reported "
-                "regulator wording.\n\n"
-                'Return JSON ONLY: {"atoms": ["..."], "verbatim_sentences": ["..."]}\n\n'
+                "regulator wording.\n"
+                "Also return up to 30 KEY TERMS (1-4 words each, copied exactly as the article writes "
+                "them): the domain terms whose replacement by a near-synonym would change the meaning or "
+                "its precision. Cross-domain examples: 'lean mass' is not 'muscle mass'; 'narrative "
+                "review' is not 'review article'; 'APR' is not 'interest rate'; 'general contractor' is "
+                "not 'builder'; 'SOC 2 Type II' is not 'SOC 2'; 'Quick answer' as a section label. "
+                "EXCLUDE everyday wording a rewrite may freely vary.\n\n"
+                'Return JSON ONLY: {"atoms": ["..."], "verbatim_sentences": ["..."], "key_terms": ["..."]}\n\n'
                 f"ARTICLE:\n{claude_body[:14000]}", max_tokens=2000, temperature=0)
         except Exception as e:
             print(f"[writer] fact extraction failed ({e}) — regex-only path", flush=True)
@@ -10181,7 +10355,14 @@ you MAY assume the description will carry: "{disc}".
         print(f"[writer] facts: {len(kept)} atoms + {len(sents)} verbatim sentences, locking "
               f"{used / body_words:.1%} of the body (model missed {missed} → restored, "
               f"rejected {rejected} generic)", flush=True)
-        return {"atoms": kept, "verbatim_sentences": sents}
+        # FU221 (rewrite guard): the article's key terms — verified to be in the body, short, capped.
+        key_terms = []
+        for kt in (res.get("key_terms") or [])[:60]:
+            kt = str(kt or "").strip()
+            if kt and len(kt.split()) <= 4 and kt.lower() in low and kt.lower() not in \
+                    {k.lower() for k in key_terms}:
+                key_terms.append(kt)
+        return {"atoms": kept, "verbatim_sentences": sents, "key_terms": key_terms[:30]}
 
     def _classify_spans(self, spans, brand=None, extracted=None):
         """FU172 Change 0b/2 — Claude labels each surviving span fact-bearing / discretionary / structural.
@@ -10393,6 +10574,9 @@ you MAY assume the description will carry: "{disc}".
                     "never reword, rephrase, shorten, translate, or restructure a heading. Rewrite ONLY "
                     "the paragraph text UNDER the headings;\n"
                     "- every number, dose, %, price, date, and product/drug/brand name;\n"
+                    "- every BOLD LEAD-IN LABEL at the START of a paragraph or list item — \"**Quick answer:**\", "
+                    "\"- **Hematocrit Elevation:**\", \"**Best fit for:**\" — keep the bold and its EXACT words "
+                    "(they are section labels a reader scans, not prose); reword only the text AFTER the label;\n"
                     + (("- THESE EXACT SPANS, character-for-character (this is the authoritative list — "
                         "everything NOT on it is yours to recast freely):\n"
                         + "".join(f"    • {a}\n" for a in _atoms[:120])) if _atoms else "")
@@ -10724,6 +10908,61 @@ you MAY assume the description will carry: "{disc}".
                 except Exception as _e:
                     print(f"[writer] fact verification skipped ({_e})", flush=True)
                 article["writer_secs"] = round(secs, 1)
+
+            # FU221 — THE REWRITE GUARD, the last word before anything ships. The gates above check that
+            # every number and every original [S#] survives SOMEWHERE in the body; none of them compares a
+            # table, a paragraph's own citations, a bold label or a domain term against the input. #158
+            # shipped a dropped pricing column, a literal "[S#]", renamed labels and "lean mass" →
+            # "muscle mass" through all of them. The guard puts back the input's version of exactly the
+            # blocks that changed one of those, and keeps the rewrite everywhere else. Compose writes
+            # fresh (no block to compare against) and the LinkedIn POST is free-form plain-text lines,
+            # so both are left alone.
+            if best and self.writer_mode == "rewrite" and surface != "linkedin_post":
+              # own try/except: the guard is a SAFETY NET, so a fault in it must cost at most the net —
+              # never the whole rewrite. (Found live: one bad argument threw here and the pass fell all
+              # the way back to Claude's body, i.e. no strip at all.)
+              try:
+                from generators.rewrite_guard import guard_rewrite
+                _log = lambda m: print(m, flush=True)          # noqa: E731
+                _g_body, _g_rep = guard_rewrite(
+                    claude_body, best, key_terms=_extracted.get("key_terms") or [], log=_log)
+                # FU221 — RETRY BEFORE REVERTING. A paragraph that broke a rule goes back to the REWRITE
+                # model (never Claude — his words are what we are replacing) with the rule spelled out;
+                # only a second failure falls back to the input. Same repair-or-revert discipline the
+                # fact verifier already uses.
+                _todo = (_g_rep.get("retryable") or [])[:_GUARD_RETRY_MAX]
+                if _todo and self.writer:
+                    _fix = self._guard_retry(_todo, brand, _extracted)
+                    if _fix:
+                        _g2_body, _g2_rep = guard_rewrite(
+                            claude_body, best, key_terms=_extracted.get("key_terms") or [],
+                            log=_log, repairs=_fix)
+                        if _g2_body:
+                            _g_body, _g_rep = _g2_body, _g2_rep
+                        # A paragraph the re-reword still broke gets ONE surgical edit of the model's
+                        # own attempt before it would be handed back unreworded.
+                        _todo2 = [x for x in (_g_rep.get("retryable") or [])
+                                  if x.get("round") == 2][:_GUARD_RETRY_MAX]
+                        if _todo2 and os.environ.get("GUARD_SURGICAL", "1") != "0":
+                            _fix2 = self._guard_surgical(_todo2, brand, _extracted)
+                            if _fix2:
+                                _fix.update(_fix2)
+                                _g3_body, _g3_rep = guard_rewrite(
+                                    claude_body, best, key_terms=_extracted.get("key_terms") or [],
+                                    log=_log, repairs=_fix)
+                                if _g3_body:
+                                    _g_body, _g_rep = _g3_body, _g3_rep
+                article["writer_guard"] = {k: v for k, v in _g_rep.items()
+                                           if k not in ("examples", "retryable", "_repairs")}
+                article["writer_guard"]["retryable"] = len(_g_rep.get("retryable") or [])
+                if _g_rep.get("changed") and _g_body:
+                    best = _g_body
+                    best_rep = self._watermark_removal_report(claude_body, best, brand, _atoms, _verdicts)
+                    article["writer_warning"] = "; ".join(
+                        x for x in [article.get("writer_warning", ""), _g_rep["summary"]] if x)
+              except Exception as _e:
+                print(f"[rewrite-guard] skipped ({_e}) — shipping the rewrite as the model wrote it",
+                      flush=True)
 
             _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
             _share = best_rep.get("residual_share", 0.0)
@@ -11176,6 +11415,136 @@ you MAY assume the description will carry: "{disc}".
             elif k in self._CHECK_NOTES:
                 setattr(self, k, v)
 
+    def mark_bold_labels(self, body, seed="", brand=None):
+        """FU221 — ONE extra Claude call that MARKS the lead-in labels in a finished article, and code
+        applies the bold. A colon rule can never cover every shape (a dash lead-in, a label with no
+        punctuation at all), and judging "is this line a labelled point or a sentence?" is exactly what a
+        model is good at — so the model decides, and the mechanical half stays mechanical:
+
+          * the model returns PHRASES ONLY, never rewritten text;
+          * a phrase is applied ONLY when the line genuinely STARTS with it, character-for-character;
+          * anything else — an invented phrase, a phrase from the middle of a sentence, a line that is
+            already bold, a heading, a table row, the Sources list — is dropped.
+
+        So the worst a bad answer can do is bold nothing. Returns (body, n_added); never raises."""
+        if os.environ.get("BLOG_LABEL_PASS", "1") == "0" or not (body or "").strip() or not self.claude:
+            return body, 0
+        lines = body.split("\n")
+        # only the lines a label could live on — headings, tables, code and the Sources list never qualify
+        cand, fence, in_src = [], None, False
+        for i, ln in enumerate(lines):
+            st = ln.strip()
+            f = re.match(r"(```|~~~)", st)
+            if fence is not None:
+                if st.startswith(fence):
+                    fence = None
+                continue
+            if f:
+                fence = f.group(1)
+                continue
+            if re.match(r"#{1,6}\s", st):
+                in_src = bool(re.match(r"#{1,6}\s+Sources\s*$", st, re.I))
+                continue
+            if in_src or not st or st.startswith(("|", ">")) or "**" in ln:
+                continue
+            cand.append((i, ln))
+        if not cand:
+            return body, 0
+        numbered = "\n".join(f"{i}\t{ln[:300]}" for i, ln in cand[:200])
+        # Show the article's OWN convention: the labels it already uses. In production most are already
+        # bold and only a straggler is missing, so these examples are what make the answer consistent
+        # with the rest of the piece rather than a fresh judgement call.
+        _bold_lead = re.compile(r"^\s*(?:[-*+]|\d+[.)])?\s*\*\*([^*\n]{1,90}?)\*\*")
+        seen = []
+        for ln in lines:
+            m = _bold_lead.match(ln)
+            if m and m.group(1).strip() not in seen:
+                seen.append(m.group(1).strip())
+            if len(seen) >= 10:
+                break
+        convention = ("THIS ARTICLE ALREADY LABELS ITS POINTS LIKE THIS: "
+                      + "; ".join(f'"{x}"' for x in seen)
+                      + ". Mark the remaining points the SAME way — a point that belongs to the same "
+                        "list or section as one of these should be labelled too.\n\n") if seen else ""
+        try:
+            res = self.claude.call(
+                "This article is finished. Its sections use a SHORT BOLD LABEL at the start of a point "
+                "so a reader (and an answer engine) can scan it — e.g. \"**Binding estimate:** a quote "
+                "that cannot change\". Some points below are written WITHOUT that bold.\n\n"
+                "For each numbered line, decide: does it OPEN with a short phrase that names what the "
+                "point is about (a risk, a criterion, a step, a feature, an option)? If yes, return that "
+                "phrase EXACTLY as the line writes it — the leading words only, without the list marker "
+                "and without the separator that follows it (a colon, a dash or an em dash).\n"
+                "Return NOTHING for a line that is ordinary prose, a full sentence, a quotation, or a "
+                "continuation of the point above — a colon alone does not make a label (\"In short:\", "
+                "\"The result:\", \"She said:\" are prose).\n"
+                "Never invent, shorten, expand or re-capitalise a phrase: it must be copied from the "
+                "line. Never return more than 6 words.\n\n"
+                + convention
+                + f"ARTICLE TOPIC: {seed or ''}"
+                + (f" (published by {(brand or {}).get('name') or ''})" if (brand or {}).get("name") else "")
+                + f"\n\nLINES:\n{numbered}\n\n"
+                'Return JSON ONLY: {"labels": [{"line": <number>, "phrase": "<exact leading words>"}]}',
+                max_tokens=2000, temperature=0)
+        except Exception as e:
+            print(f"[blog_gen] label pass skipped ({e})", flush=True)
+            return body, 0
+        out, n = list(lines), 0
+        for item in ((res or {}).get("labels") or [])[:80]:
+            try:
+                i = int(item.get("line"))
+                phrase = str(item.get("phrase") or "").strip()
+            except (TypeError, ValueError):
+                continue
+            if not phrase or i < 0 or i >= len(out) or "**" in out[i] or len(phrase.split()) > 6:
+                continue
+            m = re.match(r"(\s*(?:[-*+]|\d+[.)])\s+)?" + re.escape(phrase) + r"(\s*[:—–-]\s+)(?=\S)",
+                         out[i])
+            if not m:                       # not the START of that line, verbatim → drop it
+                continue
+            rest = out[i][m.end():]
+            if len(rest.strip()) < 20:      # a label needs something after it
+                continue
+            out[i] = f"{m.group(1) or ''}**{phrase}:** {rest.lstrip()}"
+            n += 1
+        # Consistency inside ONE list: when a list already labels some of its items, a sibling written
+        # the same way ("Phrase: …", "Phrase — …") is a label too. The strongest evidence available is
+        # the list itself, so this needs no judgement and no second call.
+        n += self._label_siblings(out)
+        if n:
+            print(f"[blog_gen] label pass: bolded {n} lead-in label(s)", flush=True)
+        return "\n".join(out), n
+
+    @staticmethod
+    def _label_siblings(out):
+        """Bold a list item written like its already-labelled siblings. Mutates `out`; returns a count."""
+        _bold_lead = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\*\*[^*\n]{1,90}?\*\*")
+        _plain = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)([A-Z][^:\n*_`.!?—–-]{1,58}?)(\s*[:—–-]\s+)(?=\S)")
+        n, i = 0, 0
+        while i < len(out):
+            if not re.match(r"\s*(?:[-*+]|\d+[.)])\s+", out[i]):
+                i += 1
+                continue
+            j = i                                   # the run of consecutive list items
+            while j < len(out) and (re.match(r"\s*(?:[-*+]|\d+[.)])\s+", out[j]) or not out[j].strip()):
+                if not out[j].strip() and (j + 1 >= len(out)
+                                           or not re.match(r"\s*(?:[-*+]|\d+[.)])\s+", out[j + 1])):
+                    break
+                j += 1
+            block = list(range(i, j))
+            if any(_bold_lead.match(out[k]) for k in block):
+                for k in block:
+                    if _bold_lead.match(out[k]) or "**" in out[k]:
+                        continue
+                    m = _plain.match(out[k])
+                    if m and 1 <= len(m.group(2).split()) <= 6 \
+                            and m.group(2).split()[0].lower() not in _NOT_A_LABEL_WORD \
+                            and len(out[k][m.end():].strip()) >= 20:
+                        out[k] = f"{m.group(1)}**{m.group(2).strip()}:** {out[k][m.end():].lstrip()}"
+                        n += 1
+            i = max(j, i + 1)
+        return n
+
     def _finalize_article(self, brand, seed, article, draft_body, geo="", qualifier="",
                           ymyl=None, link_targets=None, with_linkedin=True, include_pricing=True,
                           guide=False):
@@ -11297,6 +11666,9 @@ you MAY assume the description will carry: "{disc}".
                 self._warn(article, _nn)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"], brand)
+        # FU221: mark any lead-in label the writer left unbolded, so every article in the set scans the
+        # same way and the rewrite guard has a label to protect. The model only MARKS; code applies.
+        article["body_markdown"], _n_lab = self.mark_bold_labels(article["body_markdown"], seed, brand)
         # FU205 (R3): `_resolve_table_punts` RESETS `self._table_punt_note` on every call, and the
         # verification pass below re-runs `_rebuild_sources` after a prose repair. Capture the note
         # from THIS rebuild so a column dropped here is still reported even when the second rebuild

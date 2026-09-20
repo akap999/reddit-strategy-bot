@@ -189,3 +189,38 @@ def test_a_one_line_summary_block_is_never_judged():
     g._evidence_blocks.append({"label": page[0], "url": page[1], "text": _page(page[2])})
     out, note = _run(g, "## X\n\nIt was superior for all key endpoints at 72 weeks [S1].\n")
     assert "news.example/x" in out and not note      # untouched: we cannot judge a summary
+
+
+def test_a_cited_page_is_read_when_the_block_is_only_a_summary(monkeypatch):
+    """The real defect this exists for: a review states "HbA1c was reduced in SURPASS 1-5 by between
+    1.69 to 2.58%" and the body claimed "1.24-2.58%". The block held only the one-liner
+    `search_sources` wrote, so there was nothing to check the figure against. Read the page."""
+    import generators.blog_gen as BG
+    page = ("HbA1c was reduced in SURPASS 1-5 by between 1.69 to 2.58% and body weight by 5.4 to "
+            "11.7 kg across the 5 to 15 mg doses. " + ("Further discussion follows. " * 20))
+    calls = []
+
+    def _read(url, claude=None, cache=None, max_chars=20000):
+        calls.append(url)
+        return page, "web fetch"
+
+    monkeypatch.setattr(BG._research, "read_page", _read)
+    review = ("reference · Tirzepatide, a dual GIP/GLP-1 receptor co-agonist",
+              "https://link.springer.com/article/10.1186/s12933-022-01604-7",
+              "A review of the SURPASS programme.")          # the one-liner, far below page length
+    g = _gen(review, pad=False)
+    out, note = _run(g, "## X\n\nTirzepatide reduced HbA1c by 1.24-2.58% across SURPASS [S1].\n")
+    assert calls == [review[1]]                               # the cited page was read, once
+    assert "no gathered source states" in note and "1.24" in note
+    assert "2.58%" not in note                                # the bound that IS on the page passes
+    assert "[S1]" in _prose(out)                              # nothing moved: we only report
+
+
+def test_a_page_is_not_read_for_a_claim_with_no_figure(monkeypatch):
+    import generators.blog_gen as BG
+    calls = []
+    monkeypatch.setattr(BG._research, "read_page",
+                        lambda url, **kw: (calls.append(url), ("text " * 200, "direct"))[1])
+    g = _gen(("reference · R", "https://r.example/x", "A short summary."), pad=False)
+    _run(g, "## X\n\nIt is a dual agonist rather than a selective one [S1].\n")
+    assert calls == []

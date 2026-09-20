@@ -2576,6 +2576,7 @@ class BlogGenerator:
         self._price_warn = ""         # FU161: the subject's price could not be confirmed
         self._invented_note = ""      # FU184: a competitor the model named itself
         self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
+        self._claim_pages = {}        # FU230: pages read once to check the figures cited from them
         self._dup_table_note = ""     # FU228: a draft comparison section the guard did not restore
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
@@ -5101,12 +5102,21 @@ class BlogGenerator:
         # "official ·" primary source must ALWAYS be listed in ## Sources, even if the model didn't cite it
         # inline — the highest-authority source can never be silently dropped. Force such blocks into the
         # render set so they get a Sources entry. Other uncited blocks are still dropped as before.
-        def _is_forced(bl):
-            lab = (bl.get("label") or "").lower()
-            url = (bl.get("url") or "").lower()
-            return (lab.startswith("community discussion") or lab.startswith("official ·")
-                    or "reddit.com" in url)
-        forced = [i + 1 for i, bl in enumerate(blocks) if _is_forced(bl) and (i + 1) not in used]
+        def _is_community(bl):
+            return ((bl.get("label") or "").lower().startswith("community discussion")
+                    or "reddit.com" in (bl.get("url") or "").lower())
+
+        def _is_official(bl):
+            return (bl.get("label") or "").lower().startswith("official ·")
+
+        forced = [i + 1 for i, bl in enumerate(blocks) if _is_community(bl) and (i + 1) not in used]
+        # FU230: an official source is force-kept so a page can never ship with NO authoritative
+        # source behind it — not so that every authoritative page the sourcing happened to gather is
+        # listed. Once the body cites one, that guarantee is already met, and listing ten more
+        # uncited leaves nearly half the source list as dead weight (measured: 10 of 22).
+        if not any(_is_official(blocks[n - 1]) for n in used):
+            forced += [i + 1 for i, bl in enumerate(blocks)
+                       if _is_official(bl) and (i + 1) not in used][:2]
         render = used + forced
         if not render:
             return body   # nothing valid cited and no community block — leave the body untouched
@@ -9804,9 +9814,14 @@ you MAY assume the description will carry: "{disc}".
                           "after", "before", "during", "including", "such", "based", "plus", "via",
                           "per", "about", "under", "over", "through", "across", "between", "among",
                           "not", "just", "only", "especially", "particularly", "even", "also", "plus"}
-    # a subject pronoun opens a clause on its own
+    # a subject pronoun opens a clause on its own. "that" is NOT here: after a dash it is nearly
+    # always a RELATIVE pronoun continuing the noun phrase ("a 'twincretin' — that activates both
+    # receptors"), and punctuating that as a sentence ships the fragment "That activates both
+    # receptors." It earns a full stop only as a demonstrative SUBJECT, which a finite verb follows
+    # ("that is the whole point") — handled with the determiners below.
     _AI_CLAUSE_PRONOUN = {"it", "they", "he", "she", "we", "you", "i", "there",
-                          "this", "that", "these", "those"}
+                          "this", "these", "those"}
+    _AI_AMBIGUOUS_LEAD = {"that", "which"}
     # a determiner opens a NOUN PHRASE, which is only a clause once a finite verb follows it
     _AI_CLAUSE_DET = {"the", "a", "an", "most", "many", "some", "each", "all", "every", "no",
                       "its", "his", "her", "their", "our", "your", "both", "few", "several"}
@@ -9830,7 +9845,8 @@ you MAY assume the description will carry: "{disc}".
         if w == "i":                            # never "i"
             return False
         return w in (cls._AI_CONJ | cls._AI_NONCLAUSE_LEAD | cls._AI_CLAUSE_DET
-                     | cls._AI_CLAUSE_PRONOUN | {"if", "when", "since", "whether", "either",
+                     | cls._AI_CLAUSE_PRONOUN | cls._AI_AMBIGUOUS_LEAD
+                     | {"if", "when", "since", "whether", "either",
                                                  "neither", "as", "that", "than", "then"})
     _AI_DASH_TIGHT_RE = re.compile(r"(\w+)(?:—|–|--)(\w+)")
     _AI_DASH_RE = re.compile(r"[ \t]*(?:—|–|--)[ \t]*")
@@ -9854,6 +9870,8 @@ you MAY assume the description will carry: "{disc}".
         # EARNED FULL STOP
         if w0 in cls._AI_CLAUSE_PRONOUN:
             return True
+        if w0 in cls._AI_AMBIGUOUS_LEAD:
+            return any(w.lower() in cls._AI_FINITE_VERB for w in words[1:2])
         if w0 in cls._AI_CLAUSE_DET:
             return any(w.lower() in cls._AI_FINITE_VERB for w in words[1:3])
         return False
@@ -11526,6 +11544,7 @@ you MAY assume the description will carry: "{disc}".
     # Both are warning-backed: anything neither pass can resolve is reported, never invented.
     _CLAIM_CHECK_ON = os.environ.get("BLOG_CLAIM_SOURCE_CHECK", "1") != "0"
     _PAGE_TEXT_MIN = 400      # chars: below this a block is a summary, not a page we can judge
+    _CLAIM_FETCH_MAX = int(os.environ.get("BLOG_CLAIM_FETCH_MAX", "12"))
 
     @staticmethod
     def _norm_claim_text(s):
@@ -11559,6 +11578,33 @@ you MAY assume the description will carry: "{disc}".
                 for i, bl in enumerate(blocks) if (bl.get("text") or "").strip()}
         if not info:
             return body, ""
+        # FU230: most sources reach the evidence as the one-liner `search_sources` wrote, so the
+        # figures they are cited for cannot be checked against anything. Read the pages that are
+        # actually CITED FOR A FIGURE — only those, once each, capped — and the check finally has
+        # something to judge. This is what catches a figure that is simply wrong: a review stating
+        # "1.69 to 2.58%" cannot support a body claiming "1.24-2.58%".
+        want = set()
+        for _ln in (body or "").split("\n"):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
+                break
+            if not _LOADBEARING_NUM_RE.search(_ln):
+                continue
+            for _x in re.findall(r"\[S(\d+)\]", _ln):
+                _i = int(_x)
+                if _i in info and len(info[_i][0]) < self._PAGE_TEXT_MIN:
+                    want.add(_i)
+        for _i in sorted(want)[:self._CLAIM_FETCH_MAX]:
+            url = (blocks[_i - 1].get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                txt, how = _research.read_page(url, claude=getattr(self, "claude", None),
+                                               cache=self._claim_pages)
+            except Exception:
+                continue
+            if txt and len(txt) >= self._PAGE_TEXT_MIN:
+                info[_i] = (txt, info[_i][1])
+                print(f"[blog_gen] claim-source: read [S{_i}] to check its figures ({how})", flush=True)
         repointed, unsupported, dropped, advised = [], [], [], []
 
         def _fix(unit, cell=False):

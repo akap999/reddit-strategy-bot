@@ -128,3 +128,73 @@ def test_two_genuinely_different_sources_still_cite_side_by_side():
     ]
     out = g._rebuild_sources("## X\nBoth agree [S1][S2].\n")
     assert "[S1][S2]" in out.split("## Sources")[0]
+
+
+# the second half of the shipped duplication: a sub-section restored outside its parent
+STALE_H3 = """### Why is tirzepatide more effective for weight loss than some GLP-1 drugs?
+
+In a head-to-head trial, all three doses beat the highest approved dose of semaglutide [S7].
+"""
+
+FAQ_WITH_ANSWER = """## FAQ
+
+### Why is tirzepatide more effective for weight loss than semaglutide?
+
+In the SURMOUNT-5 trial tirzepatide achieved 20.2% versus 13.7% at 72 weeks [S4].
+"""
+
+
+def test_a_sub_section_is_not_restored_outside_its_section():
+    """The draft's H3 belongs to the comparison section. That section is not restored (the rewrite
+    already has one), so the H3 would land orphaned before the FAQ -- which is how a second
+    'Why is X more effective?' answer shipped, carrying the draft's older trial framing."""
+    g = _gen()
+    draft = STALE_TABLE_SECTION + "\n" + STALE_H3
+    out = g._restore_dropped_sections(draft, REVISED_TABLE_SECTION + "\n" + FAQ_WITH_ANSWER)
+    assert "highest approved dose" not in out
+    assert out.count("Why is tirzepatide more effective") == 1     # only the FAQ's
+    assert "| Feature |" in out and out.count("| Feature |") == 1
+
+
+def test_a_whole_deleted_section_still_comes_back_with_its_sub_sections():
+    """The FU54 guarantee: when the PARENT is genuinely gone too, both are restored, in order."""
+    g = _gen()
+    draft = PROSE_SECTION + "\n" + STALE_H3
+    out = g._restore_dropped_sections(draft, REVISED_TABLE_SECTION + "\n" + FAQ_WITH_ANSWER)
+    assert "503A pharmacy" in out
+    assert "Why is tirzepatide more effective for weight loss than some GLP-1 drugs?" in out
+    assert out.index("503A pharmacy") < out.index("than some GLP-1 drugs")
+
+
+def test_a_deleted_entity_profile_is_still_restored():
+    """The orphan rule must not eat real substance: a competitor profile is not a question, and the
+    FU54/FU220 guarantee that a genuinely deleted profile comes back is unchanged."""
+    g = _gen()
+    draft = "## The agencies compared\n\nIntro.\n\n### Loganix\n\nLoganix builds links [S2].\n"
+    revised = "## The agencies compared\n\nIntro.\n\n" + FAQ_WITH_ANSWER
+    out = g._restore_dropped_sections(draft, revised)
+    assert "### Loganix" in out
+
+
+def test_the_sources_separator_is_a_hyphen():
+    g = _gen()
+    g._evidence_blocks = [{"label": "official · A", "url": "https://a.gov/x", "text": "t"}]
+    out = g._rebuild_sources("## X\nA claim [S1].\n")
+    assert "- [S1] official · A - <https://a.gov/x>" in out
+    assert "—" not in out.split("## Sources")[1]
+
+
+def test_an_h2_that_repeats_the_h1_is_dropped():
+    g = _gen()
+    body = ("# Is Tirzepatide a GLP-1?\n\n## Is Tirzepatide a GLP-1?\n\n"
+            "**Quick answer:** No, it is a dual agonist.\n\n## What is it?\n\nA peptide.\n")
+    out = g._drop_h1_echo(body)
+    assert out.count("Is Tirzepatide a GLP-1?") == 1
+    assert out.startswith("# Is Tirzepatide a GLP-1?")
+    assert "**Quick answer:**" in out and "## What is it?" in out
+
+
+def test_a_first_h2_that_merely_resembles_the_h1_is_kept():
+    g = _gen()
+    body = "# Is tirzepatide a GLP-1?\n\n## So, is tirzepatide a GLP-1 drug?\n\nNo.\n"
+    assert g._drop_h1_echo(body) == body

@@ -257,7 +257,7 @@ def test_a_written_cell_is_cited_to_the_page_the_price_was_read_from():
     gen, ledger = _ledger_gen()
     out, _n = gen._write_price_cells(_TABLE, ledger)
     final = gen._rebuild_sources(out)
-    assert "- [S1] price · Philips Avent · walmart.com — <https://www.walmart.com/ip/philips>" in final
+    assert "- [S1] price · Philips Avent · walmart.com - <https://www.walmart.com/ip/philips>" in final
     assert "$23.97 (3-pack, 9 oz, $7.99 each) [S1]" in final
 
 

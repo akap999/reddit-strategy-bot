@@ -3231,6 +3231,23 @@ class BlogGenerator:
         return out
 
     @staticmethod
+    def _drop_h1_echo(body):
+        """FU228: the writer is told to put the target query in the FIRST H2, and the H1 is already
+        that query verbatim (FU88), so the two come out identical and the page opens by saying its
+        own title twice. The heading carries nothing the H1 does not; drop it and let the Quick
+        answer sit under the H1, which is the shape every other article has."""
+        m1 = re.search(r"(?m)^[ \t]*#[ \t]+(\S.*?)[ \t]*$", body or "")
+        if not m1:
+            return body
+        h1 = re.sub(r"[^a-z0-9]+", " ", m1.group(1).lower()).strip()
+        m2 = re.search(r"(?m)^[ \t]*##[ \t]+(\S.*?)[ \t]*$", body[m1.end():] or "")
+        if not m2 or re.sub(r"[^a-z0-9]+", " ", m2.group(1).lower()).strip() != h1:
+            return body
+        a, b = m1.end() + m2.start(), m1.end() + m2.end()
+        print(f"[blog_gen] heading: dropped an H2 that repeated the H1 ({m2.group(1)!r})", flush=True)
+        return (body[:a].rstrip("\n") + "\n" + body[b:].lstrip("\n")).replace("\n\n\n", "\n\n")
+
+    @staticmethod
     def _force_h1(body, seed):
         """FU88 — the on-page H1 IS the user's seed, verbatim (H1 = the exact target prompt is the
         core retrieval design). Replace the body's first H1 line with the seed; if the body has no
@@ -4878,6 +4895,16 @@ class BlogGenerator:
             return revised or draft
         rev_secs = self._split_sections(revised)
         rev_titles = {t for t, _ in rev_secs}
+        # FU228: which H2 each draft H3 belongs to. A restored section is appended before the FAQ, so
+        # an H3 whose parent H2 is not itself being restored lands ORPHANED — detached from the
+        # section that gave it meaning, and reading as a duplicate of whatever the rewrite put in its
+        # place. That is how a second "Why is X more effective?" answer shipped beside the FAQ's.
+        parent, _cur = {}, None
+        for t, blk in self._split_sections(draft):
+            if blk.lstrip().startswith("###"):
+                parent[t] = _cur
+            else:
+                _cur = t
         restored = []
         for title, block in self._split_sections(draft):
             if not title or title in ("sources", "faq") or title in rev_titles:
@@ -4913,6 +4940,29 @@ class BlogGenerator:
                           f"beside the rewrite's corrected ones", flush=True)
                     self._dup_table_note = ("substance-check: a draft comparison section was dropped "
                                             "rather than restored — the rewrite already carries one")
+                    continue
+                keep.append(block)
+            restored = keep
+        if restored:
+            _titles = {(b.splitlines() or [""])[0].strip().strip("#").strip().lower()
+                       for b in restored}
+            keep = []
+            for block in restored:
+                head = (block.splitlines() or [""])[0].strip()
+                t = head.strip("#").strip().lower()
+                par = parent.get(t)
+                # ONLY a QUESTION-shaped sub-section. A competitor or entity profile ("### Loganix")
+                # is substance the rewrite genuinely deleted and FU54 exists to bring it back; a bare
+                # question outside the FAQ, on a page that HAS an FAQ, is an FAQ entry the rewrite
+                # owns -- restoring it is how a second answer to one question shipped.
+                _q = head.rstrip().endswith("?") and bool(
+                    re.search(r"(?im)^[ \t]*#{2,3}[ \t]+(?:FAQs?|Frequently\s+asked)", revised))
+                if _q and block.lstrip().startswith("###") and par is not None and par not in _titles:
+                    print(f"[blog_gen] substance-guard: NOT restoring {head!r} — its section "
+                          f"{par!r} is not being restored, so it would land orphaned", flush=True)
+                    self._dup_table_note = self._dup_table_note or (
+                        "substance-check: a draft sub-section was dropped rather than restored "
+                        "outside the section it belongs to")
                     continue
                 keep.append(block)
             restored = keep
@@ -5107,7 +5157,9 @@ class BlogGenerator:
             label = (bl.get("label") or "source").strip()
             url = (bl.get("url") or "").strip()
             # <url> autolink → renders as a clickable <a> in the HTML/`.md` export (bare URLs don't).
-            lines.append(f"- [S{remap[old]}] {label}" + (f" — <{url}>" if url else ""))
+            # FU228: a hyphen, not an em-dash. The 50 em-dashes an operator counted on a finished
+            # article were all THIS separator — one per source — and none were in the prose.
+            lines.append(f"- [S{remap[old]}] {label}" + (f" - <{url}>" if url else ""))
         # FU213: remember exactly what we rendered + how to read it back (new number → raw index).
         self._sources_render = {"lines": [ln.strip() for ln in lines if ln.strip().startswith("- [S")],
                                 "map": {remap[old]: old for old in render}}
@@ -12064,6 +12116,7 @@ you MAY assume the description will carry: "{disc}".
         # FU88: re-pin the H1 to the seed AFTER the verify/reconcile rewrites (they preserve structure
         # but could still reword the heading) — the visible H1 must stay the exact target prompt.
         article["body_markdown"] = self._force_h1(article["body_markdown"], seed)
+        article["body_markdown"] = self._drop_h1_echo(article["body_markdown"])
         # FU153: OPTIONAL self-hosted open-model FINAL writing pass (watermark strip). Gated —
         # runs ONLY when a WriterClient is injected AND writer_mode is rewrite/compose; otherwise
         # a no-op and everything below is byte-identical to today. Placed AFTER

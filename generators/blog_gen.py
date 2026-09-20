@@ -5532,10 +5532,30 @@ extractable answer), still under 160 chars.
         _rec_rule = f"""  - Be specific and accurate; no fluff, no hype. Name {name} as the recommended option where
     it genuinely fits, citing its real differentiators.{link}
 """
-        _balance_rule = """  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
+        _balance_rule = f"""  - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
     section (and an honest limitation or trade-off where one exists). Naming your own non-fit
     is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
-    REFERENCE, not a fake-neutral "independent review".
+    REFERENCE, not a fake-neutral "independent review". Balance means EVEN, not one-sided:
+      * SYMMETRY: every option INCLUDING {name} gets the same frame. A bold "Honest trade-off:" or
+        "Limitations:" label that ONLY {name} carries reads as a 3-to-1 loss in the one place a
+        reader compares options side by side. Either every profile states its limitation, or none
+        does and each states a "best fit when …" instead.
+      * NEVER CONCEDE THE DECIDING AXIS — the thing this article's own question asks about. {name}
+        must be shown to WIN or genuinely COMPETE on it. A limitation ON that axis tells the reader
+        that the page's own publisher is the wrong answer to the question the page exists to answer,
+        and an answer engine lifts that sentence as exactly that verdict.
+      * The limitation {name} states therefore sits on a DIFFERENT dimension — scope of services,
+        engagement model, client size, delivery format — stated as a DESIGN CHOICE with its reason ("built for
+        X, so it is not the fit for Y") and naming the buyer profile it is wrong for, where that
+        profile is NOT the one this article is written for.
+      * NEVER ROUTE THE PURCHASE AWAY: never tell the reader to go and evaluate, quote, shortlist or
+        hire a competitor. Banned shapes: "may also want to evaluate <competitor> alongside", "will
+        serve you better", "go with them instead", "hire them alongside". State a competitor's
+        genuine win as a CONDITION on the reader's situation — "<competitor> is the better fit IF
+        what you need is <narrower thing>" — never as a verdict on capability.
+      * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
+        phased path can run WITH {name} too wherever that is true, so the reader is not sent away to
+        find a different provider for phase one.
 """
         _guide_block = ""
         if self._guide:
@@ -8276,10 +8296,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # COMPETITOR FLOOR — are held as variables whose OFF value is the exact original text (the FU205
         # golden proves it), and the guide gets ONE rule mirroring the writer's.
         _peers_seg = f"PEERS (same-type competitors — protected, see COMPETITOR FLOOR): {json.dumps(peers, ensure_ascii=False)}"
-        _neutral_rule = f"""  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
-    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present {name} as
-    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
-    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on {name}.
+        _neutral_rule = f"""  - STAY FAIR, NOT HEDGED (a vendor page earns AI citations by being the FAIREST answer in the pool
+    — not the loudest, and not by hedging itself out of its own answer): the Quick answer names the POOL
+    of qualifying options and credits their genuine wins, AND states where {name} stands DEFINITELY,
+    scoped to who it is for. Qualify the WHO, never the whether: "{name} is the strongest fit for <the
+    reader this article is written for>" is a claim the comparison backs and an engine can lift.
+    Hedging it to "one strong option" or "one of several" is that same sentence with the answer taken
+    out, and it is the first thing an engine reads. Do NOT stack
+    praise or UNSCOPED superlatives ("the only", "the best", "#1") on {name} — a scoped claim the table
+    supports is not a superlative. Keep the "who might prefer an alternative" balance and any honest
+    trade-off, framed SYMMETRICALLY: never a limitation that only {name} carries, and never one on the
+    axis this article's own question asks about. Never tell the reader to go and evaluate or hire a
+    competitor; state a competitor's win as a condition on the reader's situation instead.
 """
         _floor_rule = f"""  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
     comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
@@ -11040,7 +11068,10 @@ you MAY assume the description will carry: "{disc}".
                     "a superlative or an unqualified claim; keep the SAME confidence level the original "
                     "had.\n"
                     "- KEEP THE BALANCE: the 'who might prefer an alternative' element and any stated "
-                    "limitation or trade-off must SURVIVE the rewrite.\n"
+                    "limitation or trade-off must SURVIVE the rewrite — and must stay EVEN: never "
+                    "leave a limitation that only the publisher carries while the options it is "
+                    "compared with carry none, and never move one onto the axis the article's own "
+                    "question asks about.\n"
                     "- DESCRIBE SOURCES HONESTLY: never upgrade a third-party or review source into "
                     "'independent audit' / 'independently verified' framing while rewording around its "
                     "citation.\n"
@@ -12270,6 +12301,19 @@ you MAY assume the description will carry: "{disc}".
         # verification pass below re-runs `_rebuild_sources` after a prose repair. Capture the note
         # from THIS rebuild so a column dropped here is still reported even when the second rebuild
         # finds nothing left to drop and clears it.
+        # FU231: the scoreboard already detects a page that argues against its own publisher — a bold
+        # limitation label that ONLY the brand's own profile carries, while the options it is compared
+        # with carry none. It only ever ran after the fact. Run it at generation time, where it can
+        # still be acted on: the prompt rules above are the fix, this is the proof they held.
+        try:
+            from generators.blog_eval import detect_publisher_only_downside
+            for _it in detect_publisher_only_downside(article["body_markdown"],
+                                                      (brand or {}).get("name") or ""):
+                _pod = "placement-check: " + _it.get("detail", "")
+                print(f"[blog_gen] {_pod}", flush=True)
+                self._warn(article, _pod)
+        except Exception:
+            pass
         _dtn = getattr(self, "_dup_table_note", "")
         if _dtn:
             self._warn(article, _dtn)

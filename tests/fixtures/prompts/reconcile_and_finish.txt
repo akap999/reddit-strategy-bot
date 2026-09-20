@@ -110,10 +110,18 @@ COMPLETE and every stated fact is sourced:
   - EVERY KEPT ROW FULLY FILLED: a tool row you keep must have EVERY cell filled from that tool's OWN sourced
     facts (including the commercial-license cell). If even ONE required cell can't be sourced for a tool, DROP
     that tool's whole row — never ship a kept row with a blank or "—" cell.
-  - STAY NEUTRAL (a vendor page earns AI citations by being the FAIREST answer in the pool, not the
-    loudest): the Quick answer must be EVEN-HANDED — name the POOL of qualifying tools and present Acme Tools as
-    ONE strong option, NOT as a pitch/headline. Keep the "who might prefer an alternative" balance and any
-    honest trade-off. Do NOT stack praise or superlatives ("the only / the best / #1") on Acme Tools.
+  - STAY FAIR, NOT HEDGED (a vendor page earns AI citations by being the FAIREST answer in the pool
+    — not the loudest, and not by hedging itself out of its own answer): the Quick answer names the POOL
+    of qualifying options and credits their genuine wins, AND states where Acme Tools stands DEFINITELY,
+    scoped to who it is for. Qualify the WHO, never the whether: "Acme Tools is the strongest fit for <the
+    reader this article is written for>" is a claim the comparison backs and an engine can lift.
+    Hedging it to "one strong option" or "one of several" is that same sentence with the answer taken
+    out, and it is the first thing an engine reads. Do NOT stack
+    praise or UNSCOPED superlatives ("the only", "the best", "#1") on Acme Tools — a scoped claim the table
+    supports is not a superlative. Keep the "who might prefer an alternative" balance and any honest
+    trade-off, framed SYMMETRICALLY: never a limitation that only Acme Tools carries, and never one on the
+    axis this article's own question asks about. Never tell the reader to go and evaluate or hire a
+    competitor; state a competitor's win as a condition on the reader's situation instead.
   - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
     subject's MECHANICS (the rules, procedures and constraints that determine the outcome). Never
     trade a mechanic for more rankings, awards or accreditations — those are commodity content and

@@ -281,7 +281,27 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
   - INCLUDE GENUINE BALANCE: add a short "Who it's best for / who might prefer an alternative"
     section (and an honest limitation or trade-off where one exists). Naming your own non-fit
     is what makes the page trustworthy enough to cite. The target is a CREDIBLE FIRST-PARTY
-    REFERENCE, not a fake-neutral "independent review".
+    REFERENCE, not a fake-neutral "independent review". Balance means EVEN, not one-sided:
+      * SYMMETRY: every option INCLUDING Acme Tools gets the same frame. A bold "Honest trade-off:" or
+        "Limitations:" label that ONLY Acme Tools carries reads as a 3-to-1 loss in the one place a
+        reader compares options side by side. Either every profile states its limitation, or none
+        does and each states a "best fit when …" instead.
+      * NEVER CONCEDE THE DECIDING AXIS — the thing this article's own question asks about. Acme Tools
+        must be shown to WIN or genuinely COMPETE on it. A limitation ON that axis tells the reader
+        that the page's own publisher is the wrong answer to the question the page exists to answer,
+        and an answer engine lifts that sentence as exactly that verdict.
+      * The limitation Acme Tools states therefore sits on a DIFFERENT dimension — scope of services,
+        engagement model, client size, delivery format — stated as a DESIGN CHOICE with its reason ("built for
+        X, so it is not the fit for Y") and naming the buyer profile it is wrong for, where that
+        profile is NOT the one this article is written for.
+      * NEVER ROUTE THE PURCHASE AWAY: never tell the reader to go and evaluate, quote, shortlist or
+        hire a competitor. Banned shapes: "may also want to evaluate <competitor> alongside", "will
+        serve you better", "go with them instead", "hire them alongside". State a competitor's
+        genuine win as a CONDITION on the reader's situation — "<competitor> is the better fit IF
+        what you need is <narrower thing>" — never as a verdict on capability.
+      * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
+        phased path can run WITH Acme Tools too wherever that is true, so the reader is not sent away to
+        find a different provider for phase one.
   - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
     inline (a study, regulator, or guideline) and frame contested or off-label uses as such
     ("used off-label", "studied in the … trial") rather than as asserted benefits.

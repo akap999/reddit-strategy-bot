@@ -2431,6 +2431,103 @@ def _vfact_prompt_block(brand, surface, blocks, guide=False, removed=()):
 
 
 
+# FU226 — DOCUMENT IDENTITY. One document can reach the evidence twice by two routes: the same paper
+# under two hosts (pmc.ncbi.nlm.nih.gov/articles/PMC7526454 and www.ncbi.nlm.nih.gov/pmc/articles/
+# PMC7526454), or two EDITIONS of one regulator filing (an original document beside a later
+# amendment, each published under its own year). The URL-string dedup in `_rebuild_sources`
+# catches neither: the duplicate ships as two numbered sources, and the article cites whichever
+# edition its search happened to surface — often the stale one. These helpers give a URL a canonical document id and a comparable edition, so
+# the Sources rebuild can collapse the pair and keep the NEWER edition.
+#
+# Only PUBLIC identifier schemes are read — a PMC id, a PubMed id, an arXiv id, a DOI, a regulator's
+# application number. Each is a stable worldwide id for ONE document, so two URLs carrying the same
+# one are the same document. Nothing here guesses at a site's URL layout.
+_DOC_ID_PATTERNS = (
+    ("pmc",   re.compile(r"/(?:pmc/)?articles/PMC(\d+)", re.I)),
+    ("pmid",  re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d{4,9})", re.I)),
+    ("arxiv", re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", re.I)),
+    ("label", re.compile(r"/drugsatfda_docs/label/\d{4}/(\d{5,7})", re.I)),
+    ("doi",   re.compile(r"/(10\.\d{4,9}/[^\s?#]+)", re.I)),
+)
+_DOC_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+_DOC_REVISION_RE = re.compile(r"/\d{5,7}s(\d{1,4})", re.I)
+# the classes whose labels are a DOCUMENT TITLE. A brand page is labelled with the brand's NAME, and
+# two brands can each title a page "Pricing" — so a title match only identifies a document here.
+_DOC_TITLED_LABEL_RE = re.compile(
+    r"^\s*(?:official|third-party|review|reference|preferred)\s*·", re.I)
+
+
+def _doc_identity(url):
+    """The canonical id of the DOCUMENT a URL points at, or "" when the URL carries no public
+    identifier. Two URLs with the same id are the same document, whatever host served it."""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    for kind, rx in _DOC_ID_PATTERNS:
+        m = rx.search(u)
+        if m:
+            return f"{kind}:{(m.group(1) or '').strip('/').lower()}"
+    return ""
+
+
+def _doc_version(url):
+    """A comparable (year, revision) for two EDITIONS of one document, read from the URL PATH only:
+    a regulator files each edition under its year, and numbers each revision. (0, 0) when the path
+    carries neither, so an undated URL can never displace a dated one. The page TITLE is deliberately
+    not read — it is model- or search-written, and must not be able to move an edition."""
+    path = re.sub(r"^https?://[^/]*", "", (url or "").strip().split("?")[0])
+    years = [int(y) for y in _DOC_YEAR_RE.findall(path)]
+    m = _DOC_REVISION_RE.search(path)
+    return (max(years) if years else 0, int(m.group(1)) if m else 0)
+
+
+def _doc_is_newer(cand_url, kept_url):
+    """True when `cand_url` is a later edition of the same document than `kept_url`.
+
+    The FILING YEAR decides, and the revision number only breaks a tie inside one year. That looks
+    backwards until you check a real pair: the 2026 filing of one label carries revision 009 while
+    its 2025 filing carries 031 — both documents are genuine (dated January 2026 and May 2025), and
+    the numbers disagree because a regulator keeps SEPARATE revision series per amendment type. So a
+    revision number is not comparable across years; the year is."""
+    return _doc_version(cand_url) > _doc_version(kept_url)
+
+
+def _doc_title_key(label):
+    """The DOCUMENT TITLE inside an evidence label, normalised: the `class · ` prefix and the
+    trailing " – Publisher" a search result appends are dropped, then punctuation and case. Returns
+    "" for a title under five words — too short to identify a document on its own."""
+    t = (label or "").strip()
+    t = re.sub(r"^\s*[a-z][a-z\- ]{0,20}·\s*", "", t, flags=re.I)
+    # one trailing publisher segment: " – PNAS", " — PMC", " | Nature", " - PubMed". A PLAIN hyphen
+    # only counts with spaces around it, so "GLP-1" inside a title is never cut.
+    t = re.sub(r"\s+[–—|]\s+\S.{0,79}$", "", t)
+    t = re.sub(r"\s+-\s+\S.{0,79}$", "", t)
+    t = re.sub(r"\s*\([^)]*\)\s*$", "", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+    return t if len(t.split()) >= 5 else ""
+
+
+def _doc_keys(block):
+    """Every identity an evidence block answers to: its URL's public identifier, AND — for a
+    scholarly / regulator / third-party reference — its normalised title. Two keys, not one, because
+    the two routes to a paper often carry identifiers from DIFFERENT schemes (a publisher DOI on one
+    side, a PMC or PubMed id on the other) that no amount of URL parsing can reconcile; the shared
+    title is what connects them. Empty when neither — such a block dedups on its URL string alone,
+    exactly as before."""
+    if not isinstance(block, dict):
+        return ()
+    keys = []
+    ident = _doc_identity(block.get("url"))
+    if ident:
+        keys.append(ident)
+    label = block.get("label") or ""
+    if _DOC_TITLED_LABEL_RE.match(label):
+        tk = _doc_title_key(label)
+        if tk:
+            keys.append("title:" + tk)
+    return tuple(keys)
+
+
 class BlogGenerator:
     def __init__(self, claude, db, writer=None, writer_mode="off"):
         self.claude = claude
@@ -4933,16 +5030,36 @@ class BlogGenerator:
         # FU200 — two evidence blocks can hold the SAME page (a Chambers profile reached by two
         # different briefs), and the article then cites it as two numbers. Collapse on the normalised
         # URL: the later index re-points at the earlier number and gets no Sources line of its own.
-        remap, render_out, _byurl = {}, [], {}
+        # FU226 — the same DOCUMENT can also arrive under two different URLs: one paper mirrored on
+        # two hosts, or two editions of one regulator filing. Collapse on the document's public id
+        # (or, for a scholarly/third-party reference, its title) as well as on the URL, and when the
+        # pair is two editions, keep the NEWER one under the number the body already cites.
+        def _nurl(i):
+            return (blocks[i - 1].get("url") or "").strip().split("?")[0].rstrip("/").lower()
+
+        remap, render_out, _byurl, _bydoc = {}, [], {}, {}
         for old in render:
-            _u = (blocks[old - 1].get("url") or "").strip().split("?")[0].rstrip("/").lower()
-            if _u and _u in _byurl:
-                remap[old] = _byurl[_u]
+            _u = _nurl(old)
+            _keys = _doc_keys(blocks[old - 1])
+            _pos = next((_bydoc[k] for k in _keys if k in _bydoc), None)
+            if _pos is None and _u:
+                _pos = _byurl.get(_u)
+            if _pos:
+                _kept = render_out[_pos - 1]
+                if _keys and _doc_is_newer(_nurl(old), _nurl(_kept)):
+                    render_out[_pos - 1] = old      # a newer edition of the same document
+                    if _u:
+                        _byurl[_u] = _pos
+                remap[old] = _pos
+                for k in _keys:
+                    _bydoc.setdefault(k, _pos)
                 continue
             render_out.append(old)
             remap[old] = len(render_out)
             if _u:
                 _byurl[_u] = len(render_out)
+            for k in _keys:
+                _bydoc.setdefault(k, len(render_out))
         render = render_out
         prose = re.sub(r"\[S(\d+)\]",
                        lambda m: (f"[S{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else ""),

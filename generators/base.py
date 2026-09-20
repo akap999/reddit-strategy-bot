@@ -1081,18 +1081,27 @@ class ClaudeClient:
     _WEB_FETCH_TOOL = "web_fetch_20250910"
     _WEB_FETCH_BETA = "web-fetch-2025-09-10"
 
-    def find_pages(self, brand, domains, needs, context="", max_searches=3, max_pages=4):
+    def find_pages(self, brand, domains, needs, context="", max_searches=3, max_pages=4,
+                   queries=None):
         """Step A: which pages on `domains` (the brand's own site, pinned) state each need. Returns a
-        list of URLs (most useful first, ≤ max_pages) — never page text, never a model summary."""
+        list of URLs (most useful first, ≤ max_pages) — never page text, never a model summary.
+
+        FU222 `queries`: the literal searches to run, in a buyer's words ("<brand> <product> price").
+        A need is a comparison COLUMN HEADING, and a heading does not match the page it is asking
+        about — a page titled "Pricing" answers "<brand> pricing". The domain pin is unchanged, so
+        this changes WHICH of the brand's own pages are found, never whose pages they are."""
         doms = [d for d in (domains or []) if d]
         needs = [n for n in (needs or []) if str(n).strip()]
         if not doms or not needs or self._over_budget():
             return []
+        _qs = [str(q).strip() for q in (queries or []) if str(q).strip()]
         tool = {"type": "web_search_20250305", "name": "web_search",
                 "max_uses": int(max_searches), "allowed_domains": doms}
         prompt = (f"Find the pages on {', '.join(doms)} ({brand}'s own site) that state each of these "
                   f"about {brand}" + (f" ({context})" if context else "") + ":\n"
                   + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(needs))
+                  + ("\n\nSearch for these, in these words — they are what a buyer would type:\n"
+                     + "\n".join(f"- {q}" for q in _qs) if _qs else "")
                   + f"\n\nRespond with JSON only (no prose, no code fences): "
                     f'{{"pages": ["https://...", "..."]}} — at most {int(max_pages)} distinct page URLs '
                     "on that site, the most useful first. Product, pricing, plans, features, about and "
@@ -1187,6 +1196,13 @@ class ClaudeClient:
               "required\", \"2-pack, 5.4 oz\". Never add a unit, term or condition the page does "
               "not state; empty when it states none, and for anything that is not a price.\n"
               "- A price is the REGULAR price, never a sale / deal / discounted figure.\n"
+              "- When a price item has SEVERAL figures (an introductory price and the ongoing one, "
+              "or several plans, tiers, terms or pack sizes), return a SEPARATE object for EACH "
+              "figure — the same `need` number, its own `answer`, its own exact `quote`, its own "
+              "`basis`. Do not merge them into one answer and do not leave any out. NEVER put two "
+              "figures in one `answer` (not even in a parenthesis): if you would write \"$39/mo "
+              "(billed annually: $32.49/mo)\", return $39 with the basis that belongs to IT and "
+              "$32.49 as its own object with ITS basis.\n"
             + (f"- {guidance}\n" if guidance else "")
             + "- If the pages do not state an item, answer \"not found\" with an empty quote.\n\n"
               'Respond with JSON only: {"facts": [{"need": 1, "answer": "...", "url": "...", '

@@ -1372,6 +1372,9 @@ def _norm_price_kind(k):
     return "exact"
 
 
+_MAX_PRICE_TIERS = 3   # FU222 — rungs of a price ladder printed in one comparison cell
+
+
 def _format_price_value(entry):
     """FU214 — the ONE place a ledger entry becomes printable text.
 
@@ -1388,22 +1391,44 @@ def _format_price_value(entry):
     kind = _norm_price_kind(entry.get("kind"))
     if kind == "none" or not val:
         return ""
+
+    def _one(v, k, b, per=""):
+        k = _norm_price_kind(k)
+        core = f"From {v}" if k == "from" else (f"Up to {v}" if k == "upto" else v)
+        if b:
+            core += f" ({b}" + (f", {per}" if per else "") + ")"
+        elif per:
+            core += f" ({per})"
+        return core
+
+    # FU222: a page usually states a LADDER, not a price — an intro figure and the ongoing one, or
+    # several plans. Each rung was verified by its OWN quote (research.price_ladder), so printing
+    # them all says what the page says; printing one silently dropped the rest. The rungs carry the
+    # page's own condition words, so "; " joins them without asserting an order we did not read.
+    tiers = [t for t in (entry.get("tiers") or [])[:_MAX_PRICE_TIERS]
+             if isinstance(t, dict) and (t.get("value") or "").strip()]
+    if len(tiers) > 1:
+        # Conditions the rungs SHARE are stated once at the end: live, every Ro rung repeated
+        # "per month, cash pay only, membership required", which made a 230-character cell.
+        _cl = [[c.strip() for c in (t.get("basis") or "").split(",") if c.strip()] for t in tiers]
+        _shared = [c for c in _cl[0] if all(c in o for o in _cl[1:])] if all(_cl) else []
+        _tail = ", ".join(_shared)
+        parts = [_one((t.get("value") or "").strip(), t.get("kind"),
+                      ", ".join(c for c in own if c not in _shared))
+                 for t, own in zip(tiers, _cl)]
+        return "; ".join(parts) + (f"; all {_tail}" if _tail else "")
+
     vmax = (entry.get("value_max") or "").strip()
-    if kind == "from":
-        core = f"From {val}"
-    elif kind == "upto":
-        core = f"Up to {val}"
-    elif kind == "range" and vmax:
-        core = f"{val}-{vmax}"
-    else:
-        core = val
     basis = (entry.get("basis") or "").strip()
     per = (entry.get("per_unit") or "").strip()
-    if basis:
-        core += f" ({basis}" + (f", {per}" if per else "") + ")"
-    elif per:
-        core += f" ({per})"
-    return core
+    if kind == "range" and vmax:
+        core = f"{val}-{vmax}"
+        if basis:
+            core += f" ({basis}" + (f", {per}" if per else "") + ")"
+        elif per:
+            core += f" ({per})"
+        return core
+    return _one(val, kind, basis, per)
 
 
 def _priced_competitor_names(brand, subject_name=""):
@@ -4103,15 +4128,16 @@ class BlogGenerator:
             # FU221 (R4): a price research VERIFIED on the brand's own page this run — its quote (or its
             # figure next to the product name) is on the page — outranks a cached search result and
             # replaces the one-search fallback below. Below the operator's table / value / link.
-            _rp_e = _research.price_entry((tool_state.get(tool) or {}).get("research_price"),
-                                          checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            _rp_e = _research.price_ladder((tool_state.get(tool) or {}).get("research_price"),
+                                           checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                                    time.gmtime()))
             if _rp_e:
                 _rp_e["per_unit"] = _per_unit_price(_rp_e["value"], _rp_e["basis"])
                 ledger[tool] = _rp_e
                 cfacts.setdefault(slug, {})["price"] = _rp_e
                 dirty = True
-                print(f"[blog_gen] price-ledger: {tool} → {_rp_e['value']} "
-                      f"({_rp_e.get('basis') or 'no basis'}) from research {_rp_e['url']}", flush=True)
+                print(f"[blog_gen] price-ledger: {tool} → {_format_price_value(_rp_e)} "
+                      f"from research {_rp_e['url']}", flush=True)
                 continue
             if not forced and self._price_entry_usable(entry):
                 ledger[tool] = entry
@@ -6950,10 +6976,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             if _rs_needs and dom and not _is_option(tool):
                 rs = _research.research_brand(self.claude, tool, [_dom(dom)], _rs_needs,
                                               context=_rs_ctx, guidance=_rs_guide,
-                                              page_cache=self._page_cache, log=_rs_log)
+                                              page_cache=self._page_cache, log=_rs_log,
+                                              products=_products)
                 rblocks = _research.facts_to_blocks(tool, rs["facts"])
                 if rblocks:
-                    _rp = next((f for f in rs["facts"] if _research.is_price_need(f.get("need"))), None)
+                    # FU222: EVERY verified price fact, not the first — the ladder, not one rung.
+                    _rp = [f for f in rs["facts"] if _research.is_price_need(f.get("need"))]
                     return tool, {"dom": dom, "blocks": rblocks, "t1": len(rblocks), "t2": 0, "t3": 0,
                                   "rescue": 0, "research": len(rs["facts"]),
                                   "research_unconfirmed": rs["unconfirmed"], "research_price": _rp}
@@ -6984,7 +7012,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             return _research.research_brand(
                 self.claude, name, [_own_rs], _subj_needs,
                 context=f"{name}'s own offering, the subject of an article about '{seed}'",
-                guidance=_rs_guide, page_cache=self._page_cache, log=_rs_log)
+                guidance=_rs_guide, page_cache=self._page_cache, log=_rs_log,
+                products=_subj_prods_rs)
 
         _live_baseline = [t for t in tools if t not in _cached_tools]
         if _live_baseline or _subj_needs:
@@ -7217,11 +7246,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 fresh.extend(blocks)
                 # FU151 (A): write LIVE-sourced competitors back to the per-brand cache (skip cache hits).
                 if not st.get("cached") and not _guide:   # FU218: a guide's option evidence is question-bound
-                    _cfacts[_kf_slug(tool)] = {
-                        "domain": st.get("dom") or "",
-                        "blocks": [{"label": b["label"], "url": b["url"], "text": b["text"]}
-                                   for b in blocks[:_MAX_TOOL_PAGES * 2]],
-                        "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    # FU222: MERGE, never replace. `_ensure_price_ledger` wrote this slug's verified
+                    # `price` into `_cfacts` a few lines above (7210); replacing the whole entry here
+                    # dropped it, and the price-less entry was then persisted — so every generation
+                    # re-bought a price it had already verified and paid for.
+                    _cf_ent = {"domain": st.get("dom") or "",
+                               "blocks": [{"label": b["label"], "url": b["url"], "text": b["text"]}
+                                          for b in blocks[:_MAX_TOOL_PAGES * 2]],
+                               "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    _kept_price = (_cfacts.get(_kf_slug(tool)) or {}).get("price")
+                    if _kept_price:
+                        _cf_ent["price"] = _kept_price
+                    _cfacts[_kf_slug(tool)] = _cf_ent
                     _cf_dirty = True
                 print(f"[blog_gen] verify+complete: {tool} dom={st['dom'] or '∅'} "
                       f"{'(cache) ' if st.get('cached') else ''}"

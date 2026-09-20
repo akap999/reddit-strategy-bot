@@ -19,8 +19,10 @@ class ResearchStub(StubClaude):
         self._pages_handler, self._fetch_handler, self._facts_handler = pages_handler, fetch_handler, facts_handler
         self.find_calls, self.fetch_calls, self.extract_calls = [], [], []
 
-    def find_pages(self, brand, domains, needs, context="", max_searches=3, max_pages=4):
-        self.find_calls.append({"brand": brand, "domains": list(domains), "needs": list(needs)})
+    def find_pages(self, brand, domains, needs, context="", max_searches=3, max_pages=4,
+                   queries=None):
+        self.find_calls.append({"brand": brand, "domains": list(domains), "needs": list(needs),
+                                "queries": list(queries or [])})
         return list((self._pages_handler or (lambda b, d, n: []))(brand, domains, needs))[:max_pages]
 
     def web_fetch_text(self, url, max_content_tokens=8000):
@@ -259,7 +261,8 @@ def test_a_quoted_sale_price_is_rejected_even_though_the_quote_is_on_the_page(mo
     stub = ResearchStub(pages_handler=lambda b, d, n: ["https://p.com/bottles"],
                         facts_handler=lambda b, n, p: [{"need": 1, "answer": next(answers),
                                                          "url": "https://p.com/bottles", "quote": next(quotes)}])
-    stub.find_pages = (lambda brand, domains, needs, context="", max_searches=3, max_pages=4:
+    stub.find_pages = (lambda brand, domains, needs, context="", max_searches=3, max_pages=4,
+                       queries=None:
                        ["https://p.com/bottles"] if not stub.find_calls.append(1) and len(stub.find_calls) == 1
                        else ["https://p.com/bottles-2"])
     monkeypatch.setattr(R, "_fetch_page", lambda url, retries=0: (page, "ok"))

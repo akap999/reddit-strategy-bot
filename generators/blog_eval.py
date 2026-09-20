@@ -418,6 +418,12 @@ def grounding_report(gen, brand, body, meta="", max_pages=None):
     items.sort(key=lambda x: order.get(x["status"], 9))
     return {"counts": counts, "items": items,
             "pages": {u: bool(p.get("ok")) for u, p in pages.items()},
+            # FU221 (R6/R5): WHY each page could not be read — "blocked", "not-found", "error",
+            # "blocked; web fetch url_not_accessible", … — and the cited links that are simply dead.
+            "page_reasons": {u: (getattr(gen, "_fetch_reasons", {}) or {}).get(u, "ok" if p.get("ok") else "unknown")
+                             for u, p in pages.items()},
+            "dead_links": sorted(u for u, p in pages.items() if not p.get("ok") and str(
+                (getattr(gen, "_fetch_reasons", {}) or {}).get(u, "")).startswith("not-found")),
             "pages_capped": len(capped)}
 
 

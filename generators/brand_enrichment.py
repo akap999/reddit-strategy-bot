@@ -47,12 +47,21 @@ class _VisibleTextExtractor(HTMLParser):
         return re.sub(r"\s+", " ", joined).strip()
 
 
-_CHALLENGE_MARKERS = (
+# Markup that only an anti-bot CHALLENGE page carries (Cloudflare's interstitial) — matched against
+# the raw HTML, because it lives in the page's scripts/attributes.
+_CHALLENGE_CODE_MARKERS = ("cf-browser-verification", "_cf_chl", "cf-challenge")
+# Wording a challenge page SHOWS the visitor. FU221 (R3): matched against what a visitor SEES — the
+# <title>, or the visible text of a SHORT page — never the raw HTML. A normal page that merely loads a
+# reCAPTCHA script (Wikipedia, LinkedIn, a law firm's contact form) was rejected as "blocked" because
+# the word "captcha" sat in its code; a real challenge page is short, so a long page with the word in
+# its footer ("protected by reCAPTCHA") is not one either.
+_CHALLENGE_TEXT_MARKERS = (
     "just a moment", "attention required", "enable javascript and cookies",
     "checking your browser", "verify you are a human", "access denied",
     "you have been blocked", "captcha", "ddos protection by",
-    "cf-browser-verification", "_cf_chl", "cf-challenge",
 )
+_CHALLENGE_MARKERS = _CHALLENGE_CODE_MARKERS + _CHALLENGE_TEXT_MARKERS   # back-compat name
+_CHALLENGE_SHORT_PAGE = 1500   # visible chars — challenge / block pages are shorter than this
 
 
 def _looks_blocked(html: str) -> str:
@@ -63,12 +72,22 @@ def _looks_blocked(html: str) -> str:
     "challenge-page" / "thin-content" when the page can't be real grounding, else ""."""
     if not html:
         return "thin-content"
-    low = html[:8000].lower()
-    for marker in _CHALLENGE_MARKERS:
-        if marker in low:
-            return "challenge-page"
+    head = html[:8000].lower()
+    if any(m in head for m in _CHALLENGE_CODE_MARKERS):
+        return "challenge-page"
+    tm = re.search(r"<title[^>]*>(.*?)</title>", html[:20000], re.I | re.S)
+    title = (tm.group(1) if tm else "").lower()
+    if any(m in title for m in _CHALLENGE_TEXT_MARKERS):
+        return "challenge-page"
+    visible = _extract_visible_text(html, max_chars=_CHALLENGE_SHORT_PAGE + 1)
+    if len(visible) <= _CHALLENGE_SHORT_PAGE and any(m in visible.lower()
+                                                      for m in _CHALLENGE_TEXT_MARKERS):
+        return "challenge-page"
+    # FU221 (R3): a sitemap is XML, not a page — a small one is not "thin content".
+    if re.match(r"\s*(<\?xml|<urlset|<sitemapindex)", html[:300], re.I):
+        return ""
     # A real company page has real visible text; a JS shell / block stub doesn't.
-    if len(_extract_visible_text(html, max_chars=1000)) < 200:
+    if len(visible) < 200:
         return "thin-content"
     return ""
 
@@ -80,8 +99,20 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
     jittered backoff — on a cloud host (Railway) a single naked GET often hits a
     transient block, and one quick retry recovers it. A hard Cloudflare block stays
     empty (the caller has a web-search fallback for that case)."""
+    return _fetch_page(domain_url, timeout=timeout, retries=retries)[0]
+
+
+def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2):
+    """FU221 — `_fetch_homepage` that also says WHY a fetch failed: returns (html, reason) with reason
+    one of "ok", "not-found" (404/410 — the page does not exist), "blocked" (403/401/429/503, or a
+    200 challenge page), "thin" (a JS shell with no text), "error" (timeout / network / other status),
+    "no-url". The reason decides what a caller does next: a blocked page is worth reading through
+    Anthropic's web fetch, a missing one is not (the fixed /pricing-style guesses 404 constantly), and
+    the scoreboard reports it instead of a bare true/false. A 404 skips the residential retry — the
+    page is missing, not walled, and residential GB is metered."""
     if not domain_url:
-        return ""
+        return "", "no-url"
+    reason = "error"
     url = domain_url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -105,11 +136,16 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
                 # serve 200 block/challenge pages, which must fall through the ladder.
                 blocked = _looks_blocked(resp.text)
                 if not blocked:
-                    return resp.text
+                    return resp.text, "ok"
+                reason = "blocked" if blocked == "challenge-page" else "thin"
                 print(f"[brand_enrichment] 200-but-blocked ({blocked}) for {url} — "
                       "continuing the ladder", flush=True)
                 break   # a bot wall won't change on retry — go straight to residential
+            if resp.status_code in (404, 410):
+                return "", "not-found"   # FU221: missing, not walled — no retry, no residential GB
+            reason = "blocked" if resp.status_code in (401, 403, 429, 503) else "error"
         except requests.exceptions.RequestException as e:
+            reason = "error"
             if i == attempts - 1:
                 print(f"[brand_enrichment] fetch error for {url}: {e}")
         if i < attempts - 1:
@@ -129,15 +165,17 @@ def _fetch_homepage(domain_url: str, timeout: int = 10, retries: int = 2) -> str
                 blocked = _looks_blocked(resp.text)   # FU113: gate the residential rung too
                 if not blocked:
                     print(f"[brand_enrichment] ✓ homepage via residential proxy: {url}", flush=True)
-                    return resp.text
+                    return resp.text, "ok"
                 print(f"[brand_enrichment] residential fetch 200-but-blocked ({blocked}) "
                       f"for {url}", flush=True)
             else:
+                if resp.status_code in (404, 410):
+                    reason = "not-found"
                 print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
                       flush=True)
         except requests.exceptions.RequestException as e:
             print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
-    return ""
+    return "", reason
 
 
 def _extract_visible_text(html: str, max_chars: int = 6000) -> str:

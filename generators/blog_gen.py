@@ -19,6 +19,8 @@ from difflib import SequenceMatcher as _SequenceMatcher   # FU167: longest-share
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
+from generators.brand_enrichment import _fetch_page   # FU221: fetch + WHY it failed
+from generators import research as _research   # FU221 (Step 0): find → read → extract → verify
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
 
 PROMPT_VERSION = "blog-v2-evidence"
@@ -56,6 +58,8 @@ _EVIDENCE_PATHS = ("", "/pricing", "/features", "/about",
                    "/testimonials", "/customers", "/case-studies", "/reviews")
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
+_WEB_FETCH_PER_DOMAIN = 3        # FU221 (R2): web-fetch fallbacks per walled domain per generation
+_RESEARCH_ON = os.environ.get("BLOG_RESEARCH", "1") != "0"   # FU221 (R0): off → the old tiers only
 
 # Reputable INDEPENDENT domains for the optional web-search tier (Follow-up 7). Passed as
 # allowed_domains so discovered sources are third-party (these inherently exclude the
@@ -2414,6 +2418,13 @@ class BlogGenerator:
         self.writer_mode = (writer_mode or "off")
         self._evidence_blocks = []   # set by _gather_evidence; read by _rebuild_sources
         self._last_sourcing = None   # FU220: the sourcing dict the reconcile used (evidence snapshot)
+        # FU221 (Step 0): pages read this run (url -> (text, how)), shared by research and the checker so
+        # a page is fetched once; why each fetch failed (url -> reason) for the scoreboard (R6); and a
+        # per-domain count of web-fetch fallbacks, so a walled site's guessed paths can't run up cost.
+        self._page_cache = {}
+        self._fetch_reasons = {}
+        self._web_fetch_per_domain = {}
+        self._research_notes = []    # FU221: per-brand research outcomes, for the log / quality report
         # FU213 (Change 1): the LAST ## Sources section this instance rendered — its exact lines and
         # the new-number → raw-evidence-index map. A later `_rebuild_sources` over a body that still
         # carries that section translates the markers BACK to raw indexes first, so a second pass can
@@ -2929,9 +2940,9 @@ class BlogGenerator:
         # third-party subject page could be negative about the brand. Sweep only the top competitor.
         brands = [n for n in (list(competitors or [])[:1]) if (n or "").strip()]
         angles = [   # FU56: 2 angles (was 3) — fewer searches per brand
-            "independent user REVIEWS and ratings (e.g. G2, Capterra, Trustpilot, TrustRadius)",
+            "independent user REVIEWS and ratings on reputable review platforms",   # FU221 (R7): no SaaS-only examples
             "NEWS / funding / analyst coverage OR third-party PRICING & commercial-license / terms references "
-            "(e.g. TechCrunch, Reuters, Forbes, Crunchbase, G2)",
+            "from reputable independent publications",
         ]
 
         def _take(srcs):
@@ -3099,11 +3110,36 @@ class BlogGenerator:
             return re.sub(r"(?m)^#\s+[^\n]*", lambda m: "# " + s, body, count=1)
         return f"# {s}\n\n{body}"
 
-    def _fetch_url(self, url):
+    def _fetch_url(self, url, force_web_fetch=False):
         """Fetch a URL and return its stripped visible text ("" on failure). Shared by
-        `_gather_evidence`'s pasted-source path and FU79 `finish_pending_blog`'s manual-link path."""
-        txt = _extract_visible_text(_fetch_homepage(url))
-        return (txt or "").strip()
+        `_gather_evidence`'s pasted-source path and FU79 `finish_pending_blog`'s manual-link path.
+
+        FU221 (R2): when our fetch is WALLED or errors (not when the page is missing), read it through
+        Anthropic's web fetch instead — it runs on Anthropic's servers, and in the 19 Sep test it read
+        5 pages our fetch could not (Capterra, jollysearch.com, osborneslaw.com, lowes.com,
+        TrustRadius). A walled site's guessed /pricing-style paths would each trigger one, so at most
+        `_WEB_FETCH_PER_DOMAIN` fallbacks run per domain per generation unless the caller chose this
+        exact URL (`force_web_fetch` — research, the checker, a pasted link). Why each fetch failed is
+        kept in `self._fetch_reasons` for the scoreboard (R6)."""
+        html, reason = _fetch_page(url)
+        if html:
+            self._fetch_reasons[url] = "ok"
+            return (_extract_visible_text(html) or "").strip()
+        claude = getattr(self, "claude", None)
+        if claude is not None and hasattr(claude, "web_fetch_text") and reason in ("blocked", "error"):
+            d = _norm_domain(url)
+            n = self._web_fetch_per_domain.get(d, 0)
+            if force_web_fetch or url in getattr(self, "_must_read_urls", ()) or n < _WEB_FETCH_PER_DOMAIN:
+                self._web_fetch_per_domain[d] = n + 1
+                txt, code = claude.web_fetch_text(url)
+                if txt:
+                    self._fetch_reasons[url] = f"{reason}; read via web fetch"
+                    print(f"[blog_gen] web fetch: read {url[:90]} ({len(txt)} chars) — our fetch was "
+                          f"{reason}", flush=True)
+                    return txt[:6000].strip()
+                reason = f"{reason}; web fetch {code}"
+        self._fetch_reasons[url] = reason
+        return ""
 
     _CI_SEED_STOP = {"best", "which", "what", "where", "when", "should", "does", "with", "from", "that",
                      "this", "your", "their", "online", "guide", "near", "about", "into", "than", "them",
@@ -4063,6 +4099,19 @@ class BlogGenerator:
                 else:
                     missing.append(tool)
                     print(f"[blog_gen] price-ledger: {tool} — {why}", flush=True)
+                continue
+            # FU221 (R4): a price research VERIFIED on the brand's own page this run — its quote (or its
+            # figure next to the product name) is on the page — outranks a cached search result and
+            # replaces the one-search fallback below. Below the operator's table / value / link.
+            _rp_e = _research.price_entry((tool_state.get(tool) or {}).get("research_price"),
+                                          checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            if _rp_e:
+                _rp_e["per_unit"] = _per_unit_price(_rp_e["value"], _rp_e["basis"])
+                ledger[tool] = _rp_e
+                cfacts.setdefault(slug, {})["price"] = _rp_e
+                dirty = True
+                print(f"[blog_gen] price-ledger: {tool} → {_rp_e['value']} "
+                      f"({_rp_e.get('basis') or 'no basis'}) from research {_rp_e['url']}", flush=True)
                 continue
             if not forced and self._price_entry_usable(entry):
                 ledger[tool] = entry
@@ -6205,7 +6254,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
     HR platforms; a course of TREATMENT compared among clinics; "build in-house" compared among
     vendors. Leave EMPTY when every compared entity is a named provider.{_ct_gopts}
   - DIMENSIONS: the comparison columns / attributes being compared (e.g. pricing, commercial license,
-    royalty-free, imitates real artists, all-in-one).
+    contract terms, materials, service area, turnaround time).
   - CLAIMS: the HIGH-RISK factual claims (comparison-table cells, competitor claims, any number / price /
     plan / license term, superlatives) — each with the brand it's about, the dimension, and the value.
   - PRODUCTS: the specific drugs / products / therapies / instruments CENTRAL to the article (the things
@@ -6707,7 +6756,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     (f"{tool} {' and '.join(_products)} CURRENT price/cost on {tool}'s own site (EACH "
                      f"product's price, the unit/tier/dose/supply it applies to); " if (_products and _px) else "")
                     + f"{tool}: " + ("pricing and plans, " if _px else "")   # FU162: no price ask when OFF
-                    + f"commercial-use / licensing / royalty-free terms, key capabilities"
+                    + (", ".join(dims[:5]) if dims else "key terms and capabilities")   # FU221 (R7): the article's own columns
                     + (f", availability / coverage / compliance support in {rgeo}" if rgeo else "")
                     + (f", {rqual} terms/options offered" if rqual else "")   # FU93
                     + _subj_brief,   # FU198: the article's subject, not the brand's whole category
@@ -6878,15 +6927,82 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 tool_state[tool] = {"dom": "", "blocks": list(_cached_tools[tool]),
                                     "t1": 0, "t2": 0, "t3": 0, "rescue": 0, "cached": True}
 
+        # ---- FU221 (Step 0, R0): RESEARCH FIRST. For each LIVE provider — and for the subject — one
+        # search pinned to its own site FINDS the pages that state what this article compares; our fetch
+        # (or Anthropic's web fetch when the site walls us) READS them; one tool-free call EXTRACTS the
+        # answers with exact quotes; code keeps only answers whose quote is on the page. Verified facts
+        # become the brand's first-party blocks, so the writer sees what the page actually says, with
+        # its conditions. The old Tier-1/Tier-2 baseline runs only for a provider research left empty.
+        # Off with BLOG_RESEARCH=0; never in a guide (no provider comparison); options have no website.
+        _rs_on = bool(_RESEARCH_ON and not _guide and getattr(self, "claude", None) is not None
+                      and hasattr(self.claude, "find_pages"))
+        _rs_needs = (_research.build_needs(dims, _products, include_pricing=_px, geo=rgeo,
+                                           subject=_subject) if _rs_on else [])
+        _rs_ctx = ((f"a {cat} provider" if cat else "a provider")
+                   + f" compared in an article about '{seed}'")
+        _rs_guide = (f"For a price, give the price of the product or plan comparable to "
+                     f"{_product or _subject or 'the article subject'}." if _px else "")
+        _rs_log = (lambda m: print(f"[blog_gen] {m}", flush=True))
+
         def _do_baseline(tool):
             dom = dom_map.get(tool, "")
+            rs = None
+            if _rs_needs and dom and not _is_option(tool):
+                rs = _research.research_brand(self.claude, tool, [_dom(dom)], _rs_needs,
+                                              context=_rs_ctx, guidance=_rs_guide,
+                                              page_cache=self._page_cache, log=_rs_log)
+                rblocks = _research.facts_to_blocks(tool, rs["facts"])
+                if rblocks:
+                    _rp = next((f for f in rs["facts"] if _research.is_price_need(f.get("need"))), None)
+                    return tool, {"dom": dom, "blocks": rblocks, "t1": len(rblocks), "t2": 0, "t3": 0,
+                                  "rescue": 0, "research": len(rs["facts"]),
+                                  "research_unconfirmed": rs["unconfirmed"], "research_price": _rp}
             blocks, t1, t2 = _baseline(tool, dom)
-            return tool, {"dom": dom, "blocks": blocks, "t1": t1, "t2": t2, "t3": 0, "rescue": 0}
+            st = {"dom": dom, "blocks": blocks, "t1": t1, "t2": t2, "t3": 0, "rescue": 0}
+            if rs is not None:   # research ran and confirmed nothing — say so, then the old tiers
+                st.update({"research": 0, "research_unconfirmed": rs["unconfirmed"]})
+            return tool, st
+
+        # The subject's own facts, researched alongside the competitors (its own site only — FU150's
+        # first-party rule holds by construction). A product whose price the operator set is not
+        # researched: the saved value is the authority (F1 finds the page that shows it).
+        _own_rs = _dom((brand or {}).get("domain_url") or "")
+        try:
+            _kf_rs = json.loads((brand or {}).get("key_facts") or "{}")
+        except Exception:
+            _kf_rs = {}
+        _op_slugs_rs = {_kf_slug(it.get("product")) for it in _kf_pricing_items(_kf_rs)
+                        if it.get("operator_set") and str(it.get("value") or "").strip()}
+        _subj_prods_rs = [p for p in _products if _kf_slug(p) not in _op_slugs_rs]
+        _subj_needs = (_research.build_needs(dims, _subj_prods_rs,
+                                             include_pricing=bool(_px and _subj_prods_rs),
+                                             geo=rgeo, subject=_subject)
+                       if (_rs_on and _own_rs) else [])
+        self._subject_research = None
+
+        def _do_subject_research():
+            return _research.research_brand(
+                self.claude, name, [_own_rs], _subj_needs,
+                context=f"{name}'s own offering, the subject of an article about '{seed}'",
+                guidance=_rs_guide, page_cache=self._page_cache, log=_rs_log)
+
         _live_baseline = [t for t in tools if t not in _cached_tools]
-        if _live_baseline:
-            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_live_baseline))) as _ex:
+        if _live_baseline or _subj_needs:
+            _n_jobs = len(_live_baseline) + (1 if _subj_needs else 0)
+            with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, _n_jobs)) as _ex:
+                _subj_fut = _ex.submit(_do_subject_research) if _subj_needs else None
                 for _tool, _st in _ex.map(_do_baseline, _live_baseline):
                     tool_state[_tool] = _st
+                if _subj_fut is not None:
+                    try:
+                        self._subject_research = _subj_fut.result()
+                    except Exception as _e:
+                        print(f"[blog_gen] research: subject failed ({_e})", flush=True)
+        self._research_notes = [
+            f"{t}: {st.get('research', 0)} researched fact(s)"
+            + (f", unconfirmed: {', '.join(n[:30] for n in st['research_unconfirmed'])}"
+               if st.get("research_unconfirmed") else "")
+            for t, st in tool_state.items() if st.get("research") is not None]
 
         # ---- Pass B: rescue what still needs it, ZERO-BLOCK tools FIRST, then missing-key-fact ----
         def _rescue_prio(t):
@@ -6984,9 +7100,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     br = self.claude.search_sources(
                         (f"{tool} {_product} price/cost; " if (_product and _px) else "")   # FU156/162: product-anchored, only when pricing ON
                         + f"{tool} ({cat}) official " + ("pricing and plans, " if _px else "")
-                        + f"commercial-use / licensing / "
-                        f"royalty-free terms, key capabilities — prefer its OWN site or a reputable review "
-                        f"(G2 / Capterra / Trustpilot / TechCrunch / The Verge)"
+                        + (", ".join(dims[:5]) if dims else "key terms and capabilities")   # FU221 (R7)
+                        + " — prefer its OWN site or a reputable independent review"
                         + _subj_brief, max_searches=2)   # FU198: subject-scoped
                 except Exception:
                     br = []
@@ -7194,6 +7309,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     own_dom_s and bd0 and (bd0 == own_dom_s or bd0.endswith("." + own_dom_s))):
                 subj_txt += " " + str(blk.get("text") or "").lower()
         tool_texts[name] = subj_txt
+        # FU221 (R0): the subject's researched facts — pages on its own site that STATE them, quoted.
+        # Added before the coverage scan below, so the subject price search and the dimension rescue
+        # skip what research already confirmed (no double spend).
+        _srs = getattr(self, "_subject_research", None) or {}
+        for _sb in _research.facts_to_blocks(name, _srs.get("facts") or []):
+            if not any((b.get("url") or "") == _sb["url"] and b.get("label") == name for b in fresh):
+                fresh.append({**_sb, "text": _sb["text"][:_EVIDENCE_TEXT_CAP]})
+        if _srs:
+            self._research_notes.append(
+                f"{name} (subject): {len(_srs.get('facts') or [])} researched fact(s)"
+                + (f", unconfirmed: {', '.join(n[:30] for n in _srs.get('unconfirmed') or [])}"
+                   if _srs.get("unconfirmed") else ""))
         for f in fresh:
             lbl = str(f.get("label") or "")
             for t in [name] + tools:
@@ -12160,6 +12287,22 @@ you MAY assume the description will carry: "{disc}".
         if (article.get("key_facts_warning") or "").strip():
             self._warn(article, article["key_facts_warning"].strip(),
                        fold_string=False, key="key-facts")
+        # FU221 (R5): a cited page this run already found MISSING (404 / 410 on our fetch and, when it
+        # was walled first, on web fetch too) is a dead citation — say so instead of listing it silently.
+        # Free: reads the reasons recorded while fetching, no extra request on the hot path.
+        _fr = getattr(self, "_fetch_reasons", None) or {}
+        if _fr:
+            _src_sec = re.split(r"(?mi)^##\s+Sources\s*$", article.get("body_markdown") or "")
+            _src_urls = re.findall(r"https?://[^\s)>]+", _src_sec[-1]) if len(_src_sec) > 1 else []
+            _dead = [u for u in dict.fromkeys(u.rstrip(".,;") for u in _src_urls)
+                     if str(_fr.get(u, "")).startswith("not-found")]
+            if _dead:
+                _dl = ("dead-link: " + ", ".join(_dead[:4]) + (" …" if len(_dead) > 4 else "")
+                       + " — cited as a source but the page no longer exists; replace or remove it")
+                print(f"[blog_gen] {_dl}", flush=True)
+                self._warn(article, _dl)
+        if getattr(self, "_research_notes", None):
+            print("[blog_gen] research: " + " | ".join(self._research_notes), flush=True)
         # FU151 (D): deterministic quality scorecard (structure/meta/links + folded warnings), persisted.
         try:
             article["quality_report"] = self._quality_report(article, brand, link_targets=link_targets)
@@ -13017,6 +13160,10 @@ you MAY assume the description will carry: "{disc}".
             except Exception:
                 return u, ""
         if todo:
+            # FU221 (R2): a CITED page is worth a web-fetch read when our fetch is walled — exempt from
+            # the per-domain cap (that cap is for guessed /pricing-style paths). Registered as a set so
+            # `_fetch_url` keeps its one-argument signature.
+            self._must_read_urls = set(getattr(self, "_must_read_urls", set())) | set(todo)
             with ThreadPoolExecutor(max_workers=max(1, min(_BLOG_FETCH_WORKERS, len(todo)))) as ex:
                 for u, txt in ex.map(_one, todo):
                     pages[u] = {"label": labels.get(u, ""), "ok": bool(txt), "text": (txt or "")[:_VX_PAGE_STORE]}

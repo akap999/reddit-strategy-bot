@@ -4020,15 +4020,19 @@ def api_blog_check_links(blog_id):
             results = []
             for u in sorted(urls):
                 u = u.rstrip(".,);]")
-                ok, status = False, 0
+                ok, status, reason = False, 0, "error"
                 try:
                     r = _rq.get(u, headers={"User-Agent": _BROWSER_UA}, timeout=8, allow_redirects=True)
                     status = r.status_code
                     ok = 200 <= status < 400
+                    # FU221 (R5): a walled page (403 / 429 …) is NOT a dead link — it stops our
+                    # checker, not the reader. Only a page that is gone (404 / 410) counts as dead.
+                    reason = ("ok" if ok else "not-found" if status in (404, 410)
+                              else "walled" if status in (401, 403, 429, 503) else "error")
                 except Exception:
-                    ok, status = False, 0
-                results.append({"url": u, "ok": ok, "status": status})
-            dead = [r for r in results if not r["ok"]]
+                    ok, status, reason = False, 0, "error"
+                results.append({"url": u, "ok": ok, "status": status, "reason": reason})
+            dead = [r for r in results if r["reason"] == "not-found"]
             qr = blog.get("quality_report") if isinstance(blog.get("quality_report"), dict) else {}
             qr = dict(qr or {})
             qr["link_check"] = {"checked": len(results), "dead": len(dead), "results": results,

@@ -822,8 +822,8 @@ class ClaudeClient:
         if first_party:
             guidance = (
                 "Use web search to pull the OWN pages of the allowed site that answer the above — "
-                "its pricing / plans, license / commercial-use / royalty-free terms, and key "
-                "features/capabilities. Return the SPECIFIC page URLs on that site (e.g. its "
+                "the facts the brief asks for (pricing / plans, terms and conditions, key "
+                "features or capabilities). Return the SPECIFIC page URLs on that site (e.g. its "
                 "pricing or terms page), NOT third-party reviews. Respond with JSON ONLY (no prose, "
                 'no code fences): {"sources": [{"title": "...", "url": "...", "fact": "one specific '
                 'fact stated on that page"}]}. Include only pages you actually found on that site.'
@@ -1068,3 +1068,141 @@ class ClaudeClient:
         dom = dom.replace("https://", "").replace("http://", "").strip("/")
         dom = dom.split("/")[0].strip()
         return dom
+
+    # ------------------------------------------------------------------ FU221 — research layer
+    # Three narrow calls that `generators/research.py` composes. The split is deliberate (tested on
+    # Railway, 19 Sep): ONE call doing search + page reading + answering left half its quotes
+    # unverifiable (the model quoted pages it only saw as search results, whose text never reaches us)
+    # and cost $0.75 for one brand. Search only FINDS pages; our code READS them; a tool-free call
+    # EXTRACTS from text we hold — so every quote can be checked word for word, at about a third of the
+    # cost. All three use the app's model, the tool versions the app already runs (no SDK upgrade), and
+    # the shared usage/ceiling accounting. Never raise.
+
+    _WEB_FETCH_TOOL = "web_fetch_20250910"
+    _WEB_FETCH_BETA = "web-fetch-2025-09-10"
+
+    def find_pages(self, brand, domains, needs, context="", max_searches=3, max_pages=4):
+        """Step A: which pages on `domains` (the brand's own site, pinned) state each need. Returns a
+        list of URLs (most useful first, ≤ max_pages) — never page text, never a model summary."""
+        doms = [d for d in (domains or []) if d]
+        needs = [n for n in (needs or []) if str(n).strip()]
+        if not doms or not needs or self._over_budget():
+            return []
+        tool = {"type": "web_search_20250305", "name": "web_search",
+                "max_uses": int(max_searches), "allowed_domains": doms}
+        prompt = (f"Find the pages on {', '.join(doms)} ({brand}'s own site) that state each of these "
+                  f"about {brand}" + (f" ({context})" if context else "") + ":\n"
+                  + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(needs))
+                  + f"\n\nRespond with JSON only (no prose, no code fences): "
+                    f'{{"pages": ["https://...", "..."]}} — at most {int(max_pages)} distinct page URLs '
+                    "on that site, the most useful first. Product, pricing, plans, features, about and "
+                    "policy pages beat blog posts and news. Return an empty list if none exist.")
+        try:
+            message = self.client.messages.create(
+                model=self.model, max_tokens=800, tools=[tool],
+                messages=[{"role": "user", "content": prompt}])
+            self._track(message)
+        except Exception as e:
+            print(f"    find_pages error ({brand}): {e}", flush=True)
+            return []
+        text = "".join(getattr(b, "text", "") for b in (message.content or [])
+                       if getattr(b, "type", None) == "text")
+        data, _how = _extract_json_object(text, "pages")
+        urls, seen = [], set()
+        for u in ((data or {}).get("pages") or []):
+            u = str(u or "").strip()
+            key = u.lower().split("#")[0].rstrip("/")
+            if u.startswith(("http://", "https://")) and key not in seen:
+                seen.add(key)
+                urls.append(u)
+        if not urls:   # fall back to the pages the search itself surfaced
+            for c in _web_citations(message):
+                cu = c.get("url") or ""
+                key = cu.lower().split("#")[0].rstrip("/")
+                if cu and key not in seen:
+                    seen.add(key)
+                    urls.append(cu)
+        return urls[:int(max_pages)]
+
+    def web_fetch_text(self, url, max_content_tokens=8000):
+        """Read ONE page through Anthropic's web fetch tool (it runs on Anthropic's servers, so a site
+        that walls our IP often still serves it — tested: Capterra, jollysearch.com, osborneslaw.com,
+        lowes.com, TrustRadius). Returns (text, "ok") or ("", <error code>). The URL is in the prompt,
+        which satisfies the tool's "URL must already be in the conversation" rule. `max_tokens` must
+        leave room for the tool call itself (a tiny value cuts it off before it names the URL)."""
+        if not url:
+            return "", "no-url"
+        if self._over_budget():
+            return "", "budget"
+        tool = {"type": self._WEB_FETCH_TOOL, "name": "web_fetch", "max_uses": 1,
+                "max_content_tokens": int(max_content_tokens)}
+        try:
+            message = self.client.messages.create(
+                model=self.model, max_tokens=400, tools=[tool],
+                messages=[{"role": "user", "content": f"Fetch {url} and reply only OK."}],
+                extra_headers={"anthropic-beta": self._WEB_FETCH_BETA})
+            self._track(message)
+        except Exception as e:
+            print(f"    web_fetch error ({url}): {e}", flush=True)
+            return "", "error"
+        try:
+            blocks = message.model_dump(warnings=False).get("content") or []
+        except Exception:
+            blocks = []
+        for b in blocks:
+            if (b or {}).get("type") != "web_fetch_tool_result":
+                continue
+            c = b.get("content") or {}
+            if c.get("type") == "web_fetch_result":
+                data = (((c.get("content") or {}).get("source") or {}).get("data")) or ""
+                if data.strip():
+                    return data, "ok"
+                return "", "empty"
+            return "", str(c.get("error_code") or "error")
+        return "", "no-fetch"
+
+    def extract_facts(self, brand, needs, pages, context="", guidance="", page_chars=12000):
+        """Step C: answer each need from ONLY the given page texts ({url: text}), with the exact quote
+        and the url it came from. No tools, so the model can only use text we hold. Returns a list of
+        {"need": <1-based index>, "answer", "url", "quote", "product"} ([] on any failure)."""
+        needs = [n for n in (needs or []) if str(n).strip()]
+        pages = {u: t for u, t in (pages or {}).items() if u and (t or "").strip()}
+        if not needs or not pages:
+            return []
+        blob = "\n\n".join(f"=== PAGE {u}\n{t[:int(page_chars)]}" for u, t in pages.items())
+        prompt = (
+            f"From ONLY the page texts below, answer each item about {brand}"
+            + (f" ({context})" if context else "") + ".\n"
+            + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(needs))
+            + "\n\nRules:\n"
+              "- Use only what the page text states. Never use outside knowledge, never infer.\n"
+              "- `quote`: the exact sentence or line from the page that states it, copied character "
+              "for character (no paraphrase, no added formatting).\n"
+              "- Keep every condition the page attaches (first month, per month, billed annually, "
+              "membership required, with insurance, pack size, which plan or product line).\n"
+              "- `product`: the specific product, plan or line the fact belongs to, when the page "
+              "names one.\n"
+              "- `basis` (prices only): what the price covers and its conditions, short, using ONLY "
+              "words the page itself states — e.g. \"per month, billed monthly, membership "
+              "required\", \"2-pack, 5.4 oz\". Never add a unit, term or condition the page does "
+              "not state; empty when it states none, and for anything that is not a price.\n"
+              "- A price is the REGULAR price, never a sale / deal / discounted figure.\n"
+            + (f"- {guidance}\n" if guidance else "")
+            + "- If the pages do not state an item, answer \"not found\" with an empty quote.\n\n"
+              'Respond with JSON only: {"facts": [{"need": 1, "answer": "...", "url": "...", '
+              '"quote": "...", "product": "", "basis": ""}]}\n\n' + blob)
+        data = self.call(prompt, max_tokens=2000, temperature=0)
+        out = []
+        for f in ((data or {}).get("facts") or []) if isinstance(data, dict) else []:
+            if not isinstance(f, dict):
+                continue
+            try:
+                idx = int(f.get("need") or f.get("item") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            out.append({"need": idx, "answer": str(f.get("answer") or "").strip(),
+                        "url": str(f.get("url") or "").strip(),
+                        "quote": str(f.get("quote") or "").strip(),
+                        "product": str(f.get("product") or "").strip(),
+                        "basis": str(f.get("basis") or "").strip()})
+        return out

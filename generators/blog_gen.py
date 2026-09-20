@@ -11461,6 +11461,138 @@ you MAY assume the description will carry: "{disc}".
                              f"{sites} but the article cites none — regenerate the article")
         return notes
 
+    # ── FU229 — a cited claim must be ON its cited page, and should cite the BEST page that states it ──
+    # `search_sources` asks the model for "one specific, sourced fact this page SUPPORTS" and never
+    # fetches the page, so an `official ·` / `third-party ·` block carries a model-written one-liner
+    # rather than anything the page states. Nothing downstream checked it: a retrospective cohort was
+    # cited for a trial's endpoints, an adverse-events paper for a drug's approved indications, and
+    # three trial protocols for a half-life the prescribing information in the SAME source list states
+    # three times. Two deterministic passes, no model call and no network:
+    #   1. a citation that supports NOTHING measurable in its sentence, while another gathered source
+    #      does, is re-pointed to that source;
+    #   2. among the sources that DO state a value, the most authoritative one keeps the citation.
+    # Both are warning-backed: anything neither pass can resolve is reported, never invented.
+    _CLAIM_CHECK_ON = os.environ.get("BLOG_CLAIM_SOURCE_CHECK", "1") != "0"
+
+    @staticmethod
+    def _norm_claim_text(s):
+        """Compare a figure the way a reader would: case, thousands separators and the space or hyphen
+        between a number and its unit are all noise ("5 days", "5-day", "5 Days")."""
+        s = (s or "").lower().replace(",", "")
+        s = re.sub(r"[‐-―]", "-", s)
+        return re.sub(r"[\s\-]+", " ", s)
+
+    @classmethod
+    def _atom_in(cls, atom, text):
+        """Does this page's text actually state this figure? Plural-tolerant, and bounded so "5 days"
+        never matches inside "15 days" or "5 days" inside "5-6 days"."""
+        a = cls._norm_claim_text(atom).strip()
+        if not a or not text:
+            return False
+        stem = a[:-1] if a.endswith("s") else a
+        return re.search(r"(?<![\w.])" + re.escape(stem) + r"s?(?![\w])",
+                         cls._norm_claim_text(text)) is not None
+
+    def _claim_source_check(self, body, blocks, brand):
+        """Re-point citations that their page does not support, prefer the most authoritative page
+        that does, and report what neither pass could resolve. Returns (body, note)."""
+        if not self._CLAIM_CHECK_ON or not body:
+            return body, ""
+        if not blocks:
+            return body, ""
+        name = ((brand or {}).get("name") or "").strip()
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+        info = {i + 1: ((bl.get("text") or ""), _evidence_tier(bl, name, own))
+                for i, bl in enumerate(blocks) if (bl.get("text") or "").strip()}
+        if not info:
+            return body, ""
+        repointed, unsupported, dropped, advised = [], [], [], []
+
+        def _fix(unit, cell=False):
+            atoms = [m.group(0) for m in _LOADBEARING_NUM_RE.finditer(unit)]
+            cites = [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
+                     if n in info]
+            if not atoms or not cites:
+                return unit
+            # every gathered source that STATES each figure, most authoritative first
+            sup = {a: sorted((info[m][1], m) for m in info if self._atom_in(a, info[m][0]))
+                   for a in atoms}
+            covers = {n: {a for a in atoms if any(m == n for _, m in sup[a])} for n in cites}
+            for a in atoms:
+                if not sup[a]:
+                    unsupported.append(a)
+            # the source that SHOULD carry each figure — the label a regulator publishes outranks a
+            # trial protocol that merely repeats its number, and both outrank a page that only
+            # discusses the topic
+            best = {a: sup[a][0][1] for a in atoms if sup[a]}
+            want = list(dict.fromkeys(best.values()))
+            out, used = unit, []
+            for n in cites:
+                if n in want:
+                    used.append(n)
+                    continue
+                outranked = bool(covers[n]) and all(info[best[a]][1] < info[n][1] for a in covers[n])
+                if covers[n] and outranked and not cell:
+                    # PROSE: a sentence qualifies its claim in ways a figure match cannot see. On the
+                    # article that motivated this, the regulator's label states "72 weeks" but never
+                    # mentions the trial or its secondary endpoints, so preferring it by authority
+                    # alone MIS-CITED a trial outcome. In a table CELL the column header IS the whole
+                    # claim, so the same preference is sound there. In prose, only advise.
+                    advised.append((n, best[sorted(covers[n])[0]]))
+                    used.append(n)
+                    continue
+                if covers[n] and not outranked:
+                    used.append(n)          # it states something, and nothing better does
+                    continue
+                target = (next((m for m in want if m not in used), None)
+                          or next((m for m in want if m in used), None))
+                if target is None:
+                    continue                      # nothing better exists — leave the citation alone
+                if f"[S{target}]" in out:
+                    # the better source already carries this figure here; a second one is redundant
+                    out = re.sub(r"\[S%d\]" % n, "", out)
+                    dropped.append((n, target))
+                else:
+                    out = re.sub(r"\[S%d\]" % n, f"[S{target}]", out)
+                    used.append(target)
+                    (dropped if covers[n] else repointed).append((n, target))
+            return re.sub(r"\s+([.,;:)])", r"\1", re.sub(r"[ \t]{2,}", " ", out))
+
+        lines, changed = [], False
+        in_src = False
+        for line in body.split("\n"):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                in_src = True
+            if in_src or not line.strip():
+                lines.append(line)
+                continue
+            if line.lstrip().startswith("|"):              # a table row: each CELL is a claim
+                parts = line.split("|")
+                new = "|".join(_fix(p, cell=True) if i not in (0, len(parts) - 1) else p
+                               for i, p in enumerate(parts))
+            else:                                          # prose: each SENTENCE is a claim
+                bits = re.split(r"((?<=[.!?])\s+)", line)
+                new = "".join(b if i % 2 else _fix(b) for i, b in enumerate(bits))
+            changed = changed or new != line
+            lines.append(new)
+        out = "\n".join(lines)
+        bits = []
+        if repointed:
+            bits.append("re-pointed " + ", ".join(f"[S{a}]→[S{b}]" for a, b in repointed[:4]))
+        if dropped:
+            bits.append("preferred the authoritative source for "
+                        + ", ".join(f"[S{b}] over [S{a}]" for a, b in dropped[:4]))
+        if advised:
+            bits.append("consider citing "
+                        + ", ".join(f"[S{b}] instead of [S{a}]" for a, b in advised[:4]))
+        if unsupported:
+            bits.append("no gathered source states "
+                        + ", ".join(sorted(dict.fromkeys(unsupported))[:4]))
+        note = ("claim-source: " + "; ".join(bits)) if bits else ""
+        if note:
+            print(f"[blog_gen] {note}", flush=True)
+        return (out if changed else body), note
+
     def _citation_attribution_check(self, body, blocks, brand, tools):
         """FU204 Change 2 — a sentence that names exactly ONE brand (or one bare domain) but whose
         cited blocks all belong to somebody else. Warning only: a false positive costs one line of
@@ -12015,6 +12147,14 @@ you MAY assume the description will carry: "{disc}".
                        + " — every brand keeps its row")
                 print(f"[blog_gen] {_nn}", flush=True)
                 self._warn(article, _nn)
+        # FU229: check each cited figure against the text of the page it cites, BEFORE the sources are
+        # rendered — here every [S#] is still a RAW evidence index, so a citation can be re-pointed to
+        # any gathered source, including one the writer never cited. Doing it after the rebuild would
+        # only ever see the handful of blocks already rendered.
+        article["body_markdown"], _csn = self._claim_source_check(
+            article["body_markdown"], self._evidence_blocks, brand)
+        if _csn:
+            self._warn(article, _csn)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"], brand)
         # FU221: mark any lead-in label the writer left unbolded, so every article in the set scans the

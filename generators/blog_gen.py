@@ -11525,6 +11525,7 @@ you MAY assume the description will carry: "{disc}".
     #   2. among the sources that DO state a value, the most authoritative one keeps the citation.
     # Both are warning-backed: anything neither pass can resolve is reported, never invented.
     _CLAIM_CHECK_ON = os.environ.get("BLOG_CLAIM_SOURCE_CHECK", "1") != "0"
+    _PAGE_TEXT_MIN = 400      # chars: below this a block is a summary, not a page we can judge
 
     @staticmethod
     def _norm_claim_text(s):
@@ -11567,7 +11568,13 @@ you MAY assume the description will carry: "{disc}".
             if not atoms or not cites:
                 return unit
             # every gathered source that STATES each figure, most authoritative first
-            sup = {a: sorted((info[m][1], m) for m in info if self._atom_in(a, info[m][0]))
+            # Only a block holding a real PAGE can be judged. Most `official ·` / `third-party ·`
+            # blocks carry a one-line summary `search_sources` wrote, never the page — the absence of
+            # a figure from one sentence says nothing about the page, so such a citation is left
+            # alone rather than re-pointed on no evidence. This is what keeps the check quiet on a
+            # body whose sources were never fetched, instead of rewriting most of its citations.
+            judge = {n for n in info if len(info[n][0]) >= self._PAGE_TEXT_MIN}
+            sup = {a: sorted((info[m][1], m) for m in judge if self._atom_in(a, info[m][0]))
                    for a in atoms}
             covers = {n: {a for a in atoms if any(m == n for _, m in sup[a])} for n in cites}
             for a in atoms:
@@ -11579,7 +11586,7 @@ you MAY assume the description will carry: "{disc}".
             best = {a: sup[a][0][1] for a in atoms if sup[a]}
             want = list(dict.fromkeys(best.values()))
             out, used = unit, []
-            for n in cites:
+            for n in [c for c in cites if c in judge]:
                 if n in want:
                     used.append(n)
                     continue

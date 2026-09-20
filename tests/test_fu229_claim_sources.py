@@ -13,6 +13,12 @@ import pytest
 from generators.blog_gen import BlogGenerator
 from tests.stubs import StubClaude
 
+def _page(text):
+    """A real fetched page is thousands of characters; these fixtures are excerpts, so pad them to
+    page length. The filler carries no figures of its own."""
+    return text + " " + ("Additional background detail follows in the full document. " * 12)
+
+
 LABEL = ("official · FDA Prescribing Information – ZEPBOUND (tirzepatide)",
          "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/217806s042lbl.pdf",
          "A period of observation may be necessary, taking into account the half-life of tirzepatide "
@@ -32,9 +38,10 @@ TRIAL = ("third-party · Tirzepatide as Compared with Semaglutide (SURMOUNT-5) �
          "Mean weight reduction was 20.2% with tirzepatide and 13.7% with semaglutide at week 72.")
 
 
-def _gen(*pages):
+def _gen(*pages, pad=True):
     g = BlogGenerator(StubClaude(), None)
-    g._evidence_blocks = [{"label": l, "url": u, "text": t} for l, u, t in pages]
+    g._evidence_blocks = [{"label": l, "url": u, "text": _page(t) if pad else t}
+                          for l, u, t in pages]
     return g
 
 
@@ -167,3 +174,18 @@ def test_figure_matching_tolerates_how_a_page_writes_it():
     assert ok("$1,000", "priced at $1000 per course")          # thousands separator
     assert not ok("5 days", "the elimination half-life is 5-6 days")
     assert not ok("5 days", "the study ran 15 days")
+
+
+def test_a_one_line_summary_block_is_never_judged():
+    """Most official/third-party blocks carry the one-liner `search_sources` wrote, not the page. The
+    absence of a figure from one sentence says nothing about the page, so such a citation is left
+    alone -- otherwise a body whose sources were never fetched would have most of its citations
+    rewritten on no evidence."""
+    summary = ("third-party · SURMOUNT-5 coverage", "https://news.example/x",
+               "A head-to-head trial found tirzepatide superior to semaglutide.")
+    page = ("official · FDA label", "https://x.gov/label/2026/1lbl.pdf",
+            "Patients were treated for 72 weeks. " + ("Clinical detail. " * 40))
+    g = _gen(summary, pad=False)
+    g._evidence_blocks.append({"label": page[0], "url": page[1], "text": _page(page[2])})
+    out, note = _run(g, "## X\n\nIt was superior for all key endpoints at 72 weeks [S1].\n")
+    assert "news.example/x" in out and not note      # untouched: we cannot judge a summary

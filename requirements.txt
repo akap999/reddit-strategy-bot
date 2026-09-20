@@ -11,4 +11,5 @@ authlib>=1.3.0
 gunicorn>=21.2.0
 markdown>=3.5
 markdownify>=0.11         # FU180: HTML -> Markdown when importing an existing blog
+pypdf>=5.1                # FU227: read regulator/standards PDFs as text, not raw bytes
 pytest>=8.0            # dev only: the $0 offline blog test suite (tests/) — not imported by the app

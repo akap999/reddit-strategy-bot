@@ -16,6 +16,7 @@ import requests
 
 from config import REDDIT_USER_AGENT
 from generators.base import ClaudeClient
+from generators.pdf_text import as_page_html, looks_like_pdf, pdf_text
 
 
 class _VisibleTextExtractor(HTMLParser):
@@ -185,6 +186,21 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
     for i in range(attempts):
         try:
             resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+            if resp.status_code == 200 and looks_like_pdf(resp.content,
+                                                          resp.headers.get("Content-Type")):
+                # FU227: the primary documents this pipeline most wants to cite — regulator filings,
+                # standards, manufacturer specifications — are published as PDFs. Read the text out
+                # of the file. Until now its bytes were passed on as though they were a page, so the
+                # model was "grounded" in `%PDF-1.7 %\xd0\xd4\xc5\xd8 6460 0 obj ...`.
+                _t = pdf_text(resp.content)
+                if _t:
+                    print(f"[brand_enrichment] ✓ PDF: {len(_t)} chars of text from {url}", flush=True)
+                    return as_page_html(_t), "ok"
+                # No text layer (a scan). No re-fetch can create one, and the file is large — so do
+                # not spend a metered residential GET, and do not let the caller pay for a web fetch
+                # that would hand back the same document base64-encoded.
+                print(f"[brand_enrichment] PDF at {url} has no readable text layer", flush=True)
+                return "", "thin"
             if resp.status_code == 200 and resp.text:
                 # FU113: a 200 is NOT success unless it carries real content — bot walls
                 # serve 200 block/challenge pages, which must fall through the ladder.
@@ -215,6 +231,13 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
             resp = requests.get(url, headers=headers, timeout=max(timeout, 12),
                                 allow_redirects=True,
                                 proxies={"http": proxy, "https": proxy})
+            if resp.status_code == 200 and looks_like_pdf(resp.content,
+                                                          resp.headers.get("Content-Type")):
+                _t = pdf_text(resp.content)       # FU227: the same document, read as text
+                if _t:
+                    print(f"[brand_enrichment] ✓ PDF via residential proxy: {url}", flush=True)
+                    return as_page_html(_t), "ok"
+                return "", "thin"
             if resp.status_code == 200 and resp.text:
                 blocked = _looks_blocked(resp.text)   # FU113: gate the residential rung too
                 if not blocked:

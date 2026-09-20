@@ -12,6 +12,7 @@ import threading
 import requests
 
 from config import DEFAULT_MODEL
+from generators.pdf_text import is_base64_pdf, pdf_text_from_base64
 
 
 # --- Anti-detection: Persona pool (20 total) ---
@@ -1168,6 +1169,12 @@ class ClaudeClient:
             if c.get("type") == "web_fetch_result":
                 data = (((c.get("content") or {}).get("source") or {}).get("data")) or ""
                 if data.strip():
+                    # FU227: web fetch does NOT read a PDF — it hands the file back base64-encoded.
+                    # Left alone, megabytes of base64 entered the evidence as though they were the
+                    # page's text. Decode and read it, or say plainly that it could not be read.
+                    if is_base64_pdf(data):
+                        _t = pdf_text_from_base64(data)
+                        return (_t, "ok") if _t else ("", "pdf-unreadable")
                     return data, "ok"
                 return "", "empty"
             return "", str(c.get("error_code") or "error")

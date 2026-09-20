@@ -73,6 +73,15 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     proven", "BPA-free", a temperature or shatter rating, a certification — cited only to a
     "review · " star-rating page or a "retail · " marketplace listing. Re-cite to the brand's own page
     or an official source, or drop the claim. A rating page evidences sentiment, never a spec.
+  - AN AUTHORITY'S SCOPE WIDENED: a recommendation, standard or requirement attributed to a named
+    organisation, stated WITHOUT the qualifying population/conditions the source attaches to it, or
+    stated with a DIFFERENT scope in two places (Quick answer vs body vs FAQ), or asserting what the
+    authority does NOT limit itself to ("broadly, not only …", "regardless of …"). Restore the
+    source's own scope everywhere the article states it. These MUST appear in `flagged`.
+  - AN ORGANISATION'S POSITION TAKEN FROM A NEWS ITEM: "the <organisation> recommends/requires/
+    emphasizes …" cited to a press release, news-room item or conference write-up. That is the quoted
+    person's claim, not the organisation's position — re-attribute it to the person and their
+    institution, or cite the guideline/standard itself.
   - PRICING PRODUCT-MATCH: a price in a cell/sentence about the article's product that is actually a
     DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
     presented AS the medication price — fix it (use the product's own price), label the fee type, or drop

@@ -58,6 +58,7 @@ _EVIDENCE_PATHS = ("", "/pricing", "/features", "/services", "/about",
                    "/testimonials", "/customers", "/case-studies", "/reviews")
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
+_SEG_AIRTIME_MAX = float(os.environ.get("YT_SEGMENT_AIRTIME_MAX", "0.15"))  # FU235
 _WEB_FETCH_PER_DOMAIN = 3        # FU221 (R2): web-fetch fallbacks per walled domain per generation
 # FU232: the PUBLISHER's own domain gets a bigger budget than a competitor's. The 3-per-domain cap
 # exists so a walled competitor can't run up cost on guessed paths; applied to the subject it
@@ -5555,6 +5556,23 @@ extractable answer), still under 160 chars.
         must be shown to WIN or genuinely COMPETE on it. A limitation ON that axis tells the reader
         that the page's own publisher is the wrong answer to the question the page exists to answer,
         and an answer engine lifts that sentence as exactly that verdict.
+      * THE DECIDING AXIS IS THE READER'S OUTCOME, NOT A MECHANISM YOU SELL. The axis is the RESULT
+        the reader is buying — the customers, clients, cases, bookings, revenue or recovery this
+        category exists to deliver — not the technique that produces it. Defining the axis as {name}'s
+        own mechanism turns its advantage into a niche: the page then reads "the others deliver the
+        result, {name} delivers something adjacent to it".
+      * NEVER CONCEDE THE OUTCOME TO THE FIELD. You may concede a different SERVICE, channel,
+        engagement model or buyer profile ("if you also want paid media managed by the same partner
+        …"). You may NOT write or imply that any or all of the alternatives deliver the OUTCOME while
+        {name} delivers the mechanism. Banned shape: "if what you want is <the outcome>, any of these
+        will get you there; if you want <our mechanism>, that is us." A mechanism is the ROUTE to the
+        outcome — state it as that route ("this is how you win the buyers who ask an AI"), never as an
+        alternative to it. A competitor's conditioned win follows the same rule: condition it on a
+        different service, channel or buyer profile, NEVER on the outcome itself ("if your metric is
+        <the outcome>" is a concession of the outcome, however politely it is phrased).
+      * DO NOT UNDERSTATE {name}'S OWN POSITION. State {name}'s value at the strength its own
+        positioning in the BRAND context states it. If the brand describes its work as producing the
+        outcome, this page may not demote that to a mechanism, a channel or a "route to" claim.
       * The limitation {name} states therefore sits on a DIFFERENT dimension — scope of services,
         engagement model, client size, delivery format — stated as a DESIGN CHOICE with its reason ("built for
         X, so it is not the fit for Y") and naming the buyer profile it is wrong for, where that
@@ -5684,6 +5702,27 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
     or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
     be framed as authoritative/official.
+  - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE. Any assertion about how a platform,
+    engine, marketplace, algorithm or ranking system ranks, weights, retrieves, evaluates or prefers
+    content ("X finds this more substantive", "the algorithm favours …", "this is what gets cited")
+    must come from that platform's OWN documentation in the EVIDENCE, or from a cited study. Otherwise
+    state it as {name}'s own working model ("in our experience …") or leave it out. An unsourced
+    mechanism claim is the easiest sentence on the page to disprove.
+  - CARRY A SOURCE'S OWN SCOPE, WORD FOR WORD. When a sentence attributes a recommendation,
+    standard, position, requirement or finding to a NAMED organisation, body or authority, it must
+    state that source's OWN qualifying population and conditions — never a shortened, generalised or
+    widened version. If the source scopes what it says ("in patients with X who are Y", "for members
+    operating in Z", "for loans above N"), EVERY restatement of it — the Quick answer, the body, the
+    FAQ, the meta description — carries that same qualifier. NEVER write what an authority does NOT
+    limit itself to ("broadly, not only …", "regardless of …", "for everyone, not just …") unless the
+    source itself says so in those words. Widening a scoped recommendation makes the sentence false
+    while its citation still looks correct — the worst failure available to you.
+  - A NEWS ITEM IS NOT AN ORGANISATION'S POSITION. A press release, news-room item, conference
+    write-up or blog post published BY an organisation carries the claim of the person quoted in it —
+    not the organisation's position. Attribute it to that person and their institution ("<Name>,
+    <role> at <institution>, said …"). Only a guideline, standard, regulation, label or specification
+    may be written as "the <organisation> recommends / requires / states". Never upgrade a
+    researcher's or a spokesperson's quote into an institutional position.
   - THE PUNT BAN IS ON MEANING, NOT WORDING: any cell, clause or sentence whose meaning is "this
     data is not available/specified/disclosed/found" is a punt IN ANY PHRASING ("Not specified in
     sourced facts", "data not present", "no data", …). The resolution is STRUCTURAL, never verbal:
@@ -5813,6 +5852,18 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     it reads as "this option has none". Also state each option's key sourced specifics (its price, its
     material, its headline capability) in the PROSE as well as in the table, so a fact is never
     reachable only through a cell.
+  - EVERY EVALUATION CRITERION MUST BE ONE {name} MEETS (hard rule). A criterion is anything the page
+    asks the reader to judge options by: a comparison COLUMN, a "what to look for" / "how to choose" /
+    "questions to ask" bullet, a checklist item, a scoring dimension, a qualifying requirement. Each one
+    must be a bar {name} genuinely clears on its own sourced facts. If {name} does NOT meet it, it is
+    NOT a criterion for THIS article — choose a different dimension that is real, useful to the reader,
+    and that {name} meets. This is a CHOICE of dimension, never a false claim: you may not assert that
+    {name} meets a criterion the EVIDENCE does not support — you drop the criterion instead.
+    A {name} cell that is filled but EMPTY IN SUBSTANCE ("none stated", "not offered", "limited",
+    "no dedicated programme") is the same failure as a blank one: the reader reads a criterion the
+    publisher fails. This does NOT weaken GENUINE BALANCE above — that section names a buyer profile
+    {name} is the wrong fit FOR, on a non-deciding dimension, as a design choice. It never hands the
+    reader a test {name} fails and then invites them to apply it to {name}.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name {name} (e.g. do NOT write
@@ -5970,6 +6021,15 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
     proven", "BPA-free", a temperature or shatter rating, a certification — cited only to a
     "review · " star-rating page or a "retail · " marketplace listing. Re-cite to the brand's own page
     or an official source, or drop the claim. A rating page evidences sentiment, never a spec.
+  - AN AUTHORITY'S SCOPE WIDENED: a recommendation, standard or requirement attributed to a named
+    organisation, stated WITHOUT the qualifying population/conditions the source attaches to it, or
+    stated with a DIFFERENT scope in two places (Quick answer vs body vs FAQ), or asserting what the
+    authority does NOT limit itself to ("broadly, not only …", "regardless of …"). Restore the
+    source's own scope everywhere the article states it. These MUST appear in `flagged`.
+  - AN ORGANISATION'S POSITION TAKEN FROM A NEWS ITEM: "the <organisation> recommends/requires/
+    emphasizes …" cited to a press release, news-room item or conference write-up. That is the quoted
+    person's claim, not the organisation's position — re-attribute it to the person and their
+    institution, or cite the guideline/standard itself.
   - PRICING PRODUCT-MATCH: a price in a cell/sentence about the article's product that is actually a
     DIFFERENT product's price (e.g. a TRT price on a tirzepatide page), or a PROGRAM/MEMBERSHIP fee
     presented AS the medication price — fix it (use the product's own price), label the fee type, or drop
@@ -8319,6 +8379,18 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
     trade-off, framed SYMMETRICALLY: never a limitation that only {name} carries, and never one on the
     axis this article's own question asks about. Never tell the reader to go and evaluate or hire a
     competitor; state a competitor's win as a condition on the reader's situation instead.
+  - NEVER CONCEDE THE OUTCOME (FU235): the deciding axis is the RESULT the reader is buying — the
+    customers, clients, cases, bookings or revenue this category delivers — not a mechanism {name}
+    sells. Never write or keep a line saying the alternatives deliver the outcome while {name}
+    delivers the mechanism ("if what you want is <the outcome>, any of these will get you there"), and
+    never condition a competitor's win on the outcome metric itself. Condition it on a different
+    service, channel, engagement model or buyer profile; state {name}'s mechanism as the ROUTE to the
+    outcome. Do not demote {name}'s own positioning: if the BRAND context frames its work as producing
+    the outcome, this page states it that way too.
+  - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE (FU235): an assertion about how a
+    platform, engine or algorithm ranks, weights, retrieves or prefers content must rest on that
+    platform's own documentation or a cited study in the FRESH FACTS; otherwise re-frame it as
+    {name}'s own working model or cut it.
 """
         _floor_rule = f"""  - ENTITY-TYPE (FU98): when the title asks for the best <TYPE> (agencies, platforms, …), the
     comparison's PRIMARY field = entities of that TYPE. Keep different-type options clearly labeled as
@@ -8403,6 +8475,15 @@ COMPLETE and every stated fact is sourced:
   - WHAT A SOURCE IS GOOD FOR (FU204): a "retail · …" listing or a "review · …" rating page may support
     a PRICE or AVAILABILITY only. A material, safety, certification, temperature or efficacy claim must
     cite the brand's own page or an official/authority source — never a rating page.
+  - CARRY A SOURCE'S OWN SCOPE: a recommendation, standard, position or requirement attributed to a
+    NAMED organisation must keep that source's own qualifying population/conditions in EVERY place the
+    article states it — the Quick answer, the body and the FAQ must agree, word for word, on the scope.
+    Never widen it, never drop the qualifier to shorten a sentence, and never assert what an authority
+    does NOT limit itself to ("broadly, not only …", "regardless of …") unless the source says so.
+  - A NEWS ITEM IS NOT A POSITION: a press release, news-room item or conference write-up published by
+    an organisation carries the quoted person's claim, not the organisation's position. Re-attribute it
+    to that person and their institution; only a guideline, standard, regulation or label may be
+    written as "the <organisation> recommends / requires / states".
   - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
     block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
     then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
@@ -8502,7 +8583,14 @@ COMPLETE and every stated fact is sourced:
 {_floor_rule}  - SUBJECT COMPLETENESS (FU142): {name}'s own row must be AT LEAST as complete as the competitors'
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from {name}'s sourced facts [S#] (its own-site FRESH FACTS included); never
-    invent.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}{vfact_rules}
+    invent.
+  - EVERY EVALUATION CRITERION MUST BE ONE {name} MEETS: a comparison COLUMN, a "what to look for"
+    bullet, a checklist item or any other bar the page asks the reader to judge options by must be one
+    {name} clears on its sourced facts. A column whose {name} cell can only be filled with an absence
+    ("none stated", "not offered", "limited") is a criterion {name} fails — DROP that column and compare
+    on a dimension {name} meets, rather than filling the cell with the absence. Never invent a fact to
+    meet a criterion; drop the criterion. This does not touch the balance section, which names a buyer
+    profile {name} is the wrong fit for on a NON-deciding dimension.{unverified_rules}{price_rules}{honesty_rules}{geo_rules}{qual_rules}{ymyl_rules}{_opt_rules}{_rm_rules}{_mine_rules}{_priced_rules}{vfact_rules}
 
 The FRESH FACTS are numbered starting at [S{start_idx}] — cite them with those EXACT [S#] numbers.
 
@@ -8877,6 +8965,112 @@ Rules:
         return (f"the script runs ~{words / 145.0:.1f} min ({words} words) against a "
                 f"{cls._fmt_min(dm)} min target (~{budget} words)")
 
+    # FU235 — the RESULT a buyer of this category is actually buying. Conceding it to the field, or
+    # conditioning a competitor's win on it, tells the viewer the alternatives do the thing that pays
+    # and the publisher does something adjacent. Generic across service categories on purpose.
+    _OUTCOME_RE = re.compile(
+        # NB "cases" is deliberately NOT here on its own — "in all of these cases" is a discourse
+        # connective, not a concession, and it is the commonest false positive this check can make.
+        r"\b(?:leads?|lead\s+volume|cost[-\s]per[-\s]lead|customers?|clients?|patients?|"
+        r"new\s+cases|cases?\s+won|case\s+volume|"
+        r"bookings?|appointments?|enquir(?:y|ies)|inquir(?:y|ies)|conversions?|revenue|sales|"
+        r"pipeline|roi|new\s+business|jobs\s+won|deals?|sign[-\s]?ups?|phone\s+calls?|"
+        r"form\s+submissions?)\b", re.I)
+    # "any of these", "all of these", "any of the agencies above" — the whole field, at once.
+    # A leading "in" makes it a connective ("in all of these cases, ask a professional"), never a
+    # concession — the negative lookbehind is what keeps ordinary prose out of this check.
+    _BLANKET_RE = re.compile(
+        r"(?<!\bin )\b(?:any|all|either|each)\s+of\s+(?:these|them|those|the\s+[\w-]+\s+(?:above|here|below))\b"
+        r"|\bevery\s+(?:one\s+of\s+)?(?:these|option|provider|agency|firm|platform)s?\b"
+        r"|\bany\s+of\s+the\s+(?:above|options|providers|agencies|firms|platforms|tools)\b", re.I)
+    _COMP_WIN_RE = re.compile(
+        r"\b(?:is|are)\s+the\s+(?:better|stronger|right)\s+(?:fit|choice|pick|match)\b"
+        r"|\bfits?\s+best\b|\bis\s+the\s+stronger\s+match\b|\bprimary\s+metric\s+is\b", re.I)
+
+    @classmethod
+    def _outcome_concession_note(cls, script, body_md, name):
+        """FU235 — the script hands the buyer's OUTCOME to the field and keeps a MECHANISM.
+
+        FU215 built the two-part close deliberately: concede the non-deciding axis, resolve the
+        deciding one. What it could not check is WHICH axis got conceded. On the reviewed package the
+        conceded half was lead volume - the result an agency buyer is actually buying - and the half
+        kept was AI citation visibility, which is the route to it. So the video says the competitors
+        do the thing that pays and the publisher does the interesting new thing, which is the same
+        concession FU215 exists to prevent, one level up.
+
+        Two shapes, both needing an OUTCOME word to fire, so conceding a different SERVICE or a buyer
+        profile (which the balance rules REQUIRE) stays silent:
+          (a) a blanket concession - "any of these will move it" - about an outcome;
+          (b) a competitor's conditioned win whose CONDITION is the outcome metric itself.
+        Warning only."""
+        nm = (name or "").strip()
+        if not script or not nm:
+            return ""
+        comps, brand_in_table = _tradeoff_competitors(body_md, nm)
+        comp_res = [_tradeoff_name_re(c) for c in _tradeoff_match_names(comps)] if brand_in_table else []
+        brand_re = _tradeoff_name_re(nm)
+        hits = []
+        for sent in cls._spoken_text(script):
+            if not cls._OUTCOME_RE.search(sent):
+                continue
+            if cls._BLANKET_RE.search(sent):
+                hits.append(f'"{sent[:80].strip()}…" hands the outcome to the whole field')
+            elif (comp_res and any(r.search(sent) for r in comp_res)
+                  and not (brand_re and brand_re.search(sent))
+                  and cls._COMP_WIN_RE.search(sent)):
+                hits.append(f'"{sent[:80].strip()}…" conditions a competitor\'s win on the outcome')
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return ("outcome-concession: " + "; ".join(hits)
+                + f" - the outcome is what the buyer is buying; {nm}'s mechanism is the ROUTE to it, "
+                  "not an alternative - condition a competitor's win on a different service, channel "
+                  "or buyer profile instead")
+
+    @classmethod
+    def _segment_airtime_note(cls, script, body_md, name):
+        """FU235 — a segment that spends real runtime on background the publisher does not do.
+
+        On the reviewed package, 75 seconds of a 5:45 script - 22% - went to CSLB licensing, CEQA,
+        seismic code and ADA standards, naming no option at all, and closed by telling the viewer that
+        "any agency you evaluate needs to understand those four layers". None of it is work the
+        publisher does, so the segment spends a fifth of the video building a checklist its own
+        publisher fails. Fires on a segment that names NEITHER the publisher NOR any compared option
+        and takes more than `_SEG_AIRTIME_MAX` of the runtime. Warning only."""
+        nm = (name or "").strip()
+        if not script or not nm:
+            return ""
+        heads = list(re.finditer(
+            r"(?im)^\s{0,3}#{1,6}[^\n]*?\((\d{1,2}):(\d{2})\s*[-\u2013\u2014]\s*(\d{1,2}):(\d{2})\)[^\n]*$",
+            script))
+        if len(heads) < 3:
+            return ""
+        spans = [(int(m.group(1)) * 60 + int(m.group(2)), int(m.group(3)) * 60 + int(m.group(4)), m)
+                 for m in heads]
+        total = max(e for _, e, _ in spans) - min(st for st, _, _ in spans)
+        if total <= 0:
+            return ""
+        comps, brand_in_table = _tradeoff_competitors(body_md, nm)
+        names = [_tradeoff_name_re(nm)] + (
+            [_tradeoff_name_re(c) for c in _tradeoff_match_names(comps)] if brand_in_table else [])
+        hits = []
+        for i, (st, en, m) in enumerate(spans):
+            seg = script[m.end():spans[i + 1][2].start() if i + 1 < len(spans) else len(script)]
+            share = (en - st) / total
+            if share <= _SEG_AIRTIME_MAX:
+                continue
+            if any(r.search(seg) for r in names):
+                continue
+            head = re.sub(r"^\s*#+\s*", "", m.group(0)).strip()
+            hits.append(f'"{head[:60]}" is {round(share * 100)}% of the runtime and names no option')
+        if not hits:
+            return ""
+        return ("segment-airtime: " + "; ".join(hits[:2])
+                + " - background the publisher does not do is one sentence of framing, never a "
+                  "segment, and never a list of what "
+                + "\"any provider you evaluate needs to understand\"")
+
     @staticmethod
     def _spoken_text(script):
         """FU215 - the SPOKEN sentences of a script (stage directions, headings and markdown are not
@@ -9192,6 +9386,21 @@ SCRIPT (`script_markdown`)
         fit IF what you need is <narrower thing>". Never a verdict on the competitor's capability
         ("they have deeper legal expertise"), which is the same concession with an "if" bolted on,
         and never an unconditional claim on the deciding axis.
+      * THE DECIDING AXIS IS THE BUYER'S OUTCOME, NOT A MECHANISM {name} SELLS. The axis is the
+        RESULT the viewer is buying - the customers, clients, cases, bookings or revenue this category
+        delivers - not the technique that produces it. Narrowing the axis to {name}'s own mechanism
+        turns its advantage into a niche and hands the result to the field.
+      * NEVER CONCEDE THE OUTCOME. You may condition a competitor's win on a different SERVICE,
+        channel, engagement model or buyer profile. You may NEVER say or imply that the alternatives
+        deliver the outcome while {name} delivers the mechanism - not in the opening, not in a
+        conditioned win, and not in the closing two-part line. Banned shape: "if the gap is <the
+        outcome>, any of these will move it; if it is <our mechanism>, that is {name}." A mechanism is
+        the ROUTE to the outcome: say so ("this is how you win the buyers who ask an AI"), and never
+        condition a competitor's win on the outcome metric itself ("if your metric is cost per
+        <outcome>" concedes the outcome).
+      * DO NOT UNDERSTATE {name}. State {name}'s value at the strength its own positioning states it.
+        If the brand describes its work as producing the outcome, this script may not demote that to a
+        mechanism or a channel.
       * {name}'s LIMIT: SAY WHAT IT IS BUILT FOR, NEVER WHAT IT IS NOT. Write it as a POSITIVE
         statement of scope plus the buyer that therefore suits it less: "{name} is built as <what it
         actually is>, so a firm that wants <the other thing> will want a different partner." A BARE
@@ -9256,8 +9465,29 @@ SCRIPT (`script_markdown`)
   - NO MANUFACTURED SOCIAL PROOF: no staged reactions, no reading self-written "user testimonials", and do
     NOT cite the brand's OWN press releases / PR-wire syndication as if it were INDEPENDENT reporting. A
     vendor-sourced stat is attributed as yours ("our internal numbers show"), never "reports confirm".
+  - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE: an assertion about how a platform,
+    engine or algorithm ranks, weights, retrieves or prefers content ("engines find this more
+    substantive", "this is what gets cited") must come from the blog's cited facts or that platform's
+    own documentation. Otherwise say it as {name}'s own working model ("what we see in practice is
+    ...") or leave it out. It is spoken on camera and it is the easiest line in the script to
+    disprove.
   - YMYL: if this is a health/finance topic, name a credentialed presenter/reviewer on screen and in the
     description, and make NO off-label or ahead-of-evidence claims.
+  - EVERY EVALUATION CRITERION MUST BE ONE {name} MEETS: whatever you tell the viewer to judge options
+    by - a comparison dimension, a "what to look for" point, a question to ask a provider - must be a bar
+    {name} genuinely clears. If {name} does not meet it, pick a different dimension that is real and that
+    {name} meets. Never say it on camera and never put it on screen. You may not claim {name} meets
+    something the blog's facts do not support - you choose a different criterion instead. This is not the
+    tradeoffs segment: there {name} names a buyer profile it is the wrong fit for, on a NON-deciding
+    dimension, which is a different thing from handing the viewer a test {name} fails.
+  - EVERY SEGMENT MUST EARN ITS AIRTIME. A segment survives only if it BOTH moves the viewer toward
+    the decision the title asks about AND connects to something {name} actually does. Background that
+    is true but that {name} does not do - regulatory layers, market context, how an industry works -
+    is at most ONE sentence of framing inside another segment. It is never its own segment, never a
+    numbered list of "layers", and never a set of things "any provider you evaluate needs to
+    understand": that is an evaluation checklist, and a viewer applies it to {name} too. If a segment
+    never names {name} and never names a compared option, it is not a segment - keep the one sentence
+    that changes the decision and fold it into the segment that follows.
   - Structure the script in clear SEGMENTS with a spoken transition question at the top of each.{duration_rule}
 
 DESCRIPTION SUPPORT — also return, so the description + captions can be assembled:
@@ -9303,7 +9533,12 @@ you MAY assume the description will carry: "{disc}".
             if not _r or not isinstance(_r, dict) or not (_r.get("script_markdown") or "").strip():
                 break                                  # keep whatever attempt 0 produced, if any
             _s = self._sa(self._youtube_scrub((_r.get("script_markdown") or "").strip()))
-            _w = self._tradeoff_balance_note(_s, body, name, tq, title)
+            _w = "; ".join(x for x in (
+                self._tradeoff_balance_note(_s, body, name, tq, title),
+                # FU235 - the package can pass every balance check and still concede the buyer's
+                # OUTCOME, or spend a fifth of the runtime on background the publisher does not do.
+                self._outcome_concession_note(_s, body, name),
+                self._segment_airtime_note(_s, body, name)) if x)
             # keep the first result, then replace it only with one that fails FEWER checks (a
             # clean retry always wins; a still-failing retry ties back to the original)
             if _best is None or (_w.count(";") if _w else -1) < (_best[2].count(";") if _best[2] else -1):
@@ -9315,7 +9550,15 @@ you MAY assume the description will carry: "{disc}".
                 "\n\nCORRECTION - your previous draft of the HONEST TRADEOFFS segment failed this "
                 "deterministic check:\n"
                 f"  {_w}\n"
-                "Rewrite the WHOLE package with that segment fixed. In particular: the deciding axis "
+                "Rewrite the WHOLE package with that fixed. If the check named an "
+                "outcome-concession: the outcome (the customers/clients/cases/revenue the buyer is "
+                "actually buying) is NEVER conceded to the field and NEVER the condition on a "
+                f"competitor's win - {name}'s mechanism is the ROUTE to that outcome, so say it that "
+                "way; condition a competitor's win on a different service, channel or buyer profile "
+                "instead. If it named a segment-airtime: cut that segment to the ONE sentence that "
+                "changes the decision and fold it into the next segment - background the publisher "
+                "does not do never gets its own segment or its own checklist. In particular: the "
+                "deciding axis "
                 "is the one the TITLE asks about and you may not narrow it; state NO limit on that "
                 f"axis; state NO bare negative about {name} in any wording; re-frame the blog's "
                 "limitation onto the scope dimension underneath it (a layer rather than a "
@@ -11863,6 +12106,199 @@ you MAY assume the description will carry: "{disc}".
             return ""
         return "citation-check: " + "; ".join(hits) + " — re-cite to that brand's own source or drop the specific"
 
+    # FU233 — an organisation's own NEWS surface. A press release, news-room item or conference
+    # write-up published BY a body carries the quoted person's claim, not the body's position.
+    _NEWS_PATH_RE = re.compile(
+        r"/(?:news|press|newsroom|news-room|media|blog|announcements?|"
+        r"press-releases?|press-cent(?:er|re)|media-cent(?:er|re)|news-and-advocacy)(?:/|$|\?|#)", re.I)
+    # "<Proper Noun Phrase> [adverb] recommends/requires/…" or "<Proper Noun>'s position is" — an
+    # institutional POSITION verb, not a research verb ("found", "shows", "examined"), which is what
+    # keeps a correctly-attributed study finding out of this check.
+    _ORG_POSITION_RE = re.compile(
+        r"\b(?:[A-Z][a-z]{2,}(?:\s+(?:of|for|and|the))?(?:\s+[A-Z][a-z]{2,})+|[A-Z]{2,6})"
+        r"(?:'s|\u2019s)?\s+(?:\w+\s+){0,4}?"
+        r"(?:recommends?|requires?|emphasi[sz]es?|advises?|mandates?|stipulates?|specifies?|"
+        r"supports?|position\s+is|stance\s+is|guidance\s+is)\b")
+    # Asserting what an authority does NOT limit itself to. Each needs the source to say so in those
+    # words, and a source almost never does — the writer reaches for these when widening a scope.
+    _SCOPE_NEGATION_RE = re.compile(
+        r"\b(?:not only|not just|not merely|rather than only|regardless of|irrespective of|"
+        r"for everyone|for all patients|broadly, not|more broadly, not)\b", re.I)
+    _ATTRIB_VERB_RE = re.compile(
+        r"\b(recommends?|requires?|emphasi[sz]es?|advises?|mandates?|stipulates?|specifies?|"
+        r"supports?|permits?|allows?|defines?|sets?)\b", re.I)
+    _SCOPE_STOP = {"the", "and", "for", "that", "its", "his", "her", "are", "was", "were", "has",
+                   "have", "had", "who", "which", "with", "this", "these", "those", "any", "all"}
+
+    def _sentence_citations(self, body):
+        """FU233 — [(sentence, [S# indexes])] for PROSE, handling BOTH citation conventions.
+
+        `_prose_sentences` splits on the full stop, so an article that writes "…who are obese. [S1] Men
+        face…" — the marker AFTER the period, which is a common house style — hands every marker to the
+        FOLLOWING sentence. A check reading citations out of a sentence then sees the claim with none and
+        the next sentence carrying somebody else's. A leading marker run is moved back to the sentence it
+        belongs to, and stripped from the one it was sitting in front of."""
+        out = []
+        for sent in self._prose_sentences(body):
+            lead = re.match(r"^((?:\s*\[S\d+\])+)\s*", sent)
+            if lead and out:
+                out[-1][1].extend(int(x) for x in re.findall(r"\[S(\d+)\]", lead.group(1)))
+                sent = sent[lead.end():]
+                if not sent.strip():
+                    continue
+            out.append([sent, [int(x) for x in re.findall(r"\[S(\d+)\]", sent)]])
+        return [(t, i) for t, i in out]
+
+    # FU234 — a comparison cell whose VALUE is an absence. A column the publisher can only answer with
+    # one is a criterion the publisher fails: the cell is filled, so the fill-every-cell rule and the
+    # publisher-BLANK check both pass, and the reader still reads a test the page's own publisher
+    # loses. Deliberately excludes a bare "No …" that negates a BURDEN ("No long-term contract", "No
+    # setup fee") — that shape is a WIN written as an absence.
+    _ABSENCE_CELL_RE = re.compile(
+        r"^\W*(?:none(?:\s+stated)?|n/?a|not\s+(?:offered|stated|available|provided|specified|listed|"
+        r"disclosed|supported|published)|no\s+(?:dedicated|formal|specific|published|stated|separate|"
+        r"explicit)\b|does\s+not\s+offer|doesn't\s+offer|limited\b|minimal\b)", re.I)
+
+    def _publisher_weak_check(self, body, brand):
+        """FU234 — a comparison column the PUBLISHER can only answer with an absence.
+
+        The FU204 fill-every-cell rule only demands the cell not be blank, and the FU142
+        publisher-blank check only fires on a blank one — so "No dedicated Reddit or community
+        program stated" in the publisher's row is filled, honest, and passes both, while handing the
+        reader a test the page's own publisher loses in the one place options are compared side by
+        side. That column is not a criterion for this article; a dimension the publisher meets is.
+
+        Fires only when a competitor answers the SAME column substantively — a column nobody can
+        answer is the existing column-drop rule's job, not this one. Warning only."""
+        name = ((brand or {}).get("name") or "").strip()
+        if not body or not name:
+            return ""
+        try:
+            from generators.blog_eval import _cell_text, _tables
+        except Exception:
+            return ""
+        nm = re.compile(r"\b" + re.escape(name.lower()) + r"\b")
+        blank = ("", "—", "-", "\u2013")
+        cols = []
+        for hdr, rows in _tables(body):
+            cells = [[_cell_text(c) for c in r[0]] for r in rows]
+            subj = [r for r in cells if r and nm.search(r[0].lower())]
+            comp = [r for r in cells if r and not nm.search(r[0].lower())]
+            if not subj or not comp:
+                continue
+            for ci in range(1, len(hdr)):
+                if not any(ci < len(r) and self._ABSENCE_CELL_RE.search(r[ci]) for r in subj):
+                    continue
+                if any(ci < len(r) and r[ci] not in blank
+                       and not self._ABSENCE_CELL_RE.search(r[ci]) for r in comp):
+                    cols.append(_cell_text(hdr[ci]) or f"column {ci + 1}")
+        if not cols:
+            return ""
+        return (f"publisher-weak: {name}'s " + ", ".join(sorted(set(cols)))
+                + " cell(s) state an absence while competitors show a value — that column is an "
+                  "evaluation criterion the publisher fails; compare on a dimension it meets, or "
+                  "drop the column")
+
+    def _press_release_position_check(self, body, blocks):
+        """FU233 — "the <Organisation> recommends/requires/emphasizes X", cited to that organisation's
+        PRESS RELEASE or news-room item. The page is real, on-topic and published by the body named, so
+        every existing check passes it; what it carries is a quoted researcher's or spokesperson's
+        claim, not an institutional position. On the article that exposed this, a study lead's "exercise
+        cannot be optional" at a conference became "the Endocrine Society emphasizes".
+
+        Vertical-neutral: the same shape is a trade body's newsroom, a vendor's blog, a regulator's
+        press page. Warning only — which page to cite instead is an editorial call."""
+        blocks = self._blocks_from_sources(body, blocks)
+        if not body or not blocks:
+            return ""
+        hits = []
+        for sent, idxs in self._sentence_citations(body):
+            if not idxs or not self._ORG_POSITION_RE.search(sent):
+                continue
+            news = [b for i in idxs if 1 <= i <= len(blocks)
+                    for b in [blocks[i - 1]] if self._NEWS_PATH_RE.search(b.get("url") or "")]
+            if not news:
+                continue
+            where = ", ".join(sorted({_norm_domain(b.get("url") or "") or "?" for b in news}))
+            hits.append(f'"{sent[:70].strip()}…" cites a news/press page ({where})')
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return ("position-check: " + "; ".join(hits)
+                + " — a press release carries the quoted person's claim, not the organisation's "
+                  "position; attribute the person or cite the guideline/standard itself")
+
+    def _cited_scope_check(self, body, blocks):
+        """FU233 — an authority's recommendation restated with a DIFFERENT scope than the source gives
+        it. Two shapes, both deterministic:
+
+          (a) a sentence citing a source asserts what that authority does NOT limit itself to
+              ("broadly, not only those with X") — a claim the source has to make in those words, and
+              almost never does;
+          (b) two sentences citing the SAME [S#] both attribute something, and one's claim is a strict
+              SUBSET of the other's — the shorter one dropped a qualifier. This is the only check that
+              reads across the Quick answer, the body and the FAQ at once, which is where three
+              full-body rewrites each restating one fact in isolation leaks.
+
+        Warning only: restoring a scope is an editorial call, and a deterministic rewrite of a
+        scoped claim is exactly the failure this is meant to catch."""
+        blocks = self._blocks_from_sources(body, blocks)
+        if not body:
+            return ""
+        hits, by_src = [], {}
+        for sent, idxs in self._sentence_citations(body):
+            if not idxs:
+                continue
+            if self._SCOPE_NEGATION_RE.search(sent) and self._ATTRIB_VERB_RE.search(sent):
+                hits.append(f'"{sent[:70].strip()}…" states what the source does NOT limit itself to')
+            m = self._ATTRIB_VERB_RE.search(sent)
+            if m:
+                toks = {t for t in re.findall(r"[a-z0-9]{3,}", sent[m.end():].lower())
+                        if t not in self._SCOPE_STOP}
+                if len(toks) >= 4:
+                    # quote from the attribution verb, not the sentence opening — the claim is what
+                    # the operator has to compare, and it often sits mid-sentence.
+                    claim = sent[m.start():]
+                    for i in idxs:
+                        by_src.setdefault(i, []).append((claim, toks))
+        for i, sents in by_src.items():
+            if len(sents) < 2 or len(hits) >= 4:
+                continue
+            for a_sent, a in sents:
+                for b_sent, b in sents:
+                    if a is b or not (a < b) or len(b - a) < 2:
+                        continue
+                    hits.append(f'"{a_sent[:78].strip()}…" drops a qualifier another [S{i}] '
+                                f'sentence states ("{b_sent[:78].strip()}…")')
+                    break
+                if len(hits) >= 4:
+                    break
+        if not hits:
+            return ""
+        return ("scope-check: " + "; ".join(hits[:4])
+                + " — carry the source's own qualifying population everywhere the article states it")
+
+    def _uncited_section_check(self, body):
+        """FU233 — on a YMYL page, a section of real length that cites nothing. It reads in exactly the
+        register the sourced sections do, so a reader cannot tell a trial result from the writer's own
+        reasoning. Stops at the FAQ (its answers are checked as prose elsewhere). Warning only."""
+        if not body:
+            return ""
+        parts = re.split(r"(?im)^[ \t]*(#{2,3})[ \t]+([^\n]+)$", body)
+        named = []
+        for k in range(1, len(parts) - 1, 3):
+            head, chunk = parts[k + 1].strip(), parts[k + 2]
+            if re.match(r"(?i)^(?:sources?|faqs?|frequently\s+asked)\b", head):
+                break
+            if len(re.findall(r"\w+", chunk)) >= 40 and "[S" not in chunk:
+                named.append(head[:60])
+        if not named:
+            return ""
+        return ("uncited-section: " + "; ".join(f'"{h}"' for h in named[:3])
+                + " — a section this long with no [S#] reads exactly like the sourced ones; cite it "
+                  "or mark it as the article's own reasoning")
+
     def _source_class_check(self, body, blocks):
         """FU204 Change 3 — a material / safety / certification / efficacy claim whose ONLY citations
         are `review ·` (star ratings) or `retail ·` (marketplace listings). Those evidence sentiment
@@ -12491,6 +12927,29 @@ you MAY assume the description will carry: "{disc}".
         if _scc:
             print(f"[blog_gen] {_scc}", flush=True)
             self._warn(article, _scc)
+        # FU233 — the source says something NARROWER than the sentence does. Every existing check
+        # confirms a claim is attached to a real, relevant, official page; none tests whether the page
+        # says that. These two are the deterministic slice of that gap — a position taken from a press
+        # release, and an authority's scope widened or restated three ways by three rewrites.
+        _prc = self._press_release_position_check(article.get("body_markdown") or "",
+                                                  getattr(self, "_evidence_blocks", None) or [])
+        if _prc:
+            print(f"[blog_gen] {_prc}", flush=True)
+            self._warn(article, _prc)
+        _csc = self._cited_scope_check(article.get("body_markdown") or "",
+                                       getattr(self, "_evidence_blocks", None) or [])
+        if _csc:
+            print(f"[blog_gen] {_csc}", flush=True)
+            self._warn(article, _csc)
+        _pwc = self._publisher_weak_check(article.get("body_markdown") or "", brand)
+        if _pwc:
+            print(f"[blog_gen] {_pwc}", flush=True)
+            self._warn(article, _pwc)
+        if ymyl:
+            _usc = self._uncited_section_check(article.get("body_markdown") or "")
+            if _usc:
+                print(f"[blog_gen] {_usc}", flush=True)
+                self._warn(article, _usc)
         _srn = self._self_reference_note(article.get("body_markdown") or "", brand)
         if _srn:
             print(f"[blog_gen] {_srn}", flush=True)

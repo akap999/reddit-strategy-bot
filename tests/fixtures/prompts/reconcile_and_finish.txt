@@ -34,6 +34,15 @@ COMPLETE and every stated fact is sourced:
   - WHAT A SOURCE IS GOOD FOR (FU204): a "retail · …" listing or a "review · …" rating page may support
     a PRICE or AVAILABILITY only. A material, safety, certification, temperature or efficacy claim must
     cite the brand's own page or an official/authority source — never a rating page.
+  - CARRY A SOURCE'S OWN SCOPE: a recommendation, standard, position or requirement attributed to a
+    NAMED organisation must keep that source's own qualifying population/conditions in EVERY place the
+    article states it — the Quick answer, the body and the FAQ must agree, word for word, on the scope.
+    Never widen it, never drop the qualifier to shorten a sentence, and never assert what an authority
+    does NOT limit itself to ("broadly, not only …", "regardless of …") unless the source says so.
+  - A NEWS ITEM IS NOT A POSITION: a press release, news-room item or conference write-up published by
+    an organisation carries the quoted person's claim, not the organisation's position. Re-attribute it
+    to that person and their institution; only a guideline, standard, regulation or label may be
+    written as "the <organisation> recommends / requires / states".
   - SOURCE HIERARCHY for a PRICING or LICENSE claim: PREFER the tool's OWN pricing/terms page (a first-party
     block labeled with the tool's name). Use a "third-party ·" review ONLY when no vendor page exists — and
     then ATTRIBUTE it in-text ("per <review>"). Keep the BILLING BASIS exactly as the source states (monthly
@@ -122,6 +131,18 @@ COMPLETE and every stated fact is sourced:
     trade-off, framed SYMMETRICALLY: never a limitation that only Acme Tools carries, and never one on the
     axis this article's own question asks about. Never tell the reader to go and evaluate or hire a
     competitor; state a competitor's win as a condition on the reader's situation instead.
+  - NEVER CONCEDE THE OUTCOME (FU235): the deciding axis is the RESULT the reader is buying — the
+    customers, clients, cases, bookings or revenue this category delivers — not a mechanism Acme Tools
+    sells. Never write or keep a line saying the alternatives deliver the outcome while Acme Tools
+    delivers the mechanism ("if what you want is <the outcome>, any of these will get you there"), and
+    never condition a competitor's win on the outcome metric itself. Condition it on a different
+    service, channel, engagement model or buyer profile; state Acme Tools's mechanism as the ROUTE to the
+    outcome. Do not demote Acme Tools's own positioning: if the BRAND context frames its work as producing
+    the outcome, this page states it that way too.
+  - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE (FU235): an assertion about how a
+    platform, engine or algorithm ranks, weights, retrieves or prefers content must rest on that
+    platform's own documentation or a cited study in the FRESH FACTS; otherwise re-frame it as
+    Acme Tools's own working model or cut it.
   - SUBSTANCE BEFORE CREDENTIALS (FU198): PRESERVE and STRENGTHEN the sections that explain the
     subject's MECHANICS (the rules, procedures and constraints that determine the outcome). Never
     trade a mechanic for more rankings, awards or accreditations — those are commodity content and
@@ -155,6 +176,13 @@ COMPLETE and every stated fact is sourced:
     rows — a blank/"—" publisher cell beside filled competitor cells reads evasive and must not
     ship. Fill it from Acme Tools's sourced facts [S#] (its own-site FRESH FACTS included); never
     invent.
+  - EVERY EVALUATION CRITERION MUST BE ONE Acme Tools MEETS: a comparison COLUMN, a "what to look for"
+    bullet, a checklist item or any other bar the page asks the reader to judge options by must be one
+    Acme Tools clears on its sourced facts. A column whose Acme Tools cell can only be filled with an absence
+    ("none stated", "not offered", "limited") is a criterion Acme Tools fails — DROP that column and compare
+    on a dimension Acme Tools meets, rather than filling the cell with the absence. Never invent a fact to
+    meet a criterion; drop the criterion. This does not touch the balance section, which names a buyer
+    profile Acme Tools is the wrong fit for on a NON-deciding dimension.
   - SOURCE HONESTY: never describe a "third-party ·" source as an "independent audit / analysis /
     report" or "independently verified" — attribute reviews/affiliate write-ups plainly by name, or
     re-cite the figure to the vendor's own page. Only "official ·" sources may be framed as

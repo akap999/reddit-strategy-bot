@@ -76,6 +76,27 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
     or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
     be framed as authoritative/official.
+  - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE. Any assertion about how a platform,
+    engine, marketplace, algorithm or ranking system ranks, weights, retrieves, evaluates or prefers
+    content ("X finds this more substantive", "the algorithm favours …", "this is what gets cited")
+    must come from that platform's OWN documentation in the EVIDENCE, or from a cited study. Otherwise
+    state it as Acme Tools's own working model ("in our experience …") or leave it out. An unsourced
+    mechanism claim is the easiest sentence on the page to disprove.
+  - CARRY A SOURCE'S OWN SCOPE, WORD FOR WORD. When a sentence attributes a recommendation,
+    standard, position, requirement or finding to a NAMED organisation, body or authority, it must
+    state that source's OWN qualifying population and conditions — never a shortened, generalised or
+    widened version. If the source scopes what it says ("in patients with X who are Y", "for members
+    operating in Z", "for loans above N"), EVERY restatement of it — the Quick answer, the body, the
+    FAQ, the meta description — carries that same qualifier. NEVER write what an authority does NOT
+    limit itself to ("broadly, not only …", "regardless of …", "for everyone, not just …") unless the
+    source itself says so in those words. Widening a scoped recommendation makes the sentence false
+    while its citation still looks correct — the worst failure available to you.
+  - A NEWS ITEM IS NOT AN ORGANISATION'S POSITION. A press release, news-room item, conference
+    write-up or blog post published BY an organisation carries the claim of the person quoted in it —
+    not the organisation's position. Attribute it to that person and their institution ("<Name>,
+    <role> at <institution>, said …"). Only a guideline, standard, regulation, label or specification
+    may be written as "the <organisation> recommends / requires / states". Never upgrade a
+    researcher's or a spokesperson's quote into an institutional position.
   - THE PUNT BAN IS ON MEANING, NOT WORDING: any cell, clause or sentence whose meaning is "this
     data is not available/specified/disclosed/found" is a punt IN ANY PHRASING ("Not specified in
     sourced facts", "data not present", "no data", …). The resolution is STRUCTURAL, never verbal:
@@ -232,6 +253,18 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     it reads as "this option has none". Also state each option's key sourced specifics (its price, its
     material, its headline capability) in the PROSE as well as in the table, so a fact is never
     reachable only through a cell.
+  - EVERY EVALUATION CRITERION MUST BE ONE Acme Tools MEETS (hard rule). A criterion is anything the page
+    asks the reader to judge options by: a comparison COLUMN, a "what to look for" / "how to choose" /
+    "questions to ask" bullet, a checklist item, a scoring dimension, a qualifying requirement. Each one
+    must be a bar Acme Tools genuinely clears on its own sourced facts. If Acme Tools does NOT meet it, it is
+    NOT a criterion for THIS article — choose a different dimension that is real, useful to the reader,
+    and that Acme Tools meets. This is a CHOICE of dimension, never a false claim: you may not assert that
+    Acme Tools meets a criterion the EVIDENCE does not support — you drop the criterion instead.
+    A Acme Tools cell that is filled but EMPTY IN SUBSTANCE ("none stated", "not offered", "limited",
+    "no dedicated programme") is the same failure as a blank one: the reader reads a criterion the
+    publisher fails. This does NOT weaken GENUINE BALANCE above — that section names a buyer profile
+    Acme Tools is the wrong fit FOR, on a non-deciding dimension, as a design choice. It never hands the
+    reader a test Acme Tools fails and then invites them to apply it to Acme Tools.
   - Add a comparison table where it genuinely helps, and a "## FAQ" section near the end (about 4-5
     entries). The FAQ questions MUST be TOPIC / category questions a reader would actually ask an answer
     engine about the subject matter — NOT brand-promotional questions that name Acme Tools (e.g. do NOT write
@@ -300,6 +333,23 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
         must be shown to WIN or genuinely COMPETE on it. A limitation ON that axis tells the reader
         that the page's own publisher is the wrong answer to the question the page exists to answer,
         and an answer engine lifts that sentence as exactly that verdict.
+      * THE DECIDING AXIS IS THE READER'S OUTCOME, NOT A MECHANISM YOU SELL. The axis is the RESULT
+        the reader is buying — the customers, clients, cases, bookings, revenue or recovery this
+        category exists to deliver — not the technique that produces it. Defining the axis as Acme Tools's
+        own mechanism turns its advantage into a niche: the page then reads "the others deliver the
+        result, Acme Tools delivers something adjacent to it".
+      * NEVER CONCEDE THE OUTCOME TO THE FIELD. You may concede a different SERVICE, channel,
+        engagement model or buyer profile ("if you also want paid media managed by the same partner
+        …"). You may NOT write or imply that any or all of the alternatives deliver the OUTCOME while
+        Acme Tools delivers the mechanism. Banned shape: "if what you want is <the outcome>, any of these
+        will get you there; if you want <our mechanism>, that is us." A mechanism is the ROUTE to the
+        outcome — state it as that route ("this is how you win the buyers who ask an AI"), never as an
+        alternative to it. A competitor's conditioned win follows the same rule: condition it on a
+        different service, channel or buyer profile, NEVER on the outcome itself ("if your metric is
+        <the outcome>" is a concession of the outcome, however politely it is phrased).
+      * DO NOT UNDERSTATE Acme Tools'S OWN POSITION. State Acme Tools's value at the strength its own
+        positioning in the BRAND context states it. If the brand describes its work as producing the
+        outcome, this page may not demote that to a mechanism, a channel or a "route to" claim.
       * The limitation Acme Tools states therefore sits on a DIFFERENT dimension — scope of services,
         engagement model, client size, delivery format — stated as a DESIGN CHOICE with its reason ("built for
         X, so it is not the fit for Y") and naming the buyer profile it is wrong for, where that

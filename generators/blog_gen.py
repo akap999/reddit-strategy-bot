@@ -54,11 +54,15 @@ def _looks_like_site_post(path):
 
 # Common pages worth fetching beyond a brand's homepage, for real feature/pricing facts
 # and on-site testimonials / case studies (curated, first-party — citable customer quotes).
-_EVIDENCE_PATHS = ("", "/pricing", "/features", "/about",
+_EVIDENCE_PATHS = ("", "/pricing", "/features", "/services", "/about",
                    "/testimonials", "/customers", "/case-studies", "/reviews")
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
 _WEB_FETCH_PER_DOMAIN = 3        # FU221 (R2): web-fetch fallbacks per walled domain per generation
+# FU232: the PUBLISHER's own domain gets a bigger budget than a competitor's. The 3-per-domain cap
+# exists so a walled competitor can't run up cost on guessed paths; applied to the subject it
+# starves the pages the article most needs (/case-studies, /services/*) — the publisher's own proof.
+_WEB_FETCH_OWN_DOMAIN = int(os.environ.get("BLOG_WEB_FETCH_OWN_DOMAIN", "10"))
 _RESEARCH_ON = os.environ.get("BLOG_RESEARCH", "1") != "0"   # FU221 (R0): off → the old tiers only
 
 # Reputable INDEPENDENT domains for the optional web-search tier (Follow-up 7). Passed as
@@ -2555,6 +2559,7 @@ class BlogGenerator:
         self._page_cache = {}
         self._fetch_reasons = {}
         self._web_fetch_per_domain = {}
+        self._own_domain = ""       # FU232: the subject's registrable domain (a bigger fetch budget)
         self._research_notes = []    # FU221: per-brand research outcomes, for the log / quality report
         # FU213 (Change 1): the LAST ## Sources section this instance rendered — its exact lines and
         # the new-number → raw-evidence-index map. A later `_rebuild_sources` over a body that still
@@ -3269,7 +3274,9 @@ class BlogGenerator:
         5 pages our fetch could not (Capterra, jollysearch.com, osborneslaw.com, lowes.com,
         TrustRadius). A walled site's guessed /pricing-style paths would each trigger one, so at most
         `_WEB_FETCH_PER_DOMAIN` fallbacks run per domain per generation unless the caller chose this
-        exact URL (`force_web_fetch` — research, the checker, a pasted link). Why each fetch failed is
+        exact URL (`force_web_fetch` — research, the checker, a pasted link). FU232: the SUBJECT's own
+        domain gets `_WEB_FETCH_OWN_DOMAIN` instead — a competitor's cap starved the publisher's own
+        proof pages (/case-studies, /services/*), which is exactly the evidence the article needs. Why each fetch failed is
         kept in `self._fetch_reasons` for the scoreboard (R6)."""
         html, reason = _fetch_page(url)
         if html:
@@ -3279,7 +3286,10 @@ class BlogGenerator:
         if claude is not None and hasattr(claude, "web_fetch_text") and reason in ("blocked", "error"):
             d = _norm_domain(url)
             n = self._web_fetch_per_domain.get(d, 0)
-            if force_web_fetch or url in getattr(self, "_must_read_urls", ()) or n < _WEB_FETCH_PER_DOMAIN:
+            _own = (getattr(self, "_own_domain", "") or "").strip()
+            _cap = (_WEB_FETCH_OWN_DOMAIN if _own and d and (d == _own or d.endswith("." + _own))
+                    else _WEB_FETCH_PER_DOMAIN)
+            if force_web_fetch or url in getattr(self, "_must_read_urls", ()) or n < _cap:
                 self._web_fetch_per_domain[d] = n + 1
                 txt, code = claude.web_fetch_text(url)
                 if txt:
@@ -3520,6 +3530,7 @@ class BlogGenerator:
         web_resolved_names = set()   # competitor names whose domain came from find_official_domain
         if b.get("domain_url"):
             targets.append((subject, b["domain_url"].strip(), False))
+            self._own_domain = _norm_domain(b["domain_url"])   # FU232: bigger web-fetch budget
         else:
             print(f"[blog_gen] evidence: subject {subject!r} has NO domain_url — "
                   "no first-party source can be fetched", flush=True)
@@ -11530,7 +11541,12 @@ you MAY assume the description will carry: "{disc}".
         if len(sec) < 2:
             return list(fallback or [])
         found = {}
-        for m in re.finditer(r"^\s*[-*]\s*\[S(\d+)\]\s*(.*?)\s*(?:—|--)\s*<?(\S+?)>?\s*$",
+        # FU232: accept the HYPHEN separator too. FU228b stopped `_rebuild_sources` writing an
+        # em-dash in the source list, so an em-dash-only pattern stopped matching our OWN rendered
+        # Sources — every check here silently fell back to the raw, un-renumbered evidence blocks,
+        # which is exactly the mis-mapping this function exists to prevent. The label is non-greedy
+        # and the URL must be one token, so a hyphen INSIDE a label backtracks to the real separator.
+        for m in re.finditer(r"^\s*[-*]\s*\[S(\d+)\]\s*(.*?)\s*[\u2014\u2013-]{1,2}\s*<?(\S+?)>?\s*$",
                              sec[1], re.M):
             found[int(m.group(1))] = {"label": m.group(2), "url": m.group(3), "text": ""}
         if not found:
@@ -11731,8 +11747,10 @@ you MAY assume the description will carry: "{disc}".
 
     def _citation_attribution_check(self, body, blocks, brand, tools):
         """FU204 Change 2 — a sentence that names exactly ONE brand (or one bare domain) but whose
-        cited blocks all belong to somebody else. Warning only: a false positive costs one line of
-        toast, and rewriting a citation automatically could silently relabel a real source."""
+        cited blocks all belong to somebody else. FU232 adds the same check for a comparison-TABLE
+        cell, where the brand is the ROW rather than anything in the cell. Warning only: a false
+        positive costs one line of toast, and rewriting a citation automatically could silently
+        relabel a real source."""
         blocks = self._blocks_from_sources(body, blocks)
         if not body or not blocks:
             return ""
@@ -11793,6 +11811,54 @@ you MAY assume the description will carry: "{disc}".
                 hits.append(f'"{sent[:60].strip()}…" names {nm} but cites {where}')
             if len(hits) >= 4:
                 break
+
+        # FU232 — the same check for a COMPARISON-TABLE cell. `_prose_sentences` skips table rows, and
+        # a cell names no brand of its own (the brand is the ROW, in the first column), so the prose
+        # pass structurally cannot see a row citing another brand's source — the defect a hand-corrected
+        # article surfaced (a competitor's row citing a DIFFERENT competitor's site). The row's first
+        # cell supplies the entity. Deliberately narrow: flag only when the cited source belongs to
+        # ANOTHER compared brand, never merely "doesn't obviously name this one" — a third-party page
+        # that names the brand only in its body (not its title) is a legitimate cite, and the rendered
+        # Sources list carries no page text to confirm it with.
+        if len(hits) < 4:
+            try:
+                from generators.blog_eval import _cell_text, _tables
+            except Exception:
+                _tables = None
+            for _hdr, _rows in (_tables(body) if _tables else []):
+                for _cells, _raw in _rows:
+                    if not _cells:
+                        continue
+                    _first = _cell_text(_cells[0]).lower()
+                    _row_named = [n for n in names
+                                  if re.search(r"\b" + re.escape(n.lower()) + r"\b", _first)]
+                    if len(_row_named) != 1:
+                        continue                  # 0 or 2+ brands in the name cell → ambiguous
+                    _nm = _row_named[0]
+                    for _ci, _cell in enumerate(_cells):
+                        _idxs = [int(x) for x in re.findall(r"\[S(\d+)\]", _cell)]
+                        _cited = [blocks[i - 1] for i in _idxs if 1 <= i <= len(blocks)]
+                        if not _cited or any(_belongs(b, _nm) for b in _cited):
+                            continue
+                        # `_belongs` answers True for a name with no distinctive tokens ("can't
+                        # tell → never flag"), so such a name must never be the one we blame.
+                        _other = sorted({o for o in names
+                                         if o.lower() != _nm.lower()
+                                         and [t for t in _product_tokens(o) if len(t) >= 3]
+                                         and any(_belongs(b, o) for b in _cited)})
+                        if not _other:
+                            continue              # belongs to nobody in particular → not a mis-cite
+                        _col = _cell_text(_hdr[_ci]) if _ci < len(_hdr) else f"column {_ci + 1}"
+                        _where = ", ".join(sorted({_norm_domain(b.get("url") or "")
+                                                   or (b.get("label") or "?") for b in _cited}))
+                        hits.append(f'the "{_col}" cell in the {_nm} row cites {_where} '
+                                    f'({_other[0]}\'s source)')
+                        if len(hits) >= 4:
+                            break
+                    if len(hits) >= 4:
+                        break
+                if len(hits) >= 4:
+                    break
         if not hits:
             return ""
         return "citation-check: " + "; ".join(hits) + " — re-cite to that brand's own source or drop the specific"
@@ -12411,8 +12477,9 @@ you MAY assume the description will carry: "{disc}".
         # FU204 — the two citation checks. Warning only; they never rewrite a marker, because a
         # deterministic re-cite would silently relabel a real source. Between them they catch the
         # wrong-ENTITY case (a Nanobebe price cited to Tommee Tippee) and the wrong-SOURCE-CLASS case
-        # (borosilicate glass cited to a Trustpilot rating). A same-brand WRONG-PRODUCT page (a PPSU
-        # claim cited to that brand's GLASS page) is caught by neither — recorded, not claimed.
+        # (borosilicate glass cited to a Trustpilot rating), in PROSE and — since FU232 — in the
+        # comparison TABLE. A same-brand WRONG-PRODUCT page (a PPSU claim cited to that brand's GLASS
+        # page) is caught by neither — recorded, not claimed.
         _cab = self._citation_attribution_check(article.get("body_markdown") or "",
                                                 getattr(self, "_evidence_blocks", None) or [],
                                                 brand, getattr(self, "_article_tools", None) or [])

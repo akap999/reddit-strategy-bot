@@ -669,3 +669,29 @@ def test_a_section_scope_does_not_reach_across_the_article(gen):
             "## LillyDirect pricing\n\nZepbound self-pay starts at $299 per month [S1].\n")
     assert "price-source" in gen._price_source_check(
         body, [{"url": "https://www.noom.com/med/pricing/", "text": "x" * 800}], PETERMD)[1]
+
+
+@pytest.mark.parametrize("url,unit", [
+    # "for" was missing from the vanity list, so Hims never reached its own site (16 citations)
+    ("https://www.forhims.com/weight-loss", "| **Hims** | tirzepatide from $299/month [S4] |"),
+    # only the FIRST label was tried, so G2 was invisible behind its own subdomain (6 citations)
+    ("https://sell.g2.com/pricing", "G2 vendor plans start from $299/month [S3]"),
+    # the article writes the name as two tokens and neither reaches the domain alone (5 citations)
+    ("https://www.drbrownsbaby.com/p/x", "| **Dr. Brown's** | $8.99 (single bottle) [S4] |"),
+])
+def test_a_brand_is_found_behind_a_subdomain_a_prefix_or_a_two_word_name(url, unit):
+    """Counted off the replay's own domain tally: these three shapes accounted for 27 of the
+    remaining flagged citations, and every one of them was the company's OWN site."""
+    assert BlogGenerator._domain_names_entity(url, unit)
+
+
+@pytest.mark.parametrize("url,unit", [
+    ("https://forbes.com/health/x", "Membership is $149/mo [S1]"),
+    ("https://goodrx.com/x", "Zepbound is $299/month via LillyDirect [S1]"),
+    ("https://blog.vitalitycentersnw.com/x", "HCG typically costs $50-$150 per month [S1]"),
+    ("https://peptidepub.com/x", "PeterMD's GLP-1 plans start at $149 per month [S1]"),
+])
+def test_widening_the_matcher_did_not_let_the_repeaters_back_in(url, unit):
+    """The three shapes above are the reason to be careful: each one loosens the matcher, and the
+    whole point of the check is that a page repeating a price it does not set is not a source."""
+    assert not BlogGenerator._domain_names_entity(url, unit)

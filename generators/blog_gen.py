@@ -13152,7 +13152,8 @@ you MAY assume the description will carry: "{disc}".
     # Vanity prefixes a company puts on its own domain when the bare name is taken. Stripped before
     # comparing, so "getopt.com" is recognised as Opt Health's and "myhspa.org" as HSPA's.
     _DOMAIN_VANITY_RE = re.compile(
-        r"^(?:get|try|join|use|go|my|the|we|hello|meet|with|shop|team|visit|its)(?=[a-z0-9]{3,})")
+        r"^(?:get|try|join|use|go|my|the|we|hello|meet|with|shop|team|visit|its|for|buy|book|"
+        r"live|ask|find|our)(?=[a-z0-9]{3,})")
 
     @staticmethod
     def _domain_names_entity(url, unit):
@@ -13167,14 +13168,31 @@ you MAY assume the description will carry: "{disc}".
         unsourced. A SHORT name may now match the START of the stem, but only where the article
         writes it as a NAME (capitalised), so a lowercase common word cannot reach a domain it
         happens to begin. Two characters still has to be exact: "ro" is Ro, never "rocket"."""
-        raw = re.sub(r"[^a-z0-9]", "", (_norm_domain(url) or "").split(".")[0])
-        if len(raw) < 2:
+        # EVERY label but the TLD is a candidate, not just the first: "sell.g2.com" is G2's, and
+        # taking only "sell" made the company invisible to its own pricing page.
+        labels = [x for x in (_norm_domain(url) or "").split(".")[:-1] if x]
+        stems = set()
+        for lab in labels:
+            raw = re.sub(r"[^a-z0-9]", "", lab)
+            if len(raw) < 2:
+                continue
+            stems.add(raw)
+            bare = BlogGenerator._DOMAIN_VANITY_RE.sub("", raw)
+            if len(bare) >= 2:
+                stems.add(bare)
+        if not stems:
             return False
-        stems = {raw}
-        bare = BlogGenerator._DOMAIN_VANITY_RE.sub("", raw)
-        if len(bare) >= 2:
-            stems.add(bare)
-        for w in re.findall(r"[A-Za-z][A-Za-z0-9&'\u2019-]+", unit or ""):
+        # A multi-word name is also ONE word in a domain: the article writes "Dr. Brown's" as two
+        # tokens and neither reaches drbrownsbaby.com, so adjacent capitalised words are tried
+        # joined as well.
+        words = re.findall(r"[A-Za-z][A-Za-z0-9&'\u2019-]+", unit or "")
+        joined = []
+        for i in range(len(words) - 1):
+            if words[i][:1].isupper() and words[i + 1][:1].isupper():
+                joined.append(words[i] + words[i + 1])
+                if i + 2 < len(words) and words[i + 2][:1].isupper():
+                    joined.append(words[i] + words[i + 1] + words[i + 2])
+        for w in words + joined:
             # "Calibrate's" is Calibrate. The possessive goes before the letters are compared,
             # otherwise "calibrates" matches nothing in "joincalibrate".
             t = re.sub(r"[^a-z0-9]", "", re.sub(r"['\u2019]s\b", "", w.lower()))

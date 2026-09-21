@@ -59,6 +59,9 @@ _EVIDENCE_PATHS = ("", "/pricing", "/features", "/services", "/about",
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
 _SEG_AIRTIME_MAX = float(os.environ.get("YT_SEGMENT_AIRTIME_MAX", "0.15"))  # FU235
+# FU236: one retry was not enough — the flagged background segment shipped anyway, because cutting it
+# left the script under its length target and the model padded instead of shortening.
+_YT_RETRIES = int(os.environ.get("YT_RETRIES", "2"))
 _WEB_FETCH_PER_DOMAIN = 3        # FU221 (R2): web-fetch fallbacks per walled domain per generation
 # FU232: the PUBLISHER's own domain gets a bigger budget than a competitor's. The 3-per-domain cap
 # exists so a walled competitor can't run up cost on guessed paths; applied to the subject it
@@ -5702,6 +5705,15 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
     or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
     be framed as authoritative/official.
+  - NEVER COMPOSE A CLAIM OUT OF TWO SEPARATE FACTS. Each fact may be true and the sentence that
+    merges them false. A location or service-area page is NOT a head office. A company-wide figure is
+    NOT a local one. Offering a service to a market is NOT experience in that market. If the EVIDENCE
+    says a provider has a page for a city AND, separately, that it has N years in business, you may
+    state each and you may NOT merge them into "an N-year <city> team". In particular: NEVER attach
+    THIS article's target geography to a competitor as a credential ("<geo>-based", "<geo> team",
+    "N years in <geo>") unless the EVIDENCE states that credential for that geography — on a page
+    whose whole premise is that geography, an invented local credential is the single most valuable
+    thing you can hand a competitor.
   - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE. Any assertion about how a platform,
     engine, marketplace, algorithm or ranking system ranks, weights, retrieves, evaluates or prefers
     content ("X finds this more substantive", "the algorithm favours …", "this is what gets cited")
@@ -8969,13 +8981,15 @@ Rules:
     # conditioning a competitor's win on it, tells the viewer the alternatives do the thing that pays
     # and the publisher does something adjacent. Generic across service categories on purpose.
     _OUTCOME_RE = re.compile(
-        # NB "cases" is deliberately NOT here on its own — "in all of these cases" is a discourse
-        # connective, not a concession, and it is the commonest false positive this check can make.
+        # Deliberately NOT bare "cases", "contracts", "projects" or "work": "in all of these cases",
+        # "no long-term contract" and "project manager" are ordinary prose, and each one produced a
+        # false positive on a real body the first time it was in this list.
         r"\b(?:leads?|lead\s+volume|cost[-\s]per[-\s]lead|customers?|clients?|patients?|"
-        r"new\s+cases|cases?\s+won|case\s+volume|"
-        r"bookings?|appointments?|enquir(?:y|ies)|inquir(?:y|ies)|conversions?|revenue|sales|"
-        r"pipeline|roi|new\s+business|jobs\s+won|deals?|sign[-\s]?ups?|phone\s+calls?|"
-        r"form\s+submissions?)\b", re.I)
+        r"enquir(?:y|ies)|inquir(?:y|ies)|conversions?|revenue|sales|pipeline|roi|new\s+business|"
+        r"bookings?|appointments?|sign[-\s]?ups?|phone\s+calls?|form\s+submissions?|"
+        r"new\s+(?:cases|projects|work|contracts|jobs)|"
+        r"(?:cases|projects|contracts|jobs|work)\s+won|case\s+volume|project\s+enquir(?:y|ies))\b",
+        re.I)
     # "any of these", "all of these", "any of the agencies above" — the whole field, at once.
     # A leading "in" makes it a connective ("in all of these cases, ask a professional"), never a
     # concession — the negative lookbehind is what keeps ordinary prose out of this check.
@@ -8986,6 +9000,112 @@ Rules:
     _COMP_WIN_RE = re.compile(
         r"\b(?:is|are)\s+the\s+(?:better|stronger|right)\s+(?:fit|choice|pick|match)\b"
         r"|\bfits?\s+best\b|\bis\s+the\s+stronger\s+match\b|\bprimary\s+metric\s+is\b", re.I)
+
+    # FU236 — a credential word. Attached to THIS article's geography and a competitor's name, it is
+    # a local-presence claim, and that is the claim most worth checking against the blog.
+    _CREDENTIAL_RE = re.compile(
+        r"\b(?:based|headquarter(?:s|ed)?|head\s+office|office|team|staff|presence|roots|native|"
+        r"local|experience|years?|serving|operating|established|founded)\b", re.I)
+    _PRONOUN_LEAD_RE = re.compile(r"^\s*(?:they|their|theirs|it|its|the\s+(?:team|agency|firm|company))\b",
+                                  re.I)
+
+    @classmethod
+    def _option_sentences(cls, script, names):
+        """FU236 — [(sentence, option)] for every spoken sentence attributable to exactly ONE named
+        option. `names` is [(canonical, [regex, ...])] so an option's aliases count as one option.
+        Carries the subject ACROSS a pronoun. A profile is written "X has a page for Y. They
+        also serve Z." — the second sentence names nobody, and a per-sentence check reads it as
+        unattributed, which is where the reviewed package hid half of its invented credential."""
+        out, current = [], None
+        for sent in cls._spoken_text(script):
+            # count DISTINCT options, not distinct patterns: "Straight North" matches both its full
+            # name and its first-word alias, and counting those as two options made every profile
+            # sentence look ambiguous and silenced the check entirely.
+            named = sorted({n for n, rxs in names if any(rx.search(sent) for rx in rxs)})
+            if len(named) == 1:
+                current = named[0]
+            elif named:
+                current = None                      # two options in one sentence — ambiguous
+            elif not cls._PRONOUN_LEAD_RE.match(sent):
+                current = None                      # a new subject that is not a carried pronoun
+            if current:
+                out.append((sent, current))
+        return out
+
+    @classmethod
+    def _geo_credential_note(cls, script, body_md, name, geo):
+        """FU236 — a LOCAL credential handed to a competitor that the article never gave it.
+
+        The reviewed package said Straight North serves the Bay Area "with over 25 years of experience
+        in California" and called it "a California-based team". Straight North is an Illinois company;
+        the blog had a San Francisco LOCATION page as its source and a company-wide tenure figure, and
+        the script merged the two. Both facts true, the sentence false — and on a video whose entire
+        premise is California, it hands a competitor the one credential the premise turns on.
+
+        Fires when a sentence attributable to a COMPETITOR ties this article's geography to a
+        credential word, and no sentence in the blog does the same for that competitor. The publisher
+        is excluded: its own local claims come from its brand context, not the blog. Warning only."""
+        nm, g = (name or "").strip(), (geo or "").strip()
+        if not script or not nm or not g:
+            return ""
+        comps, brand_in_table = _tradeoff_competitors(body_md, nm)
+        if not brand_in_table:
+            return ""
+        # one entry per COMPETITOR, carrying every alias that names it
+        names = [(c, [_tradeoff_name_re(a) for a in _tradeoff_match_names([c])]) for c in comps]
+        names = [(c, rxs) for c, rxs in names if rxs]
+        if not names:
+            return ""
+        # the geography's own distinctive words ("California", "the US") — a sub-region named in the
+        # blog (a city inside it) is NOT the claim being checked; the claim is the region as credential
+        gx = re.compile("|".join(re.escape(t) for t in _product_tokens(g) if len(t) >= 3) or r"(?!x)x",
+                        re.I)
+        hits = []
+        for sent, opt in cls._option_sentences(script, names):
+            if not gx.search(sent) or not cls._CREDENTIAL_RE.search(sent):
+                continue
+            rxs = dict(names)[opt]
+            supported = any(gx.search(b) and cls._CREDENTIAL_RE.search(b)
+                            and any(rx.search(b) for rx in rxs)
+                            for b in re.split(r"(?<=[.!?])\s+|\n", body_md or ""))
+            if supported:
+                continue
+            hits.append(f'"{sent[:80].strip()}…" gives {opt} a {g} credential the article never states')
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return ("geo-credential: " + "; ".join(hits)
+                + f" - a service-area or location page is not a head office and a company-wide figure "
+                  f"is not a {g} one; state only what the article states")
+
+    @classmethod
+    def _publisher_lane_note(cls, script, body_md, name):
+        """FU236 — {name}'s own fit line promises a MECHANISM and never says what it produces.
+
+        FU235 stopped the OUTCOME being conceded to the field. The other half of the same defect
+        survives: the publisher's own lane stated as "the gap you need to close is appearing in
+        AI-generated answers" - a visibility promise, when the brand's own positioning is about being
+        named when buyers ask who to hire, which is a pipeline promise. The competitors get outcomes,
+        the publisher gets a technique. Fires when NO sentence naming {name} in the trade-offs segment
+        or the closing carries an outcome word. Warning only."""
+        nm = (name or "").strip()
+        if not script or not nm:
+            return ""
+        seg = cls._tradeoff_segment(script)
+        tail = "\n".join((script or "").splitlines()[-25:])
+        zone = (seg or "") + "\n" + tail
+        rx = _tradeoff_name_re(nm)
+        # the trade-offs segment and the tail overlap on a short script, so the same sentence can be
+        # collected twice — dedupe, or one line looks like enough to judge.
+        mine = list(dict.fromkeys(x for x in cls._spoken_text(zone) if rx.search(x)))
+        if len(mine) < 2:
+            return ""                                # too little to judge
+        if any(cls._OUTCOME_RE.search(x) for x in mine):
+            return ""
+        return (f"publisher-lane: every {nm} line in the trade-offs and the close states a mechanism "
+                f"(what the system does) and none states the OUTCOME it produces - a buyer does not "
+                f"buy mechanisms; name the enquiries, projects or clients the citations turn into")
 
     @classmethod
     def _outcome_concession_note(cls, script, body_md, name):
@@ -9304,6 +9424,11 @@ Rules:
             duration_rule = (
                 f"\n  - TARGET LENGTH: about {_dmtxt} minute{'' if _dmtxt == '1' else 's'} spoken "
                 f"≈ {words} words (±10%) for `script_markdown` — plan the SEGMENT COUNT to fit. "
+                f"NEVER PAD TO THE TARGET: if, after cutting everything that does not move the "
+                f"viewer's decision, the script comes in SHORTER than the target, ship it shorter. "
+                f"Background, market context and regulatory explanation are not filler you may use "
+                f"to reach a number - a tight script beats a padded one, and the target is a budget, "
+                f"not a quota. "
                 f"NON-NEGOTIABLE AT ANY LENGTH (compress by using FEWER/LEANER segments and less "
                 f"elaboration, NEVER by dropping these): the answer-first opening, the spoken "
                 f"target-prompt language + section-transition questions, the claims discipline, "
@@ -9398,6 +9523,11 @@ SCRIPT (`script_markdown`)
         the ROUTE to the outcome: say so ("this is how you win the buyers who ask an AI"), and never
         condition a competitor's win on the outcome metric itself ("if your metric is cost per
         <outcome>" concedes the outcome).
+      * {name}'s OWN FIT LINE MUST NAME THE OUTCOME IT PRODUCES. "The gap you need to close is
+        <our mechanism>" is a mechanism promise, and a buyer does not buy mechanisms. Say what the
+        mechanism produces for them in the same sentence - the enquiries, projects, clients or cases
+        that come from being the brand named when a buyer asks. One clause is enough; without it the
+        segment credits the competitors with the result and {name} with the technique.
       * DO NOT UNDERSTATE {name}. State {name}'s value at the strength its own positioning states it.
         If the brand describes its work as producing the outcome, this script may not demote that to a
         mechanism or a channel.
@@ -9465,6 +9595,13 @@ SCRIPT (`script_markdown`)
   - NO MANUFACTURED SOCIAL PROOF: no staged reactions, no reading self-written "user testimonials", and do
     NOT cite the brand's OWN press releases / PR-wire syndication as if it were INDEPENDENT reporting. A
     vendor-sourced stat is attributed as yours ("our internal numbers show"), never "reports confirm".
+  - NEVER COMPOSE A CLAIM OUT OF TWO SEPARATE FACTS: each can be true and the merged sentence false.
+    A location or service-area page is NOT a head office; a company-wide figure is NOT a local one;
+    serving a market is NOT experience in it. NEVER attach this video's target geography to a
+    competitor as a credential ("<geo>-based", "a <geo> team", "N years in <geo>") unless the blog
+    states that credential for that geography. In a video whose whole premise is that geography, an
+    invented local credential is the most valuable thing you can hand a competitor - and it is spoken
+    on camera and repeated in the captions.
   - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE: an assertion about how a platform,
     engine or algorithm ranks, weights, retrieves or prefers content ("engines find this more
     substantive", "this is what gets cited") must come from the blog's cited facts or that platform's
@@ -9528,22 +9665,31 @@ you MAY assume the description will carry: "{disc}".
         # OPERATOR the enforcement mechanism. Hand the model its own failure instead, and retry once.
         # Fires only when the check trips, so a clean package costs exactly what it costs today.
         _best, _retry_block = None, ""
-        for _att in range(2):
+        for _att in range(1 + _YT_RETRIES):
             _r = self.claude.call(prompt + _retry_block, max_tokens=_max_tok, temperature=0.7)
             if not _r or not isinstance(_r, dict) or not (_r.get("script_markdown") or "").strip():
                 break                                  # keep whatever attempt 0 produced, if any
             _s = self._sa(self._youtube_scrub((_r.get("script_markdown") or "").strip()))
-            _w = "; ".join(x for x in (
+            _notes = [x for x in (
                 self._tradeoff_balance_note(_s, body, name, tq, title),
                 # FU235 - the package can pass every balance check and still concede the buyer's
                 # OUTCOME, or spend a fifth of the runtime on background the publisher does not do.
                 self._outcome_concession_note(_s, body, name),
-                self._segment_airtime_note(_s, body, name)) if x)
+                self._segment_airtime_note(_s, body, name),
+                # FU236 - a local credential invented for a competitor, and the publisher's own lane
+                # promising a mechanism with no outcome attached.
+                self._geo_credential_note(_s, body, name, rgeo),
+                self._publisher_lane_note(_s, body, name)) if x]
+            _w = "; ".join(_notes)
+            # FU236: score by DEFECTS, not by semicolons. Each note joins its own sub-hits with "; ",
+            # so counting semicolons in the joined string conflates "one check with three hits" with
+            # "three checks" - the same conflation FU205 R2 fixed in the quality report.
+            _score = sum(n.count(";") + 1 for n in _notes)
             # keep the first result, then replace it only with one that fails FEWER checks (a
             # clean retry always wins; a still-failing retry ties back to the original)
-            if _best is None or (_w.count(";") if _w else -1) < (_best[2].count(";") if _best[2] else -1):
-                _best = (_r, _s, _w)
-            if not _w or _att:
+            if _best is None or _score < _best[3]:
+                _best = (_r, _s, _w, _score)
+            if not _w or _att >= _YT_RETRIES:
                 break
             print(f"[blog_gen] youtube: {_w} - regenerating once with the failure named", flush=True)
             _retry_block = (
@@ -9557,7 +9703,13 @@ you MAY assume the description will carry: "{disc}".
                 "way; condition a competitor's win on a different service, channel or buyer profile "
                 "instead. If it named a segment-airtime: cut that segment to the ONE sentence that "
                 "changes the decision and fold it into the next segment - background the publisher "
-                "does not do never gets its own segment or its own checklist. In particular: the "
+                "does not do never gets its own segment or its own checklist - and if cutting it "
+                "leaves the script SHORTER than the target length, ship it shorter rather than "
+                "padding it back out, which is what produced the segment in the first place. If it "
+                "named a geo-credential: delete that claim - you merged a location page and a "
+                "company-wide figure into a local credential the article never gave that competitor. "
+                f"If it named a publisher-lane: add one clause to {name}'s own fit line saying what "
+                "the mechanism PRODUCES for the buyer, in the buyer's own terms. In particular: the "
                 "deciding axis "
                 "is the one the TITLE asks about and you may not narrow it; state NO limit on that "
                 f"axis; state NO bare negative about {name} in any wording; re-frame the blog's "
@@ -9567,7 +9719,7 @@ you MAY assume the description will carry: "{disc}".
                 "Every other rule above still applies, and the FACTS stay identical.\n")
         if _best is None:
             return {}
-        res, script_txt, _tradeoff_warn = _best
+        res, script_txt, _tradeoff_warn, _ = _best
         chapters = [c for c in (res.get("chapters") or []) if isinstance(c, dict)]
         # FU203 — validate the chapter timestamps BEFORE the description is assembled from them:
         # the description, the export doc and the modal all read this one stored list, so fixing it

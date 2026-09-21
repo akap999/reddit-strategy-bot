@@ -65,6 +65,15 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     audits. Attribute them plainly by name ("a review by <site> lists …", "per <site>'s review")
     or cite the vendor's OWN page for the number instead. Only a source labeled "official ·" may
     be framed as authoritative/official.
+  - NEVER COMPOSE A CLAIM OUT OF TWO SEPARATE FACTS. Each fact may be true and the sentence that
+    merges them false. A location or service-area page is NOT a head office. A company-wide figure is
+    NOT a local one. Offering a service to a market is NOT experience in that market. If the EVIDENCE
+    says a provider has a page for a city AND, separately, that it has N years in business, you may
+    state each and you may NOT merge them into "an N-year <city> team". In particular: NEVER attach
+    THIS article's target geography to a competitor as a credential ("<geo>-based", "<geo> team",
+    "N years in <geo>") unless the EVIDENCE states that credential for that geography — on a page
+    whose whole premise is that geography, an invented local credential is the single most valuable
+    thing you can hand a competitor.
   - A CLAIM ABOUT HOW A THIRD-PARTY SYSTEM WORKS NEEDS A SOURCE. Any assertion about how a platform,
     engine, marketplace, algorithm or ranking system ranks, weights, retrieves, evaluates or prefers
     content ("X finds this more substantive", "the algorithm favours …", "this is what gets cited")

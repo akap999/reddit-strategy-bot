@@ -25,7 +25,7 @@ $0, no network (StubClaude).
 import pytest
 
 import generators.blog_gen as G
-from generators.blog_gen import BlogGenerator
+from generators.blog_gen import BlogGenerator, _YT_RETRIES
 from tests.stubs import StubClaude
 
 NAME = "Jolly Search"
@@ -506,6 +506,17 @@ If the gap you are closing is legal-vertical immersion, any of these will move i
 """
 
 
+# FU236 — REFRAMED is FU215's own worked example and stays exactly as it was, as the historical
+# anchor. It does NOT satisfy FU236's publisher-lane rule: its two Jolly Search lines state a
+# mechanism ("built through one system", "the layer Jolly Search builds") and never what that
+# produces for the buyer. That is the defect FU236 exists for, and it was in the model answer.
+# The loop tests below need a retry that is clean under EVERY check, so they use this instead.
+REFRAMED_CLEAN = REFRAMED.replace(
+    "that is the layer Jolly Search builds.",
+    "that is the layer Jolly Search builds, and it is where the clients who ask an AI first come "
+    "from.")
+
+
 def test_the_shipped_sentence_fires_both_the_shape_check_and_the_axis_check():
     n = _note(SHIPPED_B)
     assert 'states a bare negative about Jolly Search ("Jolly Search is not...")' in n    # (E)
@@ -574,14 +585,14 @@ def test_a_clean_first_draft_costs_exactly_one_call():
 
 
 def test_a_failing_draft_is_regenerated_once_and_the_clean_retry_ships():
-    out, stub = _run_seq(SHIPPED_B, REFRAMED)
+    out, stub = _run_seq(SHIPPED_B, REFRAMED_CLEAN)
     assert len(stub.calls) == 2
     assert "is not a law-firm-exclusive agency" not in out["script"]
     assert "tradeoff_warning" not in out["meta"]
 
 
 def test_the_retry_hands_the_model_its_own_failure():
-    _, stub = _run_seq(SHIPPED_B, REFRAMED)
+    _, stub = _run_seq(SHIPPED_B, REFRAMED_CLEAN)
     retry = stub.calls[1]
     assert "CORRECTION" in retry
     assert "states a bare negative about Jolly Search" in retry
@@ -589,17 +600,22 @@ def test_the_retry_hands_the_model_its_own_failure():
     assert retry.startswith(stub.calls[0])          # the full original prompt, plus the correction
 
 
-def test_there_is_never_a_second_retry():
-    out, stub = _run_seq(SHIPPED_B, SHIPPED_B, SHIPPED_B)
-    assert len(stub.calls) == 2
+def test_the_retry_budget_is_bounded():
+    """FU215 allowed exactly one retry. FU236 raised it to `_YT_RETRIES`, because a flagged
+    background segment shipped anyway after a single retry — but it is still BOUNDED, and a package
+    that never converges still reaches the operator with its warning."""
+    out, stub = _run_seq(*[SHIPPED_B] * (2 + _YT_RETRIES))
+    assert len(stub.calls) == 1 + _YT_RETRIES
     assert "tradeoff_warning" in out["meta"]        # still failing: the operator still sees it
 
 
 def test_a_still_failing_retry_ships_only_if_it_fails_fewer_checks():
-    """SCRIPT1 fails four checks; SHIPPED_B fails two — the retry is better, so it ships."""
+    """SCRIPT1 carries more defects than SHIPPED_B, so the retry ships even though it also fails.
+    FU236 scores by DEFECTS rather than by semicolons — each note joins its own sub-hits with "; ",
+    so counting semicolons conflated "one check with three hits" with "three checks"."""
     out, _ = _run_seq(SCRIPT1, SHIPPED_B)
     assert "Here's where we have to be straight" not in out["script"]
-    assert out["meta"]["tradeoff_warning"].count(";") == 1
+    assert 'says "we"' not in out["meta"]["tradeoff_warning"]    # SCRIPT1's own defect is gone
 
 
 def test_a_worse_retry_never_replaces_a_better_first_draft():

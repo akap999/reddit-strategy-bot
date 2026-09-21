@@ -20,7 +20,13 @@ they would change — no model, no network, no write, so it costs nothing and ta
 
   python3 tools/blog_eval.py --replay [--detail] [--brand-ids 34] [--limit 500]
 
-Run it before AND after any generator change. It is the gate the project kept skipping.
+FU252 adds `--rewrites`, the same idea for the REWORDING pass — it compares every stored body with
+its own rewrite and reports what changed about what the article ASSERTS (a lost figure bound, a
+dropped link, a strengthened claim, a changed acronym expansion, a bold subject that lost its verb):
+
+  python3 tools/blog_eval.py --rewrites [--detail]
+
+Run both before AND after any generator change. They are the gate the project kept skipping.
 """
 import argparse
 import base64
@@ -174,6 +180,54 @@ def _blocks_from_sources(body):
             out.append({"url": "", "text": ""})
         out[n - 1] = {"url": (u.group(1) if u else "").rstrip(">),."), "text": "x" * 800}
     return out
+
+
+def run_replay_rewrites(args):
+    """FU252 — what the REWORDING changed about what each stored article ASSERTS. $0.
+
+    A different question from `--replay`: that one asks whether a body is damaged, this one compares
+    a body with its own rewrite. Walks both pairs the schema carries — (body_markdown,
+    rewritten_body) and the FU250 (imported_body, imported_rewritten)."""
+    import collections
+    E = _load_eval_module()
+    db = _db()
+    cols = {r[1] for r in db.conn.execute("PRAGMA table_info(blogs)")}
+    total = collections.Counter()
+    blocking = budgeted = affected = 0
+    seen = 0
+    for bcol, rcol in (("body_markdown", "rewritten_body"), ("imported_body", "imported_rewritten")):
+        if bcol not in cols or rcol not in cols:
+            continue
+        q = (f"SELECT b.id, b.title, b.{bcol} o, b.{rcol} r FROM blogs b "
+             f"WHERE length(coalesce(b.{rcol},''))>500 AND length(coalesce(b.{bcol},''))>500")
+        params = []
+        if _ids(args.brand_ids):
+            q += " AND b.brand_id IN (%s)" % ",".join("?" * len(_ids(args.brand_ids)))
+            params += _ids(args.brand_ids)
+        rows = [dict(r) for r in db.conn.execute(q + " ORDER BY b.id", params).fetchall()]
+        print(f"\n=== {bcol} → {rcol}: {len(rows)} pair(s) ===")
+        seen += len(rows)
+        for x in rows:
+            hits = E.rewrite_findings(x["o"] or "", x["r"] or "")
+            if not hits:
+                continue
+            affected += 1
+            for h in hits:
+                total[h["check"]] += 1
+                if h.get("severity") == "blocking":
+                    blocking += 1
+                else:
+                    budgeted += 1
+            if args.detail:
+                print(f"  #{x['id']:<5} {(x['title'] or '')[:52]}")
+                for h in hits[:6]:
+                    print(f"        [{h.get('severity','?'):<9}] {h['check']:<28} {h['detail'][:74]}")
+    print(f"\n=== {seen} pair(s) replayed — no model, no network, $0 ===")
+    print(f"\n{affected} pair(s) carry at least one finding "
+          f"({blocking} blocking, {budgeted} budgeted)\n")
+    for k, v in total.most_common():
+        print(f"    {v:>4}  {k}")
+    return 0
 
 
 def run_replay(args):
@@ -367,9 +421,14 @@ def main():
                     help="FU251: run every DETERMINISTIC check over the stored bodies and report what "
                          "they would change. No model, no network, no write — $0.")
     ap.add_argument("--detail", action="store_true", help="with --replay: one line per affected article")
+    ap.add_argument("--rewrites", action="store_true",
+                    help="FU252: compare every stored body with its own REWRITE and report what the "
+                         "rewording changed about what the article asserts. Also $0.")
     args = ap.parse_args()
     if args.compare:
         return compare(*args.compare)
+    if args.rewrites:
+        return run_replay_rewrites(args)
     if args.replay:
         return run_replay(args)
     run_local(args)

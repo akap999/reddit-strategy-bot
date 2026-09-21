@@ -1839,6 +1839,15 @@ def _is_trial_protocol(url, title=""):
     return bool(_TRIAL_PROTOCOL_RE.search(blob)) or u.endswith(".pdf")
 
 
+def _page_text(entry):
+    """The text out of a `read_page` cache entry, which is a (text, how) TUPLE. Appending the tuple
+    itself raised `sequence item: expected str, tuple found` the moment any page had been read — the
+    crash never showed in tests because the cache is empty unless something actually fetched."""
+    if isinstance(entry, tuple):
+        return entry[0] or ""
+    return entry or ""
+
+
 def _official_source_ok(url, title, brand_name, own_domain, pins):
     """FU141: THE one validator for granting the `official ·` badge, everywhere. Generic —
     brand name, own domain and vertical pins are all parameters; every rule is shape-based.
@@ -12356,7 +12365,7 @@ you MAY assume the description will carry: "{disc}".
         for i, bl in enumerate(blocks, 1):
             t = bl.get("text") or ""
             u = (bl.get("url") or "").strip()
-            cached = (self._claim_pages.get(u) or ("", ""))[0] if u else ""
+            cached = _page_text(self._claim_pages.get(u)) if u else ""
             txts[i] = t if len(t) >= len(cached or "") else cached
 
         def _cites(unit):
@@ -12470,9 +12479,9 @@ you MAY assume the description will carry: "{disc}".
             parts.append(b.get("text") or "")
             u = (b.get("url") or "").strip()
             if u:
-                parts.append(pages.get(u) or pages.get(_norm_page_url(u)) or "")
+                parts.append(_page_text(pages.get(u) or pages.get(_norm_page_url(u))))
         for v in pages.values():
-            parts.append(v or "")
+            parts.append(_page_text(v))
         blob = "\n".join(p for p in parts if p)
         if not blob.strip():
             return body, ""      # nothing gathered at all → nothing can be judged
@@ -12554,7 +12563,7 @@ you MAY assume the description will carry: "{disc}".
         # than the sentence a search wrote about it.
         for _i, _bl in enumerate(blocks, 1):
             _u = (_bl.get("url") or "").strip()
-            _cached = (self._claim_pages.get(_u) or ("", ""))[0] if _u else ""
+            _cached = _page_text(self._claim_pages.get(_u)) if _u else ""
             if _cached and len(_cached) > len((info.get(_i) or ("", 0))[0]):
                 info[_i] = (_cached, _evidence_tier(_bl, name, own))
         if not info:

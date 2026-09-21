@@ -223,3 +223,18 @@ def test_a_competitor_that_simply_found_nothing_is_not_treated_as_starved():
     the pause, not an automatic removal."""
     gen, s = _source(["Ro", "Hims", "Noom", "Calibrate"], starved=None)
     assert not (gen._budget_drop_note or "")
+
+
+# ── the page cache holds (text, how) TUPLES, not strings ─────────────────────────────────────────
+def test_the_page_cache_shape_does_not_crash_the_check():
+    """`read_page` caches (text, how). Appending the tuple raised `expected str, tuple found` the
+    moment any page had been read — which is every real generation, and no test caught it because
+    the cache is empty unless something actually fetched. Found by running the check against a live
+    page rather than a fixture."""
+    g = _gen()
+    g._claim_pages = {"https://x/a": ("a page stating 41.5% of firms", "direct"),
+                      "https://x/b": ("", "blocked")}
+    blocks = [{"label": "x", "url": "https://x/a", "text": "short"},
+              {"label": "y", "url": "https://x/b", "text": "short"}]
+    out, _ = g._unsourced_figure_check("The rate was 41.5% last year [S1].\n", blocks)
+    assert "41.5%" in out, "a figure the cached page DOES state survives"

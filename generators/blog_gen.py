@@ -4716,21 +4716,39 @@ class BlogGenerator:
         """FU214 (Change 3) — SEVERAL rows per brand, so pick the one this article is about.
 
         A brand may have a 9 oz single AND a 3-pack; the ledger is keyed by brand alone, so exactly one
-        row can reach the cell. Precedence (mirrors `_canonical_price_item`): the row whose product
-        tokens intersect the article's product/subject wins; failing that, the SINGLE row is used as-is;
-        failing that the FIRST row is used and the caller warns. Returns (entry, ambiguous)."""
+        row can reach the cell. Precedence (mirrors `_canonical_price_item`): among the rows whose
+        product tokens intersect the article's product/subject, the one that states the TOTAL the
+        reader pays (FU253); failing any match, the SINGLE row is used as-is; failing that the FIRST
+        row is used and the caller warns. Returns (entry, ambiguous)."""
         ents = [e for e in (self._price_row_entry(r, name) for r in (rows or [])) if e]
         if not ents:
             return None, False
-        want = set(topic_tokens or []) | set(_product_tokens(subject))
-        if want:
-            for e in ents:
-                toks = set(_product_tokens(e.get("product") or ""))
-                if toks and (toks & want):
-                    return e, False
         if len(ents) == 1:
             return ents[0], False
-        return ents[0], True
+        want = set(topic_tokens or []) | set(_product_tokens(subject))
+        matched = [e for e in ents if (set(_product_tokens(e.get("product") or "")) & want)] if want else []
+        # FU253 — whichever set we are choosing from, take the row that states what the READER PAYS.
+        # The operator priced one competitor three ways: the product at $349, the membership at
+        # $74-$149, and "product + membership" at $423-$498. None of those product strings shares a
+        # token with a "semaglutide cost per month" article, so the token match found nothing and the
+        # FIRST row won by default — a part-price, ranked against a rival's all-in price, which is
+        # what made the article call the cheaper option "a premium". The total is the comparable
+        # figure, and the operator said which row it is.
+        _RANK = {"all-in": 0, "plus": 1, "product": 2, "program": 3, "": 4}
+        cands = matched or ents
+        comps = {_norm_price_composition(e.get("composition")) for e in cands}
+        # `min` is stable, so with no composition to go on the first row still wins, exactly as
+        # before — every brand in the stored corpus that has one row, or rows the operator never
+        # graded, is untouched by this.
+        if matched:
+            best = min(cands, key=lambda e: (_RANK.get(_norm_price_composition(e.get("composition")), 4),
+                                             -len(_product_tokens(e.get("product") or ""))))
+        else:
+            best = min(cands, key=lambda e: _RANK.get(_norm_price_composition(e.get("composition")), 4))
+        # Ambiguous only when nothing decided it: no product matched the article AND the operator
+        # gave no composition to rank by. Reporting a pick the operator's own data settled would be
+        # noise in the warnings the operator actually has to read.
+        return best, bool(not matched and len(cands) > 1 and len(comps) == 1)
 
     def _ensure_price_ledger(self, brand, tools, tool_state, cfacts, topic_tokens, subject,
                              refresh_slugs=None, refresh_all=False):
@@ -13193,10 +13211,18 @@ you MAY assume the description will carry: "{disc}".
         r"collected|recovered|recover|claim size|portfolio|assets under|"
         r"in (?:sales|debt|losses|savings|grants))\b", re.I)
     _MAGNITUDE_RE = re.compile(r"^\s*(?:million|billion|trillion|bn|k)\b", re.I)
+    # FU253: "/mo\b" does NOT match "/month" — \b fails on the "n" — and "$270/month" is the
+    # commonest way anyone writes a price. Measured on the article that exposed this: 0 of its 8
+    # price sentences reached the check, so a list price cited to a magazine and a compounded price
+    # cited to a consumer blog both walked past the gate written to stop exactly that. "retail" was
+    # missing for the same reason: nothing in the list described a price by what it IS.
     _PRICE_CTX_RE = re.compile(
         r"\bpric|\bcost|\bfee\b|\bfees\b|\bcharges?\b|\bbill(?:s|ed|ing)?\b|\brate\b|"
-        r"\blists? at\b|\blist price\b|/mo\b|per month|per year|monthly|annually|a month|"
-        r"\bpays?\b|\bout-of-pocket\b|\bcash[- ]pay\b|\bstarting at\b|\bfrom \$", re.I)
+        r"\blists? at\b|\blist price\b|\bretail|"
+        r"/\s*(?:mo|month|months|monthly|yr|year|wk|week|day|dose)\b|"
+        r"per (?:month|year|dose|week|day)|monthly|annually|\b(?:a|each) (?:month|year)\b|"
+        r"\bpays?\b|\bout-of-pocket\b|\bcash[- ]pay\b|\bstarting at\b|\bas low as\b|"
+        r"\bfrom \$", re.I)
 
     # Vanity prefixes a company puts on its own domain when the bare name is taken. Stripped before
     # comparing, so "getopt.com" is recognised as Opt Health's and "myhspa.org" as HSPA's.

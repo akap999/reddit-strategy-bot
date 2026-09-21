@@ -215,6 +215,48 @@ def _opt_forms(s):
     return [x for x in out if x]
 
 
+def _entity_match_tokens(name):
+    """FU245 — the tokens that say a page is about THIS comparison entity.
+
+    Two matchers used to answer that question and both broke on the same input. The dimension
+    rescue tested `name.lower().split()[0]`, which on "Commercial/Employer-Sponsored Insurance"
+    yields the string "commercial/employer-sponsored" — not a word, present on no page ever
+    written, so every result it was handed was thrown away. Any entity name carrying a slash or a
+    leading hyphenated compound was unmatchable, and the only symptom was a pause asking the
+    operator to type facts the article's own sources already carried.
+
+    Takes the SHORTEST reading (so "TRT" is preferred over "TRT (Testosterone Replacement
+    Therapy)") and splits on non-alphanumerics, which is what makes a slash or a hyphen a word
+    boundary rather than part of a token."""
+    best = None
+    for f in _opt_forms(name):
+        toks = [x for x in _product_tokens(f) if len(x) >= 3]
+        if toks and (best is None or len(toks) < len(best)):
+            best = toks
+    return best or []
+
+
+def _entity_named_in(name, blob, tokens=None):
+    """FU245 — does this text name the entity? One predicate, used by the option keep filter, the
+    dimension rescue and the pause re-check, so they can no longer disagree about it.
+
+    A one- or two-token name must match in FULL: "term loan" is not matched by a page that only
+    says "loan", and loosening that would let any lending page answer for a specific product.
+
+    A THREE-or-more-token name is a compound category, and demanding every word of it is what kept
+    a payer type out of an article entirely about payers. "Commercial/Employer-Sponsored Insurance"
+    needed all four of commercial, employer, sponsored and insurance on one page; the survey that
+    answers it says "employer-sponsored insurance" and never the word "commercial". So a compound
+    needs a MAJORITY, and at least two, which still refuses a page that merely shares one word."""
+    toks = tokens if tokens is not None else _entity_match_tokens(name)
+    if not toks:
+        return False
+    low = (blob or "").lower()
+    hits = sum(1 for x in toks if x in low)
+    need = len(toks) if len(toks) <= 2 else max(2, (len(toks) + 1) // 2)
+    return hits >= need
+
+
 def _named_as_option(tool, options):
     """FU189 — did the extraction name this comparison entity as a generic OPTION (a treatment,
     method, material, plan type, approach, technology, standard or product class) rather than a
@@ -7618,14 +7660,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         def _option_keep(t, blob):
             """Keep test for an option's reference results. Tier 3 / the FU78 rescue demand the entity's
             LITERAL full string, which no real page contains — that is WHY the vendor hunt yields zero.
-            Use the SHORTEST reading's distinctive tokens instead ("TRT" from "TRT (Testosterone
-            Replacement Therapy)", both of "term loan"), and require all of them."""
-            best = None
-            for f in _opt_forms(t):
-                toks = [x for x in _product_tokens(f) if len(x) >= 2]
-                if toks and (best is None or len(toks) < len(best)):
-                    best = toks
-            return bool(best) and all(x in blob for x in best)
+            FU245: the distinctive-token rule now lives in `_entity_named_in`, shared with the
+            dimension rescue and the pause re-check so the three cannot disagree about whether a page
+            names the entity — they did, and a compound category name fell through all three."""
+            return _entity_named_in(t, blob)
 
         print(f"[blog_gen] verify+complete: pre-resolved {len(dom_map)}/{len(tools)} competitor "
               f"domain(s) (cache+batch)", flush=True)
@@ -7753,7 +7791,14 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                                  "body, a published study, an independent tester, or a reputable "
                                  "independent publication), NOT a vendor sales page or an affiliate list")
                 else:
-                    _obrief = (f"{tool} in the context of {cat or 'this category'}: what it is, how it works, "
+                    # FU245: anchor on what the ARTICLE is about, not on the brand's category. The
+                    # brand's category is the publisher's line of business, which for an option that
+                    # is not a product at all is the wrong context entirely — a payer type searched
+                    # "in the context of telehealth" returns nothing about payers. The article's own
+                    # subject is what the option is being compared FOR, and it is what FU198 already
+                    # anchors every competitor brief on.
+                    _oanchor = (_subject or seed or cat or "this category")
+                    _obrief = (f"{tool} in the context of \"{_oanchor}\": what it is, how it works, "
                                f"and the specific current values for {_want} — from AUTHORITATIVE or REFERENCE "
                                f"sources (a regulator, a standards body, manufacturer or product documentation, "
                                f"professional or industry guidance, or a reputable independent publication), "
@@ -8306,7 +8351,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 u = (s.get("url") or "").strip()
                 fct = (s.get("fact") or s.get("title") or "").strip()
                 blob = (fct + " " + str(s.get("title") or "") + " " + u).lower()
-                if (u and fct and t.lower().split()[0] in blob and not _is_non_evidence(s)
+                # FU245: was `t.lower().split()[0] in blob` — on "Commercial/Employer-Sponsored
+                # Insurance" that is the string "commercial/employer-sponsored", which appears on no
+                # page, so every result for such an entity was discarded and it paused as unsourced.
+                if (u and fct and _entity_named_in(t, blob) and not _is_non_evidence(s)
                         and not _is_negative_about(s, name)      # FU150 (#2)
                         # FU198: this branch bypasses _blocks_from entirely, so it needs the same gate
                         and not _is_non_capability_source(s)
@@ -8545,8 +8593,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 if _u.get("thin_coverage"):
                     _kept.append(_u)
                     continue
-                _toks = [x for x in _product_tokens(_t) if len(x) >= 3]
-                if _t and _toks and all(x in _blob for x in _toks) and not _u.get("ymyl_official"):
+                # FU245: the same all-or-nothing rule as the two filters above, and the same
+                # failure — a four-word payer category had to appear word for word in one blob.
+                if _t and _entity_named_in(_t, _blob) and not _u.get("ymyl_official"):
                     print(f"[blog_gen] verify+complete: {_t} was sourced by the dim-rescue after all "
                           f"— dropping it from the pause list", flush=True)
                     continue

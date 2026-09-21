@@ -321,3 +321,63 @@ def test_an_editorial_finding_never_reaches_the_removal_guard(shipped):
 ])
 def test_what_counts_as_answering_a_price_question(section, findings):
     assert len(detect_price_question_unanswered("# T\n\n" + section)) == findings
+
+
+# ── 6. a rule with no number still goes out of date ──────────────────────────────────────────────
+import time  # noqa: E402
+
+from generators.blog_gen import _source_pub_date  # noqa: E402
+
+NOW = time.strptime("2026-09-22", "%Y-%m-%d")
+OLD_BLOCK = [{"label": "official · Obesity Playbook (April 2025) – Endocrine Society",
+              "url": "https://www.endocrine.org/-/media/obesity-playbook-april-2025_updated2.pdf",
+              "text": "official · Obesity Playbook (April 2025) – Endocrine Society Advocacy Resource"}]
+RULE_BODY = ("# T\n\n## Coverage\n\nMedicare Part D does not cover anti-obesity medications, "
+             "including semaglutide prescribed for weight loss [S1].\n")
+
+
+def test_a_rule_cited_to_an_old_source_is_flagged(gen):
+    """The claim appeared five times in the reported article, cited only to a document whose own
+    title says April 2025 — seventeen months before publication, and false by then. Everything
+    needed was already here: the current-state phrase matched on "cover", the date parser could read
+    the source, the window is twelve months — and the sentence was thrown out one conjunct later for
+    having no NUMBER in it. A rule is not less perishable than a price."""
+    gen._claim_pages = {}
+    note = gen._stale_source_check(RULE_BODY, OLD_BLOCK, now=NOW)
+    assert note and "17 months" in note
+
+
+def test_the_same_rule_cited_to_a_current_source_is_not(gen):
+    gen._claim_pages = {}
+    fresh = [dict(OLD_BLOCK[0], url="https://www.endocrine.org/playbook-august-2026.pdf",
+                  text="official · Obesity Playbook (August 2026) – Endocrine Society")]
+    assert gen._stale_source_check(RULE_BODY, fresh, now=NOW) == ""
+
+
+def test_ordinary_qualitative_prose_is_still_out_of_scope(gen):
+    """Narrow on purpose: the sentence must describe the PRESENT and state a RULE. Measured across
+    217 stored articles, the new arm fires 4 times in 3 articles — three of them the reported
+    claim."""
+    gen._claim_pages = {}
+    plain = "# T\n\n## About\n\nThe programme is delivered entirely online by its team [S1].\n"
+    assert gen._stale_source_check(plain, OLD_BLOCK, now=NOW) == ""
+
+
+@pytest.mark.parametrize("block,want", [
+    # the date is in the URL slug as a month name…
+    ({"url": "https://x/obesity-playbook-april-2025_updated2.pdf", "text": ""}, (2025, 4)),
+    # …or in the title, with no day
+    ({"url": "https://x/doc.pdf", "text": "Obesity Playbook (April 2025) – Endocrine Society"}, (2025, 4)),
+    # the forms that already worked must keep working
+    ({"url": "https://x/2024/12/post", "text": ""}, (2024, 12)),
+    ({"url": "https://x/post", "text": "Published December 20, 2024"}, (2024, 12)),
+    # …including the deliberate "a bare year looks as NEW as possible" rule
+    ({"url": "https://x/report-2025.pdf", "text": ""}, (2025, 12)),
+    ({"url": "https://x/p", "text": "no date here at all"}, None),
+])
+def test_a_month_and_year_with_no_day_is_a_date(block, want):
+    """This is what actually hid the defect. "April 2025" in the title AND the URL slug, and neither
+    form was read, so the bare-year fallback resolved it to December — making a seventeen-month-old
+    document look nine months old and slip under a twelve-month window. Not a relaxation of the
+    "look as new as possible" rule: April IS the date, and reading it as December was wrong."""
+    assert _source_pub_date(block, NOW) == want

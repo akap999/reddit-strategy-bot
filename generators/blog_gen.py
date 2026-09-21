@@ -2184,13 +2184,21 @@ _SRC_STAMP_RE = re.compile(
     r"(?:(" + _SRC_MONTHS + r")[^\n]{0,12}?)?(?<!\d)(20\d{2})(?!\d)", re.I)
 _SRC_BARE_DATE_RE = re.compile(
     r"\b(" + _SRC_MONTHS + r")\s+\d{1,2},?\s+(20\d{2})\b", re.I)
+# FU253 — a month and a year with NO DAY. "Obesity Playbook (April 2025)" carries its date in its
+# own title and in its URL slug, and neither form was read: the bare-year fallback resolved it to
+# December 2025, which made a seventeen-month-old document look nine months old and slip under the
+# twelve-month window. This is not the "look as new as possible" rule being relaxed — April IS the
+# date; reading it as December was simply wrong.
+_SRC_MONTH_YEAR_RE = re.compile(r"\b(" + _SRC_MONTHS + r")[\s,\-_/]+(20\d{2})\b", re.I)
+_SRC_URL_MONTH_RE = re.compile(r"(?:^|[/_-])(" + _SRC_MONTHS + r")[_-](20\d{2})(?!\d)", re.I)
 
 
 def _source_pub_date(block, now=None):
     """(year, month) a gathered source was published or last updated, or None when it cannot be told.
 
-    Three places a date reliably lives, cheapest first: the URL path (/2024/12/), an explicit
-    published / updated stamp in the page text, and a bare "December 20, 2024" near the top of it.
+    Four places a date reliably lives, cheapest first: the URL path (/2024/12/ or /…-april-2025), an
+    explicit published / updated stamp in the page text, a bare "December 20, 2024" near the top of
+    it, and a month-and-year with no day ("(April 2025)").
 
     A bare year with no month resolves to DECEMBER, and an undeterminable date returns None — both
     choices make a source look as NEW as possible, because every caller uses this to decide whether a
@@ -2206,9 +2214,15 @@ def _source_pub_date(block, now=None):
         y, mo = int(m.group(1)), int(m.group(2))
         if 1990 <= y <= hi:
             return (y, mo)
+    m = _SRC_URL_MONTH_RE.search(url)        # FU253: /…/obesity-playbook-april-2025_updated2.pdf
+    if m:
+        y = int(m.group(2))
+        if 1990 <= y <= hi:
+            return (y, _MONTH_NAMES.index(m.group(1).lower()) + 1)
     txt = str(block.get("text") or "")
     head = txt[:1500]
-    for rx, grp in ((_SRC_STAMP_RE, (1, 2)), (_SRC_BARE_DATE_RE, (1, 2))):
+    for rx, grp in ((_SRC_STAMP_RE, (1, 2)), (_SRC_BARE_DATE_RE, (1, 2)),
+                    (_SRC_MONTH_YEAR_RE, (1, 2))):   # FU253: "(April 2025)", no day
         mm = rx.search(head)
         if not mm:
             continue
@@ -13587,9 +13601,20 @@ you MAY assume the description will carry: "{disc}".
         2024 piece, and a self-pay price section built on 2024 figures, both published in September
         2026. The sources say exactly what the article says; they just stopped being true.
 
-        Requires all three — a current-state phrase, a figure, and a determinable date on EVERY
-        citation — so a dated historical fact, an undated source and a qualitative claim are all
-        silent. Warning only: the fix is a newer source, which this cannot conjure."""
+        Requires a current-state phrase, a determinable date on EVERY citation, and EITHER a figure
+        OR (FU253) a stated RULE — so a dated historical fact and an undated source stay silent.
+
+        FU253 added the rule arm because the figure requirement was the whole gap. "Medicare Part D
+        does not cover anti-obesity medications including semaglutide" appeared five times in one
+        article, cited only to a document whose own title says April 2025, seventeen months before
+        publication, and by then it was false. Everything needed was already here: the
+        current-state phrase matched on "cover", the date parser read the source, and the window is
+        twelve months — and the sentence was thrown out one conjunct later for having no number in
+        it. A rule is not less perishable than a price. Narrow on purpose: the sentence must both
+        describe the present AND state a rule (`_CATEGORY_RULE_RE`, the FU243 lexicon), so ordinary
+        qualitative prose is still out of scope.
+
+        Warning only: the fix is a newer source, which this cannot conjure."""
         blocks = self._dated_blocks(body, blocks)
         if not body or not blocks:
             return ""
@@ -13597,7 +13622,9 @@ you MAY assume the description will carry: "{disc}".
         dates = {i + 1: _source_pub_date(b, t) for i, b in enumerate(blocks)}
         hits, worst = [], 0
         for sent, idxs in self._sentence_citations(body):
-            if not idxs or not self._CURRENT_STATE_RE.search(sent) or not _CLAIM_NUM_RE.search(sent):
+            if not idxs or not self._CURRENT_STATE_RE.search(sent):
+                continue
+            if not (_CLAIM_NUM_RE.search(sent) or self._CATEGORY_RULE_RE.search(sent)):
                 continue
             # a sentence anchored to a past year is a record of what happened then, not a claim
             # about now — the old page IS its source. "As of <year>" is the exception: that is a
@@ -13618,8 +13645,8 @@ you MAY assume the description will carry: "{disc}".
             return ""
         return (f"stale-source: {'; '.join(hits)} — every source cited for "
                 f"{'these' if len(hits) > 1 else 'this'} is at least {worst} months old, and "
-                f"{'they state' if len(hits) > 1 else 'it states'} a current price, coverage or "
-                f"eligibility position; re-source against the current page before publishing")
+                f"{'they state' if len(hits) > 1 else 'it states'} a current price, rule, coverage "
+                f"or eligibility position; re-source against the current page before publishing")
 
     # ══ FU246 — the page is written from TODAY, and no one source carries the whole article ═════════
     # A regenerated insurance article picked up the new programme FU244 went looking for, and then

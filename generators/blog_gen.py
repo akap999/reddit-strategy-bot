@@ -691,6 +691,25 @@ _CADENCE_PATTERNS = [
     (re.compile(r"(?:over|for|across)\s+(?:\d+|twelve|six|three|two)\s+(?:month|year|week)s?\b"
                 r"|\b\d+[-\s](?:month|year)\s+term\b", re.I), "TERM"),
 ]
+# FU242 — the figures a CLAIM CHECK must see, which are not the same as the ones a REWRITE must
+# preserve. `_LOADBEARING_NUM_RE` deliberately skips a bare-integer percent, because FU174 found the
+# Qwen gate failing rewrites over a rhetorical "100% online" — right for that consumer, and wrong
+# here. Measured on one article: "25% of employers", "19%", "43%", "13 state Medicaid programs" and
+# "592,624 additional fills" were ALL invisible, so an employer-coverage rate that appears nowhere on
+# the page it cites passed every check silently. This regex is used ONLY to decide what to verify;
+# nothing about the rewrite gate changes.
+_CLAIM_NUM_RE = re.compile(
+    _LOADBEARING_NUM_RE.pattern
+    # (?<![\w-]) — a digit inside a product name must not start an atom. Without it "GLP-1
+    # prescriptions" yields the atom "1 prescriptions", and "COVID-19 patients" likewise.
+    + r"|(?<![\w-])\d[\d,]*\s?%"                             # bare percent: 25%, 19%, 43%
+    + r"|(?<![\w-])\d{1,3}(?:,\d{3})+"                        # a large counted figure: 592,624
+    + r"|(?<![\w-])\d[\d,]*\s+(?:states?|programs?|plans?|payers?|insurers?|employers?|firms?|"
+      r"patients?|people|enrollees?|beneficiaries|members?|adults?|participants?|fills?|"
+      r"prescriptions?|clinics?|providers?|brands?|products?)\b",                # "13 state programs"
+    re.IGNORECASE)
+
+
 # FU181: `\d(?:[\d,]*\d)?` — see _LOADBEARING_NUM_RE. The old `[\d,]+` could both START and END on a
 # comma, so "$10,000, billed quarterly" produced the amount KEY "$10,000," while the rewrite's
 # "$10,000" keyed differently — the cadence multiset then reported a cadence the rewrite had actually
@@ -1846,6 +1865,12 @@ def _page_text(entry):
     if isinstance(entry, tuple):
         return entry[0] or ""
     return entry or ""
+
+
+def _asof_label(now=None):
+    """FU242 (2): "September 2026" — the month a brief should be asking about."""
+    t = now or time.gmtime()
+    return time.strftime("%B %Y", t)
 
 
 def _official_source_ok(url, title, brand_name, own_domain, pins):
@@ -7019,7 +7044,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             prim = self.claude.search_sources(
                 f"the OFFICIAL primary source documenting {core_q} — the platform's / regulator's / "
                 f"standard-body's OWN policy, documentation or help page (NOT a third-party blog or "
-                f"review). Return the official page URL + the exact rule / requirement it states."
+                f"review). Return the official page URL + the exact rule / requirement it states. "
+                # FU242 (2): a rule, a coverage decision and a price all have a DATE, and the article
+                # is read long after it is written. One article published in September 2026 described
+                # Medicare, Medicaid and cash prices as they stood in 2024 and missed a programme that
+                # had started three months before it published — every figure sourced, every one
+                # stale. Asking for the CURRENT state and what replaced the old one costs nothing.
+                f"State the CURRENT status as of {_asof_label()}, the date it took effect, and name "
+                f"any LATER change, update or programme that supersedes it — if the rule changed in "
+                f"the last 18 months, return the change, not the version it replaced."
                 + (" It must be a NATIONAL or GENERAL authority (a national code body, federal agency, "
                    "or standards / trade body) — NEVER a single city's or county's page." if _gnat else ""),
                 max_searches=2)
@@ -12305,7 +12338,7 @@ you MAY assume the description will carry: "{disc}".
             if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
                 break
             for _unit in ([_ln] if not _ln.lstrip().startswith("|") else _ln.split("|")):
-                if not (_LOADBEARING_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)):
+                if not (_CLAIM_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)):
                     continue
                 for _x in re.findall(r"\[S(\d+)\]", _unit):
                     if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
@@ -12378,7 +12411,7 @@ you MAY assume the description will carry: "{disc}".
             cs = _cites(unit)
             if not cs:
                 return ""
-            specific = bool(_LOADBEARING_NUM_RE.search(unit))
+            specific = bool(_CLAIM_NUM_RE.search(unit))
             m = self._ATTRIB_CLAIM_RE.search(unit)
             label = (m.group(1) if m else "").strip().lower()
             if all(n in walled for n in cs) and (specific or m):
@@ -12450,6 +12483,45 @@ you MAY assume the description will carry: "{disc}".
             bits.append(f"removed {n_s} claim(s) stating something their readable source does not say")
         return out, "source-check: " + "; ".join(bits)
 
+    _STALE_MONTHS = int(os.environ.get("BLOG_STALE_MONTHS", "12"))
+    _MONTHS = ("january february march april may june july august september october november "
+               "december").split()
+    # "as of August 2024" / "as of 2024" / "currently, as of …" — a claim about the state of the
+    # world NOW, which is the only kind that can go stale. "In March 2024 the FDA approved…" is a
+    # dated historical event and is left alone.
+    _ASOF_RE = re.compile(
+        r"\bas\s+of\s+(?:(january|february|march|april|may|june|july|august|september|october|"
+        r"november|december)\s+)?(20\d{2})\b", re.I)
+
+    def _staleness_check(self, body, now=None):
+        """FU242 (2) — an article publishing today whose state-of-the-world claims are a year or more
+        old will lose to whatever page carries the current answer.
+
+        One article published in September 2026 said "as of August 2024, 13 state Medicaid programs
+        cover GLP-1s", quoted 2024 cash prices, and omitted a Medicare programme that had started
+        that July. Every figure was sourced and every one was out of date — the class of failure no
+        citation check can see, because the source really does say it.
+
+        Only an AS-OF claim counts. A dated historical event ("in March 2024 the FDA approved…") is
+        not stale, it is history, and flagging it would make the check noise. Warning only."""
+        if not body:
+            return ""
+        t = now or time.gmtime()
+        yr, mo = t.tm_year, t.tm_mon
+        worst = None
+        for m in self._ASOF_RE.finditer(body.split("\n## Sources")[0]):
+            y = int(m.group(2))
+            mon = (self._MONTHS.index(m.group(1).lower()) + 1) if m.group(1) else 12
+            age = (yr - y) * 12 + (mo - mon)
+            if age >= self._STALE_MONTHS and (worst is None or age > worst[0]):
+                worst = (age, m.group(0))
+        if not worst:
+            return ""
+        return (f"staleness: \"{worst[1]}\" is {worst[0]} months old and this article publishes "
+                f"{_asof_label(t)} — a reader, and anything comparing pages, will take the source "
+                f"that carries the current position; re-check the policy, coverage and price claims "
+                f"before publishing")
+
     def _unsourced_figure_check(self, body, blocks):
         """FU239 (3) — a figure that appears in NOTHING we gathered was not sourced; it came out of
         the model. Remove it rather than publish it.
@@ -12490,7 +12562,7 @@ you MAY assume the description will carry: "{disc}".
             """The figures in this unit that appear nowhere, when the unit also cites a source."""
             if not re.search(r"\[S\d+\]", unit):
                 return []
-            return [m.group(0) for m in _LOADBEARING_NUM_RE.finditer(unit)
+            return [m.group(0) for m in _CLAIM_NUM_RE.finditer(unit)
                     if not self._atom_in(m.group(0), blob)]
 
         lines = body.split("\n")
@@ -12577,7 +12649,7 @@ you MAY assume the description will carry: "{disc}".
         for _ln in (body or "").split("\n"):
             if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
                 break
-            if not _LOADBEARING_NUM_RE.search(_ln):
+            if not _CLAIM_NUM_RE.search(_ln):
                 continue
             for _x in re.findall(r"\[S(\d+)\]", _ln):
                 _i = int(_x)
@@ -12605,7 +12677,7 @@ you MAY assume the description will carry: "{disc}".
         repointed, unsupported, dropped, advised = [], [], [], []
 
         def _fix(unit, cell=False):
-            atoms = [m.group(0) for m in _LOADBEARING_NUM_RE.finditer(unit)]
+            atoms = [m.group(0) for m in _CLAIM_NUM_RE.finditer(unit)]
             cites = [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
                      if n in info]
             if not atoms or not cites:
@@ -13513,6 +13585,10 @@ you MAY assume the description will carry: "{disc}".
         # FU239 (3): `_claim_source_check` has now re-pointed every citation it could, so a figure
         # still absent from EVERYTHING we gathered is the model's own. Remove it — a warning let one
         # ship as a cited clinical outcome.
+        _stale = self._staleness_check(article["body_markdown"])
+        if _stale:
+            print(f"[blog_gen] {_stale}", flush=True)
+            self._warn(article, _stale)
         article["body_markdown"], _ufn = self._unsourced_figure_check(
             article["body_markdown"], self._evidence_blocks)
         if _ufn:

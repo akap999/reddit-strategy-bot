@@ -26,6 +26,12 @@ COMPLETE and every stated fact is sourced:
     column (or replace it with one they all can) — never leave a blank/"—" cell and never add a note
     saying a value could not be confirmed. A column with a gap is deleted deterministically after you,
     so leaving one only costs the reader a whole dimension.
+  - ONLY STUDIES IN THE FRESH FACTS EXIST (FU249): a study, meta-analysis, systematic review, trial,
+    guideline or statement may be named ONLY if it is one of the sources listed, and every reference to
+    one carries its [S#]. Delete a reference to a paper that is not there — "a separate systematic
+    review", "the STEP 1 extension", "another analysis" — rather than leave it uncited. Do not describe
+    one [S#] as two different studies, and never write the evidence as the subject of a sentence
+    ("Both analyses agree", "Studies show"): state the fact and cite it.
   - BRAND-SPECIFIC CLAIMS CITE THAT BRAND (FU204, hard rule): a specific factual claim about a NAMED
     brand must cite a source that is that brand's OWN page, or one that explicitly names that brand and
     states that fact about it. NEVER re-point a claim at another brand's page, a listing for a DIFFERENT

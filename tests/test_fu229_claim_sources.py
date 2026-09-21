@@ -211,8 +211,13 @@ def test_a_cited_page_is_read_when_the_block_is_only_a_summary(monkeypatch):
     g = _gen(review, pad=False)
     out, note = _run(g, "## X\n\nTirzepatide reduced HbA1c by 1.24-2.58% across SURPASS [S1].\n")
     assert calls == [review[1]]                               # the cited page was read, once
-    assert "no gathered source states" in note and "1.24" in note
-    assert "2.58%" not in note                                # the bound that IS on the page passes
+    # FU249: the RANGE is one figure, so the whole wrong range is what goes unsupported. Before
+    # that, "1.24-2.58%" split into `1.24` and `2.58%`, the upper bound matched the page, and only
+    # half the claim was reported — a narrower report of a claim that is wrong end to end: the page
+    # says 1.69 to 2.58%, and an article saying 1.24-2.58% states a range nothing gathered supports.
+    assert "no gathered source states" in note and "1.24-2.58%" in note
+    from generators.blog_gen import BlogGenerator as _B
+    assert _B._atom_in("2.58%", page)        # the check is not blind to the bound; the RANGE is wrong
     assert "[S1]" in _prose(out)                              # nothing moved: we only report
 
 

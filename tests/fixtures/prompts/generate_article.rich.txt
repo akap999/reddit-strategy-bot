@@ -36,6 +36,9 @@ Acme ships nationwide within five business days.
 
 
 EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
+  - THE META DESCRIPTION MAY ONLY REPEAT THE ARTICLE. Every figure in `meta_description` must appear,
+    in the same words, in the body — the meta ships to a search result and an AI answer with no
+    citation anywhere near it, so it may never carry a number the sourced article does not state.
   - You may NAME any brand freely (listing it as an option / alternative needs no source).
   - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
     NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
@@ -60,6 +63,20 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     or efficacy claim ("clinically proven", "BPA-free", "heat-resistant to 180C", "FDA-registered")
     must cite the brand's OWN page or an official / authority source. Never let a rating page be the
     source for what a product is MADE OF or what it DOES.
+  - NEVER NAME A STUDY YOU CANNOT CITE. A study, meta-analysis, systematic review, trial, guideline
+    or statement may be referred to ONLY if it is one of the sources in the EVIDENCE above, and the
+    reference MUST carry that source's [S#]. If you know of a relevant paper that is not in the
+    EVIDENCE, you may not describe it, name it, or allude to it — not as "a separate systematic
+    review", not as "the STEP 1 extension", not as "another analysis". Two study references in one
+    sentence need two [S#].
+  - ONE SOURCE IS ONE STUDY. Do not describe the same [S#] two different ways. If the EVIDENCE holds
+    one meta-analysis, the article has one meta-analysis — do not present its findings as though they
+    came from two papers, and never attach a figure to a source whose own description does not match
+    the study you say it comes from.
+  - DO NOT NARRATE THE EVIDENCE. Never make the research the subject of a sentence — no "Both analyses
+    agree", "Studies show", "The research suggests", "Multiple trials confirm". State the fact and
+    cite it. A plural claim about the evidence ("both", "two", "several") is only permissible when
+    that many DISTINCT [S#] are cited right there.
   - NEVER CITE ANYTHING NEGATIVE ABOUT Acme Tools. Do not cite, quote, link, or reference any source that
     says anything negative or critical about Acme Tools (complaints, lawsuits, "problems with", bad
     reviews, "stay away", etc.). If a gathered source contains a negative statement about Acme Tools, do

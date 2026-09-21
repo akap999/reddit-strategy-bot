@@ -740,8 +740,36 @@ _CADENCE_PATTERNS = [
 # "592,624 additional fills" were ALL invisible, so an employer-coverage rate that appears nowhere on
 # the page it cites passed every check silently. This regex is used ONLY to decide what to verify;
 # nothing about the rewrite gate changes.
+# FU249 — a figure's UNIT is part of the figure, and a RANGE is one figure.
+#
+# Measured on a shipped article, against the live regex: "0.8 kg per month" was seen as the atom
+# `0.8`, "1.5 years" as `1.5`, "2.5 mg" as `2.5`, and "60-66%" as NOTHING AT ALL. Every check that
+# asks whether the cited page states a figure was therefore asking whether a 40,000-character
+# clinical paper contains the digits "0.8" somewhere, which it always does — so a regain rate
+# belonging to a DIFFERENT meta-analysis verified cleanly against the one it was pinned to, and an
+# invented percentage range was not even a question anyone asked.
+#
+# Two causes, both here. `_LOADBEARING_NUM_RE`'s decimal alternative comes before its unit ones and
+# matches `0.8` first, and none of the unit alternatives accepts a decimal anyway. And the bare
+# percent's `(?<![\w-])` guard — which exists so "GLP-1 prescriptions" cannot yield "1
+# prescriptions" — also rejects the second half of "55-65%", so a range matched nothing.
+#
+# Fixed by prepending, for the CHECKS ONLY, a range form and a unit-bearing decimal form. The
+# rewrite gate keeps `_LOADBEARING_NUM_RE` byte-identical: longer atoms make a check sharper and a
+# rewrite gate stricter, and FU169/174/181 are three rounds of evidence that an over-strict gate
+# fails every rewrite and ships the watermarked body.
+_CLAIM_UNIT = (r"(?:%|mg|mcg|µg|ug|ng|mL|ml|kg|grams?|lbs?|pounds?|"
+               r"units?|iu|mmol|meq|days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?|"
+               r"seats?|users?|licen[sc]es?|members?|patients?|participants?|"
+               r"GB|TB|MB|bps|APR|points?|pts?|mo|yr|g)")
 _CLAIM_NUM_RE = re.compile(
-    _LOADBEARING_NUM_RE.pattern
+    # a RANGE, with its unit: "55-65%", "0.4-0.8 kg", "7.91-10.30%", "12 to 18 months"
+    r"(?<![\w.-])\d[\d,]*(?:\.\d+)?\s*(?:to|[\u2012-\u2015-])\s*\d[\d,]*(?:\.\d+)?\s?"
+    + _CLAIM_UNIT + r"(?!\w)"
+    # a DECIMAL that keeps its unit: "0.8 kg", "1.5 years", "2.5 mg"
+    + r"|(?<![\w-])\d[\d,]*\.\d+\s?" + _CLAIM_UNIT + r"(?!\w)"
+    + r"|"
+    + _LOADBEARING_NUM_RE.pattern
     # (?<![\w-]) — a digit inside a product name must not start an atom. Without it "GLP-1
     # prescriptions" yields the atom "1 prescriptions", and "COVID-19 patients" likewise.
     + r"|(?<![\w-])\d[\d,]*\s?%"                             # bare percent: 25%, 19%, 43%
@@ -6001,6 +6029,9 @@ BRAND (first-party — you MAY name and recommend {name}):
 {block}
 {kf_block}{evidence_block}{vfact_block}
 EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or not):
+  - THE META DESCRIPTION MAY ONLY REPEAT THE ARTICLE. Every figure in `meta_description` must appear,
+    in the same words, in the body — the meta ships to a search result and an AI answer with no
+    citation anywhere near it, so it may never carry a number the sourced article does not state.
   - You may NAME any brand freely (listing it as an option / alternative needs no source).
   - But any SPECIFIC factual claim about a named brand — features, pricing, numbers, "does / does
     NOT do X", superiority ("stronger / better / more complete") — MUST be grounded in the EVIDENCE
@@ -6025,6 +6056,20 @@ EVIDENCE RULE (intent-agnostic — applies to EVERY sentence, comparison blog or
     or efficacy claim ("clinically proven", "BPA-free", "heat-resistant to 180C", "FDA-registered")
     must cite the brand's OWN page or an official / authority source. Never let a rating page be the
     source for what a product is MADE OF or what it DOES.
+  - NEVER NAME A STUDY YOU CANNOT CITE. A study, meta-analysis, systematic review, trial, guideline
+    or statement may be referred to ONLY if it is one of the sources in the EVIDENCE above, and the
+    reference MUST carry that source's [S#]. If you know of a relevant paper that is not in the
+    EVIDENCE, you may not describe it, name it, or allude to it — not as "a separate systematic
+    review", not as "the STEP 1 extension", not as "another analysis". Two study references in one
+    sentence need two [S#].
+  - ONE SOURCE IS ONE STUDY. Do not describe the same [S#] two different ways. If the EVIDENCE holds
+    one meta-analysis, the article has one meta-analysis — do not present its findings as though they
+    came from two papers, and never attach a figure to a source whose own description does not match
+    the study you say it comes from.
+  - DO NOT NARRATE THE EVIDENCE. Never make the research the subject of a sentence — no "Both analyses
+    agree", "Studies show", "The research suggests", "Multiple trials confirm". State the fact and
+    cite it. A plural claim about the evidence ("both", "two", "several") is only permissible when
+    that many DISTINCT [S#] are cited right there.
   - NEVER CITE ANYTHING NEGATIVE ABOUT {name}. Do not cite, quote, link, or reference any source that
     says anything negative or critical about {name} (complaints, lawsuits, "problems with", bad
     reviews, "stay away", etc.). If a gathered source contains a negative statement about {name}, do
@@ -6411,6 +6456,12 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - TWO CITED FACTS IN TENSION (a rule that appears to prohibit X + a claim that X is offered) with
     no explained pathway/exception — reconcile them from the evidence, or surface the tension
     plainly with both attributions.
+  - A STUDY, TRIAL, REVIEW OR GUIDELINE NAMED WITHOUT AN [S#], or a second study described in a
+    sentence that carries only one citation — delete the reference to the paper that is not in the
+    evidence, keeping the claim if the remaining sources support it.
+  - THE SAME [S#] DESCRIBED AS TWO DIFFERENT STUDIES, or a plural claim about the evidence ("both
+    analyses", "several trials") backed by fewer distinct [S#] than it asserts.
+  - A FIGURE IN THE META DESCRIPTION THAT THE BODY DOES NOT STATE — the meta ships uncited.
   - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
     remove them, or balance with {name}'s SAME metric cited alongside (FU93).
   - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's
@@ -9025,6 +9076,12 @@ COMPLETE and every stated fact is sourced:
     column (or replace it with one they all can) — never leave a blank/"—" cell and never add a note
     saying a value could not be confirmed. A column with a gap is deleted deterministically after you,
     so leaving one only costs the reader a whole dimension.
+  - ONLY STUDIES IN THE FRESH FACTS EXIST (FU249): a study, meta-analysis, systematic review, trial,
+    guideline or statement may be named ONLY if it is one of the sources listed, and every reference to
+    one carries its [S#]. Delete a reference to a paper that is not there — "a separate systematic
+    review", "the STEP 1 extension", "another analysis" — rather than leave it uncited. Do not describe
+    one [S#] as two different studies, and never write the evidence as the subject of a sentence
+    ("Both analyses agree", "Studies show"): state the fact and cite it.
   - BRAND-SPECIFIC CLAIMS CITE THAT BRAND (FU204, hard rule): a specific factual claim about a NAMED
     brand must cite a source that is that brand's OWN page, or one that explicitly names that brand and
     states that fact about it. NEVER re-point a claim at another brand's page, a listing for a DIFFERENT
@@ -12627,21 +12684,40 @@ you MAY assume the description will carry: "{disc}".
     @staticmethod
     def _norm_claim_text(s):
         """Compare a figure the way a reader would: case, thousands separators and the space or hyphen
-        between a number and its unit are all noise ("5 days", "5-day", "5 Days")."""
+        between a number and its unit are all noise ("5 days", "5-day", "5 Days").
+
+        FU249: also the presence of that space. Now that a figure carries its unit, "0.8 kg" and
+        "0.8kg" have to compare equal — otherwise a page that happens to close the gap makes a true
+        figure look unsourced, and `_unsourced_figure_check` deletes a sentence for a typesetting
+        choice. Both sides run through here, so the normalisation is symmetric."""
         s = (s or "").lower().replace(",", "")
         s = re.sub(r"[‐-―]", "-", s)
+        s = re.sub(r"(?<=\d)(?=[a-z])", " ", s)
+        s = re.sub(r"(?<=\d)\s+to\s+(?=\d)", " ", s)   # "7.91 to 10.30" == "7.91-10.30"
         return re.sub(r"[\s\-]+", " ", s)
 
     @classmethod
     def _atom_in(cls, atom, text):
         """Does this page's text actually state this figure? Plural-tolerant, and bounded so "5 days"
-        never matches inside "15 days" or "5 days" inside "5-6 days"."""
-        a = cls._norm_claim_text(atom).strip()
-        if not a or not text:
-            return False
-        stem = a[:-1] if a.endswith("s") else a
-        return re.search(r"(?<![\w.])" + re.escape(stem) + r"s?(?![\w])",
-                         cls._norm_claim_text(text)) is not None
+        never matches inside "15 days" or "5 days" inside "5-6 days".
+
+        FU249 — a RANGE is accepted with or without its unit. An article writes a confidence interval
+        as "7.91-10.30%" and the paper it comes from writes "95% CI 7.91 to 10.30"; the two numbers
+        together are what identifies the range, and requiring the trailing unit as well would delete
+        a true sentence over a house style. A UNIT-BEARING single figure gets no such latitude — "0.8
+        kg" falling back to "0.8" is precisely the blind spot this round exists to close."""
+        norm_text = cls._norm_claim_text(text)
+        forms = [cls._norm_claim_text(atom).strip()]
+        m = re.match(r"^(\d[\d.]*(?: to | )\d[\d.]*) ?[a-z%]+$", forms[0])
+        if m:
+            forms.append(m.group(1))
+        for a in forms:
+            if not a or not norm_text:
+                continue
+            stem = a[:-1] if a.endswith("s") else a
+            if re.search(r"(?<![\w.])" + re.escape(stem) + r"s?(?![\w])", norm_text):
+                return True
+        return False
 
     _FAB_MAX_DROP = int(os.environ.get("BLOG_FAB_MAX_DROP", "8"))
 
@@ -14196,6 +14272,194 @@ you MAY assume the description will carry: "{disc}".
         return ("scope-check: " + "; ".join(hits[:4])
                 + " — carry the source's own qualifying population everywhere the article states it")
 
+    # FU249 — the article may not describe evidence it does not have.
+    #
+    # A reviewed article named five studies and listed four sources. Two different studies were
+    # described and both pinned to [S1]: "a systematic review and meta-analysis of 6 trials (8,993
+    # patients)", which is what [S1] is, and "a meta-analysis of novel incretin mimetics", which is a
+    # different paper entirely and is nowhere in the Sources. A sentence read "Both analyses agree"
+    # under a single citation. Another named the STEP 1 trial extension and cited nothing, and an FAQ
+    # cited "a separate systematic review" for 1.7 years with no marker at all.
+    #
+    # Every figure check passed all of it, and could not have done otherwise: they ask whether the
+    # cited PAGE states a figure, and a meta-analysis discusses other meta-analyses, so a rival
+    # paper's numbers are genuinely printed on the page they were wrongly attributed to. What gives
+    # the mis-attribution away is not the number — it is that the article describes TWO studies and
+    # points both at ONE source. That is checkable without reading anything.
+    _STUDY_NOUN_RE = re.compile(
+        r"\b(?:meta[-\s]?analys[ei]s|systematic\s+review|randomi[sz]ed\s+(?:controlled\s+)?trial|"
+        r"clinical\s+trial|trial\s+extension|cohort\s+study|observational\s+study|"
+        r"case[-\s]control\s+study|cross[-\s]sectional\s+study|registry\s+analysis|"
+        r"pooled\s+analysis|post[-\s]hoc\s+analysis|scientific\s+statement|position\s+statement|"
+        r"consensus\s+statement|(?:clinical\s+)?practice\s+guideline|clinical\s+guideline|"
+        r"guideline|study|trial|analysis|review|survey)\b", re.I)
+    # An INDIVIDUATED reference — "a separate systematic review", "the STEP 1 trial extension", "this
+    # analysis". A bare plural ("documented in discontinuation trials") is a gesture at a body of
+    # evidence rather than a claim about one document, and flagging it would be noise.
+    _STUDY_REF_RE = re.compile(
+        r"(?<![\w-])(?:a|an|the|this|that|one|each)\s+"
+        r"(?:[a-z0-9][\w.'’-]*\s+){0,4}?"
+        r"(?:meta[-\s]?analys[ei]s|systematic\s+review|randomi[sz]ed\s+(?:controlled\s+)?trial|"
+        r"clinical\s+trial|trial\s+extension|cohort\s+study|observational\s+study|"
+        r"registry\s+analysis|pooled\s+analysis|post[-\s]hoc\s+analysis|scientific\s+statement|"
+        r"position\s+statement|consensus\s+statement|(?:clinical\s+)?practice\s+guideline|"
+        # every vertical cites documents; these are the ones that are unambiguously ONE document
+        # once a determiner individuates them. Bare "analysis" and "review" are left out on purpose
+        # — "a review of your options" and "an analysis of your costs" are ordinary prose.
+        r"white\s+paper|working\s+paper|report|survey|audit|study)"
+        r"(?![\w-])", re.I)
+    # A trial referred to by name — STEP 1, SURMOUNT-2, SELECT — which is a specific document even
+    # without a determiner in front of it.
+    _NAMED_TRIAL_RE = re.compile(
+        r"(?<![\w-])[A-Z][A-Z0-9]{2,}(?:[-\s]?\d+)?\s+"
+        r"(?:trial|study|programme|program|extension|analysis)(?![\w-])")
+    _PLURAL_EVIDENCE_RE = re.compile(
+        r"\b(both|two|three|four|several|multiple|numerous)\s+(?:of\s+(?:the|these)\s+)?"
+        r"(analyses|studies|trials|reviews|meta[-\s]?analyses|papers|guidelines|reports|surveys)\b",
+        re.I)
+    _PLURAL_MIN = {"both": 2, "two": 2, "three": 3, "four": 4,
+                   "several": 2, "multiple": 2, "numerous": 2}
+    # Words that describe every study ever written, so they cannot distinguish one from another.
+    _STUDY_STOP = frozenset((
+        "study studies trial trials analysis analyses review reviews guideline guidelines data "
+        "evidence patients participants adults people results findings published recent new large "
+        "including such well that which from with this these those their there were have been also "
+        "showed shown found reported estimated projected measured average mean overall total"
+    ).split())
+    # The verb that ends a study's DESCRIPTION and begins its claim.
+    _STUDY_VERB_RE = re.compile(
+        r"\b(?:found|finds|show(?:s|ed)?|report(?:s|ed)?|estimat(?:es|ed)|project(?:s|ed)|"
+        r"suggest(?:s|ed)|conclude[sd]?|demonstrat(?:es|ed)|indicat(?:es|ed)|note[sd]?|"
+        r"underscore[sd]?|state[sd]?|agree[sd]?|confirm(?:s|ed)|observ(?:es|ed))\b", re.I)
+
+    def _study_reference_check(self, body):
+        """Every study the article names must be one it cites, and no two of them may be the same
+        source. Warning only — the claim is usually true and the provenance is what is wrong, and a
+        deterministic rewrite of an attributive clause is how FU247's half-sentence shipped."""
+        if not body:
+            return ""
+        uncited, dupes, plural, seen_pairs = [], [], [], set()
+        by_src = {}
+        for sent, idxs in self._sentence_citations(body):
+            refs = [(m.start(), m.end(), m.group(0)) for m in self._STUDY_REF_RE.finditer(sent)]
+            refs += [(m.start(), m.end(), m.group(0)) for m in self._NAMED_TRIAL_RE.finditer(sent)]
+            refs.sort()
+            # "the STEP 1 trial extension" matches both patterns; it is ONE reference.
+            refs = [r for k, r in enumerate(refs)
+                    if not any(r[0] < refs[j][1] and refs[j][0] < r[1] for j in range(k))]
+            # (a) a reference is cited when a marker follows it before the NEXT reference does. A
+            # sentence carrying one citation and two studies has cited one of them.
+            for i, (st, en, txt) in enumerate(refs):
+                stop = refs[i + 1][0] if i + 1 < len(refs) else len(sent)
+                if not re.search(r"\[S\d+\]", sent[en:stop]):
+                    key = re.sub(r"\s+", " ", txt.strip().lower())
+                    if key not in seen_pairs:
+                        seen_pairs.add(key)
+                        uncited.append(txt.strip())
+                    continue
+                cid = int(re.search(r"\[S(\d+)\]", sent[en:stop]).group(1))
+                # what DISTINGUISHES this study: the words around its noun, up to the verb that
+                # turns the description into a claim.
+                tail = sent[en:stop]
+                vm = self._STUDY_VERB_RE.search(tail)
+                window = sent[max(0, st - 40):en] + " " + tail[:vm.start() if vm else len(tail)]
+                # The study NOUN is in every description by definition, so it cannot tell two apart.
+                # What does: the subject matter, and the SIZE — "6 trials (8,993 patients)" and "novel
+                # incretin mimetics" describe different papers and share not one distinguishing word.
+                window = self._STUDY_NOUN_RE.sub(" ", window.lower())
+                mods = frozenset(
+                    w.replace(",", "") for w in re.findall(r"[a-z][a-z-]{3,}|\d[\d,]*", window)
+                    if w not in self._STUDY_STOP)
+                by_src.setdefault(cid, []).append((txt.strip(), mods))
+            # (c) "Both analyses agree" needs two analyses to agree.
+            pm = self._PLURAL_EVIDENCE_RE.search(sent)
+            if pm:
+                need = self._PLURAL_MIN.get(pm.group(1).lower(), 2)
+                near = set(idxs) | set(self._nearby_citations(body, sent))
+                if len(near) < need:
+                    plural.append((pm.group(0), len(near)))
+        # (b) two descriptions with nothing in common, pointing at one source.
+        for cid, refs in by_src.items():
+            for i in range(len(refs)):
+                for j in range(i + 1, len(refs)):
+                    a, b = refs[i][1], refs[j][1]
+                    if a and b and not (a & b):
+                        dupes.append((cid, refs[i][0], refs[j][0]))
+                        break
+                else:
+                    continue
+                break
+        bits = []
+        if uncited:
+            bits.append("names " + ", ".join(f'"{x}"' for x in uncited[:3])
+                        + " and cites no source for " + ("them" if len(uncited) > 1 else "it"))
+        if dupes:
+            bits.append("; ".join(f'describes "{a}" and "{b}" as different studies but points both '
+                                  f"at [S{c}]" for c, a, b in dupes[:2]))
+        if plural:
+            bits.append("; ".join(f'says "{p}" with {n} source(s) cited' for p, n in plural[:2]))
+        if not bits:
+            return ""
+        return ("study-check: " + "; ".join(bits)
+                + " — an article may only name a study it can cite, and one source is one study")
+
+    def _nearby_citations(self, body, sent):
+        """The markers in the sentence BEFORE this one. A claim about what the evidence agrees on
+        normally follows the evidence rather than repeating its markers."""
+        prev = None
+        for s, idxs in self._sentence_citations(body):
+            if s is sent or s == sent:
+                return prev or []
+            prev = idxs
+        return []
+
+    def _meta_figure_check(self, article):
+        """FU249 — the meta description may only state a figure the article states.
+
+        The reviewed article promised "55-65% regained" in the meta and said "60-66%" in the Quick
+        answer, and neither figure was in the source both cited. Nothing compared the two: every
+        figure check reads the body, and the meta is the one piece of text that ships to a search
+        result and an AI answer without a citation anywhere near it.
+
+        A figure whose shape appears exactly once in the body is corrected to the body's — the body
+        is the part that went through the source checks, so it is the one to agree with. Anything
+        ambiguous is reported rather than guessed at. Mutates `article`; returns a note."""
+        meta = (article.get("meta_description") or "").strip()
+        body = article.get("body_markdown") or ""
+        if not meta or not body:
+            return ""
+        head = re.split(r"(?im)^[ \t]*#{2,3}[ \t]+Sources\b", body, maxsplit=1)[0]
+        body_atoms = [m.group(0).strip() for m in _CLAIM_NUM_RE.finditer(head)]
+
+        def _shape(a):
+            return re.sub(r"\d+", "#", self._norm_claim_text(a))
+
+        fixed, unfixed = [], []
+        for m in list(_CLAIM_NUM_RE.finditer(meta)):
+            atom = m.group(0).strip()
+            if self._atom_in(atom, head):
+                continue
+            same = [b for b in dict.fromkeys(body_atoms) if _shape(b) == _shape(atom)]
+            if len(same) == 1:
+                meta = meta.replace(atom, same[0], 1)
+                fixed.append((atom, same[0]))
+            else:
+                unfixed.append(atom)
+        if fixed:
+            article["meta_description"] = meta
+        bits = []
+        if fixed:
+            bits.append("corrected " + ", ".join(f"{a} to {b}" for a, b in fixed[:3])
+                        + " to match the article")
+        if unfixed:
+            bits.append("states " + ", ".join(sorted(dict.fromkeys(unfixed))[:3])
+                        + ", which the article never says")
+        if not bits:
+            return ""
+        return ("meta-figure: the meta description " + "; ".join(bits)
+                + " — the meta ships without a citation anywhere near it, so it may only repeat a "
+                  "figure the sourced body states")
+
     def _uncited_section_check(self, body):
         """FU233 — on a YMYL page, a section of real length that cites nothing. It reads in exactly the
         register the sourced sections do, so a reader cannot tell a trial result from the writer's own
@@ -14762,6 +15026,19 @@ you MAY assume the description will carry: "{disc}".
         if _ufn:
             print(f"[blog_gen] {_ufn}", flush=True)
             self._warn(article, _ufn)
+        # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
+        # no source text at all: a page that names two studies and points both at one marker has
+        # mis-attributed one of them whatever either page says.
+        _src = self._study_reference_check(article["body_markdown"])
+        if _src:
+            print(f"[blog_gen] {_src}", flush=True)
+            self._warn(article, _src)
+        # …and the one piece of text that ships with no citation near it, checked against the body
+        # now that every body figure has been through the source checks above.
+        _mfc = self._meta_figure_check(article)
+        if _mfc:
+            print(f"[blog_gen] {_mfc}", flush=True)
+            self._warn(article, _mfc)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"], brand)
         # FU221: mark any lead-in label the writer left unbolded, so every article in the set scans the

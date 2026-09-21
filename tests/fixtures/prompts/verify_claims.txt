@@ -115,6 +115,12 @@ SCRUTINIZE THESE HIGH-RISK SURFACES ESPECIALLY (they slip through most often):
   - TWO CITED FACTS IN TENSION (a rule that appears to prohibit X + a claim that X is offered) with
     no explained pathway/exception — reconcile them from the evidence, or surface the tension
     plainly with both attributions.
+  - A STUDY, TRIAL, REVIEW OR GUIDELINE NAMED WITHOUT AN [S#], or a second study described in a
+    sentence that carries only one citation — delete the reference to the paper that is not in the
+    evidence, keeping the claim if the remaining sources support it.
+  - THE SAME [S#] DESCRIBED AS TWO DIFFERENT STUDIES, or a plural claim about the evidence ("both
+    analyses", "several trials") backed by fewer distinct [S#] than it asserts.
+  - A FIGURE IN THE META DESCRIPTION THAT THE BODY DOES NOT STATE — the meta ships uncited.
   - CLAIMS BUILT ON A COMPETITOR'S REVIEW-AGGREGATE STAR SCORE (Trustpilot / Reviews.io averages) —
     remove them, or balance with Acme Tools's SAME metric cited alongside (FU93).
   - BLANKET TAX/FEE CLAIMS ("no sales tax", "tax-free", "no fees") stated WITHOUT the source's

@@ -154,6 +154,10 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor Acme Tools, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - PRESENT TENSE FOR WHAT IS ALREADY IN EFFECT: a rule, programme or price whose effective date has
+    PASSED is in force now. Rewrite every "starting <date>", "beginning <date>", "will cover", "set to
+    begin" and "prior to <programme>" into the present, and DELETE any sentence that still states the
+    superseded position as current — a draft that says both is worse than one that says either.
   - CURRENT OVER OLD: where the FRESH FACTS carry a newer rule, price, coverage decision, approval
     or threshold than the draft states, REPLACE the draft's version with it and cite the newer
     source, keeping the date the position is from. Never keep a superseded position as the current

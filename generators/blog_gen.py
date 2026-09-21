@@ -5671,10 +5671,24 @@ extractable answer), still under 160 chars.
         # in 2026. State the current year explicitly; the deterministic bump in
         # _finalize_article backstops the meta fields.
         import datetime as _dt140
-        year_line = (f"  - CURRENT YEAR: {_dt140.datetime.utcnow().year}. Any year in the meta "
+        _today140 = _dt140.datetime.utcnow()
+        year_line = (f"  - CURRENT YEAR: {_today140.year}. Any year in the meta "
                      f"title, headings, or forward-looking copy MUST be the current year — never "
                      f"date the page with an earlier year unless the sentence is explicitly about "
-                     f"a past event (a founding date, a past ruling).\n")
+                     f"a past event (a founding date, a past ruling).\n"
+                     # FU246: the year alone was not enough. A page published ten weeks after a
+                     # programme started still said "starting July 1, 2026" and, a paragraph later,
+                     # "will not cover it under current law" — because every source describing it
+                     # was written before the date, and nothing said what day it is now.
+                     f"  - TODAY IS {_today140.strftime('%d %B %Y')}. A rule, programme, price or "
+                     f"policy whose stated effective date is ON OR BEFORE today is IN EFFECT NOW: "
+                     f"write it in the PRESENT tense (\"covers\", \"costs\", \"is available\"), and "
+                     f"never as \"starting\", \"beginning\", \"will\", \"set to begin\", \"upcoming\" or "
+                     f"\"prior to\" — your sources were written before that date and will read as "
+                     f"future; you are not. Give the effective date as history (\"since 1 July\"). "
+                     f"A PROPOSAL or pilot whose own date has passed is not news: say what it "
+                     f"actually became, or leave it out. And never state the old position and the "
+                     f"new one side by side as though both were current.\n")
         # FU210 — the operator's own competitors are compared in EVERY blog. Empty (byte-identical) when
         # the operator has marked none.
         _mine_a = _manual_competitors(brand)
@@ -9049,6 +9063,10 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor {name}, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - PRESENT TENSE FOR WHAT IS ALREADY IN EFFECT: a rule, programme or price whose effective date has
+    PASSED is in force now. Rewrite every "starting <date>", "beginning <date>", "will cover", "set to
+    begin" and "prior to <programme>" into the present, and DELETE any sentence that still states the
+    superseded position as current — a draft that says both is worse than one that says either.
   - CURRENT OVER OLD: where the FRESH FACTS carry a newer rule, price, coverage decision, approval
     or threshold than the draft states, REPLACE the draft's version with it and cite the newer
     source, keeping the date the position is from. Never keep a superseded position as the current
@@ -12900,6 +12918,232 @@ you MAY assume the description will carry: "{disc}".
                 f"{'they state' if len(hits) > 1 else 'it states'} a current price, coverage or "
                 f"eligibility position; re-source against the current page before publishing")
 
+    # ══ FU246 — the page is written from TODAY, and no one source carries the whole article ═════════
+    # A regenerated insurance article picked up the new programme FU244 went looking for, and then
+    # described it five different ways: "starting July 1, 2026", "beginning July 1, 2026", "will not
+    # cover it under current law", "prior to the GLP-1 Bridge program" — on September 21, 2026, ten
+    # weeks after it started. The sources were right; they were written before the date, and nothing
+    # told the writer what today is beyond the year.
+    #
+    # The same shape carried a superseded proposal: "set to begin April 2026", still framed as
+    # upcoming five months after the date it names. A proposal whose date has passed is not news.
+
+    _DATE_IN_TEXT_RE = re.compile(
+        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+(\d{1,2})?,?\s*(20\d{2})\b|\b(?<![\w-])(20\d{2})(?![\d])", re.I)
+    # words that put an event in the future. "effective <date>" is deliberately absent: it reads
+    # correctly in the present ("effective July 1, the plan covers …").
+    _FUTURE_FRAME_RE = re.compile(
+        r"\b(?:starting|begins?|beginning|commenc\w+|upcoming|forthcoming|"
+        r"will\s+(?:begin|start|take\s+effect|cover|be\s+covered|apply|become|open)|"
+        r"set\s+to\s+(?:begin|start|take\s+effect|launch)|"
+        r"is\s+expected\s+to|are\s+expected\s+to|scheduled\s+to|"
+        r"prior\s+to|ahead\s+of|once\s+it\s+(?:begins|starts|takes\s+effect))\b", re.I)
+    # a claim still framed as a plan, which a passed date turns into a stale news report
+    _PROPOSAL_RE = re.compile(
+        r"\b(?:proposed|proposal|pilot\s+program\w*|would\s+(?:allow|permit|cover|expand)|"
+        r"plans?\s+to|intends?\s+to|announced\s+(?:a|an|plans))\b", re.I)
+
+    def _stale_tense_check(self, body, now=None):
+        """FU246 — an event whose date has PASSED, still written as though it were coming.
+
+        The reported case, on a page published ten weeks after the programme started: "Starting
+        July 1, 2026, Medicare Part D covers …" in one paragraph and "Medicare Part D will not
+        cover it under current law" in the next, plus a table cell reading "begins July 1" and a
+        gap list reading "prior to the GLP-1 Bridge program". Every one of those sentences came
+        from a source written before the date.
+
+        Fires on a future-framing word in the same sentence as a date at or before today. A future
+        date is left alone ("starting in 2027" is correct), and so is a plain past-tense statement
+        about a past date, which is most of what an article like this contains."""
+        if not body:
+            return ""
+        t = now or time.gmtime()
+        today = (t.tm_year, t.tm_mon, t.tm_mday)
+        hits, props = [], []
+        for sent in self._whole_sentences(body):
+            fut = self._FUTURE_FRAME_RE.search(sent)
+            if not fut:
+                # A proposal reported in the past tense is HISTORY: "CMS announced it would not
+                # finalize a proposed rule" is correct on any date. Only a FORWARD frame makes a
+                # passed date wrong, so that is the trigger; the proposal wording only sharpens
+                # which of the two messages to print.
+                continue
+            prop = self._PROPOSAL_RE.search(sent)
+            past = None
+            for m in self._DATE_IN_TEXT_RE.finditer(sent):
+                if m.group(4):                                    # a bare year
+                    y, mo, dy = int(m.group(4)), 12, 31
+                else:
+                    y = int(m.group(3))
+                    mo = self._MONTHS.index(m.group(1).lower()) + 1
+                    dy = int(m.group(2)) if m.group(2) else 28
+                if (y, mo, dy) <= today:
+                    past = m.group(0)
+                    break
+            if not past:
+                continue
+            (props if prop else hits).append(f'"{sent[:100].strip()}…" ({past} has passed)')
+            if len(hits) + len(props) >= 4:
+                break
+        if not hits and not props:
+            return ""
+        bits = []
+        if hits:
+            bits.append("written as upcoming although the date has passed: " + "; ".join(hits[:3]))
+        if props:
+            bits.append("still framed as a proposal after its own date: " + "; ".join(props[:2]))
+        return ("stale-tense: " + " | ".join(bits)
+                + f" — today is {time.strftime('%d %B %Y', t)}; state what is IN EFFECT in the present "
+                  "tense, and say what a passed proposal actually became")
+
+    # ── one source carrying the whole article ──────────────────────────────────────────────────────
+    _OVERCITE_MIN_UNITS = int(os.environ.get("BLOG_OVERCITE_UNITS", "6"))
+    _OVERCITE_MIN_SECTIONS = 3
+
+    def _overcited_source_check(self, body, blocks):
+        """FU246 — one source cited for far more of the article than any one page can support.
+
+        In the reported case a single study — on the factors associated with starting semaglutide —
+        was cited for step therapy rules, behavioural-programme requirements, prior authorisation,
+        an employer coverage percentage and the plan requirements in three table cells and a
+        checklist. About ten citations, none of which that study makes.
+
+        `_claim_source_check` cannot see this: it re-points a unit carrying a FIGURE, and most of
+        these claims are qualitative, so nothing ever looked at them. Concentration is the signal
+        that is visible without reading anything — one page answering six units across three
+        sections is a page being used as a general-purpose citation. Where the page WAS read, the
+        note also says how many of those units share no distinctive word with it. Warning only:
+        which source each claim belongs to is an editorial call."""
+        blocks = self._dated_blocks(body, blocks)
+        if not body or not blocks:
+            return ""
+        head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body, maxsplit=1)[0]
+        # which H2 each citation sits under, so "cited a lot in one section" does not count
+        sec, per = "", {}
+        for line in head.split("\n"):
+            h = re.match(r"(?m)^#{2,3}\s+(.+)$", line.strip())
+            if h:
+                sec = h.group(1).strip().lower()
+                continue
+            for unit in re.split(r"(?<=[.!?])\s+|\s*\|\s*", line):
+                for n in {int(x) for x in re.findall(r"\[S(\d+)\]", unit)}:
+                    per.setdefault(n, {"units": [], "secs": set()})
+                    per[n]["units"].append(unit.strip())
+                    per[n]["secs"].add(sec)
+        worst = None
+        for n, d in per.items():
+            if len(d["units"]) < self._OVERCITE_MIN_UNITS or len(d["secs"]) < self._OVERCITE_MIN_SECTIONS:
+                continue
+            if worst is None or len(d["units"]) > len(worst[1]["units"]):
+                worst = (n, d)
+        if not worst:
+            return ""
+        n, d = worst
+        lab = (blocks[n - 1].get("label") or f"[S{n}]") if n <= len(blocks) else f"[S{n}]"
+        note = (f"over-cited: [S{n}] ({lab[:70]}) is cited for {len(d['units'])} separate claims "
+                f"across {len(d['secs'])} sections — one page rarely supports that many unrelated "
+                f"points; check each and re-cite the ones it does not make")
+        txt = (blocks[n - 1].get("text") or "") if n <= len(blocks) else ""
+        if len(txt) >= self._PAGE_TEXT_MIN:
+            low = txt.lower()
+            unsup = 0
+            for u in d["units"]:
+                toks = [x for x in _product_tokens(re.sub(r"\[S\d+\]", "", u)) if len(x) >= 5]
+                if toks and not any(x in low for x in toks[:8]):
+                    unsup += 1
+            if unsup:
+                note += f" — {unsup} of them share no distinctive term with the page"
+        return note
+
+    # ── a population statistic resting on a content blog ───────────────────────────────────────────
+    # "25% of large employers", "1 in 4 firms", "13 states" — the shape of a survey finding, which is
+    # exactly the kind of number a content site republishes without being the one who measured it.
+    # Shape, not vocabulary: a proportion OF a plural population ("25% of large employers", "1 in 4
+    # firms", "43% of 5,000+ workers"). Naming the populations instead would be a lexicon that works
+    # for one vertical and silently skips the next; requiring the "of <plural>" construction is what
+    # keeps "5% of body weight" and "$50 per month" out of it.
+    _POPULATION_STAT_RE = re.compile(
+        r"(?:(?<![\w-])\d[\d,]*\s?%|\b\d+\s+in\s+\d+\b|"
+        r"\b(?:one|two|three|four)\s+in\s+(?:three|four|five|ten)\b)"
+        r"\s*(?:or\s+more\s+)?(?:of\s+)?(?:[\w,.+]+[-\s]){0,3}\w{4,}s\b(?<!\bloss)", re.I)
+
+    def _stat_authority_check(self, body, blocks, ymyl=None):
+        """FU246 — a survey-shaped statistic whose only citation is a content site.
+
+        The reported case: "approximately 25% of large employers" and "36% as of 2026", both taken
+        from GLP-1 marketing blogs, while the survey that measures it (an annual employer-benefits
+        survey) says something different. FU242 stopped a figure no source states; this is the next
+        one along, a figure a WEAK source states.
+
+        Scoped to YMYL pages, where the official-source discipline already applies, and to
+        population statistics, which is the shape a content site republishes rather than measures.
+        Fires only when the page also carries an `official ·` source, so it is asking the writer to
+        prefer something it actually has. Warning only."""
+        if not body or not ymyl:
+            return ""
+        blocks = self._dated_blocks(body, blocks)
+        if not blocks:
+            return ""
+        have_official = any((b.get("label") or "").lower().startswith("official ·") for b in blocks)
+        if not have_official:
+            return ""
+        hits = []
+        for sent, idxs in self._sentence_citations(body):
+            if not idxs or not self._POPULATION_STAT_RE.search(sent):
+                continue
+            cited = [blocks[i - 1] for i in idxs if 1 <= i <= len(blocks)]
+            if not cited or any((b.get("label") or "").lower().startswith(("official ·", "provided"))
+                                for b in cited):
+                continue
+            doms = ", ".join(sorted({_norm_domain(b.get("url") or "") for b in cited if b.get("url")}))
+            hits.append(f'"{sent[:80].strip()}…" ({doms or "an unnamed source"})')
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return ("stat-authority: " + "; ".join(hits)
+                + " — a population statistic cited only to a non-authoritative page, on a page that "
+                  "carries official sources; cite the body that MEASURED it, or drop the figure")
+
+    # ── the same clause written twice ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _dedupe_repeated_clauses(body):
+        """FU246 — a clause repeated verbatim inside one sentence, removed.
+
+        The reported case, in full: "Michigan Medicaid classifies Wegovy as a non-preferred GLP-1
+        requiring clinical prior authorization including step therapy, Michigan Medicaid classifies
+        Wegovy as a non-preferred GLP-1 requiring clinical prior authorization including step
+        therapy; approval requires …". A rewrite spliced its own input back in.
+
+        Safe to fix deterministically precisely because it is an EXACT repeat: removing the second
+        copy of a span that is already present cannot change what the sentence says. Only runs on a
+        span of eight or more words, so a repeated "in most states" is left alone. Returns
+        (body, n_removed)."""
+        if not body:
+            return body, 0
+        cut = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body, maxsplit=1)
+        head, tail = cut[0], (body[len(cut[0]):] if len(cut) > 1 else "")
+        n = 0
+        out = []
+        for line in head.split("\n"):
+            if line.strip().startswith(("#", "|", ">")) or len(line.split()) < 16:
+                out.append(line)
+                continue
+            new = line
+            for _ in range(3):                      # a line can carry more than one repeat
+                # up to four bridging words between the two copies — the reported case reads
+                # "…step therapy, Michigan Medicaid classifies Wegovy …step therapy;", where the
+                # second copy is reintroduced by its own subject.
+                m = re.search(r"(?<![\w])((?:\S+\s+){7,}\S+?)\s*[,;:]\s*(?:\S+\s+){0,4}\1(?![\w])",
+                              new)
+                if not m:
+                    break
+                new = new[:m.start()] + m.group(1) + new[m.end():]
+                n += 1
+            out.append(new)
+        return "\n".join(out) + tail, n
+
     def _unsourced_figure_check(self, body, blocks):
         """FU239 (3) — a figure that appears in NOTHING we gathered was not sourced; it came out of
         the model. Remove it rather than publish it.
@@ -14428,6 +14672,25 @@ you MAY assume the description will carry: "{disc}".
         if _ssc:
             print(f"[blog_gen] {_ssc}", flush=True)
             self._warn(article, _ssc)
+        # FU246 — the article read from TODAY, and no single source holding it up.
+        article["body_markdown"], _ndup = self._dedupe_repeated_clauses(article["body_markdown"])
+        if _ndup:
+            _dn = (f"repeated-clause: removed {_ndup} clause(s) a rewrite had spliced in twice "
+                   "(the sentence is otherwise unchanged)")
+            print(f"[blog_gen] {_dn}", flush=True)
+            self._warn(article, _dn)
+        _stt = self._stale_tense_check(article["body_markdown"])
+        if _stt:
+            print(f"[blog_gen] {_stt}", flush=True)
+            self._warn(article, _stt)
+        _occ = self._overcited_source_check(article["body_markdown"], self._evidence_blocks)
+        if _occ:
+            print(f"[blog_gen] {_occ}", flush=True)
+            self._warn(article, _occ)
+        _sac = self._stat_authority_check(article["body_markdown"], self._evidence_blocks, ymyl)
+        if _sac:
+            print(f"[blog_gen] {_sac}", flush=True)
+            self._warn(article, _sac)
         article["body_markdown"], _ufn = self._unsourced_figure_check(
             article["body_markdown"], self._evidence_blocks)
         if _ufn:

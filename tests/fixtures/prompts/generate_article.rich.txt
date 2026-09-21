@@ -182,6 +182,7 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
   - GEOGRAPHY FOR THIS PAGE: the US (operator-specified or detected from the seed) — apply everything in this section to it.
   - QUALIFIER FOR THIS PAGE: financing (operator-specified or detected from the seed) — this is the page's reason to exist; apply everything in this section to it.
   - CURRENT YEAR: {{YEAR}}. Any year in the meta title, headings, or forward-looking copy MUST be the current year — never date the page with an earlier year unless the sentence is explicitly about a past event (a founding date, a past ruling).
+  - TODAY IS {{TODAY}}. A rule, programme, price or policy whose stated effective date is ON OR BEFORE today is IN EFFECT NOW: write it in the PRESENT tense ("covers", "costs", "is available"), and never as "starting", "beginning", "will", "set to begin", "upcoming" or "prior to" — your sources were written before that date and will read as future; you are not. Give the effective date as history ("since 1 July"). A PROPOSAL or pilot whose own date has passed is not news: say what it actually became, or leave it out. And never state the old position and the new one side by side as though both were current.
   - DETECT whether the seed names a GEOGRAPHY or jurisdiction ("US", "set up in the US", "UK",
     "Australia", a state or city) or another strong qualifier (a purchasing mechanism like "with
     financing", a company size, an industry). If it does NOT (and no geography or qualifier is stated

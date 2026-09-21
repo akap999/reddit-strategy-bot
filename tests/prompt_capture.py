@@ -11,8 +11,10 @@ Two variants are captured for the article prompt on purpose:
   * RICH    — every optional fragment ON. Locks the CONDITIONAL fragments, which is where an
     accidental edit is most likely to hide.
 
-The ONLY normalisation applied is the FU140 current-year line (`datetime.utcnow().year`), which is
-replaced with `{{YEAR}}` so the goldens survive a new year. Everything else is compared raw.
+The only normalisation applied is to the time-dependent tokens: the FU140 current-year line
+(`datetime.utcnow().year`) becomes `{{YEAR}}`, and the FU246 "TODAY IS <d Month Y>" line becomes
+`{{TODAY}}` — without that second one the goldens would break every midnight rather than every new
+year. Everything else is compared raw.
 """
 import datetime as _dt
 import re
@@ -20,12 +22,15 @@ import re
 from generators.blog_gen import BlogGenerator
 from tests.stubs import StubClaude
 
-_YEAR_RE = re.compile(re.escape(str(_dt.datetime.utcnow().year)))
+_NOW = _dt.datetime.utcnow()
+_YEAR_RE = re.compile(re.escape(str(_NOW.year)))
+# FU246 tells the writer the full date, so the capture has to neutralise the day and month too.
+_TODAY_RE = re.compile(re.escape(_NOW.strftime("%d %B %Y")))
 
 
 def _norm(text):
-    """Replace the only time-dependent token in the prompts (the FU140 CURRENT YEAR line)."""
-    return _YEAR_RE.sub("{{YEAR}}", text or "")
+    """Replace the time-dependent tokens in the prompts (the FU140 year, the FU246 date)."""
+    return _YEAR_RE.sub("{{YEAR}}", _TODAY_RE.sub("{{TODAY}}", text or ""))
 
 
 # ── fixed inputs ──────────────────────────────────────────────────────────────────────────────

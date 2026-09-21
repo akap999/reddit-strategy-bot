@@ -224,3 +224,100 @@ def test_the_writer_is_told_the_proportion_rule():
     assert "REPETITION and PROPORTION only" in golden
     # and the boundary is stated to the model, not just to us
     assert "never soften or drop it because it is inconvenient" in golden
+
+
+# ── 4. a price question with no price in its answer ──────────────────────────────────────────────
+from generators.blog_eval import (detect_price_question_unanswered, editorial_findings,  # noqa: E402
+                                  body_damage, _ASKS_PRICE_RE)
+
+
+def test_the_unanswered_price_heading_is_detected(shipped):
+    """"What Is the Retail Price of Brand-Name Wegovy Without Insurance?" over a section that talks
+    about Medicare and gives no price. `_answer_first_check` cannot see it — that looks for nine
+    stalling phrases in the first sentence, and this section opens fluently, confidently and
+    entirely on the wrong subject."""
+    hits = detect_price_question_unanswered(shipped)
+    assert len(hits) == 1
+    assert "Retail Price of Brand-Name Wegovy" in hits[0]["detail"]
+
+
+@pytest.mark.parametrize("head,asks", [
+    ("How much does semaglutide cost per month in the US?", True),
+    ("What Is the Retail Price of Brand-Name Wegovy Without Insurance?", True),
+    ("What does it cost?", True),
+    # "how much" is not a price question on its own
+    ("How much weight can a man expect to lose on semaglutide?", False),
+    ("How much weight do people typically regain after stopping?", False),
+    # asking what GOVERNS pricing is not asking what it costs
+    ("US Regulatory Context: What Governs Semaglutide Pricing and Access?", False),
+    ("What is the difference between a membership fee and the medication cost?", False),
+    ("How long does it take to see results?", False),
+])
+def test_only_a_real_price_question_qualifies(head, asks):
+    """Naive heading-to-body term overlap flagged 8 of 13 headings in this article, so the rule is
+    narrow by design — and each of these was a live false positive while narrowing it."""
+    assert bool(_ASKS_PRICE_RE.search(head)) is asks
+
+
+def test_a_section_answered_by_its_TABLE_counts_as_answered():
+    """`_sections` drops table rows so no detector reads one as prose — right everywhere else, wrong
+    here, and it was 2 of the 3 false positives in the first cut."""
+    body = ("# T\n\n## How much does it cost per month?\n\nThe table below compares the providers.\n\n"
+            "| Provider | Monthly cost |\n| --- | --- |\n| Acme | $270/month |\n")
+    assert detect_price_question_unanswered(body) == []
+
+
+# ── 5. a price with no source at all ─────────────────────────────────────────────────────────────
+def test_a_price_citing_nothing_is_reported(gen, shipped):
+    """Both price checks open with "no citation in this unit → skip", so a price cited to the wrong
+    kind of page is caught and a price cited to NOTHING is invisible. The reported article carries a
+    "$500-$1,865/month (retail brand-name)" tier whose figures appear nowhere else in it."""
+    note = gen._uncited_price_check(shipped)
+    assert "$1,865" in note and "$500" in note
+
+
+def test_a_price_restated_from_a_cited_one_is_not_uncited(gen):
+    """The citation is elsewhere, not missing."""
+    body = ("# T\n\n## Cost\n\nThe programme costs $270 per month [S1].\n\n"
+            "## Summary\n\nAt $270 per month it is the flat option.\n")
+    assert gen._uncited_price_check(body) == ""
+
+
+def test_the_uncited_price_check_never_removes_anything(gen, shipped):
+    """Warning only, deliberately: the shapes it finds are TIER LABELS — "Under $300/month", the
+    bucket the article defines, sits beside "$500-$1,865/month", the invented one — and removing a
+    tier label breaks the structure the section is built on, which is the damage class FU251 exists
+    to stop."""
+    before = shipped
+    assert isinstance(gen._uncited_price_check(before), str)   # it returns a NOTE, not a body
+    assert gen._uncited_price_check(before)                    # …and it still reports
+
+
+def test_an_editorial_finding_never_reaches_the_removal_guard(shipped):
+    """`body_damage` is what `_apply_removals_without_damage` consults: a removal that raises its
+    count is widened or refused. Measured the hard way — with the price-question detector inside it,
+    removing the only (unsourced) figure from a "What does it cost?" section raised the count, the
+    removal was refused, and the unsourced figure would have shipped. `constraint-bloat` is worse: it
+    is a SHARE, so ANY removal can push it up. A detector that switches off a removal protects the
+    defect it was written to expose."""
+    editorial = {h["check"] for h in editorial_findings(shipped)}
+    damage = {h["check"] for h in body_damage(shipped)}
+    assert editorial and not (editorial & damage)
+    assert {"repeated-constraint", "constraint-bloat", "price-question-unanswered"} >= editorial
+
+
+@pytest.mark.parametrize("section,findings", [
+    # "free" is a complete answer to "what does it cost" and carries no digits at all —
+    # 4 of the first 12 findings on the stored corpus were this
+    ("## How much does it cost to use the platform?\n\nIt is free for buyers. There are no fees, "
+     "no premium tiers and no upsells.\n", 0),
+    # a contingency rate IS the price
+    ("## How much does an agency charge?\n\nAgencies typically charge 25-40% of what is recovered, "
+     "with no fee if nothing is collected.\n", 0),
+    ("## How much does it cost per month?\n\nThe programme is $270 per month at every dose.\n", 0),
+    # …and these evade the question they asked
+    ("## How much does a kitchen remodel cost?\n\nCosts vary widely by scope — a cosmetic refresh "
+     "runs lower than a full gut renovation.\n", 1),
+])
+def test_what_counts_as_answering_a_price_question(section, findings):
+    assert len(detect_price_question_unanswered("# T\n\n" + section)) == findings

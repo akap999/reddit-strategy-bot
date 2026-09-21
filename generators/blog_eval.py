@@ -632,6 +632,62 @@ def detect_constraint_bloat(body, title=""):
                        f"gives it 3%"}]
 
 
+# A heading that ASKS what something costs. Narrow on purpose: naive heading-to-body term overlap
+# flagged 8 of 13 headings in the article that prompted this, because a section can answer "What
+# Drives the Price Difference" perfectly without repeating the word "drives".
+# "How much" alone is not a price question — "how much weight can a man expect to lose" is the same
+# shape and wants a number of a different kind. Every branch needs a MONEY word.
+_ASKS_PRICE_RE = re.compile(
+    r"\bhow much\b[^?]{0,44}\b(?:cost|costs|price|priced|charge|charges|pay|spend|fee|fees)\b"
+    r"|\bwhat (?:is|are|does)\b[^?]{0,30}\b(?:price|cost|charge|fee)\b"
+    r"|\b(?:price|cost) of\b", re.I)
+# What COUNTS as answering "what does it cost": a money figure, a rate expressed as a percentage (a
+# contingency fee IS the price), or saying it is free. "OutSail is free for buyers. There are no
+# fees" is a complete answer and carries no digits at all — 4 of the first 12 findings were that.
+_ANY_MONEY_RE = re.compile(
+    r"(?:\$|€|£)\s?\d"
+    r"|\d[\d,.]*\s?%"
+    r"|\b(?:free|no (?:cost|fee|fees|charge|charges)|at no (?:cost|charge)|zero (?:cost|fees?))\b",
+    re.I)
+
+
+def _sections_with_tables(body):
+    """[(heading, section text)] — like `_sections`, but the text keeps TABLE ROWS.
+
+    `_sections` drops them so a table row is never read as prose, which is right for every other
+    detector here and wrong for this one: a section whose answer IS the comparison table looks empty
+    to it. Measured, that was 2 of the 3 false positives in the first cut."""
+    out, head, cur = [], "", []
+    for ln in _prose(body).split("\n"):
+        if _HEAD_RE.match(ln):
+            out.append((head, "\n".join(cur)))
+            head, cur = ln.lstrip("#").strip(), []
+        else:
+            cur.append(ln)
+    out.append((head, "\n".join(cur)))
+    return out
+
+
+def detect_price_question_unanswered(body, cap=4):
+    """A heading that asks what something costs, above a section that never says.
+
+    The reported case: "What Is the Retail Price of Brand-Name Wegovy Without Insurance?" over a
+    section that talks about Medicare and gives no price at all. `_answer_first_check` cannot see it
+    — that one looks for nine stalling phrases in the first sentence, and this section opens with a
+    fluent, confident, entirely on-topic-sounding sentence about something else."""
+    hits = []
+    for head, text in _sections_with_tables(body):
+        if not head.rstrip().endswith("?") or not _ASKS_PRICE_RE.search(head):
+            continue
+        if not text.strip() or _ANY_MONEY_RE.search(text):
+            continue
+        hits.append({"check": "price-question-unanswered",
+                     "detail": f'"{head[:74]}" is asked and the section under it states no price'})
+        if len(hits) >= cap:
+            break
+    return hits
+
+
 def body_damage(body):
     """Every mutilation detector at once. The removal passes call this BEFORE and AFTER a removal:
     a removal that raises the count is widened to the whole paragraph, or refused. Cheap, no
@@ -639,8 +695,22 @@ def body_damage(body):
     return (detect_blank_source_cells(body) + detect_stranded_reference(body)
             + detect_broken_join(body) + detect_duplicated_paragraph(body)
             + detect_repeated_sentence(body) + detect_stub_answer(body)
-            + detect_trailing_orphan(body) + detect_repeated_constraint(body)
-            + detect_constraint_bloat(body))
+            + detect_trailing_orphan(body))
+
+
+def editorial_findings(body, title=""):
+    """FU253 — findings about what the article SAYS, as distinct from damage our own removal passes
+    did to it.
+
+    They are kept apart because `body_damage` is the guard `_apply_removals_without_damage` consults:
+    a removal that raises its count is widened or refused. An editorial finding must never reach it.
+    Measured the hard way — with `price-question-unanswered` inside `body_damage`, removing the only
+    (unsourced) figure from a "What does it cost?" section raised the count, so the removal was
+    refused and the unsourced figure would have shipped. `constraint-bloat` is worse: it is a SHARE,
+    so any removal at all can push it up. A detector that switches off a removal is a detector that
+    protects the defect."""
+    return (detect_repeated_constraint(body) + detect_constraint_bloat(body, title)
+            + detect_price_question_unanswered(body))
 
 
 # ── FU252: what the REWORDING changed about what the article ASSERTS ─────────────────────────────
@@ -1143,6 +1213,7 @@ def defects_report(gen, brand, body, meta=""):
     items += detect_quick_answer_disclaimer(body)
     items += detect_repeated_citations(body)
     items += body_damage(body)             # FU251 — damage our own removal passes leave behind
+    items += editorial_findings(body)      # FU253 — what the article says, judged separately
     if gen is not None:
         items += existing_checks(gen, brand, body, meta)
     by = {}

@@ -13306,6 +13306,46 @@ you MAY assume the description will carry: "{disc}".
         window = unit[max(0, m.start() - 70):m.end() + 70]
         return not cls._NOT_A_PRICE_RE.search(window)
 
+    def _uncited_price_check(self, body):
+        """FU253 — a price with NO source at all. Reports; never removes.
+
+        `_price_source_check` and `_unsourced_figure_check` both open with "no citation in this unit
+        → skip", so a price cited to the wrong kind of page is caught and a price cited to NOTHING is
+        invisible. The reported article carried a "$500-$1,865/month (retail brand-name)" tier whose
+        figures appear nowhere else in it and carry no marker anywhere.
+
+        WARNING ONLY, deliberately. The shapes this finds are tier labels — "Under $300/month", the
+        bucket the article itself defines, sits beside "$500-$1,865/month", the invented one — and
+        every discriminator I could write between them was fragile. Removing a tier label breaks the
+        structure the section is built on, which is the class of damage FU251 exists to stop. So this
+        names the figures and leaves the decision where it belongs."""
+        if not body:
+            return ""
+        prose = body.split("\n## Sources")[0]
+        cited, uncited = set(), []
+        for line in prose.split("\n"):
+            st = line.strip()
+            if not st or st.startswith(("#", ">", "*[")) or re.match(r"^\|[\s:|-]+\|?$", st):
+                continue
+            units = line.split("|") if st.startswith("|") else self._prose_sentences(line)
+            for u in units:
+                has_cite = bool(re.search(r"\[S\d+\]", u))
+                for m in _MONEY_RE.finditer(u):
+                    if not self._is_price_figure(u, m) or not self._PRICE_CTX_RE.search(u):
+                        continue
+                    v = m.group(0).replace(" ", "")
+                    if has_cite:
+                        cited.add(v)
+                    else:
+                        uncited.append((v, u.strip()))
+        # a figure restated from a cited price is sourced — the citation is elsewhere, not missing
+        loose = list(dict.fromkeys(v for v, _u in uncited if v not in cited))
+        if not loose:
+            return ""
+        return ("uncited-price: %s carr%s no source anywhere in the article — not in the sentence "
+                "and not restated from a cited price. Give them one or take them out"
+                % (", ".join(loose[:6]), "ies" if len(loose) == 1 else "y"))
+
     def _price_source_check(self, body, blocks, brand):
         """Every price in the body that rests only on pages which neither set nor publish it.
 
@@ -15557,6 +15597,11 @@ you MAY assume the description will carry: "{disc}".
         if _psn:
             print(f"[blog_gen] {_psn}", flush=True)
             self._warn(article, _psn)
+        # FU253 — and the prices that cite NOTHING, which both checks above skip by construction.
+        _ucp = self._uncited_price_check(article["body_markdown"])
+        if _ucp:
+            print(f"[blog_gen] {_ucp}", flush=True)
+            self._warn(article, _ucp)
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.

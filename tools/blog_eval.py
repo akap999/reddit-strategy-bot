@@ -240,7 +240,8 @@ def run_replay(args):
     gen._claim_pages = {}
     rows = _replay_rows(db, _ids(args.brand_ids), _ids(args.ids), args.limit or 1000)
     dmg = collections.Counter()
-    n_dmg = dedup_n = dedup_blogs = 0
+    edi = collections.Counter()            # FU253: what the article SAYS, kept apart from damage
+    n_dmg = n_edi = dedup_n = dedup_blogs = 0
     price_removed = price_capped = price_blogs = regressions = 0
     detail = []
     for r in rows:
@@ -250,6 +251,11 @@ def run_replay(args):
             n_dmg += 1
             for h in hits:
                 dmg[h["check"]] += 1
+        ehits = E.editorial_findings(body, r.get("title") or "")
+        if ehits:
+            n_edi += 1
+            for h in ehits:
+                edi[h["check"]] += 1
         _, nd = BlogGenerator._dedupe_repeated_clauses(body)
         if nd:
             dedup_n += nd
@@ -279,6 +285,9 @@ def run_replay(args):
     print(f"\n=== replayed {len(rows)} stored article(s) — no model, no network, $0 ===")
     print(f"\nDAMAGE already in stored bodies: {n_dmg} article(s)")
     for k, v in dmg.most_common():
+        print(f"    {v:>4}  {k}")
+    print(f"\nEDITORIAL findings — what the article says, NOT damage: {n_edi} article(s)")
+    for k, v in edi.most_common():
         print(f"    {v:>4}  {k}")
     print(f"\nDE-DUPLICATOR would remove {dedup_n} repeat(s) across {dedup_blogs} article(s)")
     print(f"\nPRICE SOURCE: {price_blogs} article(s) — {price_removed} price(s) removed, "

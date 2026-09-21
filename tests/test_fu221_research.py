@@ -300,16 +300,29 @@ def _recording_get(monkeypatch, handler):
     return calls
 
 
-def test_a_walled_host_costs_one_ladder_not_one_per_page(monkeypatch):
+def test_a_walled_host_costs_one_metered_ladder_not_one_per_page(monkeypatch):
     """jollysearch.com had 7 cited pages in the 19 Sep run; each paid a certain-to-403 residential
-    fetch. The wall is learned once and the rest of its pages go straight to the caller's fallback."""
+    fetch. The expensive rung is still paid ONCE.
+
+    FU241 changed what happens on the SECOND page, deliberately. NCBI's block is rate-based rather
+    than page-based — the same PMC article read fine on one run and returned a challenge on the next
+    — so latching a host after a single challenge recorded the next, readable page as walled too. On
+    one article's source list that turned one flaky response into three unreadable sources, and
+    since FU241 a source ruled unreadable now has its claims REMOVED, the cost of a false wall is no
+    longer cosmetic. So the second page gets one more FREE look and never a second metered one; the
+    third goes straight to the caller's fallback, as every page after the first used to."""
     calls = _recording_get(monkeypatch, lambda u: (403,))
     assert BE._fetch_page("https://walled.com/a") == ("", "blocked")
     first = len(calls)
     assert any(proxied for _u, proxied in calls), "the first page still earns a residential attempt"
-    for p in ("/b", "/c", "/d", "/e", "/f", "/g"):
+    assert BE._fetch_page("https://walled.com/b") == ("", "blocked")
+    second = [p for _u, p in calls[first:]]
+    assert second, "the second page is looked at once more"
+    assert not any(second), "…but never through the metered residential rung"
+    n = len(calls)
+    for p in ("/c", "/d", "/e", "/f", "/g"):
         assert BE._fetch_page("https://walled.com" + p) == ("", "blocked")
-    assert len(calls) == first, "no further page on that host touched the network at all"
+    assert len(calls) == n, "twice walled is walled — no further page touched the network at all"
 
 
 def test_the_wall_note_expires_so_a_transient_block_does_not_stick(monkeypatch):
@@ -369,4 +382,9 @@ def test_a_403_from_the_residential_rung_is_a_wall_not_a_network_error(monkeypat
     monkeypatch.setattr(BE.time, "sleep", lambda s: None)
     monkeypatch.setenv("REDDIT_HTTP_PROXY", "http://proxy:1")
     assert BE._fetch_page("https://odd.com/a", retries=0) == ("", "blocked")
-    assert BE._walled("https://odd.com/b"), "and the host is remembered as walled"
+    # FU241: one challenge is a strike, not a conviction — the host is latched on the second.
+    assert BE._soft_walled("https://odd.com/b"), "the strike is remembered"
+    # the free retry skips the proxy, so it never sees the 403 — it fails as "error" instead, and a
+    # failed retry on an already-struck host is the second strike whatever its status was.
+    assert BE._fetch_page("https://odd.com/b", retries=0)[0] == ""
+    assert BE._walled("https://odd.com/c"), "and the second failure walls the host"

@@ -125,6 +125,15 @@ def _host(url):
     return (m.group(1).lower().lstrip("www.") if m else "")
 
 
+def _soft_walled(url):
+    """FU241: this host has walled us ONCE. Worth one more free look, never a metered one."""
+    h = _host(url)
+    if not h:
+        return False
+    with _WALLED_LOCK:
+        return 0 < len(_WALL_STRIKES.get(h) or ()) < _WALLED_STRIKES
+
+
 def _walled(url):
     """Has this host already walled us, recently enough to believe it?"""
     h = _host(url)
@@ -140,11 +149,29 @@ def _walled(url):
     return True
 
 
+_WALLED_STRIKES = int(os.environ.get("WALLED_DOMAIN_STRIKES", "2"))
+_WALL_STRIKES = {}
+
+
 def _mark_walled(url):
+    """FU241: latch a host only after it has walled us on `_WALLED_STRIKES` DIFFERENT pages.
+
+    NCBI's block is rate-based, not page-based: the same PMC article read fine on one run and
+    returned a challenge on the next. One challenge used to disable direct fetching of the whole
+    host for 30 minutes, so the very next NCBI page — readable at that moment — was never attempted
+    and was recorded as walled. Measured on one article's source list, that turned a single flaky
+    response into three unreadable sources. A host that really does wall us fails twice immediately
+    and is latched exactly as before."""
     h = _host(url)
     if not h:
         return
     with _WALLED_LOCK:
+        seen = _WALL_STRIKES.setdefault(h, set())
+        seen.add((url or "").strip().lower())
+        if len(seen) < _WALLED_STRIKES:
+            print(f"[brand_enrichment] {h} walled one page — not latching the host yet "
+                  f"({len(seen)}/{_WALLED_STRIKES})", flush=True)
+            return
         first = h not in _WALLED
         _WALLED[h] = time.time()
     if first:
@@ -154,6 +181,7 @@ def _mark_walled(url):
 
 def forget_walled_domains():
     """Test/ops hook: start again with no assumptions about who walls us."""
+    _WALL_STRIKES.clear()
     with _WALLED_LOCK:
         _WALLED.clear()
 
@@ -231,6 +259,13 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
     # ~0.1-0.5 MB and enrichment is rare, so the spend is negligible). The FU110
     # web-search grounding remains the last resort when even this fails.
     proxy = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+    # FU241: a host that has already walled us once gets this one extra DIRECT attempt (NCBI's block
+    # is rate-based — the same page reads fine minutes later) but never a second metered one. The
+    # residential rung is the expensive rung, and a host that walls us twice is genuinely walled.
+    if proxy and _soft_walled(url):
+        print(f"[brand_enrichment] {_host(url)} walled us once — direct retry only, "
+              f"no residential GB", flush=True)
+        proxy = ""
     if proxy:
         try:
             resp = requests.get(url, headers=headers, timeout=max(timeout, 12),
@@ -266,6 +301,11 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
             print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
     if reason == "blocked":
         _mark_walled(url)     # the whole ladder failed on a wall — do not pay for it again this run
+    elif reason != "not-found" and _soft_walled(url):
+        # FU241: this host walled us once and its free retry failed too — that is the second strike,
+        # whatever the retry's status was. Without this a host that answers 202-empty directly and
+        # 403 through the proxy never latches, because the retry skips the rung that sees the 403.
+        _mark_walled(url)
     return "", reason
 
 

@@ -12271,6 +12271,176 @@ you MAY assume the description will carry: "{disc}".
 
     _FAB_MAX_DROP = int(os.environ.get("BLOG_FAB_MAX_DROP", "8"))
 
+    _SOURCE_PROBE_MAX = int(os.environ.get("BLOG_SOURCE_PROBE_MAX", "24"))
+
+    def _probe_cited_sources(self, body, blocks):
+        """FU241 — read every source the article CITES, not only the ones cited for a figure.
+
+        `_claim_source_check` reads a page when a number is pinned to it, which is why the article
+        that motivated this could say "the NIH LiverTox database specifically lists fatigue as a
+        dose-limiting side effect" and never be contradicted: no figure, no read, no check. LiverTox
+        is 24,221 characters of readable text and contains no such phrase.
+
+        Populates the shared page cache, so `_claim_source_check` picks the text up for free, and
+        returns the set of RAW indexes we could not read after every attempt — direct, residential,
+        then Anthropic's web fetch. Those are the sources nothing can ever be checked against."""
+        walled = set()
+        if not body or not blocks:
+            return walled
+        # Only the sources a SPECIFIC rests on. A citation backing a general statement needs no page
+        # read — its snippet is honest evidence that the source exists and is on topic — and probing
+        # every citation would spend a fetch on each one to learn nothing. This is also what keeps
+        # the check off ordinary prose: no figure and no attributed label, no probe, no verdict.
+        cited = []
+        for _ln in (body or "").split("\n"):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
+                break
+            for _unit in ([_ln] if not _ln.lstrip().startswith("|") else _ln.split("|")):
+                if not (_LOADBEARING_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)):
+                    continue
+                for _x in re.findall(r"\[S(\d+)\]", _unit):
+                    if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
+                        cited.append(int(_x))
+        for n in cited[:self._SOURCE_PROBE_MAX]:
+            bl = blocks[n - 1]
+            if len((bl.get("text") or "")) >= self._PAGE_TEXT_MIN:
+                continue                      # we already hold the page
+            url = (bl.get("url") or "").strip()
+            if not url:
+                walled.add(n)                 # nothing to read and nothing to read it from
+                continue
+            try:
+                txt, how = _research.read_page(url, claude=getattr(self, "claude", None),
+                                               cache=self._claim_pages,
+                                               max_chars=self._CLAIM_PAGE_CHARS)
+            except Exception:
+                txt, how = "", "error"
+            if not txt or len(txt) < self._PAGE_TEXT_MIN:
+                walled.add(n)
+                print(f"[blog_gen] source-probe: [S{n}] unreadable after every attempt ({how}) "
+                      f"— {url[:80]}", flush=True)
+        return walled
+
+    # A claim that names its source and states what that source SAYS. This is the shape the figure
+    # check cannot see, because it carries no number: "the NIH LiverTox database specifically lists
+    # fatigue as a dose-limiting side effect".
+    _ATTRIB_CLAIM_RE = re.compile(
+        r"\b(?:classif\w+|describ\w+|list\w+|identif\w+|characteri[sz]\w+|defin\w+|"
+        r"designat\w+|label\w+)\b[^.;]{0,90}?\bas\s+(?:an?|the)?\s*"
+        r"([a-z][\w'-]*(?:[ -][a-z][\w'-]*){0,3})", re.I)
+    _ATTRIB_STOP = {"well", "such", "part", "result", "consequence", "follows", "described",
+                    "above", "below", "being", "having", "that", "this", "these", "those", "it"}
+
+    def _walled_source_check(self, body, blocks, walled):
+        """FU241 — a source nobody could read carries nothing, and a claim about what a readable
+        source SAYS has to be in it.
+
+        Two rules, both narrow:
+
+        WALLED. A source unreadable after every attempt is skipped. Any unit whose specifics rest
+        ONLY on walled sources is removed, and the markers pointing at them are stripped so the
+        Sources list stops advertising a page the article never opened. The article that motivated
+        this cited a pancreatitis rate to a trial protocol that returns 404 and a characterisation to
+        a page that comes back as 376 characters of error.
+
+        SAID. When a sentence states what a named source classifies or lists something AS, and that
+        source IS readable, the claimed label has to appear in it. LiverTox reads fine and does not
+        contain "dose-limiting" anywhere; the article said it did. Only the distinctive token of the
+        label is required, only when at least one cited source was readable, and a hedged or generic
+        label is skipped — the test is whether the specific word is there, not whether the sentence
+        is fair. Returns (body, note)."""
+        if not body or not blocks:
+            return body, ""
+        walled = set(walled or ())
+        txts = {}
+        for i, bl in enumerate(blocks, 1):
+            t = bl.get("text") or ""
+            u = (bl.get("url") or "").strip()
+            cached = (self._claim_pages.get(u) or ("", ""))[0] if u else ""
+            txts[i] = t if len(t) >= len(cached or "") else cached
+
+        def _cites(unit):
+            return [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
+                    if 1 <= n <= len(blocks)]
+
+        def _verdict(unit):
+            """'' keep · 'walled' the specifics rest only on unreadable sources · 'said' the source
+            is readable and does not contain the label the sentence attributes to it."""
+            cs = _cites(unit)
+            if not cs:
+                return ""
+            specific = bool(_LOADBEARING_NUM_RE.search(unit))
+            m = self._ATTRIB_CLAIM_RE.search(unit)
+            label = (m.group(1) if m else "").strip().lower()
+            if all(n in walled for n in cs) and (specific or m):
+                return "walled"
+            readable = [n for n in cs if n not in walled and len(txts.get(n) or "") >= self._PAGE_TEXT_MIN]
+            if m and readable and label:
+                toks = [w for w in re.split(r"[ ]+", label)
+                        if len(w) > 4 and w not in self._ATTRIB_STOP]
+                toks.sort(key=len, reverse=True)
+                if toks and not any(self._atom_in(toks[0], txts.get(n) or "") for n in readable):
+                    return "said"
+            return ""
+
+        lines, hits, in_src, fence = body.split("\n"), [], False, False
+        for li, line in enumerate(lines):
+            if line.lstrip().startswith("```"):
+                fence = not fence
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                in_src = True
+            st = line.strip()
+            if in_src or fence or not st or st.startswith("#") or st.startswith(">") \
+                    or st.startswith("*[") or re.match(r"^\|[\s:|-]+\|?$", st):
+                continue
+            if st.startswith("|"):
+                cells = line.split("|")
+                for ci in range(1, len(cells) - 1):
+                    v = _verdict(cells[ci])
+                    if v:
+                        hits.append(("cell", li, ci, v))
+            else:
+                for sent in self._prose_sentences(line):
+                    v = _verdict(sent)
+                    if v:
+                        hits.append(("sent", li, sent, v))
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, ("source-check: %d claim(s) rest on a source that could not be read, or say "
+                          "something their source does not — too many to remove safely, so nothing "
+                          "was changed; regenerate rather than publish" % len(hits))
+        for kind, li, a, _v in hits:
+            if kind == "cell":
+                cells = lines[li].split("|")
+                cells[a] = " "
+                lines[li] = "|".join(cells)
+            else:
+                cur = lines[li]
+                if a in cur:
+                    cur = cur.replace(a, "", 1)
+                lines[li] = re.sub(r"[ \t]{2,}", " ", cur).strip()
+        out = "\n".join(ln for i, ln in enumerate(lines)
+                         if ln.strip() or not any(h[1] == i and h[0] == "sent" for h in hits))
+        # strip every remaining marker pointing at a source nobody could read — `_rebuild_sources`
+        # then drops it from the list rather than advertising a page the article never opened.
+        if walled:
+            head, sep, tail = out.partition("\n## Sources")
+            for n in sorted(walled):
+                head = re.sub(r"\[S%d\]" % n, "", head)
+            head = re.sub(r"\s+([.,;:)])", r"\1", re.sub(r"[ \t]{2,}", " ", head))
+            out = head + sep + tail
+        if not hits and not walled:
+            return out, ""
+        n_w = sum(1 for h in hits if h[3] == "walled")
+        n_s = len(hits) - n_w
+        bits = []
+        if walled:
+            bits.append(f"skipped {len(walled)} source(s) nothing could read")
+        if n_w:
+            bits.append(f"removed {n_w} claim(s) that rested only on them")
+        if n_s:
+            bits.append(f"removed {n_s} claim(s) stating something their readable source does not say")
+        return out, "source-check: " + "; ".join(bits)
+
     def _unsourced_figure_check(self, body, blocks):
         """FU239 (3) — a figure that appears in NOTHING we gathered was not sourced; it came out of
         the model. Remove it rather than publish it.
@@ -12379,6 +12549,14 @@ you MAY assume the description will carry: "{disc}".
         own = _norm_domain((brand or {}).get("domain_url") or "")
         info = {i + 1: ((bl.get("text") or ""), _evidence_tier(bl, name, own))
                 for i, bl in enumerate(blocks) if (bl.get("text") or "").strip()}
+        # FU241: the probe has already read every cited source into the shared cache. Upgrade each
+        # block to the page it actually holds, so a figure is judged against the document rather
+        # than the sentence a search wrote about it.
+        for _i, _bl in enumerate(blocks, 1):
+            _u = (_bl.get("url") or "").strip()
+            _cached = (self._claim_pages.get(_u) or ("", ""))[0] if _u else ""
+            if _cached and len(_cached) > len((info.get(_i) or ("", 0))[0]):
+                info[_i] = (_cached, _evidence_tier(_bl, name, own))
         if not info:
             return body, ""
         # FU230: most sources reach the evidence as the one-liner `search_sources` wrote, so the
@@ -13310,6 +13488,15 @@ you MAY assume the description will carry: "{disc}".
         # rendered — here every [S#] is still a RAW evidence index, so a citation can be re-pointed to
         # any gathered source, including one the writer never cited. Doing it after the rebuild would
         # only ever see the handful of blocks already rendered.
+        # FU241: read every CITED source first — not only the ones a figure is pinned to — so the
+        # checks below judge against the page instead of the one-line summary a search wrote, and so
+        # a source nothing can read is known to be unreadable rather than merely unchecked.
+        _walled = self._probe_cited_sources(article["body_markdown"], self._evidence_blocks)
+        article["body_markdown"], _wsn = self._walled_source_check(
+            article["body_markdown"], self._evidence_blocks, _walled)
+        if _wsn:
+            print(f"[blog_gen] {_wsn}", flush=True)
+            self._warn(article, _wsn)
         article["body_markdown"], _csn = self._claim_source_check(
             article["body_markdown"], self._evidence_blocks, brand)
         if _csn:

@@ -1662,6 +1662,62 @@ def _norm_price_kind(k):
 _MAX_PRICE_TIERS = 3   # FU222 — rungs of a price ladder printed in one comparison cell
 
 
+# FU251 — what a price INCLUDES, which nothing in the ledger could say.
+#
+# `kind` (exact/from/range/upto/none) describes the SHAPE of one number. `tiers` renders alternatives
+# ("A or B") and composition ("A plus B") identically. So "membership separate from medication" could
+# only be typed into `basis` — 80 characters of free text, printed as a cosmetic parenthetical after
+# the figure, asserting nothing and verified by nothing (`unsupported_basis_clauses` is numeric only).
+# The audited article says Ro's programme has "the program and support services bundled in"; Ro bills
+# the membership and the medication separately, and the reader who acts on that sentence is wrong
+# about what they will pay. FU247 even created an "Included?" comparison column and had to leave it
+# 100% model-written, because the ledger held no field that answers it.
+#
+# Deliberately a small CLOSED set, not free text: a closed set can be rendered, compared across rows
+# and used to fill a column. Vertical-neutral — a per-seat subscription, a financing
+# arrangement and a care programme all compose the same four ways, and none of them is named here.
+PRICE_COMPOSITIONS = {
+    "all-in":      "everything included",
+    "program":     "programme fee only, product billed separately",
+    "plus":        "membership plus the product, billed separately",
+    "product":     "the product only",
+}
+_COMPOSITION_ALIASES = {
+    "allin": "all-in", "all_in": "all-in", "inclusive": "all-in", "everything": "all-in",
+    "programme": "program", "program-only": "program", "fee": "program", "service": "program",
+    "membership": "plus", "bundle": "plus", "separate": "plus", "both": "plus",
+    "medication": "product", "product-only": "product", "item": "product",
+}
+
+
+def _norm_price_composition(v):
+    """The composition key for whatever the operator (or an import) typed, or "" for unstated.
+
+    Unstated is a real answer and the common one — most prices do not say — so it is never guessed."""
+    k = re.sub(r"[^a-z_-]+", "", str(v or "").strip().lower())
+    if k in PRICE_COMPOSITIONS:
+        return k
+    return _COMPOSITION_ALIASES.get(k, "")
+
+
+def _composition_text(entry):
+    """The composition of a ledger entry as the words a reader needs, or ""."""
+    return PRICE_COMPOSITIONS.get(_norm_price_composition((entry or {}).get("composition")), "")
+
+
+def _composition_included(entry):
+    """What an "Included?" column should say for this entry: "Yes" / "No — billed separately" /
+    "" when the operator did not state it. The column stops being written by the model."""
+    k = _norm_price_composition((entry or {}).get("composition"))
+    if k == "all-in":
+        return "Yes"
+    if k in ("program", "plus"):
+        return "No — billed separately"
+    if k == "product":
+        return "Product only"
+    return ""
+
+
 def _format_price_value(entry):
     """FU214 — the ONE place a ledger entry becomes printable text.
 
@@ -1708,6 +1764,12 @@ def _format_price_value(entry):
     vmax = (entry.get("value_max") or "").strip()
     basis = (entry.get("basis") or "").strip()
     per = (entry.get("per_unit") or "").strip()
+    # FU251: the composition rides INSIDE the parenthetical with the basis, so a cell reads
+    # "$199 (per month, programme fee only, product billed separately)" — one place, one voice, and
+    # it cannot be confused with a second price the way a trailing clause could be.
+    comp = _composition_text(entry)
+    if comp and comp not in basis.lower():
+        basis = f"{basis}, {comp}" if basis else comp
     if kind == "range" and vmax:
         core = f"{val}-{vmax}"
         if basis:
@@ -3781,6 +3843,29 @@ class BlogGenerator:
                   f"{len(res)} returned, {kept} kept", flush=True)
         return out
 
+    @staticmethod
+    def _pricing_notes_block(brand):
+        """FU251 — the operator's free-text pricing as ONE first-party evidence block.
+
+        The structured rows carry a figure, a basis and a composition, which covers most prices and
+        none of the awkward ones: a charge that is two charges, a price that only applies for the
+        first three months, a fee that covers the consultation but not the labs, a rate available
+        only to patients who qualify. Those were typed into an 80-character `basis` or not stated at
+        all. Here they are the operator's own words, verbatim, cited to the brand's own site —
+        which is exactly what they are: a first-party statement of what something costs.
+
+        Returns [] when nothing is stored, so no prompt and no [S#] changes for a brand without it."""
+        notes = str((brand or {}).get("pricing_notes") or "").strip()
+        if not notes:
+            return []
+        name = str((brand or {}).get("name") or "").strip() or "the publisher"
+        dom = _norm_domain((brand or {}).get("domain_url") or "")
+        return [{"label": f"{name} pricing, supplied by the publisher",
+                 "url": f"https://{dom}" if dom else "",
+                 "text": (f"PRICING FOR {name.upper()}, STATED BY {name.upper()} — authoritative, "
+                          f"use these words and these figures over anything found elsewhere:\n"
+                          + notes)[:_EVIDENCE_TEXT_CAP]}]
+
     def _vfact_blocks(self, brand, blocks, prefetched=None):
         """FU217 — the operator's VERIFIED FACTS as citable evidence blocks, one per (brand, page).
 
@@ -4255,6 +4340,9 @@ class BlogGenerator:
         # They enter after the guide filter, the review cap and the sort, so none of those can drop
         # them. Nothing is appended when no facts are stored.
         blocks.extend(self._vfact_blocks(b, blocks, _fetched))
+        # FU251: and the operator's free-text pricing, same slot and same reasoning — appended last,
+        # so nothing above it renumbers.
+        blocks.extend(self._pricing_notes_block(b))
         self._vfact_brand = b
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
@@ -4609,6 +4697,7 @@ class BlogGenerator:
             url = ""
         return {"value": val, "value_max": str(row.get("value_max") or "").strip(), "kind": kind,
                 "basis": basis, "per_unit": _per_unit_price(val, basis) if kind != "none" else "",
+                "composition": _norm_price_composition(row.get("composition")),   # FU251
                 "url": url, "source": "yours",
                 "quote": str(row.get("raw") or "").strip()[:220],
                 "product": str(row.get("product") or "").strip()[:80],
@@ -4836,7 +4925,12 @@ class BlogGenerator:
                 continue
             header = rows[0]
             pcols = [ci for ci in range(1, len(header)) if _is_price_column(header[ci])]
-            if not pcols:
+            # FU251: an "Included?" / "Medication Included in Fee?" column asks what the price
+            # COVERS. FU247 created the column type and had to leave the cells to the model, because
+            # the ledger had no field that answers it. It does now, so code fills it — and only for
+            # rows whose composition the operator actually stated, never by inference.
+            icols = [ci for ci in range(1, len(header)) if _YESNO_DIM_RE.search(header[ci] or "")]
+            if not pcols and not icols:
                 out.extend(tbl)
                 continue
             for r in rows[2:]:
@@ -4848,7 +4942,14 @@ class BlogGenerator:
                                                  or _kf_slug(t) in _kf_slug(who)
                                                  or _kf_slug(who) in _kf_slug(t))), None)
                 e = ledger.get(tool) if tool else None
-                if not (e and (e.get("value") or "").strip()):
+                if not isinstance(e, dict):
+                    continue
+                inc = _composition_included(e)
+                for ci in icols:
+                    if inc and ci < len(r) and r[ci].strip() != inc:
+                        r[ci] = inc
+                        written += 1
+                if not (e.get("value") or "").strip():
                     continue
                 cell = _format_price_value(e)   # FU214: the ONE formatter
                 if not cell:

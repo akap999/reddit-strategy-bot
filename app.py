@@ -2415,6 +2415,7 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
     `flagged` = rows whose brand matched none of `known_names` — kept, so a typo is VISIBLE rather than
     silently a new brand."""
     from generators.blog_gen import (_kf_slug, _PRICE_FIG_RE, _norm_price_kind, _fig_in_text,
+                                     _norm_price_composition,   # FU251
                                      _is_priced, _range_in_text)
     out, dropped, flagged = {}, [], []
     now = _fu128_time.strftime("%Y-%m-%dT%H:%M:%SZ", _fu128_time.gmtime())
@@ -2490,6 +2491,10 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
         ent["rows"].append({"product": str(row.get("product") or "").strip()[:80],
                             "kind": kind, "value": value, "value_max": value_max,
                             "basis": str(row.get("basis") or "").strip()[:80],
+                            # FU251: what the price COVERS. A closed set, so it can be rendered,
+                            # compared across rows and used to fill an "Included?" column — the one
+                            # question a comparison table asks that the ledger could never answer.
+                            "composition": _norm_price_composition(row.get("composition")),
                             "url": url, "raw": raw, "updated_at": now})
     return out, dropped, sorted(set(flagged))
 
@@ -2502,6 +2507,17 @@ def _parse_failure_message(claude, fallback):
     if le and not le.startswith("JSON parse error"):
         return le
     return fallback
+
+
+def _brand_name_twins(db, brand):
+    """Every stored brand record with this brand's name. Operator input is saved on all of them —
+    the same rule `_save_price_links` and `_save_price_table` already follow, factored out."""
+    try:
+        return [b["id"] for b in db.get_all_brands()
+                if (b.get("name") or "").strip().lower()
+                == (brand.get("name") or "").strip().lower()] or [brand["id"]]
+    except Exception:
+        return [brand["id"]]
 
 
 def _save_price_table(db, brand, rows, subject=""):
@@ -2619,6 +2635,13 @@ def api_brand_price_table_parse(bid):
               "  value_max  - the upper figure when kind is range, else ''\n"
               "  basis      - the unit/quantity/term the price is for, e.g. '3-pack, 9 oz',\n"
               "               'per seat, billed annually' ('' if not stated)\n"
+              "  composition- what the price COVERS, ONLY when the text says so, else '':\n"
+              "                 all-in  = everything is included in this one figure\n"
+              "                 program = a programme/membership/service fee only, the product is\n"
+              "                           billed separately\n"
+              "                 plus    = a membership AND the product, billed separately\n"
+              "                 product = the product alone, no service or membership\n"
+              "               NEVER guess this one: '' is the right answer unless the text states it\n"
               "  url        - a source link if the text gives one for that price, else ''\n"
               "  raw        - the line/cell of the pasted text this row came from, verbatim\n\n"
               "RULES: copy every figure EXACTLY as the text writes it, including the currency symbol "
@@ -2627,7 +2650,7 @@ def api_brand_price_table_parse(bid):
               "stated at all, do NOT create a row for it.\n"
               'Respond with JSON ONLY (no prose, no code fences): {"rows": [{"brand": "...", '
               '"product": "...", "kind": "exact", "value": "$23.97", "value_max": "", '
-              '"basis": "...", "url": "", "raw": "..."}]}')
+              '"basis": "...", "composition": "", "url": "", "raw": "..."}]}')
         try:
             out = claude.call(prompt, max_tokens=2500, temperature=0)
         except Exception as e:
@@ -2662,11 +2685,22 @@ def api_brand_price_table(bid):
         brand = db.get_brand(bid)
         if not brand:
             return jsonify({"error": "brand not found"}), 404
-        stored, dropped, flagged, canonical = _save_price_table(
-            db, brand, (request.json or {}).get("rows") or [])
+        body = request.json or {}
+        stored, dropped, flagged, canonical = _save_price_table(db, brand, body.get("rows") or [])
+        # FU251 — the operator's own words for what the structure cannot express. Saved on the same
+        # call as the rows because it is the same decision: "here is what this actually costs."
+        notes = None
+        if "pricing_notes" in body:
+            notes = re.sub(r"[ \t]+\n", "\n", str(body.get("pricing_notes") or "").strip())[:4000]
+            for tid in _brand_name_twins(db, brand):
+                try:
+                    db.update_brand(tid, pricing_notes=notes or "")
+                except Exception as e:
+                    print(f"[price-table] pricing notes save failed for brand {tid}: {e}", flush=True)
         return jsonify({"ok": True, "price_table": stored, "brands": len(stored),
                         "rows": sum(len(v.get("rows") or []) for v in stored.values()),
-                        "dropped": dropped, "flagged": flagged, "canonical_saved": canonical})
+                        "dropped": dropped, "flagged": flagged, "canonical_saved": canonical,
+                        "pricing_notes": notes if notes is not None else (brand.get("pricing_notes") or "")})
     finally:
         db.close()
 

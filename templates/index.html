@@ -14364,6 +14364,17 @@ function _blogPriceLinksRender() {
 // survives (every figure must be verbatim in what you pasted), so a row you see is a row it kept.
 const _BLOG_PRICE_KINDS = [['exact', 'exact'], ['from', 'from'], ['range', 'range'],
                           ['upto', 'up to'], ['none', 'not published']];
+// FU251 — what the price COVERS. `kind` describes the shape of one number and says nothing about
+// whether a second charge is coming, so "membership separate from the medication" could only be
+// typed into the basis, where it asserted nothing. This fills the comparison table's "Included?"
+// column too, which until now the model wrote from guesswork.
+const _BLOG_PRICE_COMPOSITIONS = [
+    ['', '— not stated —'],
+    ['all-in', 'all-in (everything included)'],
+    ['program', 'programme fee only (product billed separately)'],
+    ['plus', 'membership + product (billed separately)'],
+    ['product', 'the product only'],
+];
 function _blogPriceRowsFromBrand(brand) {
     let pt = {};
     try { pt = JSON.parse((brand || {}).price_table || '{}') || {}; } catch (_) {}
@@ -14384,6 +14395,10 @@ function _blogPriceTableHtml(brand) {
         + `</select>`;
     const cell = (i, f, v, ph) => `<input class="text-xs" value="${_blogEsc(v || '')}" placeholder="${ph}"`
         + ` onchange="_blogPriceRowEdit(${i},'${f}',this.value)">`;
+    const compSel = (v, i) => `<select class="text-xs" onchange="_blogPriceRowEdit(${i},'composition',this.value)" title="What this price covers. Fills the comparison table's Included? column.">`
+        + _BLOG_PRICE_COMPOSITIONS.map(([k, lbl]) =>
+            `<option value="${k}"${(v || '') === k ? ' selected' : ''}>${lbl}</option>`).join('')
+        + `</select>`;
     const body = rows.map((r, i) => `<tr${r.unknown_brand ? ' title="this name matched none of your competitors — check the spelling"' : ''}>
         <td>${cell(i, 'brand', r.brand, 'Brand')}${r.unknown_brand ? ' <span class="text-yellow-500" title="unmatched brand name">⚠</span>' : ''}</td>
         <td>${cell(i, 'product', r.product, 'Product / plan')}</td>
@@ -14391,6 +14406,7 @@ function _blogPriceTableHtml(brand) {
         <td>${cell(i, 'value', r.value, '$24.99')}</td>
         <td>${cell(i, 'value_max', r.value_max, '$29.99')}</td>
         <td>${cell(i, 'basis', r.basis, '3-pack, 9 oz')}</td>
+        <td>${compSel(r.composition, i)}</td>
         <td>${cell(i, 'url', r.url, 'https://… (optional)')}</td>
         <td><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowDel(${i})" title="remove this row">✕</button></td>
     </tr>`).join('');
@@ -14401,12 +14417,15 @@ function _blogPriceTableHtml(brand) {
             <span class="text-xs text-gray-600">The brands you price are always compared and lead the table; up to 5 brands in total, so a few more can ride along. No link on a row ⇒ the brand's own site is cited. A brand marked “not published” keeps its row and the price column is dropped for everyone.</span>
         </div>
         ${rows.length ? `<table class="w-full mt-2 text-xs"><thead><tr class="text-gray-500">
-            <th>Brand</th><th>Product</th><th>Kind</th><th>Price</th><th>to</th><th>Basis</th><th>Link</th><th></th>
+            <th>Brand</th><th>Product</th><th>Kind</th><th>Price</th><th>to</th><th>Basis</th><th>Covers</th><th>Link</th><th></th>
         </tr></thead><tbody>${body}</tbody></table>
         <div class="flex gap-2 mt-1"><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowAdd()">+ Add a row</button></div>` : ''}
         ${dropped.length ? `<div class="text-xs text-yellow-600 mt-2">Not kept (${dropped.length}):<ul class="ml-4">`
             + dropped.map(d => `<li>“${_blogEsc(String(d.raw || '').slice(0, 80))}” — ${_blogEsc(d.why || '')}</li>`).join('')
             + `</ul></div>` : ''}
+        <label class="text-xs text-gray-500 mt-2 block">Anything the rows above can't say</label>
+        <textarea id="blog-pricing-notes" rows="3" placeholder="Your own words, used verbatim and treated as authoritative — e.g. 'the $270 covers medication, supplies, shipping and consults; labs are billed separately at cost' or 'the intro rate applies for the first 3 months, then $249/month'" style="font-family:inherit">${_blogEsc((brand || {}).pricing_notes || '')}</textarea>
+        <div class="text-xs text-gray-600">Saved with the rows. Anything you don't enter here or above falls back to the automatic sourcing.</div>
     </div>`;
 }
 function _blogPriceRowEdit(i, field, val) {
@@ -14419,7 +14438,8 @@ function _blogPriceRowDel(i) {
 }
 function _blogPriceRowAdd() {
     window._blogPriceRows = (window._blogPriceRows || []).concat(
-        [{ brand: '', product: '', kind: 'exact', value: '', value_max: '', basis: '', url: '' }]);
+        [{ brand: '', product: '', kind: 'exact', value: '', value_max: '', basis: '',
+           composition: '', url: '' }]);
     _blogPriceLinksRender();
 }
 function _blogPriceTableCollect() {
@@ -14481,10 +14501,14 @@ async function _blogPriceLinksCheck() {
         .filter(n => n.toLowerCase() !== ((_blogFindBrand(bid) || {}).name || '').toLowerCase())
         .filter(n => !pricedLow.some(p => p === n.toLowerCase() || p.includes(n.toLowerCase()) || n.toLowerCase().includes(p)));
     try {
-        if (priced.length) {   // FU214: save the reviewed rows on the brand first
-            const pr = await api('/api/brands/' + bid + '/price-table', { method: 'PUT', body: { rows: priced } });
+        const _notesEl = document.getElementById('blog-pricing-notes');   // FU251
+        if (priced.length || _notesEl) {   // FU214: save the reviewed rows on the brand first
+            const _body = { rows: priced };
+            if (_notesEl) _body.pricing_notes = _notesEl.value || '';
+            const pr = await api('/api/brands/' + bid + '/price-table', { method: 'PUT', body: _body });
             const b0 = _blogFindBrand(bid);
             if (b0 && pr && pr.price_table) b0.price_table = JSON.stringify(pr.price_table);
+            if (b0 && pr && pr.pricing_notes !== undefined) b0.pricing_notes = pr.pricing_notes;
             toast(`✓ ${(pr && pr.rows) || 0} price row(s) saved across ${(pr && pr.brands) || 0} brand(s)`, 'success');
         }
         await api('/api/brands/' + bid + '/price-links', { method: 'PUT', body: { price_links: rows } });

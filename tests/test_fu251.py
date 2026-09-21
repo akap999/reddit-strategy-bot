@@ -39,7 +39,9 @@ import generators.brand_enrichment as BE
 from generators.blog_eval import (body_damage, detect_blank_source_cells, detect_broken_join,
                                   detect_repeated_sentence, detect_stranded_reference,
                                   detect_stub_answer)
-from generators.blog_gen import BlogGenerator, _strip_markers_safely
+from generators.blog_gen import (BlogGenerator, _composition_included,
+                                 _format_price_value, _norm_price_composition,
+                                 _strip_markers_safely)
 
 HERE = os.path.dirname(__file__)
 
@@ -442,3 +444,92 @@ def test_the_writer_is_told_the_rule_for_every_price_not_just_a_competitors(gen)
                   encoding="utf-8").read()
     assert "ANY PRICE = WHOEVER SETS IT" in golden
     assert "REPEATING a price it does not set is NOT a price source" in golden
+
+
+# ── 6. what a price COVERS, which the ledger could never say ─────────────────────────────────────
+def test_a_price_states_what_it_covers(gen):
+    """`kind` describes the SHAPE of one number and says nothing about whether a second charge is
+    coming. "Membership separate from the medication" could only go in `basis` — 80 characters of
+    free text that asserts nothing and is verified by nothing."""
+    e = gen._price_row_entry({"value": "$149", "kind": "exact", "basis": "per month",
+                              "composition": "plus"}, "Ro")
+    assert _format_price_value(e) == "$149 (per month, membership plus the product, billed separately)"
+    e2 = gen._price_row_entry({"value": "$270", "kind": "exact", "basis": "per month",
+                               "composition": "all-in"}, "X")
+    assert _format_price_value(e2) == "$270 (per month, everything included)"
+
+
+def test_an_unstated_composition_is_never_guessed(gen):
+    """Most prices do not say, and unstated is a real answer. Inventing one would be the same class
+    of defect as inventing the figure."""
+    e = gen._price_row_entry({"value": "$19.99", "kind": "exact", "basis": "3-pack"}, "X")
+    assert _format_price_value(e) == "$19.99 (3-pack, $6.66 each)"
+    assert _composition_included(e) == ""
+
+
+@pytest.mark.parametrize("typed,key", [
+    ("all-in", "all-in"), ("ALL_IN", "all-in"), ("inclusive", "all-in"),
+    ("program", "program"), ("programme", "program"), ("membership", "plus"),
+    ("bundle", "plus"), ("product-only", "product"), ("", ""), ("nonsense", ""),
+])
+def test_the_composition_vocabulary_is_a_closed_set(typed, key):
+    """A closed set is what makes it renderable, comparable across rows and usable to fill a column.
+    Anything outside it means unstated, never a guess."""
+    assert _norm_price_composition(typed) == key
+
+
+def test_the_included_column_is_filled_from_the_ledger_not_the_model(gen):
+    """FU247 created the "Included?" column type and had to leave the cells 100% model-written,
+    because no field in the ledger answered the question the column asks."""
+    body = ("# T\n\n| Provider | Monthly cost | Medication included in fee? |\n"
+            "| --- | --- | --- |\n| **PeterMD** | ? | maybe |\n| **Ro** | ? | maybe |\n")
+    ledger = {"PeterMD": gen._price_row_entry({"value": "$270", "kind": "exact",
+                                               "basis": "per month", "composition": "all-in"}, "PeterMD"),
+              "Ro": gen._price_row_entry({"value": "$149", "kind": "exact",
+                                          "basis": "per month", "composition": "plus"}, "Ro")}
+    gen._evidence_blocks = []
+    out, written = gen._write_price_cells(body, ledger)
+    assert written
+    assert "| Yes |" in out
+    assert "| No — billed separately |" in out
+    assert "maybe" not in out
+
+
+def test_a_row_with_no_stated_composition_leaves_the_column_alone(gen):
+    """Code fills what the operator said and nothing else — an empty composition is not a licence
+    to overwrite whatever the column held."""
+    body = ("# T\n\n| Provider | Monthly cost | Included? |\n| --- | --- | --- |\n"
+            "| **X** | ? | see plan |\n")
+    ledger = {"X": gen._price_row_entry({"value": "$99", "kind": "exact", "basis": "per month"}, "X")}
+    gen._evidence_blocks = []
+    assert "see plan" in gen._write_price_cells(body, ledger)[0]
+
+
+# ── 7. the free-text pricing box ─────────────────────────────────────────────────────────────────
+def test_free_text_pricing_becomes_first_party_evidence():
+    """The structured rows carry a figure, a basis and a composition, which covers most prices and
+    none of the awkward ones. These are the operator's own words, cited to their own site."""
+    blocks = BlogGenerator._pricing_notes_block(
+        {"name": "PeterMD", "domain_url": "https://getpetermd.com",
+         "pricing_notes": "The $270 covers medication, supplies, shipping and consults. Labs are "
+                          "billed separately at cost."})
+    assert len(blocks) == 1
+    assert blocks[0]["url"] == "https://getpetermd.com"
+    assert "Labs are billed separately at cost." in blocks[0]["text"]
+    assert "authoritative" in blocks[0]["text"]
+
+
+def test_a_brand_with_no_pricing_notes_changes_nothing():
+    """It appends LAST, so an empty one must append nothing — otherwise every [S#] in every article
+    for every brand without notes would shift."""
+    for b in ({}, {"name": "X"}, {"name": "X", "pricing_notes": "   "}):
+        assert BlogGenerator._pricing_notes_block(b) == []
+
+
+def test_operator_entered_prices_survive_the_price_source_check(gen):
+    """The point of the whole feature: a price the operator entered, cited to the page they gave,
+    is not a price the source check can take away."""
+    body = "# T\n\n## Cost\n\nWegovy lists at $1,349 per month without insurance [S1].\n"
+    ok = [{"url": "https://www.wegovy.com/coverage-and-savings/cost-and-coverage.html",
+           "text": "x" * 800}]
+    assert gen._price_source_check(body, ok, PETERMD)[1] == ""

@@ -377,7 +377,8 @@ class Database:
                      disclosure=None, logo_url=None, known_sources=None,
                      meta_autofetched_at=None, key_facts=None, competitor_facts=None,
                      name=None, manual_competitors=None, content_context=None,
-                     price_links=None, price_table=None, verified_facts=None):
+                     price_links=None, price_table=None, verified_facts=None,
+                     pricing_notes=None):
         """Update a brand's editable fields. Pass only the fields you want to change.
         `name` (FU84): rename the brand — exact spelling/casing flows into all future generation."""
         updates = []
@@ -403,6 +404,7 @@ class Database:
             "price_links": price_links,   # FU213: operator price-page links per compared brand JSON
             "price_table": price_table,   # FU214: operator-pasted PRICE ROWS per compared brand JSON
             "verified_facts": verified_facts,   # FU217: operator-verified facts per brand (yours + competitors') JSON
+            "pricing_notes": pricing_notes,   # FU251: free-text pricing the structure cannot express
         }
         for col, val in field_map.items():
             if val is not None:
@@ -2536,6 +2538,11 @@ class Database:
             # names, corrections) for the subject AND named competitors. Operator input — never
             # evicted, and "Clear all cached data" leaves it alone.
             "verified_facts":    "ALTER TABLE brands ADD COLUMN verified_facts TEXT",
+            # FU251: free-text PRICING NOTES — the operator's own words for anything the structured
+            # price rows cannot express (a two-part charge, a term, what a fee does and does not
+            # cover, who a price is available to). Injected VERBATIM as first-party pricing
+            # evidence. Operator input — never evicted.
+            "pricing_notes":     "ALTER TABLE brands ADD COLUMN pricing_notes TEXT",
         }
         for col, sql in brand_enrichment_cols.items():
             if col not in brand_cols:

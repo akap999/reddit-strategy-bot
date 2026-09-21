@@ -39,7 +39,7 @@ import generators.brand_enrichment as BE
 from generators.blog_eval import (body_damage, detect_blank_source_cells, detect_broken_join,
                                   detect_repeated_sentence, detect_stranded_reference,
                                   detect_stub_answer)
-from generators.blog_gen import (BlogGenerator, _composition_included,
+from generators.blog_gen import (_MONEY_RE, BlogGenerator, _composition_included,
                                  _format_price_value, _norm_price_composition,
                                  _strip_markers_safely)
 
@@ -573,3 +573,62 @@ def test_a_proxy_refusal_is_not_evidence_that_the_PAGE_is_walled():
     assert BE._PROXY_REFUSED_RE.search("Unable to connect to proxy")
     assert BE._PROXY_REFUSED_RE.search("Tunnel connection failed: 403 Forbidden")
     assert not BE._PROXY_REFUSED_RE.search("HTTPSConnectionPool: Read timed out")
+
+
+# ── 9. what a dry run over 214 stored articles found wrong with section 5 ────────────────────────
+# The price check was replayed against every article in the production DB before it was allowed near
+# a live generation. It found real mis-sourcing — PeterMD's own $149 cited to vaccinealliance.org,
+# LillyDirect's $299 cited to noom.com, Ro's membership to healthline.com — and two ways it fired on
+# things that were fine. Both are fixed here, and neither could have been found by reading the code.
+
+@pytest.mark.parametrize("url,unit", [
+    # a SHORT company name inside a longer domain. Requiring an exact match under four characters
+    # rejected these companies' OWN sites and called their correctly-cited prices unsourced.
+    ("https://stacollect.com/rates", "STA International charges 25% on US debt [S1]."),
+    ("https://psicollect.com/pricing", "PSI charges 35% for attorney-referred files [S1]."),
+    ("https://getopt.com/membership", "Opt Health's plans start at $245/month [S1]."),
+    ("https://myhspa.org/certification", "The HSPA exam costs $125 [S1]."),
+])
+def test_a_short_name_still_finds_its_own_domain(gen, url, unit):
+    assert BlogGenerator._domain_names_entity(url, unit)
+
+
+@pytest.mark.parametrize("url,unit", [
+    ("https://rocket.com/x", "Ro charges $149 per month [S1]."),        # "ro" is not "rocket"
+    ("https://tipalti.com/x", "you can tip the driver $5 [S1]."),       # lowercase word, not a name
+    ("https://theweekly.com/x", "the plan costs $5 [S1]."),             # a stopword is not a name
+    ("https://healthline.com/x", "Ro's membership is $145/month [S1]."),
+    ("https://trakkr.ai/x", "Profound's pricing runs $399-$5,000/month [S1]."),
+])
+def test_a_short_name_does_not_reach_a_domain_it_merely_begins(gen, url, unit):
+    """The loosening is bounded: a short token must be written as a NAME, and two characters still
+    has to match exactly, or the check would accept any domain starting with a common word."""
+    assert not BlogGenerator._domain_names_entity(url, unit)
+
+
+@pytest.mark.parametrize("unit", [
+    "backed by a $1 million surety bond [S15]",
+    "charges 25% on the first $5,000 collected and 20% on the balance [S16]",
+    "The company raised $150 million in its Series C round [S1]",
+    "the category reached $24 billion in 2024 [S1]",
+    "the regulator issued a $2.3 million penalty [S1]",
+])
+def test_a_money_figure_that_is_not_a_price_is_not_judged_as_one(unit):
+    """Both real cases sit in sentences that ALSO contain the word "fee", so the context gate let
+    them through and the check reported an indemnity amount and a commission bracket as unsourced
+    prices. A magnitude word after the figure is the other tell: a unit price is not quoted in
+    millions."""
+    assert not any(BlogGenerator._is_price_figure(unit, m) for m in _MONEY_RE.finditer(unit))
+
+
+@pytest.mark.parametrize("unit", [
+    "PeterMD charges $270 per month [S1]",
+    "Wegovy lists at $1,349 per month at retail [S2]",
+    "with a $300 minimum per file [S7]",
+    "The exam costs $125 [S10]",
+    "$149 first month [S2]",
+    "a $50 annual renewal fee [S13]",
+])
+def test_a_real_price_still_reads_as_one(unit):
+    """The narrowing must not become a way for a price to escape the check."""
+    assert any(BlogGenerator._is_price_figure(unit, m) for m in _MONEY_RE.finditer(unit))

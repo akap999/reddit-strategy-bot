@@ -13132,32 +13132,72 @@ you MAY assume the description will carry: "{disc}".
     # The rule, stated once and vertical-neutral: a price for X may be cited to X's own site, to a
     # named retailer, to an official (.gov) publication, or to the publisher's own domain for the
     # publisher's own price. A third party repeating a number it does not set is not a price source.
+    # FU251 (measured on 214 stored articles): a money figure is not automatically a price. "backed
+    # by a $1 million surety bond" and "25% on the first $5,000 collected" both sit in sentences that
+    # ALSO contain the word "fee", so the context gate let them through and the check reported an
+    # indemnity amount and a commission bracket as unsourced prices. A magnitude word after the
+    # figure is the other tell: a unit price is not quoted in millions.
+    _NOT_A_PRICE_RE = re.compile(
+        r"\b(?:surety|bond|bonded|indemnit\w*|underwrit\w*|policy limit|"
+        r"raised|funding|valuation|revenue|turnover|market size|net worth|"
+        r"penalt\w*|fined?|fines|settlement|damages|judgment|judgement|award(?:ed)?|"
+        r"collected|recovered|recover|claim size|portfolio|assets under|"
+        r"in (?:sales|debt|losses|savings|grants))\b", re.I)
+    _MAGNITUDE_RE = re.compile(r"^\s*(?:million|billion|trillion|bn|k)\b", re.I)
     _PRICE_CTX_RE = re.compile(
         r"\bpric|\bcost|\bfee\b|\bfees\b|\bcharges?\b|\bbill(?:s|ed|ing)?\b|\brate\b|"
         r"\blists? at\b|\blist price\b|/mo\b|per month|per year|monthly|annually|a month|"
         r"\bpays?\b|\bout-of-pocket\b|\bcash[- ]pay\b|\bstarting at\b|\bfrom \$", re.I)
 
+    # Vanity prefixes a company puts on its own domain when the bare name is taken. Stripped before
+    # comparing, so "getopt.com" is recognised as Opt Health's and "myhspa.org" as HSPA's.
+    _DOMAIN_VANITY_RE = re.compile(
+        r"^(?:get|try|join|use|go|my|the|we|hello|meet|with|shop|team|visit|its)(?=[a-z0-9]{3,})")
+
     @staticmethod
     def _domain_names_entity(url, unit):
         """Does this URL belong to something the unit NAMES? "getpetermd.com" for a sentence about
-        PeterMD, "calibrateme.com" for Calibrate, "ro.co" for Ro. Compared on letters and digits
-        only, so a "get"/"try"/"-health" prefix or a hyphen cannot break the match; a stem under
-        four characters must match a word exactly, so "ro" does not match "product"."""
-        stem = re.sub(r"[^a-z0-9]", "", (_norm_domain(url) or "").split(".")[0])
-        if len(stem) < 2:
+        PeterMD, "calibrateme.com" for Calibrate, "ro.co" for Ro, "stacollect.com" for STA
+        International. Compared on letters and digits only, so a vanity prefix or a hyphen cannot
+        break the match.
+
+        FU251, measured on 214 stored articles: requiring an EXACT match for anything under four
+        characters rejected a whole class of companies' OWN sites — STA International/stacollect.com,
+        PSI/psicollect.com, Opt Health/getopt.com — and reported their correctly-cited prices as
+        unsourced. A SHORT name may now match the START of the stem, but only where the article
+        writes it as a NAME (capitalised), so a lowercase common word cannot reach a domain it
+        happens to begin. Two characters still has to be exact: "ro" is Ro, never "rocket"."""
+        raw = re.sub(r"[^a-z0-9]", "", (_norm_domain(url) or "").split(".")[0])
+        if len(raw) < 2:
             return False
+        stems = {raw}
+        bare = BlogGenerator._DOMAIN_VANITY_RE.sub("", raw)
+        if len(bare) >= 2:
+            stems.add(bare)
         for w in re.findall(r"[A-Za-z][A-Za-z0-9&'\u2019-]+", unit or ""):
             # "Calibrate's" is Calibrate. The possessive goes before the letters are compared,
             # otherwise "calibrates" matches nothing in "joincalibrate".
-            t = re.sub(r"[^a-z0-9]", "", re.sub(r"[''\u2019]s\b", "", w.lower()))
+            t = re.sub(r"[^a-z0-9]", "", re.sub(r"['\u2019]s\b", "", w.lower()))
             if len(t) < 2 or t in _FUNCTION_WORDS:
                 continue
-            if len(stem) < 4 or len(t) < 4:
+            named = w[:1].isupper()
+            for stem in stems:
                 if t == stem:
                     return True
-            elif t in stem or stem in t:
-                return True
+                if len(t) >= 4 and len(stem) >= 4 and (t in stem or stem in t):
+                    return True
+                if named and len(t) >= 3 and stem.startswith(t):
+                    return True
         return False
+
+    @classmethod
+    def _is_price_figure(cls, unit, m):
+        """Is THIS money figure a price, rather than a bond, a bracket or a market size?"""
+        after = unit[m.end():m.end() + 24]
+        if cls._MAGNITUDE_RE.match(after):
+            return False
+        window = unit[max(0, m.start() - 70):m.end() + 70]
+        return not cls._NOT_A_PRICE_RE.search(window)
 
     def _price_source_check(self, body, blocks, brand):
         """Every price in the body that rests only on pages which neither set nor publish it.
@@ -13186,8 +13226,10 @@ you MAY assume the description will carry: "{disc}".
             entity whose price this is is frequently named in neither the cell nor the sentence
             ("The program is priced at $129 to get started"), so matching the sentence alone called
             every correctly-cited competitor unsourced."""
-            if not _MONEY_RE.search(unit) or not re.search(r"\[S\d+\]", unit):
+            if not re.search(r"\[S\d+\]", unit):
                 return False
+            if not any(self._is_price_figure(unit, m) for m in _MONEY_RE.finditer(unit)):
+                return False                      # no figure here is a price
             if not in_price_col and not self._PRICE_CTX_RE.search(unit):
                 return False                      # a money figure that is not a price
             cited = [int(x) for x in re.findall(r"\[S(\d+)\]", unit)]

@@ -66,8 +66,47 @@ _CHALLENGE_TEXT_MARKERS = (
     # wordings above, so it was accepted as a real page and the web-fetch fallback never ran. The
     # review it hid is the one that states the HbA1c range a blog then got wrong.
     "client challenge", "required part of this site couldn",
+    # FU251: NCBI answers a datacenter IP with 203 + "Cookies must be enabled" — 124 visible
+    # characters, none of them the paper. Measured on pubmed.ncbi.nlm.nih.gov/40838489/.
+    "cookies must be enabled", "enable cookies and reload",
 )
 _CHALLENGE_MARKERS = _CHALLENGE_CODE_MARKERS + _CHALLENGE_TEXT_MARKERS   # back-compat name
+
+# FU251 — a wall that REDIRECTS instead of answering 403. fda.gov sits behind Akamai, which answers a
+# datacenter IP with `302 → /apology_objects/abuse-detection-apology.html`; that apology object then
+# 404s, ten bytes of "Not found". The ladder saw the FINAL 404 and returned "not-found" — the one
+# reason that stops everything: no retry, no residential rung, no web fetch. Three FDA sources in the
+# 19 Sep scoreboard were recorded as pages that do not exist. They exist; we were being turned away.
+#
+# Matched on the URLs the redirect chain LANDED on, and only when the response did not succeed — so a
+# real article at /blog/the-challenge-of-x is never touched, because a 2xx is returned as content
+# before this is consulted. When it does match, the only change is which fallback rungs run, which is
+# the safe direction to be wrong in.
+_BLOCK_PATH_RE = re.compile(
+    r"(?:^|/)(?:apology|apology[_-]objects|abuse[_-]?detection|access[_-]?denied|accessdenied"
+    r"|blocked|bot[_-]?detect(?:ion)?|captcha|challenge|denied|distil_r_blocked|forbidden"
+    r"|incapsula|rate[_-]?limit(?:ed)?|unusual[_-]?traffic|sorry)"
+    r"(?:[/_.-]|$)", re.I)
+
+
+def _blocked_by_redirect(resp):
+    """The URL this response LANDED on names a block artifact — a wall, whatever its status says."""
+    urls = [getattr(h, "url", "") for h in (getattr(resp, "history", None) or [])]
+    urls.append(getattr(resp, "url", "") or "")
+    for u in urls:
+        m = re.match(r"^https?://[^/]+(/[^?#]*)", u or "")
+        if m and _BLOCK_PATH_RE.search(m.group(1)):
+            return True
+    return False
+
+
+def _status_ok(code):
+    """FU251: any 2xx carries a body. The ladder tested `== 200`, so NCBI's 203 Non-Authoritative
+    response — a cookie wall — was never even read, and came out as a network "error"."""
+    try:
+        return 200 <= int(code) < 300
+    except (TypeError, ValueError):
+        return False
 _CHALLENGE_SHORT_PAGE = 1500   # visible chars — challenge / block pages are shorter than this
 
 
@@ -219,13 +258,22 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
     for i in range(attempts):
         try:
             resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-            if resp.status_code == 200 and looks_like_pdf(resp.content,
-                                                          resp.headers.get("Content-Type")):
+            if not _status_ok(resp.status_code) and _blocked_by_redirect(resp):
+                # FU251: turned away by a redirect to a block page. Whatever status the block page
+                # itself answered with, this is a wall — the other rungs must get their turn.
+                print(f"[brand_enrichment] {_host(url)} redirected us to a block page "
+                      f"({resp.status_code} at {resp.url[:90]}) — treating as blocked", flush=True)
+                reason = "blocked"
+                break
+            # A zero-byte body is never a PDF, so the emptiness is settled before the file sniff.
+            _raw = getattr(resp, "content", b"") or b""
+            if _raw and _status_ok(resp.status_code) and looks_like_pdf(
+                    _raw, resp.headers.get("Content-Type")):
                 # FU227: the primary documents this pipeline most wants to cite — regulator filings,
                 # standards, manufacturer specifications — are published as PDFs. Read the text out
                 # of the file. Until now its bytes were passed on as though they were a page, so the
                 # model was "grounded" in `%PDF-1.7 %\xd0\xd4\xc5\xd8 6460 0 obj ...`.
-                _t = pdf_text(resp.content)
+                _t = pdf_text(_raw)
                 if _t:
                     print(f"[brand_enrichment] ✓ PDF: {len(_t)} chars of text from {url}", flush=True)
                     return as_page_html(_t), "ok"
@@ -234,7 +282,7 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
                 # that would hand back the same document base64-encoded.
                 print(f"[brand_enrichment] PDF at {url} has no readable text layer", flush=True)
                 return "", "thin"
-            if resp.status_code == 200 and resp.text:
+            if _status_ok(resp.status_code) and resp.text:
                 # FU113: a 200 is NOT success unless it carries real content — bot walls
                 # serve 200 block/challenge pages, which must fall through the ladder.
                 blocked = _looks_blocked(resp.text)
@@ -271,14 +319,21 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
             resp = requests.get(url, headers=headers, timeout=max(timeout, 12),
                                 allow_redirects=True,
                                 proxies={"http": proxy, "https": proxy})
-            if resp.status_code == 200 and looks_like_pdf(resp.content,
-                                                          resp.headers.get("Content-Type")):
+            if not _status_ok(resp.status_code) and _blocked_by_redirect(resp):
+                reason = "blocked"
+                print(f"[brand_enrichment] residential fetch was redirected to a block page "
+                      f"for {url}", flush=True)
+                resp = None
+            elif (getattr(resp, "content", b"") and _status_ok(resp.status_code)
+                    and looks_like_pdf(resp.content, resp.headers.get("Content-Type"))):
                 _t = pdf_text(resp.content)       # FU227: the same document, read as text
                 if _t:
                     print(f"[brand_enrichment] ✓ PDF via residential proxy: {url}", flush=True)
                     return as_page_html(_t), "ok"
                 return "", "thin"
-            if resp.status_code == 200 and resp.text:
+            if resp is None:
+                pass                                  # already classified above
+            elif _status_ok(resp.status_code) and resp.text:
                 blocked = _looks_blocked(resp.text)   # FU113: gate the residential rung too
                 if not blocked:
                     print(f"[brand_enrichment] ✓ homepage via residential proxy: {url}", flush=True)

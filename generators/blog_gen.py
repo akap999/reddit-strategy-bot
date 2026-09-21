@@ -23,8 +23,123 @@ from generators.brand_enrichment import relevant_text   # FU240: keep the passag
 from generators.brand_enrichment import _fetch_page   # FU221: fetch + WHY it failed
 from generators import research as _research   # FU221 (Step 0): find → read → extract → verify
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
+from generators.blog_eval import body_damage as _body_damage   # FU251: a removal may leave damage
 
 PROMPT_VERSION = "blog-v2-evidence"
+
+# ── FU251 — a removal may never leave damage ─────────────────────────────────────────────────────
+# The fabrication passes removed a sentence with `cur.replace(a, "", 1)` and a table cell by blanking
+# it, and nothing ever looked at what the removed text was holding up. The audited articles show what
+# that costs: a section opening "Waist circumference and lipid markers ALSO showed…" (the sentence it
+# continued is gone), an FAQ answered in 56 characters, four Source cells published as "—", and a
+# paragraph spliced onto its own tail at "…without an in-person visit., which includes…".
+#
+# So every removal is now applied ON ITS OWN and the result is inspected. One that leaves damage is
+# widened to the whole paragraph; if that is damaging too it is refused and reported. The detector is
+# the scoreboard's own (`blog_eval.body_damage`), so a pass can no longer create a defect the
+# scoreboard would report against it.
+# A cut leaves the punctuation of both halves behind: "…in-person visit., which includes…". The
+# clause that follows is what continues the sentence, so its separator is the one that survives.
+_SEAM_FIXES = (
+    (re.compile(r"(?<=[a-z0-9\)\]])[.!?]+\s*([,;:])\s*"), r"\1 "),
+    (re.compile(r"\s*,\s*([.!?])"), r"\1"),
+    (re.compile(r"([,;:])\s*\1+"), r"\1"),
+    (re.compile(r"[ \t]{2,}"), " "),
+)
+
+
+def _repair_seam(text):
+    """Repair the punctuation left behind where two halves of a sentence were rejoined."""
+    for pat, rep in _SEAM_FIXES:
+        text = pat.sub(rep, text or "")
+    return text
+
+
+_SOURCE_COL_RE = re.compile(r"\bsources?\b|\bcitations?\b|\bevidence\b", re.I)
+
+
+def _table_header_cells(lines, li):
+    """The raw `|`-split cells of the header row of the table that line `li` sits in."""
+    i = li
+    while i > 0 and (lines[i - 1] or "").lstrip().startswith("|"):
+        i -= 1
+    return (lines[i] or "").split("|")
+
+
+def _is_source_cell(lines, li, ci):
+    """Is this cell in a Source column? That column is exempt from the width rules, so a blank in it
+    is never cleaned up — it is written out as "—" and published."""
+    cells = _table_header_cells(lines, li)
+    return ci < len(cells) and bool(_SOURCE_COL_RE.search(cells[ci] or ""))
+
+
+def _strip_markers_safely(text, nums):
+    """Remove the given [S#] markers — but never empty a table cell doing it. A Source cell whose
+    entire content is the marker IS the citation; blanking it is what writes the "—"."""
+    if not nums:
+        return text
+    pat = re.compile(r"\[S(?:%s)\]" % "|".join(str(int(n)) for n in sorted(nums)))
+    out = []
+    for ln in (text or "").split("\n"):
+        if ln.lstrip().startswith("|"):
+            cells = ln.split("|")
+            for i in range(1, len(cells) - 1):
+                stripped = pat.sub("", cells[i])
+                if stripped.strip() or not cells[i].strip():
+                    cells[i] = stripped
+                # else: the marker was all the cell had — leave it rather than publish a gap
+            out.append("|".join(cells))
+        else:
+            out.append(pat.sub("", ln))
+    return "\n".join(out)
+
+
+def _apply_removals_without_damage(lines, hits):
+    """Apply `(kind, line_index, arg, payload)` removals, skipping any that would leave damage.
+
+    Returns (body, applied, widened, refused). `kind` is "cell" (blank cell `arg`) or "sent" (remove
+    sentence `arg` from the line). Shared by the walled-source and unsourced-figure passes, which had
+    the identical loop."""
+    work = list(lines)
+
+    def render(ws):
+        return "\n".join(ln for ln in ws if ln is not None)
+
+    cur_damage = len(_body_damage(render(work)))
+    applied = widened = refused = 0
+    for kind, li, a, _payload in hits:
+        if li >= len(work) or work[li] is None:
+            continue                                   # the line is already gone
+        trial, wide = list(work), None
+        if kind == "cell":
+            if _is_source_cell(lines, li, a):
+                refused += 1                           # the citation itself — never blanked
+                continue
+            cells = (trial[li] or "").split("|")
+            if a >= len(cells):
+                continue
+            cells[a] = " "
+            trial[li] = "|".join(cells)
+        else:
+            cur = trial[li] or ""
+            if a not in cur:
+                continue
+            rest = re.sub(r"[ \t]{2,}", " ", cur.replace(a, "", 1)).strip()
+            trial[li] = rest or None
+            if rest:
+                wide = list(work)
+                wide[li] = None                        # the whole paragraph, or nothing
+        d = len(_body_damage(render(trial)))
+        if d <= cur_damage:
+            work, cur_damage, applied = trial, d, applied + 1
+            continue
+        if wide is not None and len(_body_damage(render(wide))) <= cur_damage:
+            cur_damage = len(_body_damage(render(wide)))
+            work, applied, widened = wide, applied + 1, widened + 1
+            continue
+        refused += 1
+    return render(work), applied, widened, refused
+
 
 # FU115 — discovery of the brand site's EXISTING live blog posts (sitemap → /blog fallback),
 # used as internal-link candidates when the 🔗 checkbox is on.
@@ -12864,24 +12979,18 @@ you MAY assume the description will carry: "{disc}".
             return body, ("source-check: %d claim(s) rest on a source that could not be read, or say "
                           "something their source does not — too many to remove safely, so nothing "
                           "was changed; regenerate rather than publish" % len(hits))
-        for kind, li, a, _v in hits:
-            if kind == "cell":
-                cells = lines[li].split("|")
-                cells[a] = " "
-                lines[li] = "|".join(cells)
-            else:
-                cur = lines[li]
-                if a in cur:
-                    cur = cur.replace(a, "", 1)
-                lines[li] = re.sub(r"[ \t]{2,}", " ", cur).strip()
-        out = "\n".join(ln for i, ln in enumerate(lines)
-                         if ln.strip() or not any(h[1] == i and h[0] == "sent" for h in hits))
+        # FU251: each removal is applied on its own and the result inspected — one that strands the
+        # sentence after it, blanks a Source cell or leaves a fragment is widened or refused.
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
         # strip every remaining marker pointing at a source nobody could read — `_rebuild_sources`
         # then drops it from the list rather than advertising a page the article never opened.
+        # FU251: this strip was the one removal with NO cap and no guard at all, and it ran over the
+        # whole body including tables. A Source cell whose content was just "[S4]" came out empty,
+        # and `_resolve_table_punts` — which never drops a Source column — wrote "—" into it. Four of
+        # those shipped in one audited article.
         if walled:
             head, sep, tail = out.partition("\n## Sources")
-            for n in sorted(walled):
-                head = re.sub(r"\[S%d\]" % n, "", head)
+            head = _strip_markers_safely(head, walled)
             head = re.sub(r"\s+([.,;:)])", r"\1", re.sub(r"[ \t]{2,}", " ", head))
             out = head + sep + tail
         if not hits and not walled:
@@ -12895,6 +13004,12 @@ you MAY assume the description will carry: "{disc}".
             bits.append(f"removed {n_w} claim(s) that rested only on them")
         if n_s:
             bits.append(f"removed {n_s} claim(s) stating something their readable source does not say")
+        if widened:
+            bits.append(f"{widened} removal(s) took the whole paragraph rather than strand what "
+                        f"followed")
+        if refused:
+            bits.append(f"{refused} left in place — removing them would have damaged the article; "
+                        f"check those claims by hand")
         return out, "source-check: " + "; ".join(bits)
 
     _STALE_MONTHS = int(os.environ.get("BLOG_STALE_MONTHS", "12"))
@@ -13283,11 +13398,16 @@ you MAY assume the description will carry: "{disc}".
                 # up to four bridging words between the two copies — the reported case reads
                 # "…step therapy, Michigan Medicaid classifies Wegovy …step therapy;", where the
                 # second copy is reintroduced by its own subject.
-                m = re.search(r"(?<![\w])((?:\S+\s+){7,}\S+?)\s*[,;:]\s*(?:\S+\s+){0,4}\1(?![\w])",
-                              new)
+                # FU251: the separator between the two copies may be a SENTENCE END, not just a
+                # comma. The audited article carries a 60-word span repeated across "…without an
+                # in-person visit., which includes…" — copy one closes with a full stop and copy two
+                # opens with the comma that used to join it, which `[,;:]` alone could never match,
+                # so the repeat was published whole and the seam with it.
+                m = re.search(r"(?<![\w])((?:\S+\s+){7,}\S+?)\s*[.,;:!?]{1,2}\s*"
+                              r"(?:\S+\s+){0,4}\1(?![\w])", new)
                 if not m:
                     break
-                new = new[:m.start()] + m.group(1) + new[m.end():]
+                new = _repair_seam(new[:m.start()] + m.group(1) + new[m.end():])
                 n += 1
             out.append(new)
         return "\n".join(out) + tail, n
@@ -13365,18 +13485,9 @@ you MAY assume the description will carry: "{disc}".
                           "(%s) — too many to remove safely, so nothing was changed; the sourcing is "
                           "what failed here, regenerate rather than publish"
                           % (len(hits), ", ".join(figs[:6])))
-        for kind, li, a, _f in hits:
-            if kind == "cell":
-                cells = lines[li].split("|")
-                cells[a] = " "
-                lines[li] = "|".join(cells)
-            else:
-                cur = lines[li]
-                if a in cur:
-                    cur = cur.replace(a, "", 1)
-                lines[li] = re.sub(r"[ \t]{2,}", " ", cur).strip()
-        out = "\n".join(ln for i, ln in enumerate(lines)
-                         if ln.strip() or not any(h[1] == i and h[0] == "sent" for h in hits))
+        # FU251: same guard as the walled pass — a figure that cannot be sourced is still worth
+        # removing, but not at the price of a section that opens mid-thought.
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
         n_s = sum(1 for h in hits if h[0] == "sent")
         n_c = len(hits) - n_s
         bits = []
@@ -13384,10 +13495,16 @@ you MAY assume the description will carry: "{disc}".
             bits.append(f"{n_s} sentence(s)")
         if n_c:
             bits.append(f"{n_c} table cell(s)")
-        return out, ("unsourced-figures: removed " + " and ".join(bits) +
-                     " stating a figure no gathered source contains (" + ", ".join(figs[:6]) +
-                     ") — a cited number we cannot find in any source we read is the model's, "
-                     "not the page's")
+        note = ("unsourced-figures: removed " + " and ".join(bits) +
+                " stating a figure no gathered source contains (" + ", ".join(figs[:6]) +
+                ") — a cited number we cannot find in any source we read is the model's, "
+                "not the page's")
+        if widened:
+            note += f"; {widened} took the whole paragraph rather than strand what followed"
+        if refused:
+            note += (f"; {refused} left in place — removing them would have damaged the article; "
+                     f"check those figures by hand")
+        return out, note
 
     def _claim_source_check(self, body, blocks, brand):
         """Re-point citations that their page does not support, prefer the most authoritative page

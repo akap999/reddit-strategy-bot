@@ -224,6 +224,227 @@ def detect_uncited_table_cells(body, cap=6):
     return hits
 
 
+# ── FU251: damage OUR OWN removal passes leave behind ────────────────────────────────────────────
+# Every check below describes a shape no writer produces and no reader forgives — the trace of a
+# sentence, a cell or a citation marker taken out of finished prose by the fabrication passes without
+# anyone looking at what it was holding up. They are detectors for the scoreboard AND the guard the
+# removal passes consult before they commit (`body_damage`), so a pass can no longer create a defect
+# this file would report.
+
+# A sentence that cannot stand at the top of a section because it points BACK at one that is gone.
+# "This/These/Such <noun>" needs an antecedent; the self-referential nouns below have one (the page
+# itself), so they are excluded. A bare "It is/There are" is a dummy subject, not a reference.
+_SELF_REF_NOUNS = (r"guide|article|page|post|piece|section|table|comparison|list|chart|breakdown|"
+                   r"answer|faq|report")
+# "This IS the rationale" points at the heading just read and is ordinary English; "This PROTOCOL is
+# necessary" names a thing the reader was never shown. Only the second shape is damage, so a
+# demonstrative followed by a verb is let through.
+_DEMONSTRATIVE_VERBS = (
+    r"is|are|was|were|be|been|being|can|could|will|would|may|might|must|should|shall|"
+    r"does|do|did|has|have|had|means|matters|happens|makes|allows|requires|reflects|explains|"
+    r"varies|depends|applies|works|helps|changes|comes|includes|leaves|gives|remains|tends|"
+    r"differs|holds|says|shows|puts|takes|creates|becomes")
+_STRANDED_OPEN_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:This|That|These|Those|Such)\s+(?!(?:%s)\b)(?!(?:%s)\b)[a-z]"
+    % (_SELF_REF_NOUNS, _DEMONSTRATIVE_VERBS)
+    + r"|(?:Also|Additionally|In addition|Similarly|Likewise|However|But|And|Moreover|Furthermore|"
+      r"Instead|Meanwhile|Conversely|Either way|By contrast|On the other hand|The same)\b"
+    r"|(?:They|Both|Each of them|Neither|Either)\s+[a-z]"
+    r")", re.I)
+# "X and Y ALSO showed …" — the "also" that only makes sense after a sentence that is gone. Only in
+# the opening clause of a section's first sentence, so an "also" deep in a paragraph is untouched.
+_STRANDED_ALSO_RE = re.compile(r"^[^.;:]{0,90}?\balso\b", re.I)
+# A splice: text rejoined where something was cut out, leaving the punctuation of both halves.
+# The lookbehind is what keeps "e.g.," and "et al.," out of it: an abbreviation's dot is preceded by
+# a short token or another dot, a real sentence end by four or more letters ("…in-person visit.,").
+_BROKEN_JOIN_RE = re.compile(
+    r"(?<=[a-z]{4})[.!?]\s*[,;:]"        # a sentence ended, then a clause was joined onto it
+    r"|,\s*[.!?](?![.!?])"               # "…, ." — the other half of the same cut
+    r"|\s[,;:](?=\s)"                   # "…the same , since…" — a noun removed from between them
+    r"|\(\s*\)|\[\s*\]"               # an emptied parenthetical
+    r"|[,;:]\s*[,;:]")                  # two separators with nothing between them
+_BACKREF_MIN_WORDS = 4          # a 3-word opener is a label, not a stranded sentence
+_STUB_ANSWER_CHARS = 60         # an FAQ answer shorter than this is a fragment, not an answer
+
+
+def _first_sentence(par):
+    m = re.match(r"\s*(.+?[.!?])(?:\s|$)", par or "", re.S)
+    return (m.group(1) if m else (par or "")).strip()
+
+
+def _sections(body):
+    """[(heading_text, level, [paragraph, ...])] — the article's sections, tables excluded from the
+    paragraph list so a table row is never read as prose."""
+    lines = _prose(body).split("\n")
+    out, cur = [], ("", 0, [])
+    buf = []
+
+    def _close():
+        par = " ".join(x.strip() for x in buf).strip()
+        if par:
+            cur[2].append(par)
+        buf.clear()
+
+    for ln in lines:
+        m = _HEAD_RE.match(ln)
+        if m:
+            _close()
+            out.append(cur)
+            cur = (m.group(2).strip().strip("#").strip(), len(m.group(1)), [])
+            continue
+        st = ln.strip()
+        if not st or st.startswith("|") or st.startswith(">") or st.startswith("---") \
+                or st.startswith("*[") or st.startswith("#"):
+            _close()
+            continue
+        if st.startswith(("-", "*", "+")) or re.match(r"^\d+[.)]\s", st):
+            _close()
+            cur[2].append(re.sub(r"^(?:[-*+]|\d+[.)])\s*", "", st))
+            continue
+        buf.append(st)
+    _close()
+    out.append(cur)
+    return [x for x in out if x[0] or x[2]]
+
+
+def detect_blank_source_cells(body, cap=8):
+    """A Source column cell with nothing in it. The Source column is the one column the width rules
+    never drop, so when a pass strips the [S#] that was the cell's whole content the gap is written
+    out as "—" and published. A reader sees a comparison table that cites every row but one."""
+    hits = []
+    for hdr, rows in _tables(_prose(body)):
+        for col in range(len(hdr)):
+            if not re.search(r"\bsources?\b|\bcitations?\b|\bevidence\b", _cell_text(hdr[col]), re.I):
+                continue
+            for cells, _raw in rows:
+                if col >= len(cells):
+                    continue
+                if _PLACEHOLDER_CELL_RE.match(_cell_text(cells[col])):
+                    hits.append({"check": "blank-source-cell",
+                                 "detail": f'{_cell_text(cells[0])[:60] or "?"}: the '
+                                           f'"{_cell_text(hdr[col])}" cell is empty'})
+                    if len(hits) >= cap:
+                        return hits
+    return hits
+
+
+def detect_stranded_reference(body, cap=8):
+    """A section or FAQ answer that OPENS by pointing back at something the reader has not been
+    told — "This strict protocol is necessary because…", "Waist circumference and lipid markers
+    also showed…". Nobody writes a section that way; it is what is left when the sentence in front
+    of it was removed and nothing checked what depended on it."""
+    hits = []
+    for head, _lvl, pars in _sections(body):
+        if not pars or not head:
+            continue
+        first = _first_sentence(pars[0])
+        if len(first.split()) < _BACKREF_MIN_WORDS:
+            continue
+        why = ""
+        if _STRANDED_OPEN_RE.match(first):
+            why = "opens with a back-reference"
+        elif _STRANDED_ALSO_RE.match(first):
+            why = 'opens with "also"'
+        if why:
+            hits.append({"check": "stranded-reference",
+                         "detail": f'"{head[:60]}" {why}: "{first[:90]}"'})
+            if len(hits) >= cap:
+                return hits
+    return hits
+
+
+def detect_broken_join(body, cap=8):
+    """Punctuation from both halves of a cut, left side by side — "…without an in-person visit.,
+    which includes…". The de-duplication and removal passes splice text back together and none of
+    them repairs the seam."""
+    hits = []
+    for ln in _prose(body).split("\n"):
+        st = ln.strip()
+        if not st or st.startswith("#") or st.startswith("---"):
+            continue
+        m = _BROKEN_JOIN_RE.search(st)
+        if m and not re.match(r"^\|?[\s:|-]+\|?$", st):
+            hits.append({"check": "broken-join",
+                         "detail": f'"{st[max(0, m.start() - 45):m.end() + 45]}"'})
+            if len(hits) >= cap:
+                return hits
+    return hits
+
+
+def detect_duplicated_paragraph(body, min_words=25, cap=6):
+    """The same paragraph printed twice. A clause-level de-duplicator cannot see it, and the
+    restore-dropped-sections pass can create it by putting a stale copy back beside the corrected
+    one. Also catches a paragraph that repeats a long span of itself."""
+    hits, seen = [], {}
+    for head, _lvl, pars in _sections(body):
+        for par in pars:
+            norm = re.sub(r"\W+", " ", par.lower()).strip()
+            if len(norm.split()) < min_words:
+                continue
+            if norm in seen:
+                hits.append({"check": "duplicated-paragraph",
+                             "detail": f'"{par[:80]}…" appears twice ({seen[norm]} and {head or "top"})'})
+            else:
+                seen[norm] = head or "top"
+            if len(hits) >= cap:
+                return hits
+    return hits
+
+
+def detect_repeated_sentence(body, min_words=12, cap=6):
+    """The same sentence printed twice in the prose. This is the shape a paragraph spliced onto its
+    own tail takes — the clause-level de-duplicator only looks inside ONE line at a separator, so a
+    whole repeated sentence passes it untouched. A writer does not repeat a 12-word sentence."""
+    hits, seen, in_faq = [], set(), False
+    for _head, _lvl, pars in _sections(body):
+        if _FAQ_HEAD_RE.match(_head or ""):
+            in_faq = True
+        if in_faq:
+            continue        # an FAQ answer restating a body sentence is what an FAQ is for
+        for par in pars:
+            for sent in re.findall(r"[^.!?]+[.!?]", par):
+                norm = re.sub(r"\W+", " ", sent.lower()).strip()
+                if len(norm.split()) < min_words:
+                    continue
+                if norm in seen:
+                    hits.append({"check": "duplicated-sentence",
+                                 "detail": f'"{sent.strip()[:100]}…" appears twice'})
+                    if len(hits) >= cap:
+                        return hits
+                seen.add(norm)
+    return hits
+
+
+def detect_stub_answer(body, cap=6):
+    """An FAQ question answered by a fragment. "Yes, when equivalent plasma concentrations are
+    achieved." is what is left of an answer, not an answer — and it is what the schema extractor
+    publishes as the page's answer to that question."""
+    hits, in_faq = [], False
+    for head, lvl, pars in _sections(body):
+        if _FAQ_HEAD_RE.match(head or ""):
+            in_faq = True
+            continue
+        if not in_faq or not (head or "").rstrip().endswith("?"):
+            continue
+        ans = " ".join(pars).strip()
+        if ans and len(ans) < _STUB_ANSWER_CHARS:
+            hits.append({"check": "stub-answer",
+                         "detail": f'"{head[:70]}" is answered in {len(ans)} characters: "{ans}"'})
+            if len(hits) >= cap:
+                return hits
+    return hits
+
+
+def body_damage(body):
+    """Every mutilation detector at once. The removal passes call this BEFORE and AFTER a removal:
+    a removal that raises the count is widened to the whole paragraph, or refused. Cheap, no
+    network, no model — it is a handful of regexes over one string."""
+    return (detect_blank_source_cells(body) + detect_stranded_reference(body)
+            + detect_broken_join(body) + detect_duplicated_paragraph(body)
+            + detect_repeated_sentence(body) + detect_stub_answer(body))
+
+
 def detect_publisher_only_downside(body, brand_name):
     """Only the publisher's own profile carries a bold-labelled downside ("Honest trade-off:",
     "Limitations:") while none of the other options it is compared with does. The page then argues
@@ -347,6 +568,7 @@ def defects_report(gen, brand, body, meta=""):
     items += detect_publisher_only_downside(body, name)
     items += detect_quick_answer_disclaimer(body)
     items += detect_repeated_citations(body)
+    items += body_damage(body)             # FU251 — damage our own removal passes leave behind
     if gen is not None:
         items += existing_checks(gen, brand, body, meta)
     by = {}

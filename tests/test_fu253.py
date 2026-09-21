@@ -154,3 +154,73 @@ def test_ambiguity_is_only_reported_when_nothing_decided_it(gen):
     """The operator reads these warnings. Reporting a pick their own data settled is noise."""
     _e, amb = gen._price_row_for(RO_ROWS, "Ro", _product_tokens("semaglutide cost"), subject="PeterMD")
     assert amb is False
+
+
+# ── 3. a constraint stated once is information; stated three times it is the article ─────────────
+from generators.blog_eval import (detect_constraint_bloat, detect_repeated_constraint,  # noqa: E402
+                                  _constraint_passages, _same_constraint, _constraint_tokens)
+
+
+def test_the_compounding_rule_stated_three_times_is_detected(shipped):
+    """The operator's words: "the three compounding legal paragraphs … with the legal text cut to
+    one line, PeterMD looks strong". Three sections, 294 words, 14% of a page whose question is what
+    something COSTS."""
+    hits = detect_repeated_constraint(shipped)
+    assert len(hits) == 1
+    d = hits[0]["detail"]
+    assert "3 sections" in d and "14% of the article" in d
+
+
+def test_the_passages_are_paraphrases_not_copies(shipped):
+    """Which is why nothing saw them. `detect_repeated_sentence` needs a verbatim repeat, and the one
+    sentence that IS verbatim sits in the body and the FAQ, which FU251 exempts on purpose."""
+    import difflib
+    pars = [p for _h, p, _t in _constraint_passages(shipped) if "503" in p]
+    assert len(pars) >= 3
+    worst = max(difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+                for i, a in enumerate(pars) for b in pars[i + 1:])
+    assert worst < 0.55, f"these are near-copies ({worst:.2f}); the cheap detector would have caught them"
+
+
+def test_a_constraints_identity_is_what_is_SPECIFIC_to_it(shipped):
+    """Grouping on raw tokens merged three unrelated rules in one article and a state-availability
+    note with a pharmacy-law rule in another, because in a compounding article every rule mentions
+    compounding. A token in the title, or in half the sections, names the topic, not the rule."""
+    toks = [t for _h, _p, t in _constraint_passages(shipped)]
+    assert all("semaglutide" not in t for t in toks), "a topic word still carries identity"
+
+
+def test_the_volume_of_caveat_is_its_own_finding(shipped):
+    """Separate from repetition: how much of the page is rule text at all. Measured across 217
+    stored articles the median is 3%, p90 is 15%; this one is 24%."""
+    hits = detect_constraint_bloat(shipped)
+    assert len(hits) == 1 and "24% of the article" in hits[0]["detail"]
+
+
+def test_an_article_whose_question_IS_the_rule_is_exempt(shipped):
+    """"Is Compounded Tirzepatide Legit?" gives 22% of itself to regulatory text and that is the
+    article working. The exemption is shape-based — the title asks about legality, eligibility or
+    compliance — never a topic list."""
+    assert detect_constraint_bloat(shipped, title="Is Compounded Semaglutide Legal?") == []
+    assert detect_constraint_bloat(shipped, title="Who Is Eligible for Coverage?") == []
+    assert detect_constraint_bloat(shipped)          # …and the price article is not exempt
+
+
+def test_a_clause_length_reference_is_the_goal_not_a_repeat():
+    """The fix the prompt asks for — one full statement, a clause everywhere else — must not itself
+    read as a repetition."""
+    body = ("# T\n\n## The rule\n\nUnder 503A rules a pharmacy may not compound a drug that is "
+            "essentially a copy of a commercially available product, and the shortage was declared "
+            "resolved in February 2025 with a wind-down deadline in April.\n\n"
+            "## Price\n\nCompounded options, subject to the 503A rules above, start lower.\n\n"
+            "## Choosing\n\nAsk any provider about the 503A rules above before you buy.\n")
+    assert detect_repeated_constraint(body) == []
+
+
+def test_the_writer_is_told_the_proportion_rule():
+    golden = open(os.path.join(HERE, "fixtures", "prompts", "generate_article.ymyl.txt"),
+                  encoding="utf-8").read()
+    assert "SAY A RULE ONCE, WHERE IT BELONGS" in golden
+    assert "REPETITION and PROPORTION only" in golden
+    # and the boundary is stated to the model, not just to us
+    assert "never soften or drop it because it is inconvenient" in golden

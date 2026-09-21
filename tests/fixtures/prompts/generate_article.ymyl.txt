@@ -395,6 +395,17 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
         thing it is cited for (a 2020 statement cannot be the source for a 2025 approval). When the
         EVIDENCE carries a newer programme, rule or price than the one the older sources describe,
         the newer one is the answer: lead with it and say what it replaced.
+      * SAY A RULE ONCE, WHERE IT BELONGS, AT THE LENGTH THE QUESTION DESERVES. A regulatory,
+        eligibility or compliance constraint gets ONE full statement, in the one section that is
+        actually about it. Everywhere else it is a clause — "compounded products, subject to the
+        503A rules above, …" — never a restatement. Measured on real output: the same compounding
+        rule filled three sections and 14% of an article whose question was what something COSTS,
+        and a fifth of the page was rule text when the median article gives it 3%. A reader who came
+        for the price should not have to wade through the same caveat three times to reach it. This
+        is about REPETITION and PROPORTION only — state the constraint fully and accurately once,
+        and never soften or drop it because it is inconvenient. When the article's own QUESTION is
+        the rule ("is this legal?", "who is eligible?"), the rule IS the subject and belongs
+        throughout.
       * NEVER DISQUALIFY Acme Tools'S OWN PRODUCT CLASS AND THEN PITCH IT. When a section states a rule,
         regulation, coverage limit or eligibility bar that applies to the CATEGORY Acme Tools sells in,
         that rule stays exactly as sourced — it is true and the reader needs it. What must follow is

@@ -471,6 +471,167 @@ def detect_trailing_orphan(body, cap=6):
     return hits
 
 
+# ── FU253: a constraint stated once is information; stated five times it is the article ──────────
+# Measured across 216 stored articles: 41 restate a rule or caveat across three or more sections, 20
+# across five, and the worst gives a third of the page to it. In the article that prompted this, the
+# same compounding rule fills three sections and 14% of a page whose question is what something
+# costs — and the publisher SELLS the class the rule constrains.
+#
+# Nothing saw it. The three passages are PARAPHRASES of each other (0.29-0.45 similarity) so the
+# duplicate detectors, which need near-exact matches, are silent; the one sentence that is verbatim
+# sits in the body and the FAQ, which `detect_repeated_sentence` exempts on purpose. And FU243's
+# `_CATEGORY_RULE_RE` matches the rule verb in all three — it has always seen the rule, three times,
+# and only ever asked whether the brand is pitched fairly beside it, never how much of the page it is.
+#
+# The boundary this is built around: it is about REPETITION AND PROPORTION, never about dropping an
+# inconvenient truth. The article must still state the constraint, once, in full — `detect_*` here
+# only reports that it was stated again, and again. An article whose QUESTION is the rule keeps its
+# depth, because the rule then belongs in every section and the share test is what separates the two.
+_CONSTRAINT_RE = re.compile(
+    r"\b(?:may|must|can|cannot|can't|could|shall)\s+not\s+\w+"
+    r"|\bcannot\b|\bcan't\b"
+    r"|\b(?:is|are|was|were)\s+not\s+(?:permitted|allowed|eligible|approved|covered|authori[sz]ed|"
+    r"licen[sc]ed|available|reimbursed)\b"
+    r"|\b(?:is|are)\s+(?:prohibited|banned|barred|restricted|excluded|ineligible|unapproved|illegal)\b"
+    r"|\b(?:do|does|did)\s+not\s+(?:qualify|cover|reimburse|permit|allow|apply)\b"
+    r"|\bnot\s+(?:federally|legally|nationally|officially|formally)\s+approved\b"
+    r"|\bineligible\b|\bexcluded\s+from\b|\bwind-?down\b|\bdeadline\b", re.I)
+_CAVEAT_HEDGE_RE = re.compile(
+    r"\b(?:confirm(?:\s+the)?\s+(?:current\s+)?status|check\s+with\s+(?:your|a)\s+\w+"
+    r"|consult\s+a\s+licen[sc]ed|status\s+(?:can|may)\s+change|subject\s+to\s+change"
+    r"|verify\s+(?:the\s+)?(?:current|eligibility|status))\b", re.I)
+# Words that carry no identity — two passages are the same constraint when their DISTINCTIVE tokens
+# overlap, not when they share "the", "patients" or "should".
+_CONSTRAINT_STOP = frozenset("""about above after again against under below between both during each
+further more most other some such only very will just than then once here there when where which
+while with without would could should must their there these those they this that have been being
+what your yours because before after through during above below from into over under again
+patients patient provider providers prescriber prescribers current currently confirm please should
+program programs programme programmes product products service services company companies""".split())
+_CONSTRAINT_SECTIONS = int(os.environ.get("BLOG_CONSTRAINT_SECTIONS", "3"))
+
+
+def _constraint_tokens(par):
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9-]{4,}", (par or "").lower())
+            if w not in _CONSTRAINT_STOP}
+
+
+def _constraint_passages(body):
+    """[(section heading, paragraph, distinctive tokens)] for every passage stating a rule or a
+    caveat. Tables and headings are not passages — a rule belongs in prose.
+
+    "Distinctive" is relative to THIS ARTICLE. A token in the title, or one that turns up in half the
+    sections, identifies the topic and not the constraint: in a compounding article every rule
+    mentions compounding, so grouping on it merges three unrelated rules into one. Measured, that
+    false-grouped the FDA shortage status, the "essentially a copy" standard and a clinical-necessity
+    requirement in one article, and a state-availability note with a pharmacy-law rule in another."""
+    secs = _sections(body)
+    common, nsec = collections.Counter(), 0
+    for _h, _l, pars in secs:
+        if not pars:
+            continue
+        nsec += 1
+        for t in {t for p in pars for t in _constraint_tokens(p)}:
+            common[t] += 1
+    heads = {t for _h, _l, _p in secs for t in _constraint_tokens(_h)}
+    everywhere = {t for t, n in common.items() if nsec and n > max(1, nsec // 2)} | heads
+    out = []
+    for head, _lvl, pars in secs:
+        for par in pars:
+            if len(par.split()) < 12:
+                continue                       # a clause-length reference is the GOAL, not a repeat
+            if _CONSTRAINT_RE.search(par) or _CAVEAT_HEDGE_RE.search(par):
+                out.append((head or "(top)", par, _constraint_tokens(par) - everywhere))
+    return out
+
+
+def _same_constraint(a, b, floor=0.30):
+    """Two passages state the same constraint when their distinctive tokens overlap.
+
+    Jaccard, not a min-length ratio: with the smaller set as the denominator a short caveat matched
+    almost any long passage it shared three words with. Paraphrase-tolerant on purpose — the
+    passages that prompted this sit at 0.29-0.45 whole-text similarity, so anything keyed on exact
+    text sees nothing at all."""
+    if len(a) < 3 or len(b) < 3:
+        return False
+    return len(a & b) / float(len(a | b)) >= floor
+
+
+def detect_repeated_constraint(body, cap=4):
+    """One rule or caveat restated across section after section.
+
+    Reports the sections and the share of the article it occupies. It does NOT say the constraint is
+    wrong or that it should go — only that it has been stated more times than a reader needs."""
+    passages = _constraint_passages(body)
+    if len(passages) < _CONSTRAINT_SECTIONS:
+        return []
+    total = len(re.sub(r"\s+", " ", _prose(body)).split()) or 1
+    groups = []
+    for head, par, toks in passages:
+        for grp in groups:
+            if _same_constraint(toks, grp["toks"]):
+                grp["items"].append((head, par))
+                grp["toks"] = grp["toks"] | toks
+                break
+        else:
+            groups.append({"toks": set(toks), "items": [(head, par)]})
+    hits = []
+    for grp in groups:
+        heads = list(dict.fromkeys(h for h, _p in grp["items"]))
+        words = sum(len(p.split()) for _h, p in grp["items"])
+        share = words / float(total)
+        # REPETITION is the defect, so the section count is the trigger and the share is reported
+        # alongside it. Firing on share alone flagged a clinical-efficacy comparison and an
+        # insurance-concierge description in two sections apiece — neither a constraint, and both a
+        # body-and-FAQ pair, which is what an FAQ is for. A constraint that is long in ONE place is
+        # verbosity, a different complaint with a different fix.
+        if len(heads) < _CONSTRAINT_SECTIONS:
+            continue
+        hits.append({"check": "repeated-constraint",
+                     "detail": f"the same constraint is stated in {len(heads)} sections "
+                               f"({words} words, {share * 100:.0f}% of the article): "
+                               + " · ".join(h[:34] for h in heads[:4])})
+        if len(hits) >= cap:
+            break
+    return hits
+
+
+# An article whose QUESTION is the rule may spend the page on it. Shape-based: the title asks about
+# legality, eligibility or compliance. #130 "Is Compounded Tirzepatide Legit?" gives 22% of itself to
+# regulatory text and that is the article working, not failing.
+_RULE_TOPIC_TITLE_RE = re.compile(
+    r"\b(?:legal|legit|legitimate|lawful|allowed|permitted|prohibited|banned|compliance|compliant|"
+    r"regulat\w+|rules?|law|laws|eligib\w+|qualif\w+|approved|approval|covered|coverage|"
+    r"licen[sc]\w+|permit\w*|safe\b|risks?)\b", re.I)
+# Measured over 217 stored articles: median 3% of the page is rule-or-caveat text, p75 9%, p90 15%,
+# p95 18%. Past a fifth of the article it has stopped being context and become the subject.
+_CONSTRAINT_BLOAT_SHARE = float(os.environ.get("BLOG_CONSTRAINT_BLOAT", "0.20"))
+
+
+def detect_constraint_bloat(body, title=""):
+    """A page that is mostly caveat.
+
+    Separate from `detect_repeated_constraint`: that one is about saying ONE thing repeatedly, this
+    one about how much of the page is rule text at all. A price article that spends a fifth of itself
+    on what is and is not permitted has answered a question nobody asked — and the reader who came
+    for the price has to wade through it."""
+    passages = _constraint_passages(body)
+    if not passages:
+        return []
+    head = title or next((t for _ln, _lvl, t in _headings(body)), "")
+    if _RULE_TOPIC_TITLE_RE.search(head or ""):
+        return []
+    total = len(re.sub(r"\s+", " ", _prose(body)).split()) or 1
+    words = sum(len(p.split()) for _h, p, _t in passages)
+    share = words / float(total)
+    if share < _CONSTRAINT_BLOAT_SHARE:
+        return []
+    return [{"check": "constraint-bloat",
+             "detail": f"{share * 100:.0f}% of the article is rule or caveat text "
+                       f"({words} of {total} words, {len(passages)} passages) — the median article "
+                       f"gives it 3%"}]
+
+
 def body_damage(body):
     """Every mutilation detector at once. The removal passes call this BEFORE and AFTER a removal:
     a removal that raises the count is widened to the whole paragraph, or refused. Cheap, no
@@ -478,7 +639,8 @@ def body_damage(body):
     return (detect_blank_source_cells(body) + detect_stranded_reference(body)
             + detect_broken_join(body) + detect_duplicated_paragraph(body)
             + detect_repeated_sentence(body) + detect_stub_answer(body)
-            + detect_trailing_orphan(body))
+            + detect_trailing_orphan(body) + detect_repeated_constraint(body)
+            + detect_constraint_bloat(body))
 
 
 # ── FU252: what the REWORDING changed about what the article ASSERTS ─────────────────────────────

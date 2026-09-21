@@ -13359,7 +13359,8 @@ async function renderBlogs(c) {
                 <option value="linkedin">💼 Has LinkedIn post</option>
                 <option value="li_article">📄 Has LinkedIn article</option>
                 <option value="youtube">▶ Has YouTube package</option>
-                <option value="imported">⬆ Imported</option>
+                <option value="imported">⬆ Imported (the whole blog)</option>
+                <option value="import_version">⬆ Has an imported version attached</option>
                 <option value="published">✅ Published somewhere</option>
                 <option value="unpublished">○ Not published yet</option>
             </select>
@@ -13415,6 +13416,7 @@ function _blogRow(b) {
         _asset(+b.has_linkedin, 'in', 'LinkedIn post'),
         _asset(+b.has_li_article, '📄', 'LinkedIn article'),
         _asset(+b.has_youtube, '▶', 'YouTube package'),
+        _asset(+b.has_import, '⬆', 'Imported version attached'),   // FU250
     ].join(' ');
     const busy = _blogBusy.get(String(b.id));
     const pubbed = (b.platforms || []).some(p => p.status === 'published');
@@ -14775,6 +14777,55 @@ async function openBlog(id) {
         if (m.at) bits.push(String(m.at).slice(0, 10));
         return _blogEsc(bits.join(' · ') || 'generated');
     };
+    // FU250 — the IMPORTED version card: a second body of this same blog (the client's edited copy,
+    // the version that went live, a draft written elsewhere), with its own watermark-free rewrite.
+    // Kept on the blog rather than imported as a separate row, so one piece of work stays one row
+    // with one publish state.
+    const _impMeta = (b.imported_meta && typeof b.imported_meta === 'object') ? b.imported_meta : {};
+    const _impHas = !!(b.imported_body || '').trim();
+    const _impLine = _impHas
+        ? '<div class="text-xs" style="color:#c4b5fd">' + _blogEsc(_impMeta.name || 'uploaded')
+          + (_impMeta.format ? ' · ' + _blogEsc(_impMeta.format) : '')
+          + (_impMeta.chars ? ' · ' + _impMeta.chars + ' chars' : '')
+          + (_impMeta.labels_bolded ? ' · ' + _impMeta.labels_bolded + ' label(s) bolded' : '')
+          + (_impMeta.at ? ' · ' + _blogEsc(String(_impMeta.at).slice(0, 10)) : '') + '</div>'
+        : '<div class="text-xs text-gray-500">No imported version yet. Upload the copy that actually shipped — or paste it — and the watermark-free pass can run on that instead of the generated body.</div>';
+    const _impCard = `
+            <div class="card p-2" style="background:#160f1e;border:1px solid #6d28d9">
+                <div class="flex items-center justify-between mb-1">
+                    <label class="text-xs font-bold" style="color:#c4b5fd">Imported version (a copy of THIS blog written or edited elsewhere)</label>
+                    <div class="flex items-center gap-1">
+                        <input type="file" id="blog-e-imp-file" accept=".html,.htm,.docx,.md,.markdown,.txt" style="display:none" onchange="blogImportVersion(${id})">
+                        <button class="btn btn-sm" style="background:#5b21b6;color:#ede9fe" onclick="document.getElementById('blog-e-imp-file').click()" title="Upload the client's edited copy, the version that went live, or a draft written elsewhere (HTML / .docx / Markdown / text). The generated blog above is never touched.">⬆ Upload file</button>
+                        <button class="btn btn-sm btn-secondary" onclick="blogImportVersionPaste(${id})" title="Paste the article text instead of uploading a file">📋 Paste</button>
+                        ${_impHas ? `<button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="blogImportVersionRemove(${id})" title="Drop the imported version and its rewrite. The generated blog is untouched.">Remove</button>` : ''}
+                    </div>
+                </div>
+                ${_impLine}
+                ${_impHas ? `
+                <textarea id="blog-e-imp" rows="14">${_blogEsc(b.imported_body || '')}</textarea>
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-imp')" title="Copy as clean plain text">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html&amp;use=imported" target="_blank">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md&amp;use=imported">⬇ Download MD</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc&amp;use=imported" title="Word-compatible .doc — opens as a Google Doc in Drive">⬇ Google Doc</a>
+                </div>
+                <div class="flex items-center justify-between mt-2 mb-1" style="border-top:1px solid #4c1d95;padding-top:.4rem">
+                    <label class="text-xs font-bold" style="color:#c4b5fd">Watermark-free version OF THE IMPORT</label>
+                    <div class="flex items-center gap-1">
+                        <button class="btn btn-sm" style="background:#5b21b6;color:#ede9fe" onclick="blogGenRewrite(${id}, 'imported')" title="Re-compose the IMPORTED body on your self-hosted open model. Same fact and price gates as the blog's own rewrite; the heading is left exactly as uploaded.">✍ Generate / Regenerate</button>
+                        <button class="btn btn-sm btn-secondary" onclick="blogVerify(${id}, 'imported', 'rewritten')" title="Claude re-reads this rewrite — contradictions, price and brand inconsistencies, typos — then Qwen writes the corrections.">✓ Verify &amp; fix</button>
+                    </div>
+                </div>
+                <div class="text-xs" style="color:#a78bfa">${_rwMeta('imported')}</div>
+                <textarea id="blog-e-imp-rw" rows="10" placeholder="Click Generate to rewrite the imported version…">${_blogEsc(b.imported_rewritten || '')}</textarea>
+                <div class="flex gap-2 mt-1">
+                    <button class="btn btn-sm btn-secondary" onclick="blogCopyPlain('blog-e-imp-rw')">Copy (plain text)</button>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=html&amp;use=imported_rewritten" target="_blank">Open formatted</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=md&amp;use=imported_rewritten">⬇ Download MD</a>
+                    <a class="btn btn-sm btn-secondary" href="/api/blogs/${id}/export?format=gdoc&amp;use=imported_rewritten" title="Word-compatible .doc — opens as a Google Doc in Drive">⬇ Google Doc</a>
+                </div>` : ''}
+            </div>`;
     const _rwStatus = b.rewritten_body
         ? '<div class="text-xs" style="color:' + (_rwGood ? '#4ade80' : '#fbbf24') + '">verbatim overlap '
           + (_rwOv != null ? _rwOv + '%' : '?') + (_rwGood ? ' ✓ watermark replaced' : ' ⚠ high overlap — watermark may remain')
@@ -15026,6 +15077,7 @@ async function openBlog(id) {
                     <button class="btn btn-sm btn-secondary" onclick="blogUploadGdoc(${id}, 'blog', 'rewritten')" title="FU182: create a Google Doc of the WATERMARK-FREE version in your Drive folder (named '… (watermark-free)' so it is distinguishable from the original)">⬆ Drive</button>
                 </div>
             </div>
+            ${_impCard}
             <div class="card p-2" style="background:#0f1a12;border:1px solid #14532d">
                 <div class="flex items-center justify-between mb-1">
                     <label class="text-xs font-bold" style="color:#4ade80">YouTube video (script · description · captions — same facts as the blog)</label>
@@ -15148,6 +15200,10 @@ async function blogSave(id) {
             // FU216: only sent when the modal's checkbox is showing (never flips a blog by accident)
             ...(document.getElementById('blog-e-guide') ? { guide: !!document.getElementById('blog-e-guide').checked } : {}),
             rewritten_body: _v('blog-e-rw'),   // FU154: watermark-free version (manual edits persist)
+            // FU250: only sent while the imported card's fields exist, so a blog with no import is
+            // never blanked by a save.
+            ...(document.getElementById('blog-e-imp')
+                ? { imported_body: _v('blog-e-imp'), imported_rewritten: _v('blog-e-imp-rw') } : {}),
             // FU208: the verified version — only sent when its card is showing (never blanks it)
             ...(document.getElementById('blog-e-vf') ? { verified_body: _v('blog-e-vf'),
                 verified_meta_description: _v('blog-e-vf-meta') } : {}),
@@ -15218,6 +15274,58 @@ function blogGenLinkedInArticle(id) {
     }, 'Generating LinkedIn article', (tid) => _blogBusyStart(id, 'LinkedIn article', tid));
 }
 
+// ── FU250: attach an imported version to THIS blog ──────────────────────────────────────────────
+async function blogImportVersion(id) {
+    const inp = document.getElementById('blog-e-imp-file');
+    const file = inp?.files?.[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    toast('Reading ' + file.name + '…', 'info');
+    try {
+        const r = await fetch('/api/blogs/' + id + '/import-version', { method: 'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok) { toast(j.error || 'Could not read that file', 'error'); return; }
+        toast('Imported version attached — ' + ((j.imported_meta || {}).chars || 0) + ' chars', 'success');
+        openBlog(id);
+        blogReload();
+    } catch (e) { toast('Upload failed', 'error'); }
+    finally { if (inp) inp.value = ''; }   // so re-picking the SAME file fires change again
+}
+
+function blogImportVersionPaste(id) {
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Paste the imported version</h3>
+        <p class="text-xs text-gray-400 mb-2">The copy of this blog that was written or edited elsewhere. Markdown or plain text — headings and lists are kept. The generated blog is not touched.</p>
+        <textarea id="blog-imp-paste" rows="14" placeholder="# Title&#10;&#10;The article text…"></textarea>
+        <div class="flex gap-2 mt-3 justify-end">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="_blogImportVersionPasteSubmit(${id})">Attach</button>
+        </div>`);
+}
+
+async function _blogImportVersionPasteSubmit(id) {
+    const text = (document.getElementById('blog-imp-paste')?.value || '').trim();
+    if (!text) { toast('Paste the article text first', 'error'); return; }
+    try {
+        await api('/api/blogs/' + id + '/import-version', { method: 'POST', body: { text } });
+        closeModal();
+        toast('Imported version attached', 'success');
+        openBlog(id);
+        blogReload();
+    } catch (e) {}
+}
+
+async function blogImportVersionRemove(id) {
+    if (!confirm('Remove the imported version and its rewrite? The generated blog stays exactly as it is.')) return;
+    try {
+        await api('/api/blogs/' + id + '/import-version', { method: 'DELETE' });
+        toast('Imported version removed', 'info');
+        openBlog(id);
+        blogReload();
+    } catch (e) {}
+}
+
 // FU154 — produce a watermark-free rewrite of this blog (original kept; stored as rewritten_body).
 // FU173: is the self-hosted model LOADED? /api/settings/writer/test probes the endpoint (and, usefully,
 // pinging it is exactly what wakes a scaled-to-zero Modal container), so the same call powers both the
@@ -15271,7 +15379,8 @@ function writerWarmUp() {
 function blogGenRewrite(id, surface) {
     const _sf = surface || 'blog';
     const _lbl = _sf === 'linkedin_post' ? 'LinkedIn post'
-        : (_sf === 'linkedin_article' ? 'LinkedIn article' : 'blog');
+        : (_sf === 'linkedin_article' ? 'LinkedIn article'
+        : (_sf === 'imported' ? 'imported version' : 'blog'));   // FU250
     runTask(`/api/blogs/${id}/rewrite`, { surface: _sf }, (res) => {
         _blogBusyEnd(id);
         openBlog(id);

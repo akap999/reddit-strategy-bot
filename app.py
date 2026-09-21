@@ -3500,6 +3500,83 @@ def api_blog_import():
                                  ("title", "meta_title", "meta_description", "keywords")}})
 
 
+@app.route("/api/blogs/<int:blog_id>/import-version", methods=["POST"])
+def api_blog_import_version(blog_id):
+    """FU250 — attach an IMPORTED version to an EXISTING blog.
+
+    `/api/blogs/import` makes a whole new blog out of a file. This is the other half: the blog is
+    already here, and what arrived is another copy of it — the client's edited draft, the version
+    that actually went live, a rewrite someone did elsewhere. Storing that as a NEW blog splits one
+    piece of work across two rows, each with its own publish state and its own rewrite; storing it
+    beside the generated body keeps them one thing, and lets the watermark-free pass run on
+    whichever body is the real one.
+
+    Multipart `file` (HTML / .doc / .docx / Markdown), or `text` for a paste. The generated body is
+    never touched. Re-uploading replaces the imported version — and drops its rewrite with it,
+    because a rewrite of a body that no longer exists is worse than none."""
+    from generators.blog_import import import_blog_file, BlogImportError
+
+    f = request.files.get("file")
+    pasted = ((request.form.get("text") or "") if f is None else "") \
+        or ((request.get_json(silent=True) or {}).get("text") or "")
+    pasted = pasted.strip()
+    if not f and not pasted:
+        return jsonify({"error": "upload a file or paste the text"}), 400
+    try:
+        raw, name = (f.read(), f.filename or "") if f else (pasted.encode("utf-8"), "pasted.md")
+        detected = import_blog_file(raw, name)
+    except BlogImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:                     # a malformed file must not 500
+        return jsonify({"error": f"could not read that file ({e})"}), 400
+    body = (detected.get("body_markdown") or "").strip()
+    if not body:
+        return jsonify({"error": "that file has no article text in it"}), 400
+
+    db = get_db()
+    try:
+        blog = db.get_blog(blog_id)
+        if not blog:
+            return jsonify({"error": "blog not found"}), 404
+        # FU221: an outside file carries its lead-in labels without our bold, so its sections do not
+        # read — or rewrite — like a generated one. The words are the author's and never change.
+        _n_lab = 0
+        try:
+            from generators.blog_gen import BlogGenerator
+            _gen = BlogGenerator(ClaudeClient(ANTHROPIC_API_KEY
+                                              or os.environ.get("ANTHROPIC_API_KEY", "")), db)
+            body, _n_lab = _gen.mark_bold_labels(body, blog.get("seed") or "",
+                                                 db.get_brand(blog.get("brand_id")) or {})
+        except Exception as _e:
+            print(f"[blog_import] label pass skipped ({_e})", flush=True)
+        if not _n_lab:
+            from generators.blog_gen import promote_bold_labels
+            body, _n_lab = promote_bold_labels(body)
+        import time as _t
+        meta = {"name": name, "format": detected.get("format") or "", "chars": len(body),
+                "labels_bolded": _n_lab, "at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                "title": detected.get("title") or ""}
+        db.update_blog(blog_id, imported_body=body, imported_meta=meta, imported_rewritten="")
+        print(f"[blog_import] blog #{blog_id} imported version from {name!r} "
+              f"({meta['format']}, {meta['chars']} chars, {_n_lab} label(s) bolded)", flush=True)
+        return jsonify(db.get_blog(blog_id))
+    finally:
+        db.close()
+
+
+@app.route("/api/blogs/<int:blog_id>/import-version", methods=["DELETE"])
+def api_blog_import_version_delete(blog_id):
+    """Drop the imported version and its rewrite. The generated blog is untouched."""
+    db = get_db()
+    try:
+        if not db.get_blog(blog_id):
+            return jsonify({"error": "blog not found"}), 404
+        db.update_blog(blog_id, imported_body="", imported_rewritten="", imported_meta={})
+        return jsonify(db.get_blog(blog_id))
+    finally:
+        db.close()
+
+
 @app.route("/api/blogs/generate", methods=["POST"])
 def api_blog_generate():
     """Generate a blog (article → verify → LinkedIn) in the background. Returns a
@@ -4076,6 +4153,10 @@ def api_blog_verify(blog_id):
         "blog": ("body_markdown", "rewritten_body", True),
         "linkedin_post": ("linkedin_text", "linkedin_rewritten", False),
         "linkedin_article": ("linkedin_article", "linkedin_article_rewritten", False),
+        # FU250 — the imported version gets the same treatment as the generated one. The H1 is NOT
+        # re-pinned to the seed: that guard keeps OUR heading on the target query, and this body's
+        # heading is the operator's, so re-pinning it would edit what they uploaded.
+        "imported": ("imported_body", "imported_rewritten", False),
     }
     _data = request.get_json(silent=True) or {}
     _surface = _data.get("surface") or "blog"
@@ -4669,6 +4750,7 @@ def api_blog_patch(blog_id):
                "rewritten_body",
                "linkedin_rewritten", "linkedin_article_rewritten",   # FU179
                "verified_body", "verified_meta_description",         # FU208
+               "imported_body", "imported_rewritten",                # FU250
                "guide")                                              # FU216: flip, then regenerate
               if k in data}
     if "guide" in fields:
@@ -5373,6 +5455,13 @@ def api_blog_export(blog_id):
     _vf = _use == "verified" and bool((blog.get("verified_body") or "").strip())   # FU208
     if _use == "rewritten" and (blog.get("rewritten_body") or "").strip():
         body = blog["rewritten_body"]
+    # FU250: the imported version and its own watermark-free rewrite export like any other body —
+    # same renderer, same schema, same download — so whichever copy is the real one is the one you
+    # can hand over. Each falls back to the generated body when it does not exist.
+    elif _use == "imported" and (blog.get("imported_body") or "").strip():
+        body = blog["imported_body"]
+    elif _use == "imported_rewritten" and (blog.get("imported_rewritten") or "").strip():
+        body = blog["imported_rewritten"]
     elif _vf:
         body = blog["verified_body"]
     else:
@@ -7750,6 +7839,10 @@ def api_blog_rewrite(blog_id):
         "blog": ("body_markdown", "rewritten_body", True),
         "linkedin_post": ("linkedin_text", "linkedin_rewritten", False),
         "linkedin_article": ("linkedin_article", "linkedin_article_rewritten", False),
+        # FU250 — the imported version gets the same treatment as the generated one. The H1 is NOT
+        # re-pinned to the seed: that guard keeps OUR heading on the target query, and this body's
+        # heading is the operator's, so re-pinning it would edit what they uploaded.
+        "imported": ("imported_body", "imported_rewritten", False),
     }
     _surface = (request.get_json(silent=True) or {}).get("surface") or "blog"
     if _surface not in _SURFACES:

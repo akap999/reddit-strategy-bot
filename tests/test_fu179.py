@@ -192,11 +192,18 @@ More detail here: https://acme.com/guide
     assert "https://acme.com/guide" in final and "#AgencyLife" in final
 
 
-def test_surface_table_covers_exactly_the_three_surfaces():
-    assert set(_WRITER_SURFACES) == {"blog", "linkedin_post", "linkedin_article"}
+def test_every_surface_has_the_same_shape():
+    assert set(_WRITER_SURFACES) == {"blog", "linkedin_post", "linkedin_article", "imported"}
     for k, v in _WRITER_SURFACES.items():
         assert set(v) == {"label", "band", "preserve", "plain", "urls", "tags"}
     assert _WRITER_SURFACES["blog"]["preserve"] == ()      # blog uses the inline bullets, unchanged
+
+
+def test_an_imported_body_rewrites_exactly_like_a_generated_one():
+    """FU250 — the imported version is a whole article, so it gets the article's profile rather than
+    a fourth one. Identical by value, so nothing about the strip depends on where the text came
+    from, and there is no second prompt to keep in step with the first."""
+    assert _WRITER_SURFACES["imported"] == _WRITER_SURFACES["blog"]
 
 
 # ── storage + wiring: the two bodies get columns, the telemetry rides in one JSON blob ────────────

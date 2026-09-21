@@ -1211,6 +1211,10 @@ class Database:
             blog["pending_state"] = json.loads(blog.get("pending_state") or "{}")
         except (json.JSONDecodeError, TypeError):
             blog["pending_state"] = {}
+        try:   # FU250: what the imported version was and where it came from
+            blog["imported_meta"] = json.loads(blog.get("imported_meta") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            blog["imported_meta"] = {}
         try:   # FU80: YouTube package structured extras (chapters/shot_list/thumbnail/cta/variant)
             blog["youtube_meta"] = json.loads(blog.get("youtube_meta") or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -1260,6 +1264,7 @@ class Database:
              "(CASE WHEN LENGTH(COALESCE(b.linkedin_text,'')) > 0 THEN 1 ELSE 0 END) AS has_linkedin, "
              "(CASE WHEN LENGTH(COALESCE(b.linkedin_article,'')) > 0 THEN 1 ELSE 0 END) AS has_li_article, "
              "(CASE WHEN LENGTH(COALESCE(b.youtube_script,'')) > 0 THEN 1 ELSE 0 END) AS has_youtube, "
+             "(CASE WHEN LENGTH(COALESCE(b.imported_body,'')) > 0 THEN 1 ELSE 0 END) AS has_import, "
              # FU207: a paused REGENERATE leaves the blog's status alone (a published blog stays
              # published), so the list cannot find it by status — flag it from the checkpoint instead.
              "(CASE WHEN b.pending_state LIKE '%\"mode\": \"regenerate\"%' THEN 1 ELSE 0 END) "
@@ -1279,6 +1284,9 @@ class Database:
             "li_article": "LENGTH(COALESCE(b.linkedin_article,'')) > 0",
             "youtube":    "LENGTH(COALESCE(b.youtube_script,'')) > 0",
             "imported":   "b.prompt_version = 'imported'",
+            # FU250: a GENERATED blog that has an imported version attached — a different question
+            # from "this whole blog came from a file", which is what `imported` above asks.
+            "import_version": "LENGTH(COALESCE(b.imported_body,'')) > 0",
             "published":  "EXISTS (SELECT 1 FROM blog_platforms bp "
                           "WHERE bp.blog_id = b.id AND bp.status = 'published')",
             "unpublished": "NOT EXISTS (SELECT 1 FROM blog_platforms bp "
@@ -1331,6 +1339,7 @@ class Database:
                    "warnings",          # FU205 (R2): the structured warning list behind the toast
                    "verified_body", "verified_meta_description", "verified_at",   # FU208
                    "verify_session", "verified_report", "verified_cost",          # FU208
+                   "imported_body", "imported_rewritten", "imported_meta",   # FU250
                    "guide"}             # FU216: a generic how-to guide — no comparison, no service area
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
@@ -1344,7 +1353,7 @@ class Database:
             if k in ("keywords", "claims_flagged", "source_urls") and not isinstance(v, str):
                 v = json.dumps(v or [])
             elif k in ("pending_state", "youtube_meta", "quality_report",
-                       "rewrites_meta", "verify_report",
+                       "rewrites_meta", "verify_report", "imported_meta",
                        "verify_session", "verified_report") and not isinstance(v, str):
                 v = json.dumps(v or {})   # FU79/FU80/FU151/FU179/FU205: JSON dict
             elif k == "warnings" and not isinstance(v, str):
@@ -2589,6 +2598,15 @@ class Database:
                     "verify_session", "verified_report"):
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
+                self.conn.commit()
+        # FU250 — an IMPORTED version attached to an EXISTING blog. Distinct from `prompt_version
+        # = 'imported'`, which says the whole blog came from a file: this is a second body living
+        # beside a generated one — the client's edited copy, the version that actually went live, a
+        # draft written elsewhere — with its own watermark-free rewrite, because the thing you hand
+        # back is whichever body is real, not whichever one we happened to write.
+        for _c in ("imported_body", "imported_rewritten", "imported_meta"):
+            if _c not in blog_cols:
+                self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {_c} TEXT")
                 self.conn.commit()
         # FU248 — a STABLE serial for the list. Deliberately not the row's position: a position
         # changes the moment you filter or delete, so "fix blog 12" would mean a different blog

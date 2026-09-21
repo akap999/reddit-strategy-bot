@@ -175,6 +175,12 @@ def _answer_evidence_brief(seed, geo=""):
 _WRITER_SURFACES = {
     "blog": {"label": "article", "band": (0.6, 1.4), "preserve": (), "plain": False,
              "urls": False, "tags": False},
+    # FU250 — an imported version is the same shape as the article: a whole blog body, possibly
+    # carrying [S#] and a Sources list if it started here. Deliberately the SAME profile rather than
+    # a new one, so the rewrite prompt for an imported body is byte-identical to the generated
+    # body's and nothing about the strip changes with where the text came from.
+    "imported": {"label": "article", "band": (0.6, 1.4), "preserve": (), "plain": False,
+                 "urls": False, "tags": False},
     "linkedin_post": {
         "label": "LinkedIn post", "band": (0.85, 1.15), "plain": True, "urls": True, "tags": True,
         "preserve": (

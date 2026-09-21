@@ -35,6 +35,10 @@ MARKDOWN_FIELDS = frozenset({
     "rewritten_body",     # FU154 watermark-free version — shipped to clients, same guarantees
     "body_pre_verify",    # FU202 snapshot; scrubbed so the "before" view isn't worse than the after
     "verified_body",      # FU208 operator-approved verified version — hand edits get the same guards
+    # FU250: an imported version and its rewrite are whole articles that get handed to a client, so
+    # they get exactly what the generated body gets. An outside file is the likeliest source of a
+    # curly quote or an em-dash in the whole system.
+    "imported_body", "imported_rewritten",
 })
 
 # PROSE surfaces: plain text or light markdown that must NOT be restructured. A LinkedIn post has no

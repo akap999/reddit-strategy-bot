@@ -533,3 +533,43 @@ def test_operator_entered_prices_survive_the_price_source_check(gen):
     ok = [{"url": "https://www.wegovy.com/coverage-and-savings/cost-and-coverage.html",
            "text": "x" * 800}]
     assert gen._price_source_check(body, ok, PETERMD)[1] == ""
+
+
+# ── 8. a rung that cannot reach a host must not be paid for twice ────────────────────────────────
+def test_the_proxy_refusing_a_tunnel_is_learned_not_repaid(monkeypatch):
+    """Measured on Railway: IPRoyal answers `CONNECT www.fda.gov:443` with "403 Forbidden", and the
+    same for cdc.gov, consumerfinance.gov, nih.gov and pubmed — while reddit.com and an ordinary
+    brand site tunnel fine. Residential providers blocklist government destinations as an abuse
+    control, so it is permanent. Every .gov source was paying a full connect timeout for a rung that
+    CANNOT serve it. Learned from the refusal, never from a hard-coded TLD."""
+    seen = []
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=True, proxies=None):
+        seen.append(bool(proxies))
+        if proxies:
+            raise BE.requests.exceptions.ProxyError(
+                "Unable to connect to proxy", OSError("Tunnel connection failed: 403 Forbidden"))
+        return _Resp(403, "", url=url)
+
+    monkeypatch.setattr(BE.requests, "get", fake_get)
+    monkeypatch.setattr(BE.time, "sleep", lambda s: None)
+    monkeypatch.setenv("REDDIT_HTTP_PROXY", "http://user:pw@geo.example:12321")
+    BE.forget_walled_domains()
+
+    assert BE._fetch_page("https://www.agency.gov/a", retries=0)[1] == "blocked"
+    assert any(seen), "the first page still tries the rung — that is how the refusal is learned"
+    before = len(seen)
+    assert BE._fetch_page("https://www.agency.gov/b", retries=0)[1] == "blocked"
+    assert not any(seen[before:]), "a later page on that host must not pay the tunnel timeout again"
+    # …and a DIFFERENT host is unaffected: the refusal is per host, not a global switch-off
+    n = len(seen)
+    BE._fetch_page("https://shop.example/a", retries=0)
+    assert any(seen[n:]), "an unrelated host still gets the residential rung"
+
+
+def test_a_proxy_refusal_is_not_evidence_that_the_PAGE_is_walled():
+    """The proxy said no; the site said nothing. A refusal must not change the verdict the direct
+    rung reached, or a readable page behind a refused tunnel would be recorded as blocked."""
+    assert BE._PROXY_REFUSED_RE.search("Unable to connect to proxy")
+    assert BE._PROXY_REFUSED_RE.search("Tunnel connection failed: 403 Forbidden")
+    assert not BE._PROXY_REFUSED_RE.search("HTTPSConnectionPool: Read timed out")

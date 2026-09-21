@@ -218,9 +218,40 @@ def _mark_walled(url):
               f"fallback (no direct attempt, no residential GB)", flush=True)
 
 
+# FU251 — hosts the residential PROXY itself refuses to tunnel to. Measured on Railway: IPRoyal
+# answers `CONNECT www.fda.gov:443` with "403 Forbidden", and the same for cdc.gov,
+# consumerfinance.gov, nih.gov and pubmed.ncbi.nlm.nih.gov, while reddit.com, example.com and an
+# ordinary brand site tunnel fine. Residential providers blocklist government destinations as an
+# abuse control, so this is permanent, not an outage and not the GB balance.
+#
+# It matters because .gov is the authority class for every YMYL vertical: each of those sources was
+# paying a full connect timeout for a rung that CANNOT serve it, and logging "residential fetch
+# failed" as though something had broken. Learned per host from the refusal itself rather than by
+# hard-coding a TLD, so it follows whatever the provider actually blocks.
+_PROXY_REFUSED = set()
+_PROXY_REFUSED_RE = re.compile(r"tunnel connection failed|unable to connect to proxy", re.I)
+
+
+def _proxy_refuses(url):
+    return _host(url) in _PROXY_REFUSED
+
+
+def _note_proxy_refusal(url, err):
+    """Remember a host the proxy will not tunnel to, so later pages on it skip the rung."""
+    if not _PROXY_REFUSED_RE.search(str(err or "")):
+        return False
+    h = _host(url)
+    if h and h not in _PROXY_REFUSED:
+        _PROXY_REFUSED.add(h)
+        print(f"[brand_enrichment] the residential proxy refuses to tunnel to {h} — later pages on "
+              f"it skip that rung (it cannot serve them)", flush=True)
+    return True
+
+
 def forget_walled_domains():
     """Test/ops hook: start again with no assumptions about who walls us."""
     _WALL_STRIKES.clear()
+    _PROXY_REFUSED.clear()
     with _WALLED_LOCK:
         _WALLED.clear()
 
@@ -307,6 +338,8 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
     # ~0.1-0.5 MB and enrichment is rare, so the spend is negligible). The FU110
     # web-search grounding remains the last resort when even this fails.
     proxy = os.environ.get("REDDIT_HTTP_PROXY", "").strip()
+    if proxy and _proxy_refuses(url):
+        proxy = ""        # FU251: this rung cannot reach this host — do not pay its timeout again
     # FU241: a host that has already walled us once gets this one extra DIRECT attempt (NCBI's block
     # is rate-based — the same page reads fine minutes later) but never a second metered one. The
     # residential rung is the expensive rung, and a host that walls us twice is genuinely walled.
@@ -353,7 +386,13 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
                 print(f"[brand_enrichment] residential fetch got {resp.status_code} for {url}",
                       flush=True)
         except requests.exceptions.RequestException as e:
-            print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
+            if _note_proxy_refusal(url, e):
+                # The PROXY refused the tunnel; the site said nothing. That is not evidence the page
+                # is walled, so the reason the direct rung reached stands and the ladder goes on to
+                # the web fetch exactly as it would have.
+                pass
+            else:
+                print(f"[brand_enrichment] residential fetch failed for {url}: {e}", flush=True)
     if reason == "blocked":
         _mark_walled(url)     # the whole ladder failed on a wall — do not pay for it again this run
     elif reason != "not-found" and _soft_walled(url):

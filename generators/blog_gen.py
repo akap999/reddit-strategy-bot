@@ -8997,9 +8997,13 @@ Rules:
         r"(?<!\bin )\b(?:any|all|either|each)\s+of\s+(?:these|them|those|the\s+[\w-]+\s+(?:above|here|below))\b"
         r"|\bevery\s+(?:one\s+of\s+)?(?:these|option|provider|agency|firm|platform)s?\b"
         r"|\bany\s+of\s+the\s+(?:above|options|providers|agencies|firms|platforms|tools)\b", re.I)
+    # A conditioned fit, in ANY wording. The first version listed only "is the better fit if", so
+    # "are solid options if your focus is traditional lead generation" - the same concession, moved
+    # into the opening and phrased more softly - went straight through.
     _COMP_WIN_RE = re.compile(
-        r"\b(?:is|are)\s+the\s+(?:better|stronger|right)\s+(?:fit|choice|pick|match)\b"
-        r"|\bfits?\s+best\b|\bis\s+the\s+stronger\s+match\b|\bprimary\s+metric\s+is\b", re.I)
+        r"\b(?:fits?|option|options|choice|choices|pick|picks|match|bet|suited|considering|"
+        r"alternative|alternatives)\b[^.]{0,60}?\b(?:if|when|where)\b"
+        r"|\bprimary\s+metric\s+is\b|\bfits?\s+best\b", re.I)
 
     # FU236 — a credential word. Attached to THIS article's geography and a competitor's name, it is
     # a local-presence claim, and that is the claim most worth checking against the blog.
@@ -9078,6 +9082,57 @@ Rules:
         return ("geo-credential: " + "; ".join(hits)
                 + f" - a service-area or location page is not a head office and a company-wide figure "
                   f"is not a {g} one; state only what the article states")
+
+    # FU237 — a sentence that opens on a subordinating conjunction and never reaches a main clause.
+    _SUBORDINATOR_RE = re.compile(
+        r"^\s*(?:if|when|where|while|because|since|although|though|unless|whereas|whenever)\b", re.I)
+    # a finite verb: a copula/auxiliary/modal, or a lexical verb's -s / -ed form
+    _FINITE_VERB_RE = re.compile(
+        r"\b(?:is|are|was|were|be|been|being|am|has|have|had|will|would|shall|should|can|could|"
+        r"may|might|must|do|does|did|gets?|makes?|turns?|comes?|goes?)\b|\b\w{3,}(?:s|ed)\b", re.I)
+    _RELATIVE_TAIL_RE = re.compile(r"\b(?:that|which|who|whom|whose)\b.*$", re.I | re.S)
+
+    @classmethod
+    def _fragment_note(cls, script):
+        """FU237 — a spoken sentence with no main clause.
+
+        The reviewed close read: "If it is AI citation presence and the Google authority that feeds
+        it, the kind that turns an AI answer into a contractor inquiry." Everything after the comma is
+        a noun phrase with a relative clause hanging off it; there is no main clause, and the sentence
+        that follows ("That is what Jolly Search is built for.") is its stranded other half. Spoken on
+        camera and printed in the captions.
+
+        NARROW ON PURPOSE. A first draft of this check fired on five of thirteen real bodies, all of
+        them correct sentences: "…, that is the condition where X fits" (a demonstrative subject read
+        as a relative clause), "…, confirm that …" (an imperative main clause), "…, you don't exist in
+        that answer" (a contraction), and a subordinate clause carrying its own commas. So all four
+        conditions must hold: the sentence opens on a subordinator; the tail after its LAST comma
+        opens on an article, which is what a dangling noun phrase looks like and what a main clause
+        almost never does; that tail carries no finite verb once a trailing relative clause is
+        stripped; and the sentence that follows opens on a demonstrative - its stranded other half.
+        Warning only."""
+        hits = []
+        sents = cls._spoken_text(script)
+        for i, sent in enumerate(sents):
+            if not cls._SUBORDINATOR_RE.match(sent) or "," not in sent:
+                continue
+            tail = sent.rsplit(",", 1)[1].strip()
+            if not re.match(r"(?i)^(?:the|a|an)\b", tail):
+                continue                       # a main clause opens on its subject, not an article
+            core = cls._RELATIVE_TAIL_RE.sub("", tail)
+            if cls._FINITE_VERB_RE.search(core):
+                continue
+            nxt = sents[i + 1] if i + 1 < len(sents) else ""
+            if not re.match(r"(?i)^(?:that|this|which)\b", nxt):
+                continue                       # no stranded half → not confident enough to say so
+            hits.append(f'"{sent[:90].strip()}" — the sentence after it is its other half '
+                        f'("{nxt[:40].strip()}…")')
+            if len(hits) >= 2:
+                break
+        if not hits:
+            return ""
+        return ("fragment: " + "; ".join(hits)
+                + " - a subordinate clause with no main clause; join the two into one sentence")
 
     @classmethod
     def _publisher_lane_note(cls, script, body_md, name):
@@ -9522,7 +9577,15 @@ SCRIPT (`script_markdown`)
         outcome>, any of these will move it; if it is <our mechanism>, that is {name}." A mechanism is
         the ROUTE to the outcome: say so ("this is how you win the buyers who ask an AI"), and never
         condition a competitor's win on the outcome metric itself ("if your metric is cost per
-        <outcome>" concedes the outcome).
+        <outcome>" concedes the outcome). This holds IN EVERY WORDING, however soft: "X and Y are
+        solid options if your focus is <the outcome>" is the same concession as "X is the better fit
+        if your metric is <the outcome>", and putting it in the OPENING makes it worse, because
+        almost every viewer thinks their focus is the outcome. The one-line summary of the
+        alternatives in the opening splits the field on the SAME axis the trade-offs segment uses -
+        engagement model, vertical depth, purchasing model - never on the outcome.
+      * THE BLANKET CLOSING LINE IS OPTIONAL. "If the gap is <X>, any of these will move it" is worth
+        saying only when it tells the viewer something the per-option fits above have not already
+        said. When they have, CUT it: it adds nothing and reads as a giveaway.
       * {name}'s OWN FIT LINE MUST NAME THE OUTCOME IT PRODUCES. "The gap you need to close is
         <our mechanism>" is a mechanism promise, and a buyer does not buy mechanisms. Say what the
         mechanism produces for them in the same sentence - the enquiries, projects, clients or cases
@@ -9679,7 +9742,8 @@ you MAY assume the description will carry: "{disc}".
                 # FU236 - a local credential invented for a competitor, and the publisher's own lane
                 # promising a mechanism with no outcome attached.
                 self._geo_credential_note(_s, body, name, rgeo),
-                self._publisher_lane_note(_s, body, name)) if x]
+                self._publisher_lane_note(_s, body, name),
+                self._fragment_note(_s)) if x]
             _w = "; ".join(_notes)
             # FU236: score by DEFECTS, not by semicolons. Each note joins its own sub-hits with "; ",
             # so counting semicolons in the joined string conflates "one check with three hits" with
@@ -9709,7 +9773,11 @@ you MAY assume the description will carry: "{disc}".
                 "named a geo-credential: delete that claim - you merged a location page and a "
                 "company-wide figure into a local credential the article never gave that competitor. "
                 f"If it named a publisher-lane: add one clause to {name}'s own fit line saying what "
-                "the mechanism PRODUCES for the buyer, in the buyer's own terms. In particular: the "
+                "the mechanism PRODUCES for the buyer, in the buyer's own terms. If it named an "
+                "outcome-concession in the OPENING: split the alternatives on the same axis the "
+                "trade-offs segment uses - engagement model, vertical depth, purchasing model - not "
+                "on the outcome. If it named a fragment: that sentence has no main clause; join it "
+                "to the sentence beside it. In particular: the "
                 "deciding axis "
                 "is the one the TITLE asks about and you may not narrow it; state NO limit on that "
                 f"axis; state NO bare negative about {name} in any wording; re-frame the blog's "

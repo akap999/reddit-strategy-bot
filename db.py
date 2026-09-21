@@ -1155,14 +1155,17 @@ class Database:
         body_markdown = _s["body_markdown"]
         linkedin_text = _s["linkedin_text"]
         meta_description = _s["meta_description"]
+        # FU248: the next stable serial (mirrors posts.post_number).
+        _bn = self.conn.execute(
+            "SELECT COALESCE(MAX(blog_number), 0) + 1 AS n FROM blogs").fetchone()
         cur = self.conn.execute(
             """INSERT INTO blogs (brand_id, seed, title, meta_description, keywords,
                                   body_markdown, linkedin_text, claims_flagged, source_urls,
                                   research_notes, use_web_search, reddit_url, reddit_status, deep_verify,
                                   include_pricing, status, prompt_version,
                                   author_name, author_title, reviewer_name, reviewer_title,
-                                  disclosure, image_url, gen_cost)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  disclosure, image_url, gen_cost, blog_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (brand_id, seed, title, meta_description,
              json.dumps(keywords or []),
              body_markdown, linkedin_text,
@@ -1177,7 +1180,7 @@ class Database:
              status, prompt_version,
              author_name or "", author_title or "", reviewer_name or "",
              reviewer_title or "", disclosure or "", image_url or "",
-             float(gen_cost or 0)),
+             float(gen_cost or 0), (_bn["n"] if _bn else 1)),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1240,12 +1243,23 @@ class Database:
         blog["platforms"] = [dict(p) for p in prows]
         return blog
 
-    def get_all_blogs(self, brand_id=None, status=None):
+    def get_all_blogs(self, brand_id=None, status=None, has=None):
         """List blogs (newest first) + a compact platforms summary, with optional
-        brand/status filters."""
+        brand/status/`has` filters.
+
+        FU248: the list row also needs to show WHAT EXISTS for each blog without opening it, so the
+        query returns a boolean per derived asset rather than the bodies themselves — a list of 200
+        blogs must not drag every watermark-free rewrite and YouTube script over the wire to draw
+        four icons. `has` filters on those same flags."""
         q = ("SELECT b.id, b.brand_id, b.seed, b.title, b.status, b.created_at, "
              "b.updated_at, b.quality_report, "          # FU151 (D): list-row score chip
+             "b.blog_number, "                           # FU248: the stable serial shown in the list
              "b.prompt_version, "                        # FU183: 'imported' → the list-row origin badge
+             # FU248: what has been generated FOR this blog — flags only, never the bodies.
+             "(CASE WHEN LENGTH(COALESCE(b.rewritten_body,'')) > 0 THEN 1 ELSE 0 END) AS has_rewritten, "
+             "(CASE WHEN LENGTH(COALESCE(b.linkedin_text,'')) > 0 THEN 1 ELSE 0 END) AS has_linkedin, "
+             "(CASE WHEN LENGTH(COALESCE(b.linkedin_article,'')) > 0 THEN 1 ELSE 0 END) AS has_li_article, "
+             "(CASE WHEN LENGTH(COALESCE(b.youtube_script,'')) > 0 THEN 1 ELSE 0 END) AS has_youtube, "
              # FU207: a paused REGENERATE leaves the blog's status alone (a published blog stays
              # published), so the list cannot find it by status — flag it from the checkpoint instead.
              "(CASE WHEN b.pending_state LIKE '%\"mode\": \"regenerate\"%' THEN 1 ELSE 0 END) "
@@ -1257,6 +1271,21 @@ class Database:
             q += " AND b.brand_id IS ?"; params.append(brand_id)
         if status:
             q += " AND b.status = ?"; params.append(status)
+        # FU248 — "show me the ones that have X". Each maps to the flag above, so the filter and the
+        # icon can never disagree about what counts as present.
+        _HAS_SQL = {
+            "rewritten":  "LENGTH(COALESCE(b.rewritten_body,'')) > 0",
+            "linkedin":   "LENGTH(COALESCE(b.linkedin_text,'')) > 0",
+            "li_article": "LENGTH(COALESCE(b.linkedin_article,'')) > 0",
+            "youtube":    "LENGTH(COALESCE(b.youtube_script,'')) > 0",
+            "imported":   "b.prompt_version = 'imported'",
+            "published":  "EXISTS (SELECT 1 FROM blog_platforms bp "
+                          "WHERE bp.blog_id = b.id AND bp.status = 'published')",
+            "unpublished": "NOT EXISTS (SELECT 1 FROM blog_platforms bp "
+                           "WHERE bp.blog_id = b.id AND bp.status = 'published')",
+        }
+        if has and has in _HAS_SQL:
+            q += " AND " + _HAS_SQL[has]
         q += " ORDER BY b.created_at DESC, b.id DESC"
         rows = [dict(r) for r in self.conn.execute(q, params).fetchall()]
         if rows:
@@ -2561,6 +2590,22 @@ class Database:
             if col not in blog_cols:
                 self.conn.execute(f"ALTER TABLE blogs ADD COLUMN {col} TEXT")
                 self.conn.commit()
+        # FU248 — a STABLE serial for the list. Deliberately not the row's position: a position
+        # changes the moment you filter or delete, so "fix blog 12" would mean a different blog
+        # tomorrow. It is backfilled in creation order so the numbering of everything already
+        # generated reads as a history rather than starting at today. Unlike posts.post_number
+        # (per-brand) this counter is GLOBAL: the blog list's default view spans every brand, so a
+        # per-brand serial would show several "#12"s side by side and identify nothing.
+        if "blog_number" not in blog_cols:
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN blog_number INTEGER")
+            self.conn.commit()
+            rows = self.conn.execute(
+                "SELECT id FROM blogs ORDER BY created_at ASC, id ASC").fetchall()
+            for n, r in enumerate(rows, 1):
+                self.conn.execute("UPDATE blogs SET blog_number = ? WHERE id = ?", (n, r["id"]))
+            self.conn.commit()
+            if rows:
+                print(f"[db] blog_number: numbered {len(rows)} existing blog(s)", flush=True)
         if "use_web_search" not in blog_cols:
             self.conn.execute("ALTER TABLE blogs ADD COLUMN use_web_search INTEGER DEFAULT 0")
             self.conn.commit()

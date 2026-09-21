@@ -481,12 +481,15 @@ function _pollTask(taskId, label, onComplete) {
     }, 2000);
 }
 
-async function runTask(url, body, onComplete, label) {
+async function runTask(url, body, onComplete, label, onStart) {
     const taskLabel = label || 'Generating...';
     toast(`${taskLabel} started — running in background`, 'info');
     try {
         const { task_id } = await api(url, { method: 'POST', body });
         _addBgTask(task_id, taskLabel);
+        // FU248: let the caller tie this task to the row it belongs to, so the blog list can show
+        // a spinner on that card. Optional — every existing caller passes nothing and is unchanged.
+        if (typeof onStart === 'function') { try { onStart(task_id); } catch (e) {} }
         _pollTask(task_id, taskLabel, onComplete);
     } catch (e) {
         toast(`Failed to start ${taskLabel}`, 'error');
@@ -13350,10 +13353,20 @@ async function renderBlogs(c) {
         <div class="flex gap-2 mb-3">
             <select id="blog-filter-brand" onchange="blogReload()"><option value="">All brands</option>${brandOpts}</select>
             <select id="blog-filter-status" onchange="blogReload()"><option value="">All statuses</option><option value="draft">Draft</option><option value="published">Published</option><option value="archived">Archived</option></select>
+            <select id="blog-filter-has" onchange="blogReload()" title="Show only blogs that already have this">
+                <option value="">Anything generated</option>
+                <option value="rewritten">✍ Has watermark-free version</option>
+                <option value="linkedin">💼 Has LinkedIn post</option>
+                <option value="li_article">📄 Has LinkedIn article</option>
+                <option value="youtube">▶ Has YouTube package</option>
+                <option value="imported">⬆ Imported</option>
+                <option value="published">✅ Published somewhere</option>
+                <option value="unpublished">○ Not published yet</option>
+            </select>
         </div>
         <table>
-            <thead><tr><th>Title</th><th>Brand</th><th>Status</th><th>Platforms</th><th>Updated</th><th>Actions</th></tr></thead>
-            <tbody id="blog-rows">${blogs.map(_blogRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No blogs yet — generate one above.</td></tr>'}</tbody>
+            <thead><tr><th style="width:3rem">#</th><th>Title</th><th>Brand</th><th>Status</th><th>Generated</th><th>Platforms</th><th>Updated</th><th>Actions</th></tr></thead>
+            <tbody id="blog-rows">${blogs.map(_blogRow).join('') || '<tr><td colspan="8" class="text-center text-gray-500 py-6">No blogs yet — generate one above.</td></tr>'}</tbody>
         </table>`;
     window._blogYmylTouched = false;   // FU133: fresh form → auto-default follows the brand again
     _blogYmylAutoDefault();
@@ -13369,7 +13382,11 @@ function _blogIsImported(b) {
 
 function _blogRow(b) {
     const chips = (b.platforms || []).filter(p => p.status === 'published')
-        .map(p => `<a href="${_blogEsc(p.published_url || '#')}" target="_blank" class="badge" style="background:#0b3b2e;color:#6ee7b7" title="${_blogEsc(p.published_url||'')}">${p.platform}</a>`).join(' ')
+        // FU248: a platform can be marked published BEFORE its live link is known, so an unlinked
+        // one renders as a plain badge — an <a href="#"> looked clickable and went nowhere.
+        .map(p => (p.published_url || '').trim()
+            ? `<a href="${_blogEsc(p.published_url)}" target="_blank" class="badge" style="background:#0b3b2e;color:#6ee7b7" title="${_blogEsc(p.published_url)}">${p.platform}</a>`
+            : `<span class="badge" style="background:#0b3b2e;color:#6ee7b7;opacity:.7" title="Marked published — no live link recorded yet">${p.platform} · no link</span>`).join(' ')
         || '<span class="text-xs text-gray-600">—</span>';
     const upd = (b.updated_at || '').replace('T', ' ').slice(0, 16);
     // FU151 (D): quality-score chip (quality_report arrives as a JSON string in the list query).
@@ -13387,35 +13404,181 @@ function _blogRow(b) {
     const impChip = _blogIsImported(b)
         ? ' <span class="badge" style="background:#1e2a44;color:#93c5fd" title="Uploaded from a file rather than generated — it has no sourcing/evidence chain of its own. Regenerating the article replaces it with a generated one.">⬆ imported</span>'
         : '';
-    return `<tr>
+    // FU248 — what EXISTS for this blog, at a glance. The list query returns a flag per derived
+    // asset (never the bodies), so this costs nothing and answers "has the watermark-free version
+    // been made yet?" without opening every blog in turn. A missing asset is shown greyed rather
+    // than hidden, so the row reads as a checklist instead of a guess.
+    const _asset = (on, icon, label) =>
+        `<span class="badge" style="${on ? 'background:#1e293b;color:#a5b4fc' : 'background:#141414;color:#3f3f46'}" title="${label}${on ? '' : ' — not generated yet'}">${icon}</span>`;
+    const assets = [
+        _asset(+b.has_rewritten, '✍', 'Watermark-free version'),
+        _asset(+b.has_linkedin, 'in', 'LinkedIn post'),
+        _asset(+b.has_li_article, '📄', 'LinkedIn article'),
+        _asset(+b.has_youtube, '▶', 'YouTube package'),
+    ].join(' ');
+    const busy = _blogBusy.get(String(b.id));
+    const pubbed = (b.platforms || []).some(p => p.status === 'published');
+    return `<tr${busy ? ' style="opacity:.75"' : ''}>
+        <td class="text-xs text-gray-500">${b.blog_number != null ? '#' + b.blog_number : '—'}</td>
         <td><span class="font-bold">${_blogEsc(b.title || '(untitled)')}</span>${qChip}${impChip}<div class="text-xs text-gray-500">${_blogEsc((b.seed || '').slice(0, 90))}</div></td>
         <td>${_blogEsc(b.brand_name || '—')}</td>
-        <td>${b.status === 'awaiting_sources'
-            ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'
-            : `<span class="badge">${_blogEsc(b.status)}</span>`}${b.regen_pending
+        <td>${busy
+            ? `<span class="badge" style="background:#1e293b;color:#a5b4fc" title="${_blogEsc(busy.label || 'Working')} — this blog is being generated right now"><span class="spinner" style="width:.7rem;height:.7rem;display:inline-block;vertical-align:-1px;margin-right:.3rem"></span>${_blogEsc(busy.label || 'Working…')}</span>`
+            : (b.status === 'awaiting_sources'
+                ? '<span class="badge" style="background:#4a3a12;color:#fbbf24" title="Generation paused — waiting for a manual link/fact for a source it could not find">⏸ Needs sources</span>'
+                : `<span class="badge">${_blogEsc(b.status)}</span>`)}${b.regen_pending
             ? ' <span class="badge" style="background:#4a3a12;color:#fbbf24" title="A regenerate paused to ask you about a competitor it could not source. The blog itself is unchanged until you answer.">⏸ Regenerate waiting</span>'
             : ''}</td>
+        <td>${assets}</td>
         <td>${chips}</td>
         <td class="text-xs text-gray-400">${upd}</td>
         <td><div class="flex gap-1">
             ${(b.status === 'awaiting_sources' || b.regen_pending)
                 ? `<button class="btn btn-sm btn-primary" onclick="openBlog(${b.id})" title="Add the missing source(s) and finish">Provide sources</button>`
                 : `<button class="btn btn-sm btn-secondary" onclick="openBlog(${b.id})">Open</button>`}
+            <button class="btn btn-sm" style="${pubbed ? 'background:#0b3b2e;color:#6ee7b7' : 'background:#1e293b;color:#a5b4fc'}" onclick="blogPublishQuick(${b.id})" title="${pubbed ? 'Published — update the live link or add another platform' : 'Mark this blog published (the live link is optional)'}">${pubbed ? '✅ Published' : 'Publish'}</button>
             <button class="btn btn-sm" style="background:#4a1a1a;color:#ff8b8b" onclick="deleteBlog(${b.id})">Delete</button>
         </div></td>
     </tr>`;
 }
 
+// ── FU248: which blogs are mid-generation ────────────────────────────────────────────────────────
+// Keyed by blog id, persisted, and pruned against the SERVER's running-task list on every reload —
+// so a spinner survives a page refresh (generation takes minutes) and cannot outlive its task if
+// the tab was closed while it finished.
+const _blogBusy = (() => {
+    // localStorage throws in a private window / with site data blocked, and a half-written value
+    // would throw on parse — either would take the whole page's script down from a top-level line.
+    try { return new Map(JSON.parse(localStorage.getItem('_blogBusy') || '[]')); }
+    catch (e) { return new Map(); }
+})();
+
+function _blogBusySave() {
+    try { localStorage.setItem('_blogBusy', JSON.stringify([..._blogBusy])); } catch (e) {}
+}
+
+let _blogBusyTimer = null;
+
+function _blogBusyStart(blogId, label, taskId) {
+    if (blogId == null) return;
+    _blogBusy.set(String(blogId), { label, taskId });
+    _blogBusySave();
+    blogReload();
+    _blogBusyWatch();
+}
+
+// A task that ERRORS never reaches its onComplete, so nothing would clear the spinner while the
+// operator is sitting on this very list. Tick against the server's running-task set instead:
+// success, failure, a closed tab and a lost task all end the same way — the task stops running.
+// It also means a row's icons appear the moment the thing is made, without a manual refresh.
+function _blogBusyWatch() {
+    if (_blogBusyTimer || !_blogBusy.size) return;
+    _blogBusyTimer = setInterval(() => {
+        if (!_blogBusy.size) { clearInterval(_blogBusyTimer); _blogBusyTimer = null; return; }
+        blogReload();                      // prunes finished marks, then redraws
+    }, 5000);
+}
+
+function _blogBusyEnd(blogId) {
+    if (blogId == null) return;
+    _blogBusy.delete(String(blogId));
+    _blogBusySave();
+    blogReload();                          // the asset it just made should show up straight away
+}
+
+async function _blogPruneBusy() {
+    if (!_blogBusy.size) return;
+    let live = new Set();
+    try {
+        const running = await fetch('/api/tasks/running').then(r => r.json());
+        live = new Set((running || []).map(t => String(t.id || t.task_id)));
+    } catch (e) { return; }          // can't tell → leave the marks alone rather than clear wrongly
+    let changed = false;
+    for (const [bid, info] of [..._blogBusy]) {
+        if (info.taskId && !live.has(String(info.taskId))) { _blogBusy.delete(bid); changed = true; }
+    }
+    if (changed) _blogBusySave();
+}
+
+// ── FU248: mark published from the LIST, without opening the blog ────────────────────────────────
+// Reads the blog first so the modal can say what is ALREADY marked published and prefill that
+// platform's live link — otherwise "Mark published" on an already-published blog silently blanks
+// the URL someone pasted earlier.
+async function blogPublishQuick(id) {
+    let plats = [];
+    try { plats = (await api(`/api/blogs/${id}`))?.platforms || []; } catch (e) {}
+    const byPlat = {};
+    plats.forEach(p => { byPlat[p.platform] = p; });
+    const PLATFORMS = [
+        ['website', 'Website (the blog itself)'],
+        ['linkedin', 'LinkedIn'],
+        ['youtube', 'YouTube'],
+    ];
+    // Default to the first platform NOT yet published — the common case is adding a new one.
+    const firstOpen = (PLATFORMS.find(([k]) => (byPlat[k] || {}).status !== 'published') || PLATFORMS[0])[0];
+    const opts = PLATFORMS.map(([k, lbl]) => {
+        const done = (byPlat[k] || {}).status === 'published';
+        return `<option value="${k}"${k === firstOpen ? ' selected' : ''}>${lbl}${done ? ' — already published' : ''}</option>`;
+    }).join('');
+    const live = plats.filter(p => p.status === 'published');
+    const already = live.length
+        ? `<p class="text-xs text-gray-500 mb-2">Already marked published: ${live.map(p =>
+            `${_blogEsc(p.platform)}${p.published_url ? ` (<a href="${_blogEsc(p.published_url)}" target="_blank" class="underline">link</a>)` : ' — no link yet'}`).join(', ')}</p>`
+        : '';
+    window._blogQuickPubUrls = {};
+    plats.forEach(p => { window._blogQuickPubUrls[p.platform] = p.published_url || ''; });
+    showModal(`
+        <h3 class="text-xl font-bold mb-3">Mark published</h3>
+        ${already}
+        <p class="text-xs text-gray-400 mb-3">Records that this blog is live. The URL is <strong>optional</strong> — mark it now and paste the link whenever you have it.</p>
+        <div>
+            <label class="text-xs text-gray-400">Platform</label>
+            <select id="blog-quickpub-platform" class="w-full" onchange="_blogQuickPubSync()">${opts}</select>
+        </div>
+        <div class="mt-2">
+            <label class="text-xs text-gray-400">Live URL (optional)</label>
+            <input id="blog-quickpub-url" type="text" class="w-full" placeholder="https://… — leave blank if you don't have it yet" value="${_blogEsc(window._blogQuickPubUrls[firstOpen] || '')}">
+        </div>
+        <div class="flex gap-2 mt-4 justify-end">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="_blogPublishQuickSubmit(${id})">Mark published</button>
+        </div>
+    `);
+}
+
+function _blogQuickPubSync() {
+    // Switching platform swaps in THAT platform's stored link, so an existing URL is never
+    // overwritten by whatever happened to be in the box.
+    const sel = document.getElementById('blog-quickpub-platform');
+    const inp = document.getElementById('blog-quickpub-url');
+    if (sel && inp) inp.value = (window._blogQuickPubUrls || {})[sel.value] || '';
+}
+
+async function _blogPublishQuickSubmit(id) {
+    const platform = document.getElementById('blog-quickpub-platform')?.value || 'website';
+    const published_url = (document.getElementById('blog-quickpub-url')?.value || '').trim();
+    try {
+        await api(`/api/blogs/${id}/publish`, { method: 'POST', body: { platform, published_url } });
+        closeModal();
+        toast(published_url ? `Marked published on ${platform}` : `Marked published on ${platform} (no link yet)`, 'success');
+        blogReload();
+    } catch (e) {}
+}
+
 async function blogReload() {
     const bid = document.getElementById('blog-filter-brand')?.value;
     const st = document.getElementById('blog-filter-status')?.value;
+    const has = document.getElementById('blog-filter-has')?.value;
     const qs = new URLSearchParams();
     if (bid) qs.set('brand_id', bid);
     if (st) qs.set('status', st);
+    if (has) qs.set('has', has);
+    await _blogPruneBusy();
+    _blogBusyWatch();                      // a page reloaded mid-generation resumes watching
     try {
         const blogs = await api('/api/blogs?' + qs.toString());
         const tb = document.getElementById('blog-rows');
-        if (tb) tb.innerHTML = (blogs || []).map(_blogRow).join('') || '<tr><td colspan="6" class="text-center text-gray-500 py-6">No blogs.</td></tr>';
+        if (tb) tb.innerHTML = (blogs || []).map(_blogRow).join('') || '<tr><td colspan="8" class="text-center text-gray-500 py-6">No blogs.</td></tr>';
     } catch (e) {}
 }
 
@@ -15049,9 +15212,10 @@ function blogGenLinkedInArticle(id) {
     // FU83: a typed headline is sent and LOCKED (used verbatim); blank → the model writes one.
     const title = (document.getElementById('blog-e-li-article-title')?.value || '').trim();
     runTask(`/api/blogs/${id}/linkedin-article`, { persona, title }, (res) => {
+        _blogBusyEnd(id);
         openBlog(id);
         _blogCostToast(res);
-    }, 'Generating LinkedIn article');
+    }, 'Generating LinkedIn article', (tid) => _blogBusyStart(id, 'LinkedIn article', tid));
 }
 
 // FU154 — produce a watermark-free rewrite of this blog (original kept; stored as rewritten_body).
@@ -15109,6 +15273,7 @@ function blogGenRewrite(id, surface) {
     const _lbl = _sf === 'linkedin_post' ? 'LinkedIn post'
         : (_sf === 'linkedin_article' ? 'LinkedIn article' : 'blog');
     runTask(`/api/blogs/${id}/rewrite`, { surface: _sf }, (res) => {
+        _blogBusyEnd(id);
         openBlog(id);
         if (res && res.ok === false) {
             toast('Rewrite failed (' + _lbl + '): ' + (res.warning || 'try again'), 'error');
@@ -15122,7 +15287,7 @@ function blogGenRewrite(id, surface) {
             const gr = (res && res.grade) ? (' · ' + res.grade) : '';
             toast('Watermark-free ' + _lbl + ' created' + ov + gr + ct + wn + br, 'success', 14000);
         }
-    }, 'Rewriting (watermark-free)');
+    }, 'Rewriting (watermark-free)', (tid) => _blogBusyStart(id, 'Watermark-free ' + _lbl, tid));
 }
 
 // FU80 — YouTube package helpers (presenter voice-seed prefill + generate).
@@ -15142,9 +15307,10 @@ function blogGenYouTube(id) {
     const variant = (document.getElementById('blog-e-yt-variant')?.value || 'question');
     const duration_min = parseFloat(document.getElementById('blog-e-yt-duration')?.value) || 0;   // FU97 / FU203: fractional (1.5)
     runTask(`/api/blogs/${id}/youtube-script`, { persona, variant, duration_min }, (res) => {
+        _blogBusyEnd(id);
         openBlog(id);
         _blogCostToast(res);
-    }, 'Generating YouTube package');
+    }, 'Generating YouTube package', (tid) => _blogBusyStart(id, 'YouTube package', tid));
 }
 
 function _stripMd(md) {
@@ -15171,11 +15337,12 @@ function blogCopyPlain(elId) {
 }
 
 async function blogPublish(id, platform) {
+    // FU248: the live URL is OPTIONAL — marking a blog published and having its link to hand are
+    // two different moments, and blocking the mark until then left the record wrong in the meantime.
     const url = (document.getElementById('blog-pub-' + platform).value || '').trim();
-    if (!url) { toast('Paste the live URL first', 'error'); return; }
     try {
         await api(`/api/blogs/${id}/publish`, { method: 'POST', body: { platform, published_url: url } });
-        toast(`Marked published on ${platform}`, 'success');
+        toast(url ? `Marked published on ${platform}` : `Marked published on ${platform} (no link yet)`, 'success');
         await openBlog(id);
         blogReload();
     } catch (e) {}
@@ -15192,6 +15359,7 @@ async function blogUnpublish(id, platform) {
 
 function blogRegen(id, part) {
     runTask(`/api/blogs/${id}/regenerate`, { part }, (res) => {
+        _blogBusyEnd(id);
         // FU207: a regenerate can now pause to ask, exactly like the first Generate.
         if (res && res.needs_sources) {
             blogReload();
@@ -15207,7 +15375,7 @@ function blogRegen(id, part) {
         if (res && res.key_facts_warning) toast(res.key_facts_warning, 'info', 12000);   // FU150
         _blogQualityToast(res);   // FU151 (D)
         _blogWriterToast(res);    // FU164 writer time / fallback
-    }, `Regenerating ${part}`);
+    }, `Regenerating ${part}`, (tid) => _blogBusyStart(id, `Regenerating ${part}`, tid));
 }
 
 async function blogDiscardPending(id) {

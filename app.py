@@ -3212,6 +3212,7 @@ def api_blogs_list():
         return jsonify(db.get_all_blogs(
             brand_id=request.args.get("brand_id", type=int),
             status=request.args.get("status") or None,
+            has=request.args.get("has") or None,        # FU248: list rows that HAVE a derived asset
         ))
     finally:
         db.close()
@@ -4691,13 +4692,14 @@ def api_blog_publish(blog_id):
     url = (data.get("published_url") or "").strip()
     if platform not in ("website", "linkedin", "youtube"):   # FU80: youtube video publish
         return jsonify({"error": "platform must be website|linkedin|youtube"}), 400
-    if not url:
-        return jsonify({"error": "published_url is required"}), 400
+    # FU248: the URL is OPTIONAL. Marking a blog published and pasting its live link are two
+    # different moments — a piece is often live before anyone has the URL to hand, and refusing the
+    # mark until then meant the list could not be trusted as a record of what had shipped.
     db = get_db()
     try:
         if not db.get_blog(blog_id):
             return jsonify({"error": "blog not found"}), 404
-        db.upsert_blog_platform(blog_id, platform, published_url=url, status="published")
+        db.upsert_blog_platform(blog_id, platform, published_url=(url or None), status="published")
         return jsonify(db.get_blog(blog_id))
     finally:
         db.close()

@@ -1776,6 +1776,12 @@ def _format_price_value(entry):
     # "$199 (per month, programme fee only, product billed separately)" — one place, one voice, and
     # it cannot be confused with a second price the way a trailing clause could be.
     comp = _composition_text(entry)
+    # FU253: when the parts are known, NAME them instead of describing the shape. "$199 + $149
+    # membership" tells the reader more than "membership plus the product, billed separately", and
+    # it is the operator's own wording for their own rows.
+    _split = [str(x).strip() for x in (entry.get("split") or []) if str(x).strip()]
+    if len(_split) > 1:
+        comp = " + ".join(_split)
     if comp and comp not in basis.lower():
         basis = f"{basis}, {comp}" if basis else comp
     if kind == "range" and vmax:
@@ -4759,6 +4765,24 @@ class BlogGenerator:
                                              -len(_product_tokens(e.get("product") or ""))))
         else:
             best = min(cands, key=lambda e: _RANK.get(_norm_price_composition(e.get("composition")), 4))
+        # FU253 — name the SPLIT on a total. The operator asked for "From $348/month (Wegovy pen
+        # $199 + $149 membership)": comparable with an all-in rival AND the reader sees where the
+        # money goes. No new field and no extra typing for it — they already entered the parts as
+        # their own rows, so the total's components are derived from its siblings.
+        if _norm_price_composition(best.get("composition")) == "plus":
+            parts = []
+            for want in ("product", "program"):
+                sib = next((e for e in ents
+                            if e is not best
+                            and _norm_price_composition(e.get("composition")) == want
+                            and (e.get("value") or "").strip()), None)
+                if sib:
+                    lab = (sib.get("product") or "").strip()
+                    fig = sib["value"] + (f"-{sib['value_max']}" if (sib.get("value_max") or "").strip()
+                                          else "")
+                    parts.append(f"{lab} {fig}".strip())
+            if len(parts) > 1:
+                best = dict(best, split=parts)
         # Ambiguous only when nothing decided it: no product matched the article AND the operator
         # gave no composition to rank by. Reporting a pick the operator's own data settled would be
         # noise in the warnings the operator actually has to read.

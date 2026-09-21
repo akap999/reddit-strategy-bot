@@ -108,24 +108,26 @@ def test_every_price_sentence_in_the_shipped_article_is_now_checked(gen, shipped
 
 
 # ── 2. when the operator has entered the total, use the total ────────────────────────────────────
-@pytest.mark.parametrize("name,rows,want", [
-    ("Ro", RO_ROWS, "$423-$498 (per month, membership plus the product, billed separately)"),
-    ("Hims", HIMS_ROWS, "From $348 (per month, membership plus the product, billed separately)"),
+@pytest.mark.parametrize("name,rows,total", [
+    ("Ro", RO_ROWS, "$423-$498"),
+    ("Hims", HIMS_ROWS, "From $348"),
 ])
-def test_the_total_wins_over_the_part_price(gen, name, rows, want):
+def test_the_total_wins_over_the_part_price(gen, name, rows, total):
     """A part-price ranked against a rival's all-in price is not a comparison. The operator said
-    which row is the total; the picker now reads it."""
+    which row is the total; the picker now reads it. Asserted on the FIGURE, because how the total
+    is worded is a separate decision (see the split tests below)."""
     entry, _amb = gen._price_row_for(rows, name, _product_tokens("semaglutide cost per month"),
                                      subject="PeterMD")
-    assert _format_price_value(entry) == want
+    assert _format_price_value(entry).startswith(total)
+    assert "the product only" not in _format_price_value(entry)
 
 
 def test_the_membership_alone_is_never_the_headline_price(gen):
     """A programme fee on its own is the least useful of the three rows — it is neither the product
     nor the total — so it must never be the one that reaches the comparison cell."""
     for rows in (RO_ROWS, HIMS_ROWS):
-        entry, _ = gen._price_row_for(rows, "X", _product_tokens("anything at all"))
-        assert "membership plus the product" in _format_price_value(entry)
+        cell = _format_price_value(gen._price_row_for(rows, "X", _product_tokens("anything at all"))[0])
+        assert cell.startswith(("$423", "From $348")), cell
 
 
 def test_a_brand_with_one_row_is_untouched(gen):
@@ -381,3 +383,36 @@ def test_a_month_and_year_with_no_day_is_a_date(block, want):
     document look nine months old and slip under a twelve-month window. Not a relaxation of the
     "look as new as possible" rule: April IS the date, and reading it as December was wrong."""
     assert _source_pub_date(block, NOW) == want
+
+
+# ── 7. the total, with the split named ───────────────────────────────────────────────────────────
+@pytest.mark.parametrize("name,rows,want", [
+    ("Ro", RO_ROWS, "$423-$498 (per month, Wegovy pen $349 + membership $74-$149)"),
+    ("Hims", HIMS_ROWS, "From $348 (per month, Wegovy pen $199 + membership $149)"),
+])
+def test_the_total_names_its_parts(gen, name, rows, want):
+    """The operator's choice: comparable with an all-in rival AND the reader sees where the money
+    goes. No new field and no extra typing — they already entered the parts as their own rows, so
+    the components of the total are derived from its siblings."""
+    entry, _ = gen._price_row_for(rows, name, _product_tokens("semaglutide cost per month"),
+                                  subject="PeterMD")
+    assert _format_price_value(entry) == want
+
+
+def test_a_total_with_no_parts_still_describes_its_shape(gen):
+    """Naming the split depends on the operator having entered the parts. Where they have not, the
+    cell must still say a second charge exists."""
+    rows = [{"product": "programme + product", "kind": "from", "value": "$300",
+             "basis": "per month", "composition": "plus"},
+            {"product": "something else", "kind": "exact", "value": "$10"}]
+    entry, _ = gen._price_row_for(rows, "Z", _product_tokens("anything"))
+    assert _format_price_value(entry) == "From $300 (per month, membership plus the product, billed separately)"
+
+
+def test_an_all_in_price_is_unchanged(gen):
+    """The publisher's own cell must read exactly as it did — this changes how a TOTAL is written,
+    not how every price is."""
+    rows = [{"product": "GLP-1", "kind": "exact", "value": "$270", "basis": "per month",
+             "composition": "all-in"}]
+    entry, _ = gen._price_row_for(rows, "PeterMD", _product_tokens("semaglutide cost"))
+    assert _format_price_value(entry) == "$270 (per month, everything included)"

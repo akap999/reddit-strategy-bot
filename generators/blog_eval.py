@@ -503,7 +503,10 @@ _FIG_MOD_RE = re.compile(
     r"(?P<pre>\b(?:at least|no less than|more than|over|under|fewer than|less than|up to|"
     r"as many as|around|about|approximately|roughly|nearly|almost|minimum(?: of)?|maximum(?: of)?)\s+)?"
     r"(?P<sym>[~≈<>≥≤]\s*)?"
-    r"(?P<num>\d[\d,]*(?:\.\d+)?)"
+    # (?<![A-Za-z])(?<![A-Za-z]-) — a digit hyphenated or run onto letters belongs to a product CODE,
+    # not to a figure. `rewrite_guard._NUM_RE` already carries this exact guard; without it here,
+    # every paragraph naming a hyphenated product looked like it contained the figure "1".
+    r"(?P<num>(?<![A-Za-z])(?<![A-Za-z]-)\d[\d,]*(?:\.\d+)?)"
     r"(?P<plus>\s*\+)?", re.I)
 # The wordings a "+" may legitimately become. "DR 70+" → "a minimum DR of 70" keeps the meaning;
 # "DR 70+" → "an average DR of 70" does not.
@@ -532,6 +535,9 @@ _TRAIL_UPPER_RE = re.compile(
 # A citation marker is not a figure. `rewrite_guard._nums` already strips these before comparing
 # numbers; without the same strip here, "[S1]" and "[S14]" were read as the values 1 and 14.
 _CITE_STRIP_RE = re.compile(r"\[S\d+\]")
+# "…visible over 3-6 months" spans the range; it does not mean "more than three". A bound word in
+# front of the FIRST half of a range is spanning it.
+_RANGE_TAIL_RE = re.compile(r"^\s*(?:-|\u2013|\u2014|to|and)\s*\d", re.I)
 
 
 def _figure_bounds(text):
@@ -565,6 +571,8 @@ def _figure_bounds(text):
             kind = "upper"
         elif sym in ("~", "\u2248"):
             kind = "approx"
+        elif _RANGE_TAIL_RE.match(tail):
+            kind = "exact"                          # the first half of a range, not a bound
         elif pre:                                   # adjacent by construction
             kind = ("approx" if _APPROX_WORDS.search(pre)
                     else "upper" if _UPPER_BOUND_WORDS.search(pre) else "lower")
@@ -704,6 +712,30 @@ _HEDGE_RE = re.compile(
     r"can be relevant|where applicable|in many cases)\b", re.I)
 
 
+# "This is not always the case" is a HEDGE. Counting "always" without looking left reads it as an
+# absolute and reverts a block for softening a claim, which is the opposite of the point.
+_NEGATED_RE = re.compile(r"\b(?:not|never|n't|rarely|hardly|seldom|isn't|aren't|won't|doesn't|don't)"
+                         r"\W+(?:\w+\W+){0,2}$", re.I)
+
+
+def strength_terms(text):
+    """The strength wording in `text`, with negated absolutes left out."""
+    out = set()
+    for m in _STRENGTH_RE.finditer(text or ""):
+        if _NEGATED_RE.search((text or "")[max(0, m.start() - 30):m.start()]):
+            continue
+        out.add(m.group(0).lower())
+    return out
+
+
+def _strength_count(text):
+    n = 0
+    for m in _STRENGTH_RE.finditer(text or ""):
+        if not _NEGATED_RE.search((text or "")[max(0, m.start() - 30):m.start()]):
+            n += 1
+    return n
+
+
 def detect_claim_strengthened(original, rewritten, cap=8):
     """The rewording claims harder than the input did.
 
@@ -711,11 +743,10 @@ def detect_claim_strengthened(original, rewritten, cap=8):
     brand is mentioned when a property developer asks an AI assistant" — a capability turned into a
     guarantee nobody can make. Counted, not matched sentence to sentence, because a full rewording
     moves every sentence; an INCREASE in strength wording is the signal."""
-    a, b = len(_STRENGTH_RE.findall(_prose(original))), len(_STRENGTH_RE.findall(_prose(rewritten)))
+    a, b = _strength_count(_prose(original)), _strength_count(_prose(rewritten))
     if b <= a:
         return []
-    added = sorted({m.group(0).lower() for m in _STRENGTH_RE.finditer(_prose(rewritten))}
-                   - {m.group(0).lower() for m in _STRENGTH_RE.finditer(_prose(original))})
+    added = sorted(strength_terms(_prose(rewritten)) - strength_terms(_prose(original)))
     return [{"check": "claim-strengthened", "severity": "blocking",
              "detail": f"strength wording went {a} → {b}"
                        + (f' (new: {", ".join(added[:4])})' if added else "")}][:cap]
@@ -781,12 +812,13 @@ def detect_acronym_expansion_changed(original, rewritten, cap=6):
                              "detail": f'{acro} is spelled out as "{f[:50]}"; the input said '
                                        f'"{sorted(was)[0][:50]}"'})
             elif re.search(r"\b%s\b" % re.escape(acro), _prose(original)):
-                # Budgeted, not blocking. Sampled across 68 stored rewrites, 26 of these are a model
-                # helpfully spelling out a standard abbreviation — BMI, FSA, HSA — which is not a
-                # defect. The dangerous case is an expansion that CHANGES, and that is judged above.
-                # There is no way to tell a right new expansion from a wrong one without world
-                # knowledge, so this is reported and counted rather than used to block an export.
-                hits.append({"check": "acronym-expansion-invented", "severity": "budgeted",
+                # Blocking, at the operator's instruction. Sampled across 68 stored rewrites, 26 of
+                # these are a model helpfully spelling out a standard abbreviation — BMI, FSA, HSA —
+                # which is not a defect in itself. But there is no way to tell a right new expansion
+                # from a wrong one without world knowledge, and the one that reached a client
+                # ("global engagement optimization") was exactly this shape in an article whose
+                # publisher sells the thing. An expansion the input did not authorise does not ship.
+                hits.append({"check": "acronym-expansion-invented", "severity": "blocking",
                              "detail": f'{acro} was never spelled out and is now "{f[:56]}"'})
             if len(hits) >= cap:
                 return hits

@@ -1335,6 +1335,7 @@ class Database:
                    "quality_report",   # FU151 (D)
                    "rewritten_body", "rewritten_overlap", "rewritten_at", "rewritten_warning",   # FU154
                    "rewritten_cost",   # FU155
+                   "rewritten_not_ready",   # FU252: why this rewrite must not be handed over yet
                    "linkedin_rewritten", "linkedin_article_rewritten", "rewrites_meta",   # FU179
                    "body_pre_verify",   # FU202: the body before the verification pass edited it
                    "verify_report",     # FU205 (R2): computed every run, previously never stored
@@ -2578,6 +2579,9 @@ class Database:
                     # FU154: on-demand watermark-free REWRITE of a finished blog (the original
                     # body_markdown is kept; this is the alternate version to hand clients).
                     "rewritten_body", "rewritten_at", "rewritten_warning",
+                    # FU252: why this rewrite is not ready to hand over, "" when it is. Set from the
+                    # graded findings after every repair the guard ladder could make.
+                    "rewritten_not_ready",
                     # FU179: the same watermark-free rewrite for the two derived LinkedIn surfaces.
                     # Bodies get their own columns so manual edits persist through the existing PATCH;
                     # rewrites_meta is ONE JSON blob keyed by surface holding the telemetry the blog

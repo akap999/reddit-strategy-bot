@@ -24,6 +24,14 @@ from generators.brand_enrichment import _fetch_page   # FU221: fetch + WHY it fa
 from generators import research as _research   # FU221 (Step 0): find → read → extract → verify
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
 from generators.blog_eval import body_damage as _body_damage   # FU251: a removal may leave damage
+from generators.blog_eval import rewrite_findings as _rewrite_findings   # FU252: what a rewording changed
+
+# FU252 — how much a rewording may get wrong before it stops being exportable. Mirrors the guard's
+# own wording budget (`rewrite_guard._BUDGET_DIV`): one budgeted defect per ten non-empty lines, and
+# never fewer than two, so a short article is not held to an impossible standard. A BLOCKING finding
+# is not budgeted at all — it changes what the article asserts.
+_REWRITE_BUDGET_DIV = int(os.environ.get("REWRITE_BUDGET_DIV", "10"))
+_REWRITE_BUDGET_MIN = int(os.environ.get("REWRITE_BUDGET_MIN", "2"))
 
 PROMPT_VERSION = "blog-v2-evidence"
 
@@ -12351,6 +12359,19 @@ you MAY assume the description will carry: "{disc}".
                     "- every BOLD LEAD-IN LABEL at the START of a paragraph or list item — \"**Quick answer:**\", "
                     "\"- **Hematocrit Elevation:**\", \"**Best fit for:**\" — keep the bold and its EXACT words "
                     "(they are section labels a reader scans, not prose); reword only the text AFTER the label;\n"
+                    "- A BOLD PHRASE WITH NO COLON IS PART OF THE SENTENCE, not a label: \"**California's "
+                    "permit requirements** affect how companies describe their services\". Reword it TOGETHER "
+                    "with the words after it so the sentence still reads as one sentence — never leave the "
+                    "bold phrase standing in front of a new sentence that does not continue it;\n"
+                    "- every MARKDOWN LINK [text](url) exactly as written, with its anchor text and its URL, "
+                    "and in the same sentence. Reword around it. Never turn a link into plain text and never "
+                    "drop one — a link is the article pointing at its own evidence;\n"
+                    "- every FIGURE'S MODIFIER, which is part of the figure: \"70+\" is not \"70\", \"10+ years\" "
+                    "is not \"10 years\", \"\u2265 30\" is not \"30\". You MAY reword one (\"70+\" \u2192 \"at least 70\" or "
+                    "\"over 70\"); you may NOT drop it, and \"an average of 70\" is a different claim;\n"
+                    "- every ACRONYM'S EXPANSION exactly as the article gives it. If the article says "
+                    "\"Generative Engine Optimization (GEO)\", those are the words; do NOT re-expand it in your "
+                    "own words, and do NOT spell out an abbreviation the article left short;\n"
                     + (("- THESE EXACT SPANS, character-for-character (this is the authoritative list — "
                         "everything NOT on it is yours to recast freely):\n"
                         + "".join(f"    • {a}\n" for a in _atoms[:120])) if _atoms else "")
@@ -12741,6 +12762,34 @@ you MAY assume the description will carry: "{disc}".
                 print(f"[rewrite-guard] skipped ({_e}) — shipping the rewrite as the model wrote it",
                       flush=True)
 
+            # FU252 — grade what the rewording CHANGED, after every repair the ladder could make.
+            # The operator's rule for this round: "there has to be a limit/criteria to decide which
+            # and how much failed rewords are accepted." So a finding that changes what the article
+            # ASSERTS is never acceptable at any count, and the rest are budgeted against the
+            # article's length, the same shape as the guard's own wording budget.
+            try:
+                article["writer_findings"] = _rewrite_findings(claude_body, best)
+            except Exception as _fe:
+                article["writer_findings"] = []
+                print(f"[rewrite] findings skipped ({_fe})", flush=True)
+            _blocking = [f for f in article["writer_findings"] if f.get("severity") == "blocking"]
+            _budgeted = [f for f in article["writer_findings"] if f.get("severity") != "blocking"]
+            _paras = sum(1 for _ln in (claude_body or "").split("\n") if _ln.strip())
+            _budget = max(_REWRITE_BUDGET_MIN, _paras // _REWRITE_BUDGET_DIV)
+            article["writer_budget"] = _budget
+            _why = []
+            if _blocking:
+                _why.append("%d change(s) to what the article says: %s"
+                            % (len(_blocking), "; ".join(f["detail"] for f in _blocking[:3])))
+            if len(_budgeted) > _budget:
+                _why.append("%d quality defect(s), over the budget of %d for this length"
+                            % (len(_budgeted), _budget))
+            article["writer_not_ready"] = "; ".join(_why)
+            if _why:
+                print(f"[rewrite] NOT READY — {article['writer_not_ready'][:200]}", flush=True)
+                article["writer_warning"] = "; ".join(
+                    x for x in [article.get("writer_warning", ""),
+                                "rewrite not ready: " + article["writer_not_ready"]] if x)
             _ov, _run, _grade = best_rep["n5_prose_overlap"], best_rep["longest_shared_run"], best_rep["grade"]
             _share = best_rep.get("residual_share", 0.0)
             _dshare = best_rep.get("residual_discretionary_share", 0.0)

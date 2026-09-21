@@ -34,8 +34,11 @@ over 25,000" belongs to 25,000, and `[S14]` is a citation and not the value four
 """
 import glob
 import os
+import tempfile
 
 import pytest
+
+from db import Database
 
 from generators.blog_eval import (body_damage, detect_acronym_expansion_changed,
                                   detect_bold_lead_broken, detect_claim_strengthened,
@@ -48,6 +51,30 @@ HERE = os.path.dirname(__file__)
 def _fx(name):
     with open(os.path.join(HERE, "fixtures", f"fu252_{name}.md"), encoding="utf-8") as f:
         return f.read()
+
+
+@pytest.fixture
+def dbp():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        yield path
+    finally:
+        os.remove(path)
+
+
+def _open(path):
+    db = Database(path)
+    db.connect()
+    db.initialize()
+    return db
+
+
+def _client(path):
+    import app as appmod
+    appmod.DB_PATH = path
+    appmod._db_initialized = True
+    return appmod.app.test_client()
 
 
 @pytest.fixture(scope="module")
@@ -257,3 +284,103 @@ def test_every_finding_carries_a_severity(law, con):
     for o, r in (law, con):
         for h in rewrite_findings(o, r):
             assert h["severity"] in ("blocking", "budgeted"), h
+
+
+# ── 5. the guard reverts the block rather than shipping it ───────────────────────────────────────
+def _probs(orig, new, terms=()):
+    import generators.rewrite_guard as G
+    G._set_doc_acronyms(orig)
+    return G._unit_problems(orig, new, list(terms), {})
+
+
+@pytest.mark.parametrize("orig,new,expect", [
+    ("Placements average DR 70+ each month.", "Placements average DR 70 each month.",
+     "figure lost its bound"),
+    ("This layer determines whether your brand appears.",
+     "This ensures that your brand is mentioned.", "claim stated more strongly"),
+    ("See our [case studies](https://brand.test/case-studies) for the numbers.",
+     "See our case studies for the numbers.", "link dropped"),
+    ("The GEO programme runs monthly.",
+     "The global engagement optimization (GEO) programme runs monthly.", "GEO spelled out"),
+])
+def test_the_guard_now_rejects_the_block(orig, new, expect):
+    """These are the four classes that reached a client. The guard is where a block is repaired or
+    put back, so this is where they have to be visible."""
+    assert any(expect in p for p in _probs(orig, new)), _probs(orig, new)
+
+
+@pytest.mark.parametrize("orig,new", [
+    # a correct rewording of a bound is not a change
+    ("We built 25,000+ backlinks.", "We have built over 25,000 links."),
+    # softening is the opposite of strengthening
+    ("Platforms always allow a single team.", "This is not always the case for platforms."),
+    # a digit inside a product code is not a figure
+    ("Therapy with GLP-1 can modestly help.", "GLP-1 therapy may help a little."),
+    # "over 3-6 months" spans the range; it is not a floor of three
+    ("Results appear over 3-6 months of use.", "Results appear over a period of 3 to 6 months."),
+])
+def test_the_guard_does_not_reject_an_honest_rewording(orig, new):
+    """Each of these reverted a block of the FU221 fixture on the first attempt. An over-strict gate
+    is not a safe failure here: it gives the watermark strip back, which is the whole point of the
+    pass, and FU169/174/181 already paid for that lesson once."""
+    assert _probs(orig, new) == []
+
+
+def test_an_acronym_the_document_already_defined_may_be_repeated(monkeypatch):
+    """Acronym consistency is a DOCUMENT property, not a block one — the input may define a term in
+    its first paragraph and the rewrite may legitimately repeat that expansion in its seventh.
+    Judged per block, eight blocks of the FU221 fixture reverted for spelling out exactly what the
+    input had already spelled out."""
+    import generators.rewrite_guard as G
+    G._set_doc_acronyms("Testosterone Replacement Therapy (TRT) is prescribed widely.")
+    assert G._unit_problems("A course of TRT is common.",
+                            "Testosterone Replacement Therapy (TRT) is often prescribed.",
+                            [], {}) == []
+
+
+# ── 6. the budget, and what it blocks ────────────────────────────────────────────────────────────
+def test_the_budget_scales_with_the_article():
+    """The operator's rule: a limit and criteria, not a binary. One budgeted defect per ten
+    non-empty lines, never fewer than two — the same shape as the guard's own wording budget."""
+    from generators.blog_gen import _REWRITE_BUDGET_DIV, _REWRITE_BUDGET_MIN
+    assert (_REWRITE_BUDGET_DIV, _REWRITE_BUDGET_MIN) == (10, 2)
+    for lines, want in ((4, 2), (20, 2), (50, 5), (120, 12)):
+        assert max(_REWRITE_BUDGET_MIN, lines // _REWRITE_BUDGET_DIV) == want
+
+
+def test_a_blocking_finding_is_never_budgeted(law):
+    """A change to what the article ASSERTS is not a quality defect to be tolerated in small
+    numbers. Both audited rewrites carry several."""
+    o, r = law
+    assert [f for f in rewrite_findings(o, r) if f["severity"] == "blocking"]
+
+
+def test_the_export_refuses_a_rewrite_that_is_not_ready(dbp):
+    """The article itself is untouched and exports normally; this refuses only the reworded copy,
+    which is the one handed to a client. Warning-only is how the two audited articles reached the
+    operator in the first place."""
+    db = _open(dbp)
+    sub = db.ensure_live_subreddit("t")
+    brand = db.add_brand(sub["id"], "Acme")
+    bid = db.save_blog(brand, "seed", title="Seed", body_markdown="# T\n\nA body [S1].\n")
+    db.update_blog(bid, rewritten_body="# T\n\nA reworded body [S1].\n",
+                   rewritten_not_ready="GEO is spelled out as \"global engagement optimization\"")
+    db.close()
+    c = _client(dbp)
+    blocked = c.get(f"/api/blogs/{bid}/export?use=rewritten")
+    assert blocked.status_code == 409
+    assert "global engagement optimization" in blocked.get_json()["not_ready"]
+    # the ORIGINAL body is never blocked — this is about the reworded copy only
+    assert c.get(f"/api/blogs/{bid}/export").status_code == 200
+    # …and the operator can always overrule it
+    assert c.get(f"/api/blogs/{bid}/export?use=rewritten&force=1").status_code == 200
+
+
+def test_a_clean_rewrite_exports_normally(dbp):
+    db = _open(dbp)
+    sub = db.ensure_live_subreddit("t")
+    brand = db.add_brand(sub["id"], "Acme")
+    bid = db.save_blog(brand, "seed", title="Seed", body_markdown="# T\n\nA body [S1].\n")
+    db.update_blog(bid, rewritten_body="# T\n\nA reworded body [S1].\n", rewritten_not_ready="")
+    db.close()
+    assert _client(dbp).get(f"/api/blogs/{bid}/export?use=rewritten").status_code == 200

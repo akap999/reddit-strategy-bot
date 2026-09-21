@@ -5488,6 +5488,14 @@ def api_blog_export(blog_id):
     _use = (request.args.get("use") or "").lower()
     _vf = _use == "verified" and bool((blog.get("verified_body") or "").strip())   # FU208
     if _use == "rewritten" and (blog.get("rewritten_body") or "").strip():
+        # FU252 — a rewrite that changed what the article ASSERTS does not leave the building. The
+        # article itself is untouched and exports normally; this refuses only the reworded copy,
+        # which is the one handed to a client. `?force=1` is the deliberate override.
+        _nr = (blog.get("rewritten_not_ready") or "").strip()
+        if _nr and request.args.get("force") not in ("1", "true", "yes"):
+            return jsonify({"error": "This rewrite is not ready to hand over.",
+                            "not_ready": _nr,
+                            "hint": "Re-run the rewrite, or add ?force=1 to export it anyway."}), 409
         body = blog["rewritten_body"]
     # FU250: the imported version and its own watermark-free rewrite export like any other body —
     # same renderer, same schema, same download — so whichever copy is the real one is the one you
@@ -7952,6 +7960,8 @@ def api_blog_rewrite(blog_id):
                                rewritten_overlap=article.get("writer_overlap"),
                                rewritten_at=_now,
                                rewritten_warning=article.get("writer_warning") or "",
+                               # FU252: "" when the rewrite may be handed over, otherwise why not
+                               rewritten_not_ready=article.get("writer_not_ready") or "",
                                rewritten_cost=cost)
             else:
                 # FU179: the body gets its own column (so manual edits persist through PATCH); the
@@ -7977,6 +7987,8 @@ def api_blog_rewrite(blog_id):
                     "grade": article.get("writer_grade") or "",
                     "overlap": article.get("writer_overlap"),
                     "warning": article.get("writer_warning") or "",
+                    "not_ready": article.get("writer_not_ready") or "",   # FU252
+                    "findings": article.get("writer_findings") or [],
                     # FU173: where the time actually went + whether the GPU was cold
                     "stage_secs": article.get("writer_stage_secs") or {},
                     "was_cold": bool(article.get("writer_was_cold")),

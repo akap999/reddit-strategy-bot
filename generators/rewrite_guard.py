@@ -30,6 +30,12 @@ acronyms, capitalised names and study-design phrases); nothing here names a vert
 import difflib
 import re
 
+# FU252 — the meaning-aware figure/claim primitives live with the scoreboard detectors, so the guard
+# and the offline replay can never disagree about what counts as a change. `blog_eval` imports only
+# the standard library, so this adds no cycle.
+from generators.blog_eval import (_acronym_expansions, _figure_bounds, _same_expansion,
+                                  _MD_LINK_RE, strength_terms)
+
 _CITE_RE = re.compile(r"\[S(\d+)\]")
 _CITE_RUN_RE = re.compile(r"(?:\[S\d+\]\s*)+")
 # A citation-shaped token that is not a real one: [S#], [S?], [Sx], [Sn], [S...], [S], [citation needed].
@@ -323,8 +329,42 @@ def _precise(term):
     return bool(re.search(r"[A-Z0-9]", t)) or len(t.split()) <= 2
 
 
+def _bound_problems(orig, new):
+    """FU252 — a figure that was a BOUND in the input and is a bare value in the output.
+
+    `_nums` compares VALUES, and no regex in this file or in blog_gen ever captured the "+", so
+    "DR 70+" and "DR 70" were the same figure to every gate — a floor published as an average. The
+    comparison is on MEANING, not characters: "25,000+" may become "over 25,000" or "at least
+    25,000" freely, and may not become nothing."""
+    a, b = _figure_bounds(orig), _figure_bounds(new)
+    out = []
+    for num, kinds in a.items():
+        was = sum(v for k, v in kinds.items() if k != "exact")
+        if not was:
+            continue
+        after = b.get(num) or {}
+        now = sum(v for k, v in after.items() if k != "exact")
+        # only when the figure itself survived — a merged repetition is tighter prose, not a changed
+        # claim (the same rule the offline detector uses)
+        if now < was and sum(after.values()) >= sum(kinds.values()):
+            out.append(num)
+    return out
+
+
+# Set once per document by `_guard`: the expansions the INPUT authorised, for the whole article.
+# Acronym consistency is a document property, not a block one — the input may define TRT in its first
+# paragraph and the rewrite may legitimately repeat that expansion in its seventh. Judged per block,
+# eight blocks of the FU221 fixture reverted for spelling out TRT, CBC and BMI exactly as the input
+# had already spelled them out.
+_DOC_ACRONYMS = {}
+
+
 def _unit_problems(orig, new, terms, defs=None):
-    """Why a reworded block (or section) cannot be kept; an empty list means it can."""
+    """Why a reworded block (or section) cannot be kept; an empty list means it can.
+
+    FU252 added the last four. Each is a class that reached a client: a figure that lost the modifier
+    carrying its meaning, a claim reworded harder than the input made it, a link to the publisher's
+    own evidence dropped, and an acronym given an expansion the input never authorised."""
     probs = []
     if _BAD_CITE_RE.search(new):
         probs.append("placeholder citation")
@@ -339,6 +379,28 @@ def _unit_problems(orig, new, terms, defs=None):
     lost = [k for k in terms if _has(k, orig, defs) and not _has(k, new, defs, lenient=True)]
     if lost:
         probs.append("term lost: " + ", ".join(lost[:3]))
+    _b = _bound_problems(orig, new)
+    if _b:
+        probs.append("figure lost its bound: " + ", ".join(_b[:3]))
+    # A strength word the input block did not use. Deliberately NOT a count comparison: a full
+    # rewording moves wording between sentences, and counting reverted three blocks of the FU221
+    # fixture for ordinary paraphrase. The named words are the ones that change what is promised.
+    _sa, _sn = strength_terms(orig), strength_terms(new)
+    if _sn - _sa:
+        probs.append("claim stated more strongly: " + ", ".join(sorted(_sn - _sa)[:3]))
+    _la = {u for _t, u in _MD_LINK_RE.findall(orig)}
+    _lb = {u for _t, u in _MD_LINK_RE.findall(new)}
+    if _la - _lb:
+        probs.append("link dropped: " + ", ".join(sorted(_la - _lb)[:2]))
+    _ea, _eb = _acronym_expansions(orig), _acronym_expansions(new)
+    for acro, forms in _eb.items():
+        # the block's own definition, plus every definition the INPUT gave anywhere in the article
+        was = (_ea.get(acro) or set()) | set(_DOC_ACRONYMS.get(acro) or ())
+        for f in sorted(forms):
+            if not any(_same_expansion(f, w) for w in was):
+                probs.append(f"{acro} spelled out as \"{f[:40]}\""
+                             + (f', input said "{sorted(was)[0][:40]}"' if was else " (input never did)"))
+                break
     return probs
 
 
@@ -349,6 +411,15 @@ def _labels(text):
         if m:
             out.append(m.group(2).strip())
     return out
+
+
+def _set_doc_acronyms(original):
+    """Record the expansions the INPUT authorised, for the whole article, before any block is judged."""
+    global _DOC_ACRONYMS
+    try:
+        _DOC_ACRONYMS = _acronym_expansions(original or "")
+    except Exception:
+        _DOC_ACRONYMS = {}
 
 
 def guard_rewrite(original, rewritten, key_terms=None, log=print, repairs=None):
@@ -362,6 +433,7 @@ def guard_rewrite(original, rewritten, key_terms=None, log=print, repairs=None):
            "reasons": {}, "examples": [], "changed": False, "summary": ""}
     rep["_repairs"] = dict(repairs or {})
     try:
+        _set_doc_acronyms(original or "")
         return _guard(original or "", rewritten or "", key_terms, log, rep)
     except Exception as e:                                   # a guard must never take the rewrite down
         rep["error"] = str(e)

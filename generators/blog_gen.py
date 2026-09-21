@@ -768,6 +768,25 @@ he she you your our we us if when while about into over under between within per
 # subject's own-domain pricing re-search when an authoritative canonical price already exists.
 _PRICE_DIM_RE = re.compile(r"pric|cost|\bfee\b|\bfees\b|\$|/mo|month|subscription|billing|plan\b",
                            re.IGNORECASE)
+# FU247 — a column that ASKS whether something is included is not the column that says what it
+# costs. "Medication Included in Fee?" contains "fee", so the price-cell writer filled it with the
+# price string for three of four rows, and the column that should have read Yes / No / billed
+# separately repeated the monthly cost instead. Shape-based: a yes/no question, or an
+# inclusion/availability flag.
+_YESNO_DIM_RE = re.compile(
+    r"^\s*(?:is|are|does|do|can|has|have)\b"
+    r"|\b(?:included|includes|covered|covers|available|offered|supported|eligible|required|"
+    r"bundled|separate)\b[^|]{0,30}\?\s*$",
+    re.IGNORECASE)
+
+
+def _is_price_column(header):
+    """FU247: the ONE test for "this comparison column holds a price". Used by the cell writer and
+    both column droppers, so they can no longer disagree about which column is the money one."""
+    h = (header or "").strip()
+    return bool(h and _PRICE_DIM_RE.search(h)
+                and not _YESNO_DIM_RE.search(h)
+                and not re.search(r"source", h, re.I))
 _LICENSE_SIGNAL_RE = re.compile(
     r"\b(commercial(?:ly|[- ]use)?|licen[sc]e[ds]?|royalty[- ]free|copyright|monetiz\w*|own\s+the\s+(?:output|rights))\b",
     re.IGNORECASE)
@@ -1907,6 +1926,25 @@ def _page_text(entry):
     if isinstance(entry, tuple):
         return entry[0] or ""
     return entry or ""
+
+
+def _trim_to_sentence(text, cap):
+    """FU247 — cut long text at a SENTENCE end at or before `cap`, never mid-word.
+
+    Three FAQ answers shipped in the JSON-LD ending "cardiovascular histo", "This is not a " and
+    "Men evaluating programs th" — a hard `[:700]` slice through whatever character sat at 700.
+    A FAQPage answer is supposed to match the answer on the page; half a word matches nothing, and
+    a shorter complete answer is strictly better than a longer broken one. Falls back to a word
+    boundary, and only then to the hard cut."""
+    t = (text or "").strip()
+    if len(t) <= cap:
+        return t
+    window = t[:cap]
+    end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if end >= cap // 3:                     # a sentence end far enough in to keep a real answer
+        return window[:end + 1].strip()
+    sp = window.rfind(" ")
+    return (window[:sp] if sp >= cap // 3 else window).strip()
 
 
 def _asof_label(now=None):
@@ -4119,6 +4157,13 @@ class BlogGenerator:
     # from a cell, wrong to delete a whole sentence for. So a generic "not <verb>" only counts as a
     # punt when a SOURCING-context word sits within ~70 chars of it; the research-process phrases
     # stand alone.
+    # FU247 — the body of ONE sentence, where a dot inside a domain or an abbreviation is not a
+    # sentence end. `[^.\n]*` stops at the first dot it meets, so a punt sentence carrying a URL was
+    # cut in half: "…is not confirmed in the available sources; visit hims." was removed and
+    # " com for current plan details." shipped as a sentence of its own. A real break is a dot
+    # followed by whitespace or the end of the line.
+    _SENT_BODY = r"(?:[^.\n]|\.(?!\s|$))*"
+
     _PUNT_PROSE_RE = re.compile(
         r"\bnot\s+(?:specified|disclosed|stated|provided|listed|available|published|documented|"
         r"confirmed|verified|found)\b[^.\n]{0,70}?\b(?:evidence|sources?|sourced|cited|public|"
@@ -4137,7 +4182,8 @@ class BlogGenerator:
         r"varies?\s+by\s+plan|not\s+publicly\s+documented)",
         re.IGNORECASE)
     _PUNT_SENT_RE = re.compile(
-        r"[^.\n]*\b(?:(?:always\s+|be\s+sure\s+to\s+|please\s+)?(?:verify|confirm|check)\b[^.\n]*"
+        _SENT_BODY + r"\b(?:(?:always\s+|be\s+sure\s+to\s+|please\s+)?(?:verify|confirm|check)\b"
+        + _SENT_BODY +
         r"\bbefore\s+(?:publishing|monetiz|you\s+publish)|always\s+verify|varies?\s+by\s+plan|"
         r"depends?\s+on\s+the\s+(?:specific\s+)?plan|not\s+publicly\s+documented|"
         # FU138: the "not specified/disclosed in (the) sourced/available facts/sources" prose family
@@ -4145,8 +4191,10 @@ class BlogGenerator:
         r"(?:sourced|available|cited|provided)\s+(?:facts|sources|evidence|information|data)|"
         r"data\s+not\s+(?:present|available)|"
         # FU78: "See/refer to/visit/check <site> for (current) pricing / plans / terms / license / commercial"
-        r"(?:see|refer\s+to|visit|check)\s+[^.\n]*?\bfor\b[^.\n]*?(?:pricing|prices?|plans?|current\s+plan|terms|licen[sc]e|commercial\s+use)|"
-        r"(?:see|visit|check)\s+(?:the\s+)?[^.\n]*?(?:pricing|plans?|terms|licen[sc]e)\s+page)\b[^.\n]*\.",
+        r"(?:see|refer\s+to|visit|check)\s+" + _SENT_BODY + r"?\bfor\b" + _SENT_BODY +
+        r"?(?:pricing|prices?|plans?|current\s+plan|terms|licen[sc]e|commercial\s+use)|"
+        r"(?:see|visit|check)\s+(?:the\s+)?" + _SENT_BODY +
+        r"?(?:pricing|plans?|terms|licen[sc]e)\s+page)\b" + _SENT_BODY + r"\.",
         re.IGNORECASE)
     # FU78: same "see/visit/check … pricing/plans/terms/license …" pointer but URL-tolerant — a URL's internal
     # dots break the [^.\n] sentence class above, so this variant allows dots and uses a period-then-whitespace
@@ -4165,7 +4213,15 @@ class BlogGenerator:
     _META_RE = re.compile(
         r"deduplicated\s+(?:above|below)|no\s+tool-specific\s+fresh\s+fact|per\s+sourcing\s+rules|"
         r"row(?:'?s)?\s+(?:is|are)\s+removed|removed\s+per\s+sourcing|not\s+a\s+direct\s+comparison\s+row|"
-        r"addressed\s+in\s+the\s+.{0,40}?section\b.{0,30}?rather\s+than",
+        r"addressed\s+in\s+the\s+.{0,40}?section\b.{0,30}?rather\s+than|"
+        # FU247 — the prompt talking about itself. "Hims is named in the brand context as a GLP-1
+        # telehealth provider for men" shipped to readers: a sentence about where the writer got a
+        # name, in an article that has no brand context and no prompt.
+        r"(?:named|listed|mentioned|included|provided|supplied|given)\s+in\s+the\s+"
+        r"(?:brand\s+context|context\s+block|brand\s+block|prompt|evidence\s+block)|"
+        r"(?:per|from|according\s+to)\s+the\s+(?:brand\s+context|context\s+block|prompt)|"
+        r"the\s+(?:brand\s+context|prompt)\s+(?:names|lists|states|says|provides)|"
+        r"\bas\s+(?:stated|named|listed)\s+in\s+the\s+brand\s+context",
         re.IGNORECASE)
 
     # ── FU204 Change 6 — ONE price predicate, used by BOTH the ask and the re-check ───────────────
@@ -4630,9 +4686,7 @@ class BlogGenerator:
                 out.extend(tbl)
                 continue
             header = rows[0]
-            pcols = [ci for ci in range(1, len(header))
-                     if _PRICE_DIM_RE.search(header[ci] or "")
-                     and not re.search(r"source", header[ci] or "", re.I)]
+            pcols = [ci for ci in range(1, len(header)) if _is_price_column(header[ci])]
             if not pcols:
                 out.extend(tbl)
                 continue
@@ -4706,9 +4760,7 @@ class BlogGenerator:
             if len(rows) < 3:
                 out.extend(tbl); continue
             header = rows[0]
-            drop = {ci for ci in range(1, len(header))
-                    if _PRICE_DIM_RE.search(header[ci] or "")
-                    and not re.search(r"source", header[ci] or "", re.I)}
+            drop = {ci for ci in range(1, len(header)) if _is_price_column(header[ci])}
             if not drop or len(drop) >= len(header) - 1:
                 out.extend(tbl); continue
             dropped.extend(header[ci] or f"column {ci + 1}" for ci in sorted(drop))
@@ -5082,8 +5134,8 @@ class BlogGenerator:
         # FU204: drop a whole SENTENCE that narrates our own failed lookup ("prices are not confirmed
         # from a first-party source in the available evidence", "… was not retrievable"). Same
         # sentence-shaped sub `_scrub_meta` already uses for edit-narration.
-        body = re.sub(r"[^.\n]*(?:" + self._PUNT_PROSE_RE.pattern + r")[^.\n]*\.", _keep, body,
-                      flags=re.IGNORECASE)
+        body = re.sub(self._SENT_BODY + r"(?:" + self._PUNT_PROSE_RE.pattern + r")"
+                      + self._SENT_BODY + r"\.", _keep, body, flags=re.IGNORECASE)
         body = re.sub(r"[ \t]{2,}", " ", body)
         return body
 
@@ -5169,6 +5221,20 @@ class BlogGenerator:
                 print(f"[blog_gen] substance-guard: kept the rewrite's {twin!r} — not re-adding the "
                       f"draft's {title!r}", flush=True)
                 continue
+            # FU247 — an entity PROFILE the reconcile dropped, carrying no citation, is not substance
+            # the rewrite lost: it is the rewrite obeying its own rule. The reconcile removes a
+            # compared option that has NO tool-specific fresh fact, and restoring the draft's copy
+            # puts that option back with nothing behind it — which is how an uncited competitor
+            # section, still carrying the draft's leftovers, shipped after the call to action.
+            # Scoped to a profile of a NAMED compared entity: a checklist or a policy section with
+            # no citation is exactly what FU54 exists to bring back, and still is.
+            if not re.search(r"\[S\d+\]", block) and re.search(r"\[S\d+\]", revised):
+                _names = [n for n in (getattr(self, "_article_tools", None) or []) if str(n).strip()]
+                if any(_entity_named_in(n, title) for n in _names):
+                    print(f"[blog_gen] substance-guard: NOT restoring {title!r} — the rewrite dropped "
+                          f"a compared option that carries no source, and the draft's copy has none "
+                          f"either", flush=True)
+                    continue
             restored.append(block)
         # FU228: the guard re-adds the DRAFT's copy of a section, so when the reconcile RENAMED a
         # section while CORRECTING its facts, the stale copy lands beside the corrected one and the
@@ -17309,14 +17375,14 @@ def _parse_faq_pairs(body_md):
             # schema and read as noise; tidy any double space they leave behind.
             a = re.sub(r"\s*\[S\d+\]", "", a).strip()
             if q and a and q.endswith("?"):
-                pairs.append({"q": q, "a": a[:700]})
+                pairs.append({"q": q, "a": _trim_to_sentence(a, 700)})
     if pairs:
         return pairs
     for mm in re.finditer(r"(?m)^\s*\*\*(?:Q:\s*)?(.+?\?)\*\*\s*(.*)$", faq):
         q = mm.group(1).strip()
         a = re.sub(r"^A:\s*", "", (mm.group(2) or "").strip())
         if q and a:
-            pairs.append({"q": q, "a": re.sub(r"\s+", " ", a)[:700]})
+            pairs.append({"q": q, "a": _trim_to_sentence(re.sub(r"\s+", " ", a), 700)})
     return pairs
 
 

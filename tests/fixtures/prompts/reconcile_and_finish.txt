@@ -154,6 +154,17 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor Acme Tools, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - NEVER LEAVE Acme Tools'S OWN CLASS DISQUALIFIED: where the draft states a rule, regulation, coverage
+    limit or eligibility bar that applies to the CATEGORY Acme Tools sells in, KEEP the rule verbatim with
+    its [S#] — it is true and load-bearing — and make sure the passage also says where Acme Tools stands
+    inside it (the pathway, exception, licence or practice under which Acme Tools operates). If the FRESH
+    FACTS do not support such a sentence, do not invent one: cut the section instead when the article's
+    question does not need it. What must never ship is the rule stated, Acme Tools's position unstated, and
+    Acme Tools recommended in the next breath.
+  - NEVER PITCH ON A POINT THE DRAFT'S OWN FACTS BEAT: if the body cites a figure for a comparable
+    option that undercuts Acme Tools on price, do NOT keep a price / affordability / "upfront pricing"
+    claim in the recommendation or the CTA. Keep the cited figure exactly as it is and reframe the
+    recommendation onto what the draft's own sourced facts support for Acme Tools.
   - NO PHANTOM SELF-REFERENCE: never introduce OR KEEP a sentence that points the reader at another
     Acme Tools page which is not a live URL already present in the draft ("Acme Tools has published a dedicated
     guide on ...", "refer to Acme Tools's published guidance on ...", "see our guide on ..."). Those pages

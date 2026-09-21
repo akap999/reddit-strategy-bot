@@ -5723,6 +5723,20 @@ extractable answer), still under 160 chars.
       * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
         phased path can run WITH {name} too wherever that is true, so the reader is not sent away to
         find a different provider for phase one.
+      * NEVER DISQUALIFY {name}'S OWN PRODUCT CLASS AND THEN PITCH IT. When a section states a rule,
+        regulation, coverage limit or eligibility bar that applies to the CATEGORY {name} sells in,
+        that rule stays exactly as sourced — it is true and the reader needs it. What must follow is
+        the sentence that says where {name} stands inside it: the pathway, exception, licence,
+        accreditation or practice that lets {name} operate under that rule. If the article's question
+        does not actually need that rule, leave the section out; what you may never do is state the
+        rule, say nothing about {name}'s position, and recommend {name} anyway. A reader who takes
+        the rule at face value has just been told by this page not to buy from its publisher.
+      * DO NOT PITCH ON A POINT THIS ARTICLE'S OWN FACTS BEAT. If the page cites a figure for a
+        comparable option that undercuts {name} on price, the CTA and the recommendation may not rest
+        on price, affordability or "upfront pricing". Keep the cited figure — it is sourced and the
+        reader can find it anyway — and make the case on what the page's own facts do support for
+        {name}: oversight, access, what is included, eligibility, turnaround, continuity. The same
+        rule holds for any dimension the article itself shows {name} losing.
 """
         _guide_block = ""
         if self._guide:
@@ -8816,6 +8830,17 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor {name}, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - NEVER LEAVE {name}'S OWN CLASS DISQUALIFIED: where the draft states a rule, regulation, coverage
+    limit or eligibility bar that applies to the CATEGORY {name} sells in, KEEP the rule verbatim with
+    its [S#] — it is true and load-bearing — and make sure the passage also says where {name} stands
+    inside it (the pathway, exception, licence or practice under which {name} operates). If the FRESH
+    FACTS do not support such a sentence, do not invent one: cut the section instead when the article's
+    question does not need it. What must never ship is the rule stated, {name}'s position unstated, and
+    {name} recommended in the next breath.
+  - NEVER PITCH ON A POINT THE DRAFT'S OWN FACTS BEAT: if the body cites a figure for a comparable
+    option that undercuts {name} on price, do NOT keep a price / affordability / "upfront pricing"
+    claim in the recommendation or the CTA. Keep the cited figure exactly as it is and reframe the
+    recommendation onto what the draft's own sourced facts support for {name}.
   - NO PHANTOM SELF-REFERENCE: never introduce OR KEEP a sentence that points the reader at another
     {name} page which is not a live URL already present in the draft ("{name} has published a dedicated
     guide on ...", "refer to {name}'s published guidance on ...", "see our guide on ..."). Those pages
@@ -12978,6 +13003,456 @@ you MAY assume the description will carry: "{disc}".
                   "evaluation criterion the publisher fails; compare on a dimension it meets, or "
                   "drop the column")
 
+    # ══ FU243 — the page must not argue against the brand that published it ═══════════════════════════
+    # FU231 caught the asymmetric downside LABEL, FU234 the absence CELL, FU235 the conceded OUTCOME.
+    # An insurance article exposed three more. The operator's instruction on the third was not "warn"
+    # but "change the way it is put across" — so the first two below WARN (their resolution is an
+    # editorial call a prompt has to make) and `_publisher_framing_pass` actually REWRITES.
+    #
+    # Nothing here suppresses a true fact. A rule stays stated, a limitation stays stated, a
+    # competitor's real advantage stays stated; what changes is the FRAMING around them.
+
+    # (1) A rule that disqualifies a whole PRODUCT CLASS. On a YMYL page it is true and load-bearing,
+    # so it is never deleted; what must not happen is the page stating it about the publisher's OWN
+    # class and then pitching that class with no word about how the publisher operates within it.
+    _CATEGORY_RULE_RE = re.compile(
+        r"(?:\b(?:may|must|can|cannot|can't)\s+not\s+\w+"          # may not compound / must not be sold
+        r"|\bcannot\b|\bcan't\b"
+        r"|\b(?:is|are|were)\s+not\s+(?:permitted|allowed|eligible|approved|covered|authori[sz]ed|licensed)\b"
+        r"|\b(?:is|are)\s+(?:prohibited|banned|barred|restricted|excluded|ineligible|unapproved|illegal)\b"
+        r"|\b(?:do|does)\s+not\s+(?:qualify|cover|reimburse|permit|allow)\b"
+        r"|\bnot\s+(?:FDA|federally|legally|nationally|officially)\s+approved\b"
+        r"|\bineligible\b|\bexcluded\s+from\b)", re.I)
+    # words that describe HOW a business is sold rather than WHAT it sells — too common to prove a
+    # sentence is about this brand's own class, whatever vertical it comes from.
+    _OFFERING_STOP = frozenset((
+        "selling", "sells", "service", "services", "offers", "offering", "online", "platform",
+        "company", "companies", "provider", "providers", "solution", "solutions", "based", "using",
+        "their", "professional", "quality", "customers", "clients", "business", "digital",
+        "website", "brand", "products", "product", "premium", "leading", "trusted", "national",
+        "nationwide", "support"))
+    # the publisher's POSITION inside such a rule — what makes the section honest instead of self-defeating
+    # Deliberately tight: it has to mean "here is where we stand IN THAT RULE", not merely
+    # "we are licensed". A loose version silenced the check on the very article that exposed it —
+    # "runs licensed physician oversight" sat two sentences away and read as a compliance answer.
+    _WITHIN_RULE_RE = re.compile(
+        r"\b(?:exception|exemption|carve[- ]out|pathway|provision|"
+        r"(?:operates?|works?|stays?|falls?|remains?|sits?)\s+(?:with)?in\b|under\s+(?:that|this|the)\s+"
+        r"(?:rule|law|restriction|requirement|regulation|exception|exemption|pathway|provision)|"
+        r"compl(?:ies|iant)\s+with|permitted\s+(?:to|under)|allowed\s+(?:to|under)|eligible\s+under|"
+        r"qualifies\s+(?:for|under)|licen[sc]ed\s+(?:in|by|as|to)|registered\s+(?:with|as|in)|"
+        r"which\s+is\s+why|patient[- ]specific|individual\s+patient)\b", re.I)
+
+    # (2) a PRICE-LEVEL claim — the only kind of pitch the article's own cheaper figure can beat.
+    # "no hidden fees", "no contract" and the like are deliberately NOT here: they are true whatever
+    # the price is, so a lower competitor figure does not undercut them.
+    _PRICE_CLAIM_RE = re.compile(
+        r"\b(?:affordab\w+|cheaper|cheapest|lower\s+(?:cost|price|priced)|lowest\s+(?:cost|price)|"
+        r"cost[- ]effective|best\s+value|better\s+value|great\s+value|budget[- ]friendly|"
+        r"save\s+(?:you\s+)?money|competitive(?:ly)?\s+(?:price|priced|pricing)|"
+        r"upfront\s+pricing|transparent\s+pricing|pricing\s+(?:is|stays)\s+(?:upfront|transparent))\b", re.I)
+
+    # (3) the two framing shapes the rewrite pass fixes.
+    _HARSH_RE = re.compile(
+        r"\b(?:does\s+not\s+(?:offer|provide|include|cover|support)|doesn't\s+(?:offer|provide|include|"
+        r"cover|support)|cannot|can't|lacks?|lacking|falls?\s+short|is\s+not\s+(?:the\s+)?(?:cheapest|"
+        r"best|right|ideal)|more\s+expensive|costs?\s+more|only\s+covers?|limited\s+to|no\s+longer\s+"
+        r"offers?|weaker|behind\s+(?:its\s+)?competitors?|loses?\s+(?:out\s+)?to)\b", re.I)
+    _SUPERLATIVE_RE = re.compile(
+        r"\b(?:the\s+best\b|best[- ]in[- ]class|industry[- ]leading|market[- ]leading|the\s+leading\b|"
+        r"clear\s+winner|far\s+(?:better|more|cheaper)|significantly\s+(?:better|cheaper|stronger)|"
+        r"outperforms?|unmatched|unbeatable|superior\s+to|the\s+most\s+(?:comprehensive|complete|"
+        r"affordable|trusted)|hands\s+down)\b", re.I)
+
+    @staticmethod
+    def _brand_offering_tokens(brand):
+        """The distinctive words for what the BRAND ITSELF sells — its category, context, features,
+        use cases and the products its canonical facts name.
+
+        Vertical-neutral by construction: every token comes from the brand record, so a compounding
+        pharmacy, a lender, a contractor and an agency each get their own, and nothing keys on a
+        topic. Tokens shorter than 5 characters are dropped — a 3-4 letter word ("fee", "care") is
+        too common to prove a sentence is about this brand's own class."""
+        b = brand or {}
+        parts = [str(b.get("category") or ""), str(b.get("context") or "")]
+        for k in ("features", "use_cases"):
+            parts.extend(str(x) for x in (_as_list(b.get(k)) or []))
+        try:
+            kf = json.loads(b.get("key_facts") or "{}")
+        except Exception:
+            kf = {}
+        if isinstance(kf, dict):
+            for it in _kf_pricing_items(kf):
+                parts.append(str(it.get("product") or ""))
+            for it in _kf_fact_items(kf):
+                parts.append(str(it.get("value") or ""))
+        toks, seen = [], set()
+        for t in _product_tokens(" ".join(parts)):
+            if len(t) >= 5 and t not in seen and t not in BlogGenerator._OFFERING_STOP:
+                seen.add(t)
+                toks.append(t)
+        return toks[:24]
+
+    @staticmethod
+    def _whole_sentences(body):
+        """Whole sentences of the article's prose, with a wrapped paragraph joined back up first.
+
+        `_split_sentences_with_pos` deliberately works line by line, because a repair has to find its
+        quote VERBATIM in the body. A CHECK has the opposite need: a rule that wraps across two lines
+        is one sentence and must be read as one. Headings, tables, blockquotes, bold-label-only lines
+        and the ## Sources section are skipped the same way."""
+        head = re.split(r"(?im)^\s*#{1,6}\s*sources\s*$", body or "", maxsplit=1)[0]
+        out = []
+        for block in re.split(r"\n\s*\n", head):
+            keep = [ln.strip() for ln in block.split("\n")
+                    if ln.strip() and not ln.strip().startswith(("#", "|", ">"))
+                    and not re.fullmatch(r"\*\*[^*].*\*\*", ln.strip())]
+            if not keep:
+                continue
+            for sent in re.split(r"(?<=[.!?])\s+", " ".join(keep)):
+                sent = sent.strip()
+                if len(sent.split()) >= 5:
+                    out.append(sent)
+        return out
+
+    @staticmethod
+    def _offering_hits(text, toks):
+        """How many of the brand's offering tokens the text carries, matched on a STEM so
+        "compounded" finds "compound" and "pharmacies" finds "pharmacy"."""
+        low = (text or "").lower()
+        n = 0
+        for t in toks or []:
+            stem = t[:max(5, len(t) - 3)]
+            if re.search(r"\b" + re.escape(stem), low):
+                n += 1
+        return n
+
+    def _self_disqualification_check(self, body, brand):
+        """FU243 (1) — the page states a rule that condemns the PUBLISHER'S OWN product class, and
+        never says how the publisher stands relative to it.
+
+        The reported case: an insurance article correctly stated the regulatory limit on compounded
+        GLP-1s, then pitched the publisher's own compounded GLP-1 two paragraphs later. Every check
+        passed — the rule is true, cited, on-topic and about the category, not about the brand — and
+        the page still read as an argument against its own publisher.
+
+        The resolution is NEVER to delete the rule (it is true, and on a YMYL page that is the whole
+        point). It is to say how the publisher operates within it, or to drop the section when it is
+        not load-bearing for the question asked. Warning only: which of those two applies is an
+        editorial judgement."""
+        name = ((brand or {}).get("name") or "").strip()
+        toks = self._brand_offering_tokens(brand)
+        if not body or not name or not toks:
+            return ""
+        nm = _tradeoff_name_re(name)
+        sents = self._whole_sentences(body)
+        hits = []
+        for i, sent in enumerate(sents):
+            if not self._CATEGORY_RULE_RE.search(sent):
+                continue
+            near = " ".join(sents[max(0, i - 1):i + 3])
+            # the RULE must be about the publisher's own class, and the passage around it must be
+            # too — one shared word is a coincidence, the pair is the page talking about what it sells.
+            if self._offering_hits(sent, toks) < 1 or self._offering_hits(near, toks) < 2:
+                continue
+            if nm.search(sent):
+                continue                       # the sentence already names where the brand stands
+            # the page answers the rule only when ONE sentence both names the brand and says where
+            # it stands in that rule — two unrelated sentences near each other do not.
+            if any(nm.search(s) and self._WITHIN_RULE_RE.search(s)
+                   for s in sents[max(0, i - 1):i + 3]):
+                continue
+            hits.append(sent[:110].strip())
+            if len(hits) >= 2:
+                break
+        if not hits:
+            return ""
+        return ("self-disqualification: " + "; ".join(f'"{h}…"' for h in hits)
+                + f" — a rule about {name}'s OWN product class, stated with nothing about where "
+                  f"{name} stands in it. Keep the rule (it is true); add the sentence that says how "
+                  f"{name} operates within it, or drop the section if the question does not need it")
+
+    def _beaten_pitch_check(self, body, brand, seed=""):
+        """FU243 (2) — the article's own facts undercut its pitch.
+
+        The reported case: the body carried a $149/month self-pay figure for the same drug while the
+        CTA sold the publisher's $270/month subscription on price. Every figure was right and every
+        one was sourced; the page just argued the reader into the cheaper option.
+
+        Fires only when all three hold: the brand has a canonical price, the body states a LOWER one
+        for the same product class, and a sentence naming the brand makes a price-LEVEL claim. The
+        fix is never to hide the cheaper figure — it is to move the pitch onto a differentiator the
+        article's own facts support. Warning only."""
+        name = ((brand or {}).get("name") or "").strip()
+        if not body or not name:
+            return ""
+        try:
+            kf = json.loads((brand or {}).get("key_facts") or "{}")
+        except Exception:
+            return ""
+        # our price for THIS article's product when one matches; otherwise the CHEAPEST canonical
+        # price the operator set. Taking the cheapest is the conservative direction — it makes this
+        # check fire LESS often, never more, when the product cannot be matched exactly.
+        canon = _canonical_price_item(kf, f"{seed} ")
+        cands = [canon] if canon else [it for it in _kf_pricing_items(kf) if it.get("operator_set")]
+        priced = []
+        for it in cands:
+            n, _cur = _price_amount(str((it or {}).get("value") or ""))
+            try:
+                v = float(n)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                priced.append((v, it))
+        if not priced:
+            return ""
+        ours, canon = min(priced, key=lambda x: x[0])
+        nm = _tradeoff_name_re(name)
+        low_fig, low_sent = None, ""
+        claim = ""
+        for sent in self._whole_sentences(body):
+            mine = bool(nm.search(sent))
+            if mine and not claim and self._PRICE_CLAIM_RE.search(sent):
+                claim = sent[:110].strip()
+            if mine:
+                continue                       # our own figure never beats our own pitch
+            for m in _PRICE_FIG_RE.finditer(sent):
+                try:
+                    v = float(m.group(0).lstrip("$€£").strip().replace(",", ""))
+                except ValueError:
+                    continue
+                # ignore an order-of-magnitude-different figure: an annual total or a deductible is
+                # not the monthly price the pitch is competing with.
+                if v <= 0 or v >= ours or v * 4 < ours:
+                    continue
+                if low_fig is None or v < low_fig:
+                    low_fig, low_sent = v, sent[:110].strip()
+        if not claim or low_fig is None:
+            return ""
+        return (f'beaten-pitch: the article states "{low_sent}"'
+                f" — a lower figure than {name}'s own canonical "
+                f"{str(canon.get('value') or '').strip()[:60]} — while the pitch still sells on price "
+                f'("{claim}…"). Keep both figures; reframe the pitch onto what the article\'s own '
+                f"facts support for {name} (oversight, access, eligibility, what is included)")
+
+    @staticmethod
+    def _own_profile_span(body, name):
+        """The character span of the brand's OWN profile section (an H3/H4 whose heading names it),
+        or None. Mirrors `blog_eval.detect_publisher_only_downside`'s section walk closely enough to
+        act on what it reports."""
+        if not body or not name:
+            return None
+        nm = _tradeoff_name_re(name)
+        heads = list(re.finditer(r"(?m)^(#{2,6})[ \t]+(.+)$", body))
+        for i, m in enumerate(heads):
+            if len(m.group(1)) < 3 or m.group(2).rstrip().endswith("?"):
+                continue
+            if not nm.search(m.group(2)):
+                continue
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+            return (m.end(), end)
+        return None
+
+    @staticmethod
+    def _drop_table_columns(body, headers):
+        """Remove the named comparison COLUMNS from every Markdown table. Reuses the row convention
+        `_strip_price_columns` established; never drops the first (name) column, a Source column, or
+        the last remaining dimension. Returns (body, [dropped headers])."""
+        want = {re.sub(r"[*_`]", "", h or "").strip().lower() for h in (headers or []) if str(h).strip()}
+        if not body or not want:
+            return body, []
+        lines, out, i, dropped = body.split("\n"), [], 0, []
+        while i < len(lines):
+            if not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
+                out.append(lines[i]); i += 1
+                continue
+            tbl = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].count("|") >= 2:
+                tbl.append(lines[i]); i += 1
+            rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in tbl]
+            if len(rows) < 3:
+                out.extend(tbl); continue
+            header = rows[0]
+            drop = {ci for ci in range(1, len(header))
+                    if re.sub(r"[*_`]", "", header[ci] or "").strip().lower() in want
+                    and not re.search(r"source", header[ci] or "", re.I)}
+            if not drop or len(drop) >= len(header) - 1:
+                out.extend(tbl); continue
+            dropped.extend(header[ci] or f"column {ci + 1}" for ci in sorted(drop))
+            for r in rows:
+                for ci in sorted(drop, reverse=True):
+                    if ci < len(r):
+                        del r[ci]
+            out.extend("| " + " | ".join(r) + " |" for r in rows)
+        return "\n".join(out), dropped
+
+    def _publisher_framing_pass(self, body, brand):
+        """FU243 (3) — when the page is harsh on its own publisher, lets a competitor overshadow it,
+        or singles out the publisher's limitation, CHANGE how that is put. Not a warning.
+
+        The operator's instruction, exactly: "updating the way things are put across … should be
+        changed if these things are happening". So this runs in three steps, cheapest and safest
+        first, and each one preserves every fact, figure and citation:
+
+          a. the asymmetric downside LABEL (FU231) — the publisher's profile is the only one carrying
+             a bold "Honest trade-off:" / "Limitations:" header. The limitation itself is true and
+             stays; what goes is the header that turns it into a flagged verdict none of the compared
+             options gets. Deterministic, and it cannot touch a word of the sentence.
+          b. the absence COLUMN (FU234) — a comparison dimension the publisher can only answer with
+             "none stated" while competitors show values is not a criterion, it is a test the page's
+             own publisher loses. The column is dropped, which is what that check has recommended in
+             words since FU234.
+          c. what is left is prose, and prose has to be reworded rather than cut. One bounded Claude
+             call reframes at most four sentences; every answer goes through `_verify_repair_gate`,
+             so a reframe that drops a citation, a number, a name, or says a fact is unavailable is
+             refused and reported instead of applied.
+
+        Returns (body, note). Never raises; `BLOG_FRAMING_PASS=0` disables it."""
+        name = ((brand or {}).get("name") or "").strip()
+        if not body or not name or os.environ.get("BLOG_FRAMING_PASS", "1") == "0":
+            return body, ""
+        changes, skipped = [], []
+
+        # ── a. the label only the publisher carries ──────────────────────────────────────────────
+        try:
+            from generators.blog_eval import detect_publisher_only_downside, _DOWNSIDE_LABEL_RE
+            if detect_publisher_only_downside(body, name):
+                span = self._own_profile_span(body, name)
+                if span:
+                    seg = body[span[0]:span[1]]
+                    slines, hit = seg.split("\n"), False
+                    for k, ln in enumerate(slines):
+                        nl = _DOWNSIDE_LABEL_RE.sub("", ln)
+                        if nl == ln:
+                            continue
+                        hit = True
+                        # the label carried the line's opening punctuation ("**Honest trade-off:**");
+                        # drop what it left behind, keep any list marker, touch no other word.
+                        m = re.match(r"^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)?", nl)
+                        pre = m.group(1) or ""
+                        slines[k] = pre + re.sub(r"^[ \t]*[:;.-][ \t]*|^[ \t]+", "", nl[len(pre):])
+                    if hit:
+                        # a label that WAS the whole line leaves an empty one behind
+                        seg2 = re.sub(r"\n{3,}", "\n\n", "\n".join(slines))
+                        body = body[:span[0]] + seg2 + body[span[1]:]
+                        changes.append(f"removed the downside label only {name}'s profile carried "
+                                       "(the limitation itself is unchanged)")
+        except Exception:
+            pass
+
+        # ── b. the column the publisher can only answer with an absence ──────────────────────────
+        try:
+            weak = self._publisher_weak_check(body, brand)
+            if weak:
+                cols = [c.strip() for c in
+                        (weak.split("'s ", 1)[1].split(" cell(s)")[0] if "'s " in weak else "").split(",")]
+                body2, dropped = self._drop_table_columns(body, cols)
+                if dropped:
+                    body = body2
+                    changes.append("dropped the comparison column(s) "
+                                   + ", ".join(f'"{d}"' for d in dict.fromkeys(dropped))
+                                   + f" — {name} could only answer with an absence while competitors "
+                                     "showed values")
+        except Exception:
+            pass
+
+        # ── c. harsh prose / a competitor given the spotlight ────────────────────────────────────
+        try:
+            comps, brand_in_table = _tradeoff_competitors(body, name)
+            comp_res = [_tradeoff_name_re(c) for c in _tradeoff_match_names(comps)] if brand_in_table else []
+            nm = _tradeoff_name_re(name)
+            mine_harsh, comp_harsh, comp_loud, mine_loud = [], False, [], False
+            for sent in self._split_sentences_with_pos(body):
+                ours = bool(nm.search(sent))
+                theirs = any(r.search(sent) for r in comp_res)
+                if self._HARSH_RE.search(sent):
+                    if ours and not theirs:
+                        mine_harsh.append(sent)
+                    elif theirs and not ours:
+                        comp_harsh = True
+                if self._SUPERLATIVE_RE.search(sent):
+                    if theirs and not ours:
+                        comp_loud.append(sent)
+                    elif ours:
+                        mine_loud = True
+            todo = []
+            # UNIQUELY harsh: the publisher takes a hit no compared option takes anywhere on the page.
+            # When a competitor is criticised too, the ledger is even and honest — leave it alone.
+            if mine_harsh and not comp_harsh:
+                todo += [{"kind": "framing", "quote": s,
+                          "problem": f"this is the only critical framing on the page and it lands on "
+                                     f"{name}, the publisher, while none of the compared options takes "
+                                     f"one — state the same fact without making {name} the page's only "
+                                     f"loser"} for s in mine_harsh[:2]]
+            # OVERSHADOWED: a competitor gets a superlative the sources do not owe it and the
+            # publisher gets none. The competitor's real advantage stays; the volume comes down.
+            if comp_loud and not mine_loud:
+                todo += [{"kind": "framing", "quote": s,
+                          "problem": "a compared option is given superlative framing while the "
+                                     f"publisher {name} is given none — keep the option's real, "
+                                     "sourced advantage and state it plainly instead of as a verdict"}
+                         for s in comp_loud[:2]]
+            if todo and self.claude:
+                fixes = self._framing_rewrites(todo, name)
+                for it in todo:
+                    it["fix"] = fixes.get(it["quote"], "")
+                body, applied, skips = self._verify_apply_repairs(body, todo, brand, repair="claude")
+                for a in applied:
+                    changes.append("reframed " + json.dumps(a.get("quote", "")[:70]))
+                for s in skips:
+                    skipped.append(f'{json.dumps(s.get("quote", "")[:70])} ({s.get("reason", "")})')
+        except Exception:
+            pass
+
+        if not changes and not skipped:
+            return body, ""
+        note = "framing: " + ("; ".join(changes) if changes else "nothing could be changed")
+        if skipped:
+            note += " | left as written: " + "; ".join(skipped[:3])
+        return body, note
+
+    def _framing_rewrites(self, todo, name):
+        """ONE Claude call that rewords the flagged sentences. It is given the sentences and told
+        what is wrong with each; it returns replacements, which the gate then screens. The model is
+        never asked to decide WHETHER to change something — that decision is already made in code,
+        which is what keeps this from quietly editing a page on a hunch."""
+        if not todo or not self.claude:
+            return {}
+        items = "\n\n".join(f"{i + 1}. PROBLEM: {t['problem']}\n   SENTENCE: {t['quote']}"
+                            for i, t in enumerate(todo))
+        prompt = (
+            "You are re-wording sentences in a published first-party reference article so the page "
+            f"stops reading as an argument against its own publisher, {name}.\n\n"
+            "HARD RULES — a rewrite that breaks any of these is thrown away:\n"
+            "  - Keep EVERY fact, figure, price, date, product name and brand name exactly as written.\n"
+            "  - Keep EVERY [S#] citation marker, unchanged and in place.\n"
+            "  - Never delete a true statement and never soften it into vagueness. You are changing "
+            "HOW it is put, not WHAT it says.\n"
+            "  - Never write that a fact is unavailable, unconfirmed or not specified.\n"
+            "  - Plain ASCII punctuation only: no em-dash, no curly quotes, no ellipsis character.\n"
+            "  - One sentence in, one sentence out. Same length or shorter.\n\n"
+            "WHAT TO CHANGE: state the same thing neutrally and symmetrically. A limitation reads as "
+            "a fit boundary ('best suited to X') rather than a verdict. A competitor's advantage "
+            "reads as the specific, sourced fact it rests on rather than a superlative. Nobody on the "
+            "page is crowned and nobody is singled out.\n\n"
+            f"SENTENCES:\n{items}\n\n"
+            'Return ONLY JSON: {"rewrites": [{"n": 1, "text": "..."}]}. Omit any sentence you cannot '
+            "rewrite within the rules.")
+        try:
+            res = self.claude.call(prompt, max_tokens=1600, temperature=0.3) or {}
+        except Exception:
+            return {}
+        out = {}
+        for r in (res.get("rewrites") or []):
+            try:
+                n = int(r.get("n"))
+            except (TypeError, ValueError):
+                continue
+            txt = str(r.get("text") or "").strip()
+            if 1 <= n <= len(todo) and txt:
+                out[todo[n - 1]["quote"]] = txt
+        return out
+
     def _press_release_position_check(self, body, blocks):
         """FU233 — "the <Organisation> recommends/requires/emphasizes X", cited to that organisation's
         PRESS RELEASE or news-room item. The page is real, on-topic and published by the body named, so
@@ -13642,6 +14117,18 @@ you MAY assume the description will carry: "{disc}".
         _vrep = self._verify_final_article(brand, article)
         if _vrep:
             article["verify_report"] = _vrep
+        # FU243 (3) — the operator's instruction was not "warn" but "change the way it is put
+        # across". This is the one pass in the file that REWRITES on a framing judgement, so it sits
+        # here: after the verification repairs (nothing it changes gets re-judged by them) and before
+        # the read-only checks (so they report on the body that actually ships). It re-runs the
+        # Sources rebuild itself when it changed anything, exactly as `_verify_final_article` does —
+        # dropping a comparison column can take the only citation of a source with it.
+        _fbody, _fnote = self._publisher_framing_pass(article.get("body_markdown") or "", brand)
+        if _fnote:
+            if _fbody != (article.get("body_markdown") or ""):
+                article["body_markdown"] = self._rebuild_sources(self._sa(_fbody), brand)
+            print(f"[blog_gen] {_fnote}", flush=True)
+            self._warn(article, _fnote)
         # FU217: the verification repair may have re-spaced a licence number — put it back
         # (idempotent; a no-op when nothing changed).
         article["body_markdown"], _nvf2 = self._vfact_enforce(article["body_markdown"], brand, guide=guide)
@@ -13748,6 +14235,17 @@ you MAY assume the description will carry: "{disc}".
         if _pwc:
             print(f"[blog_gen] {_pwc}", flush=True)
             self._warn(article, _pwc)
+        # FU243 (1) + (2) — the two shapes whose resolution is an editorial call, so they warn
+        # rather than rewrite: a rule that condemns the publisher's own product class, and a pitch
+        # the article's own cheaper figure has already beaten.
+        _sdq = self._self_disqualification_check(article.get("body_markdown") or "", brand)
+        if _sdq:
+            print(f"[blog_gen] {_sdq}", flush=True)
+            self._warn(article, _sdq)
+        _bpc = self._beaten_pitch_check(article.get("body_markdown") or "", brand, seed)
+        if _bpc:
+            print(f"[blog_gen] {_bpc}", flush=True)
+            self._warn(article, _bpc)
         if ymyl:
             _usc = self._uncited_section_check(article.get("body_markdown") or "")
             if _usc:

@@ -343,6 +343,20 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
       * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
         phased path can run WITH Acme Tools too wherever that is true, so the reader is not sent away to
         find a different provider for phase one.
+      * NEVER DISQUALIFY Acme Tools'S OWN PRODUCT CLASS AND THEN PITCH IT. When a section states a rule,
+        regulation, coverage limit or eligibility bar that applies to the CATEGORY Acme Tools sells in,
+        that rule stays exactly as sourced — it is true and the reader needs it. What must follow is
+        the sentence that says where Acme Tools stands inside it: the pathway, exception, licence,
+        accreditation or practice that lets Acme Tools operate under that rule. If the article's question
+        does not actually need that rule, leave the section out; what you may never do is state the
+        rule, say nothing about Acme Tools's position, and recommend Acme Tools anyway. A reader who takes
+        the rule at face value has just been told by this page not to buy from its publisher.
+      * DO NOT PITCH ON A POINT THIS ARTICLE'S OWN FACTS BEAT. If the page cites a figure for a
+        comparable option that undercuts Acme Tools on price, the CTA and the recommendation may not rest
+        on price, affordability or "upfront pricing". Keep the cited figure — it is sourced and the
+        reader can find it anyway — and make the case on what the page's own facts do support for
+        Acme Tools: oversight, access, what is included, eligibility, turnaround, continuity. The same
+        rule holds for any dimension the article itself shows Acme Tools losing.
   - For any MEDICAL / HEALTH / FINANCIAL / LEGAL or other efficacy claim, CITE A PRIMARY SOURCE
     inline (a study, regulator, or guideline) and frame contested or off-label uses as such
     ("used off-label", "studied in the … trial") rather than as asserted benefits.

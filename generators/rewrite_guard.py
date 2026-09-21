@@ -33,8 +33,8 @@ import re
 # FU252 — the meaning-aware figure/claim primitives live with the scoreboard detectors, so the guard
 # and the offline replay can never disagree about what counts as a change. `blog_eval` imports only
 # the standard library, so this adds no cycle.
-from generators.blog_eval import (_acronym_expansions, _figure_bounds, _same_expansion,
-                                  _MD_LINK_RE, strength_terms)
+from generators.blog_eval import (_acronym_expansions, _bold_subjects, _figure_bounds,
+                                  _same_expansion, _MD_LINK_RE, strength_terms)
 
 _CITE_RE = re.compile(r"\[S(\d+)\]")
 _CITE_RUN_RE = re.compile(r"(?:\[S\d+\]\s*)+")
@@ -388,6 +388,20 @@ def _unit_problems(orig, new, terms, defs=None):
     _sa, _sn = strength_terms(orig), strength_terms(new)
     if _sn - _sa:
         probs.append("claim stated more strongly: " + ", ".join(sorted(_sn - _sa)[:3]))
+    # A bold phrase with NO colon is the sentence's SUBJECT, not a label. The label rule restores it
+    # verbatim, so if the rewrite replaced what followed with a new sentence the subject is left
+    # without a verb — "**California's environmental permit requirements** Construction companies
+    # must address…". Three of these shipped in one article.
+    _ba, _bb = _bold_subjects(orig), _bold_subjects(new)
+    for _lab, _rest in _bb.items():
+        _was = _ba.get(_lab)
+        if not _was:
+            continue
+        _fa = (_was.split() or [""])[0].strip("*_`")
+        _fb = (_rest.split() or [""])[0].strip("*_`")
+        if _fa and _fb and (_fa[:1].islower() or _fa[:1] in ",;:—–-") and _fb[:1].isupper():
+            probs.append(f"bold lead-in left without its sentence: **{_lab[:40]}**")
+            break
     _la = {u for _t, u in _MD_LINK_RE.findall(orig)}
     _lb = {u for _t, u in _MD_LINK_RE.findall(new)}
     if _la - _lb:

@@ -174,7 +174,18 @@ def test_pricing_save_deletes_removed_operator_item():
         os.remove(path)
 
 
-def test_pricing_save_keeps_non_operator_item_and_drops_nameless_general():
+def test_pricing_save_removes_every_line_the_operator_deleted():
+    """FU238 REVERSES half of this test, deliberately.
+
+    FU163 had the save preserve NON-operator (auto-synced) items, reasoning that the generation sync
+    owned them. But the Edit Brand textarea RENDERS every stored item, operator-set or not, so an
+    operator looking at the box cannot tell which lines it will actually delete. One did exactly that
+    — emptied the box before a generation — and an auto-synced $79 TRT price survived and went out in
+    the meta description, the JSON-LD description and the Product offer of a semaglutide article.
+
+    New contract: what the box shows, the box owns. A line the operator removed is removed. An
+    auto-synced price the sync can still justify comes back on the next generation; one it cannot
+    (the mislabeled case) is now purged there too, so it stays gone."""
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
@@ -188,8 +199,24 @@ def test_pricing_save_keeps_non_operator_item_and_drops_nameless_general():
                        json={"key_facts_pricing_items": [{"product": "tirzepatide", "value": "$149/mo"}]})
         assert r.status_code == 200
         prods = [i.get("product") for i in _brand_items(path, bid)]
-        assert "tirzepatide" in prods
-        assert "semaglutide" in prods          # a NON-operator (auto-synced) item is preserved
-        assert "" not in prods                 # the nameless general $79 item is dropped (named exist)
+        assert prods == ["tirzepatide"], "only the line still in the box survives"
+        assert r.get_json().get("pricing_note"), "and the operator is told what went"
+    finally:
+        os.remove(path)
+
+
+def test_emptying_the_box_clears_pricing_entirely():
+    """The reported failure, end to end: the operator cleared the box and an auto-synced row lived."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        kf = {"pricing": {"items": [
+            {"product": "", "value": "flexible plans as low as $79/mo",
+             "source_url": "https://acme.com/mens-trt/"}]}}      # auto-synced, nameless
+        bid = _seed_brand(path, name="Acme", domain_url="https://acme.com", key_facts=json.dumps(kf))
+        client = _app_client(path)
+        r = client.put(f"/api/brands/{bid}", json={"key_facts_pricing_items": []})
+        assert r.status_code == 200
+        assert _brand_items(path, bid) == []
     finally:
         os.remove(path)

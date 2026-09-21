@@ -58,6 +58,12 @@ _EVIDENCE_PATHS = ("", "/pricing", "/features", "/services", "/about",
                    "/testimonials", "/customers", "/case-studies", "/reviews")
 _MAX_EVIDENCE_BRANDS = 3          # subject + up to 2 competitors
 _EVIDENCE_TEXT_CAP = 2500         # chars of page text kept per source
+# FU238 — a page a brand's GENERAL price legitimately lives on. Anything else is a product page, and
+# a nameless "general" price scraped from one is that product's price mislabeled.
+_GENERIC_PRICE_PATH_RE = re.compile(
+    r"^(?:$|index|home|pricing|price|plans?|packages?|membership|subscriptions?|"
+    r"how-it-works|get-started|cost|rates?)(?:/|$|\.)", re.I)
+
 _SEG_AIRTIME_MAX = float(os.environ.get("YT_SEGMENT_AIRTIME_MAX", "0.15"))  # FU235
 # FU236: one retry was not enough — the flagged background segment shipped anyway, because cutting it
 # left the script under its length target and the model padded instead of shortening.
@@ -1266,6 +1272,15 @@ _PRICE_FIG_RE = re.compile(r"[$€£]\s?\d[\d,]*(?:\.\d{1,2})?")
 _SALE_WORD_RE = re.compile(
     r"\b(?:sale|save|saving|savings|deal|deals|discount|discounted|clearance|promo|promotion|"
     r"coupon|limited\s+time|today\s+only|rollback|off)\b|%\s*off", re.I)
+# FU239 (4): an ADD-ON / bundle / upgrade figure is not the product's own price. Live against
+# PeterMD's own site, a search for the GLP-1 price returned "/product/glp-1_weight/ — a 2-month GLP-1
+# plan is offered; an optional HCG add-on is available for $301", and the selector took $301: it is on
+# the right domain, it carries a price signal, and "glp-1" is in the path. Nothing checked that the
+# figure priced the PRODUCT rather than something sold alongside it, so an HCG add-on was one
+# generation away from being published as PeterMD's semaglutide price.
+_ADDON_WORD_RE = re.compile(
+    r"\b(?:add[-\s]?on|addon|optional(?:ly)?|upgrade|extra|additional|supplement(?:al)?|"
+    r"bundle[ds]?|bundled|combo|stack(?:ed)?|kit|package\s+add|plus\s+an?\b)\b", re.I)
 _WAS_PRICE_RE = re.compile(
     r"\b(?:was|list\s+price|regular(?:ly)?(?:\s+price)?|reg\.?|msrp|originally|orig\.?)\b"
     r"[^$€£\n]{0,24}([$€£]\s?\d[\d,]*(?:\.\d{1,2})?)", re.I)
@@ -1361,6 +1376,28 @@ def _price_is_sale(fig, text):
         if _SALE_WORD_RE.search(text[lo:hi]):
             return True, was
     return False, was
+
+
+def _price_is_addon(fig, text):
+    """FU239 (4) — True when this figure prices an ADD-ON / bundle / upgrade rather than the product
+    itself: add-on wording within ~40 characters of it, the same proximity rule `_price_is_sale` uses.
+    A product page legitimately lists what can be added to it, so the test is the wording NEXT TO THE
+    FIGURE, never the presence of the word on the page."""
+    n, txt = _norm_fig(fig), (text or "")
+    for hit in _PRICE_FIG_RE.finditer(txt):
+        if _norm_fig(hit.group(0)) != n:
+            continue
+        # the CLAUSE the figure sits in, not a blind character window: a fact routinely prices the
+        # product and then its add-on in one line ("GLP-1 plan $270/month; an optional HCG add-on is
+        # $301"), and a window wide enough to catch the add-on also swallows the real price.
+        lo = max((txt.rfind(c, 0, hit.start()) for c in ";.\n"), default=-1) + 1
+        hi = min([x for x in (txt.find(c, hit.end()) for c in ";.\n") if x != -1] or [len(txt)])
+        clause = txt[lo:hi]
+        rel = hit.start() - lo
+        near = clause[max(0, rel - 60):rel + (hit.end() - hit.start()) + 60]
+        if _ADDON_WORD_RE.search(near):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- FU214: price KINDS + one formatter
@@ -1555,6 +1592,14 @@ def _best_product_price(results, product, own_domain):
         if not dom or not (dom == own_domain or dom.endswith("." + own_domain)):
             continue
         if not _PRICE_SIGNAL_RE.search(fct):
+            continue
+        # FU239 (4): every figure here prices an ADD-ON / bundle / upgrade, so none of them prices
+        # the product. Measured live: "/product/glp-1_weight/ — a 2-month GLP-1 plan is offered; an
+        # optional HCG add-on is available for $301" would have stored $301 as the GLP-1 price.
+        _figs = [m.group(0) for m in _PRICE_FIG_RE.finditer(fct)]
+        if _figs and all(_price_is_addon(f, fct) for f in _figs):
+            print(f"[blog_gen] price: rejected an add-on/bundle figure as {product or 'the'} "
+                  f"price — {url}", flush=True)
             continue
         if toks:   # a specific product → require a token match; prefer the product-page URL
             path = re.sub(r"^[a-z]+://[^/]+", "", url).lower()   # URL path (scheme+host stripped)
@@ -2584,6 +2629,7 @@ class BlogGenerator:
         self._facts_note = ""         # FU178: the canonical-fact verification tier tally
         self._price_warn = ""         # FU161: the subject's price could not be confirmed
         self._invented_note = ""      # FU184: a competitor the model named itself
+        self._budget_drop_note = ""   # FU239: a competitor the cost ceiling starved out
         self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
         self._claim_pages = {}        # FU230: pages read once to check the figures cited from them
         self._dup_table_note = ""     # FU228: a draft comparison section the guard did not restore
@@ -4014,6 +4060,8 @@ class BlogGenerator:
                 fig = was.strip()
             else:
                 return None, f"{fig} is a sale price and the page shows no regular price"
+        if _price_is_addon(fig, quote):   # FU239 (4): an add-on is not the product's price
+            return None, f"{fig} prices an add-on / bundle, not the product itself"
         basis = (cand.get("basis") or "").strip()[:80]
         return {"value": fig, "value_max": "", "kind": "exact",   # FU214: a searched price is exact
                 "basis": basis, "per_unit": _per_unit_price(fig, basis),
@@ -4121,6 +4169,8 @@ class BlogGenerator:
                 if not (was and _fig_in_text(was, body)):
                     return None, f"{fig} is a sale price and the page shows no regular price"
                 fig = was.strip()
+            if _price_is_addon(fig, body):   # FU239 (4)
+                return None, f"{fig} prices an add-on / bundle, not the product itself"
             basis = str(c.get("basis") or "").strip()[:80]
             # the excerpt around the figure, so the ledger carries a quotable proof
             pos = next((h.start() for h in _PRICE_FIG_RE.finditer(body)
@@ -6396,15 +6446,24 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
         # in its OWN source_url path (e.g. {product:"tirzepatide", url:".../mens-trt/"}) — so a
         # regeneration self-heals the wrong price instead of preserving it. operator_set is untouched.
         def _mislabeled(it):
+            if it.get("operator_set"):
+                return False                       # the operator's own value is never purged
             prod = str(it.get("product") or "").strip()
-            if not prod or it.get("operator_set"):
-                return False
-            toks = _product_tokens(prod)
-            if not toks:
-                return False
             path = re.sub(r"^[a-z]+://[^/]+", "", (it.get("source_url") or "")).strip("/").lower()
             if not path:
                 return False   # bare-domain / no real path → can't judge it → keep
+            if not prod:
+                # FU238: a NAMELESS "general" price scraped from a PRODUCT-SPECIFIC page is that
+                # product's price wearing the brand's name. This check compared the product LABEL to
+                # the URL, so an item with no label had nothing to compare and was waved through for
+                # good: a $79 TRT price sat in one brand's canonical store as its general price, and
+                # reached the meta description, the JSON-LD description and the Product offer of a
+                # semaglutide article. A path that is not a generic pricing/plans page names a
+                # product, so a general price does not belong on it.
+                return not _GENERIC_PRICE_PATH_RE.search(path)
+            toks = _product_tokens(prod)
+            if not toks:
+                return False
             return not any(t in path for t in toks)
         _clean_items = [i for i in stored_items if not _mislabeled(i)]
         _purged = len(_clean_items) != len(stored_items)
@@ -6495,6 +6554,25 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
             elif target:
                 print(f"[blog_gen] key-facts: no product-matching own-domain price for {name} "
                       f"'{target}' — storing nothing (never a wrong-product price)", flush=True)
+
+        # FU238: hold a FRESH price to the same test as a stored one. The stored-item purge above runs
+        # BEFORE this merge, so a mislabeled price scraped THIS run would be stored and only self-heal on
+        # the NEXT generation — one article too late (that is how a $79 TRT price reached a semaglutide
+        # article's meta description, JSON-LD description and Product offer). Scoped to the NAMELESS case:
+        # a general price does not live on a product-specific page. A NAMED price is left alone because
+        # _best_product_price already matched its product on the path, title OR fact, and the path alone
+        # would falsely reject a real match (e.g. tirzepatide priced on /product/glp1m2m/).
+        def _fresh_nameless_on_product_page(f):
+            if str(f.get("product") or "").strip():
+                return False
+            _p = re.sub(r"^[a-z]+://[^/]+", "", (f.get("source_url") or "")).strip("/").lower()
+            return bool(_p) and not _GENERIC_PRICE_PATH_RE.search(_p)
+
+        for _f in fresh:
+            if _fresh_nameless_on_product_page(_f):
+                print(f"[blog_gen] key-facts: rejected a general price scraped from a PRODUCT page for "
+                      f"{name} — {_f.get('source_url')} (a general price does not live there)", flush=True)
+        fresh = [_f for _f in fresh if not _fresh_nameless_on_product_page(_f)]
 
         if not fresh:
             if _purged:   # FU156: still persist a self-heal purge even when no fresh price was found
@@ -6667,6 +6745,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # title where the comparison has <2 same-type competitors is the self-crowning pattern.
         self._peer_note = ""
         self._invented_note = ""   # FU184: competitors the MODEL named (not curated, not evidenced)
+        self._budget_drop_note = ""   # FU239 (2)
         # FU105: the same-type peer list rides into the reconcile (so its COMPETITOR FLOOR rule
         # knows WHICH tools are the protected peers), computed for EVERY seed, not just best/top.
         peers = [str(t).strip() for t in (cres.get("peer_tools") or [])
@@ -6734,6 +6813,19 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                   and _named_as_option(t, _opt_names)][:_VERIFY_MAX_OPTIONS]
         _keep = {t.lower() for t in _prov_q} | {t.lower() for t in _opt_q}
         tools = [t for t in tools_u if t.lower() in _keep]
+        # FU239 (2): with fewer competitors than the floor there is nothing to drop if the ceiling
+        # runs out — every one of them has to be sourced — so buy the headroom up front. At or above
+        # the floor the answer is the opposite: spend nothing extra, and drop whichever competitor
+        # the ceiling starves (see the budget-drop before the finalize loop).
+        if 0 < len(tools) < _MIN_COMPARISON_BRANDS:
+            try:
+                _raised = round(_BLOG_COST_CEILING * 1.5, 2)
+                self.claude.set_cost_ceiling(_raised)
+                print(f"[blog_gen] budget: {len(tools)} competitor(s) is below the floor of "
+                      f"{_MIN_COMPARISON_BRANDS}, so none can be dropped — raising the web-search "
+                      f"ceiling ${_BLOG_COST_CEILING:.2f} → ${_raised:.2f} for this article", flush=True)
+            except Exception:
+                pass
         _options = {t.lower() for t in _opt_q}   # grows in the loop via the products backstop
         # FU214 (Change 5) — the operator priced a set of brands, so THAT is the comparison field.
         # Restricting here (before Pass 0) means nothing is BOUGHT for a brand you did not price, the
@@ -7515,9 +7607,22 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # Zero-block tools are submitted first so a tight budget still favors them.
         _rescue_live = [t for t in sorted(tools, key=_rescue_prio)
                         if not tool_state[t].get("cached") and _rescue_prio(t) != 2]
+        def _rescue_measured(tool):
+            # FU239 (2): record whether the cost ceiling SKIPPED searches while this tool was being
+            # rescued. A competitor that ends with nothing because the tool stopped looking is a
+            # different thing from one that has nothing to find, and only the first is worth dropping.
+            _sk0 = self.claude.skipped_searches() if hasattr(self.claude, "skipped_searches") else 0
+            try:
+                _do_rescue(tool)
+            finally:
+                try:
+                    if self.claude.skipped_searches() > _sk0:
+                        tool_state[tool]["starved"] = True
+                except Exception:
+                    pass
         if _rescue_live:
             with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_rescue_live))) as _ex:
-                list(_ex.map(_do_rescue, _rescue_live))
+                list(_ex.map(_rescue_measured, _rescue_live))
 
         # ---- FU213 (Change 4) — the VERIFIED competitor price ledger. Until now nothing checked that
         # a price cell came from the brand's own site or a retailer, was a REGULAR price, or was a
@@ -7556,6 +7661,41 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                           flush=True)
                 else:
                     print(f"[blog_gen] price-link: {name} (subject) {_u} → blocked/empty", flush=True)
+
+        # ---- FU239 (2): a competitor the BUDGET starved is DROPPED, not shipped empty ----
+        # The reviewed article hit the $3 ceiling with 8 searches skipped, and the competitor those
+        # searches belonged to shipped anyway: a section of filler with no price, no medications and
+        # no citation, plus an empty cell that then took the whole price column down with it under
+        # the any-empty rule. One starved competitor cost every other brand its prices.
+        #
+        # So it goes, provided the comparison still has a field: the FU105 floor is re-checked before
+        # every removal, and one of the operator's OWN competitors is never removed (FU210). Below
+        # the floor there is nothing to drop and the answer is to spend more, which is what the
+        # ceiling raise above does — the two halves of the same decision.
+        _starved = [t for t in list(tools)
+                    if (tool_state.get(t) or {}).get("starved")
+                    and not (tool_state.get(t) or {}).get("blocks")
+                    and t.lower() not in _mine_low]
+        _dropped_starved = []
+        for _t in _starved:
+            if len(tools) - 1 < _MIN_COMPARISON_BRANDS:
+                print(f"[blog_gen] budget-drop: keeping {_t} despite no sourced facts — removing it "
+                      f"would leave {len(tools) - 1} competitor(s), below the floor of "
+                      f"{_MIN_COMPARISON_BRANDS}", flush=True)
+                break
+            tools.remove(_t)
+            tool_state.pop(_t, None)   # `tool_texts` is built from this AFTER the drop, so it follows
+            _dropped_starved.append(_t)
+            print(f"[blog_gen] budget-drop: removed {_t} — the web-search ceiling skipped its "
+                  f"searches and it sourced nothing; {len(tools)} competitor(s) remain", flush=True)
+        if _dropped_starved:
+            _one = len(_dropped_starved) == 1
+            self._budget_drop_note = (
+                "budget-drop: " + ", ".join(_dropped_starved) + (" was" if _one else " were") +
+                " removed from the comparison — the web-search ceiling stopped the tool looking "
+                "before " + ("it" if _one else "they") + " had any sourced facts, and shipping "
+                + ("it" if _one else "them") + " empty would cost every other brand the columns "
+                + ("it" if _one else "they") + " could not answer")
 
         # ---- Finalize: emit in ORIGINAL order (keeps each tool's [S#] blocks contiguous) ----
         for tool in tools:
@@ -12075,6 +12215,105 @@ you MAY assume the description will carry: "{disc}".
         return re.search(r"(?<![\w.])" + re.escape(stem) + r"s?(?![\w])",
                          cls._norm_claim_text(text)) is not None
 
+    _FAB_MAX_DROP = int(os.environ.get("BLOG_FAB_MAX_DROP", "8"))
+
+    def _unsourced_figure_check(self, body, blocks):
+        """FU239 (3) — a figure that appears in NOTHING we gathered was not sourced; it came out of
+        the model. Remove it rather than publish it.
+
+        The article that motivated this told readers that women lost 18.1% and men 13.4% on
+        semaglutide, cited to a cohort study. The study reports neither number — it reports odds
+        ratios by sex — and its page is behind an anti-bot wall, so it was never actually read. The
+        existing check said so ("no gathered source states 13.4%, 16.6%, 18.1%") and the blog
+        published anyway, because that check only warns.
+
+        This is deliberately narrower than that warning. `_claim_source_check` asks whether the CITED
+        page states the figure, judged only against pages long enough to judge; this asks whether ANY
+        text we gathered — every evidence block, plus every page read to check a figure — contains it
+        at all. A figure in none of them, in a unit that also CITES a source, is being presented as
+        sourced when nothing we hold supports it. That is the one case where deleting is safer than
+        publishing, and it is decided on what we have rather than on what we failed to fetch.
+
+        Prose: the sentence goes. A table cell: it is blanked, and the existing column rules decide
+        whether the column survives. Nothing else is touched, and a body needing more than
+        `_FAB_MAX_DROP` removals is left ALONE with a loud warning — at that point the evidence is
+        the problem, not the sentences, and gutting the article would hide it. Returns (body, note)."""
+        if not body or not blocks:
+            return body, ""
+        pages = getattr(self, "_claim_pages", None) or {}
+        parts = []
+        for b in blocks:
+            parts.append(b.get("text") or "")
+            u = (b.get("url") or "").strip()
+            if u:
+                parts.append(pages.get(u) or pages.get(_norm_page_url(u)) or "")
+        for v in pages.values():
+            parts.append(v or "")
+        blob = "\n".join(p for p in parts if p)
+        if not blob.strip():
+            return body, ""      # nothing gathered at all → nothing can be judged
+
+        def _bad(unit):
+            """The figures in this unit that appear nowhere, when the unit also cites a source."""
+            if not re.search(r"\[S\d+\]", unit):
+                return []
+            return [m.group(0) for m in _LOADBEARING_NUM_RE.finditer(unit)
+                    if not self._atom_in(m.group(0), blob)]
+
+        lines = body.split("\n")
+        hits, in_src, fence = [], False, False
+        for li, line in enumerate(lines):
+            if line.lstrip().startswith("```"):
+                fence = not fence
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                in_src = True
+            st = line.strip()
+            if in_src or fence or not st or st.startswith("#") or st.startswith(">") \
+                    or st.startswith("*[") or re.match(r"^\|[\s:|-]+\|?$", st):
+                continue
+            if st.startswith("|"):
+                cells = line.split("|")
+                for ci in range(1, len(cells) - 1):
+                    f = _bad(cells[ci])
+                    if f:
+                        hits.append(("cell", li, ci, f))
+            else:
+                for si, sent in enumerate(self._prose_sentences(line)):
+                    f = _bad(sent)
+                    if f:
+                        hits.append(("sent", li, sent, f))
+        if not hits:
+            return body, ""
+        figs = list(dict.fromkeys(f for h in hits for f in h[3]))
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, ("unsourced-figures: %d claim(s) state a figure no gathered source contains "
+                          "(%s) — too many to remove safely, so nothing was changed; the sourcing is "
+                          "what failed here, regenerate rather than publish"
+                          % (len(hits), ", ".join(figs[:6])))
+        for kind, li, a, _f in hits:
+            if kind == "cell":
+                cells = lines[li].split("|")
+                cells[a] = " "
+                lines[li] = "|".join(cells)
+            else:
+                cur = lines[li]
+                if a in cur:
+                    cur = cur.replace(a, "", 1)
+                lines[li] = re.sub(r"[ \t]{2,}", " ", cur).strip()
+        out = "\n".join(ln for i, ln in enumerate(lines)
+                         if ln.strip() or not any(h[1] == i and h[0] == "sent" for h in hits))
+        n_s = sum(1 for h in hits if h[0] == "sent")
+        n_c = len(hits) - n_s
+        bits = []
+        if n_s:
+            bits.append(f"{n_s} sentence(s)")
+        if n_c:
+            bits.append(f"{n_c} table cell(s)")
+        return out, ("unsourced-figures: removed " + " and ".join(bits) +
+                     " stating a figure no gathered source contains (" + ", ".join(figs[:6]) +
+                     ") — a cited number we cannot find in any source we read is the model's, "
+                     "not the page's")
+
     def _claim_source_check(self, body, blocks, brand):
         """Re-point citations that their page does not support, prefer the most authoritative page
         that does, and report what neither pass could resolve. Returns (body, note)."""
@@ -12740,7 +12979,7 @@ you MAY assume the description will carry: "{disc}".
     _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
                     "_table_punt_note", "_dup_table_note", "_core_mechanics", "_subject_phrase",
                     "_subject_peers",
-                    "_budget_warn", "_vfact_note")
+                    "_budget_warn", "_vfact_note", "_budget_drop_note")
 
     def _check_notes(self):
         """JSON-safe snapshot of the deterministic checks' state, for the pause checkpoint."""
@@ -13014,6 +13253,14 @@ you MAY assume the description will carry: "{disc}".
             article["body_markdown"], self._evidence_blocks, brand)
         if _csn:
             self._warn(article, _csn)
+        # FU239 (3): `_claim_source_check` has now re-pointed every citation it could, so a figure
+        # still absent from EVERYTHING we gathered is the model's own. Remove it — a warning let one
+        # ship as a cited clinical outcome.
+        article["body_markdown"], _ufn = self._unsourced_figure_check(
+            article["body_markdown"], self._evidence_blocks)
+        if _ufn:
+            print(f"[blog_gen] {_ufn}", flush=True)
+            self._warn(article, _ufn)
         # Deterministic ## Sources: contiguous [S#] + correct URLs for every cited source.
         article["body_markdown"] = self._rebuild_sources(article["body_markdown"], brand)
         # FU221: mark any lead-in label the writer left unbolded, so every article in the set scans the
@@ -13116,6 +13363,9 @@ you MAY assume the description will carry: "{disc}".
         _in184 = "" if guide else getattr(self, "_invented_note", "")
         if _in184:  # FU184: a compared competitor the model named itself (not curated, not evidenced)
             self._warn(article, _in184)
+        _bdn = "" if guide else getattr(self, "_budget_drop_note", "")
+        if _bdn:    # FU239 (2): a competitor the cost ceiling starved out of the comparison
+            self._warn(article, _bdn)
         # FU138: unsourced-table resolution outcome. FU205 (R3): the union of BOTH rebuilds — the
         # one above and the one the verification pass runs after a prose repair — so a drop can no
         # longer be silently overwritten by a later, quieter pass.
@@ -15462,18 +15712,47 @@ you MAY assume the description will carry: "{disc}".
                 continue
             url = str(item.get("url") or "").strip()
             fact = str(item.get("fact") or "").strip()
-            text = ""
-            if url:
-                try:
-                    text = self._fetch_url(url)
-                except Exception:
-                    text = ""
-            if not text and fact:
-                text = fact
-            if not text:
-                continue   # nothing usable for this tool → it stays dropped
-            sourcing["fresh"].append({"label": tool, "url": url, "text": text[:_EVIDENCE_TEXT_CAP]})
-            resolved.add(tool.lower())
+            # FU239 (1): the ask now has ONE ROW PER REQUIRED FACT, each with its own link and value,
+            # so a competitor missing three columns can be answered with three different pages instead
+            # of one box for everything. Each row becomes its own tool-labelled block, prefixed with
+            # the fact it answers, so the reconcile can tell which cell it fills; the legacy single
+            # url/fact still works for an older client and for the price-ledger capture below.
+            _rows = [r for r in (item.get("items") or []) if isinstance(r, dict)]
+            _added = 0
+            for _r in _rows:
+                _lbl = str(_r.get("label") or "").strip()
+                _u = str(_r.get("url") or "").strip()
+                _f = str(_r.get("fact") or "").strip()
+                _t = ""
+                if _u:
+                    try:
+                        _t = self._fetch_url(_u)
+                    except Exception:
+                        _t = ""
+                if not _t and _f:
+                    _t = _f
+                if not _t:
+                    continue
+                _pre = f"{_lbl}: " if _lbl and not _t.lower().startswith(_lbl.lower()) else ""
+                sourcing["fresh"].append({"label": tool, "url": _u,
+                                          "text": (_pre + _t)[:_EVIDENCE_TEXT_CAP]})
+                _added += 1
+            if _added:
+                resolved.add(tool.lower())
+            else:
+                text = ""
+                if url:
+                    try:
+                        text = self._fetch_url(url)
+                    except Exception:
+                        text = ""
+                if not text and fact:
+                    text = fact
+                if not text:
+                    continue   # nothing usable for this tool → it stays dropped
+                sourcing["fresh"].append({"label": tool, "url": url,
+                                          "text": text[:_EVIDENCE_TEXT_CAP]})
+                resolved.add(tool.lower())
             # FU213 (4e): the answer to a PRICE question is saved to the ledger as `yours` — the
             # operator's value is the authority, it writes the cell, and it is never asked again.
             _was_price = any(u.get("price_only") and

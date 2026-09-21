@@ -2203,6 +2203,7 @@ def api_update_brand(bid):
         # ([{product,value}], from the UI's `Product | Price` textarea), or a single `key_facts_pricing`
         # string. MERGE-UPSERTS by product so a routine save never drops an auto-synced product.
         kf_update = None
+        kf_note = ""   # FU238: what the save removed, surfaced to the operator
         _kf_items_in = data.get("key_facts_pricing_items")
         if isinstance(data.get("key_facts"), dict):
             kf_update = json.dumps(data["key_facts"])
@@ -2230,13 +2231,24 @@ def api_update_brand(bid):
                 _incoming_slugs.add(_kf_slug(prod))
                 by[_kf_slug(prod)] = {"product": prod, "value": val, "source_url": _dom,
                                       "verified_at": _now, "operator_set": True}
-            # FU163: the textarea is AUTHORITATIVE for OPERATOR items — an operator-set item whose line
-            # the operator removed (its slug isn't in the incoming set) is DELETED. Non-operator
-            # (auto-synced) items are left alone (managed by the generation sync + "Clear all cached data").
-            by = {s: it for s, it in by.items()
-                  if s in _incoming_slugs or not it.get("operator_set")}
+            # FU238: the textarea is AUTHORITATIVE for EVERY line it shows, operator-set or not.
+            # FU163 exempted auto-synced items here, reasoning that the generation sync manages them
+            # — but the box RENDERS them (it maps over every stored item), so the operator deletes a
+            # line, saves, and the row silently survives with no way to tell which lines are
+            # deletable. That is how a stale auto-synced TRT price outlived an operator who removed
+            # it. What the box shows, the box owns.
+            _removed = [it for s, it in by.items() if s not in _incoming_slugs]
+            by = {s: it for s, it in by.items() if s in _incoming_slugs}
             # FU163: a nameless general item must not coexist with named products (a separate tier is NAMED).
-            _final_items, _ = _drop_nameless_when_named(list(by.values()))
+            _final_items, _dropped_nameless = _drop_nameless_when_named(list(by.values()))
+            # FU238: say what the save removed. It used to drop items silently, so an operator who
+            # had just deleted a price had no way to know whether anything happened.
+            if _removed or _dropped_nameless:
+                _names = [str(it.get("product") or "").strip() or "the general price" for it in _removed]
+                if _dropped_nameless:
+                    _names.append("the general price (a named product price replaces it)")
+                kf_note = "Removed from canonical pricing: " + ", ".join(_names)
+                print(f"[app] canonical pricing ({_existing.get('name')}): {kf_note}", flush=True)
             if _final_items:
                 kf["pricing"] = {"items": _final_items}
             else:
@@ -2275,6 +2287,8 @@ def api_update_brand(bid):
             **enrich_fields,
         )
         out = {"ok": True}
+        if kf_note:
+            out["pricing_note"] = kf_note      # FU238: what the canonical-pricing save removed
         # FU217: say what the Content instructions save kept and what it could not — lines past the
         # 20-line limit, merged duplicates and lines cut at 300 characters used to vanish silently.
         _cc_in = (data or {}).get("content_context")

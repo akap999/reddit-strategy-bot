@@ -2473,6 +2473,7 @@ function _brandMarkMine(btn) {
 }
 
 async function saveBrandContext(brandName) {
+    let _pricingNote = '';   // FU238
     const context = document.getElementById('edit-brand-context').value;
     const domainUrl = document.getElementById('edit-brand-url').value;
     const keywordsRaw = document.getElementById('edit-brand-keywords').value;
@@ -2555,9 +2556,13 @@ async function saveBrandContext(brandName) {
             ...(_ciPayload() ? { content_context: _ciPayload() } : {}),   // FU212
         }});
         if (!_ciReport && _r && _r.content_instructions) _ciReport = _r.content_instructions;
+        if (!_pricingNote && _r && _r.pricing_note) _pricingNote = _r.pricing_note;   // FU238
     }
 
     toast('Brand updated', 'success');
+    // FU238: a removed canonical price used to vanish without a word — and, for an auto-synced
+    // line, without actually being removed. Say what went.
+    if (_pricingNote) toast(_pricingNote, 'success', 10000);
     if (_ciReport) {   // FU217: Content instructions no longer lose lines silently
         const bits = [];
         if ((_ciReport.dropped || []).length) bits.push(`${_ciReport.dropped.length} line(s) past the ${_ciReport.limit}-line limit were not kept`);
@@ -13792,11 +13797,43 @@ function _blogFactLabel(facts) {
     return f.length ? f.join(' + ') : 'a usable source';
 }
 
+// FU239 (1): the keep/remove choice below each entry is only a FALLBACK for when you have nothing
+// to give. `_blogSubmitSources` has always ignored it once a link or a value is typed (`&& !url &&
+// !fact`), but the radio stayed lit and pre-selected, so an operator who filled the fields in still
+// saw "Remove X from this blog entirely" checked and could not tell which one would win. It now
+// visibly stands down the moment anything is entered, and comes back if the fields are cleared.
+function _blogPsTouch(i) {
+    const n = ((window._blogPendingFacts || [])[i] || []).length;
+    let any = false;
+    for (let j = 0; j < n; j++) {
+        const u = document.getElementById(`blog-ps-url-${i}-${j}`);
+        const v = document.getElementById(`blog-ps-fact-${i}-${j}`);
+        if ((u && u.value.trim()) || (v && v.value.trim())) { any = true; break; }
+    }
+    const box = document.getElementById('blog-ps-fallback-' + i);
+    if (!box) return;
+    box.style.opacity = any ? '0.35' : '';
+    box.querySelectorAll('input[type=radio]').forEach(r => {
+        if (r.dataset.origDisabled === undefined) r.dataset.origDisabled = r.disabled ? '1' : '0';
+        r.disabled = any || r.dataset.origDisabled === '1';
+    });
+    let note = document.getElementById('blog-ps-fbnote-' + i);
+    if (!note) {
+        note = document.createElement('div');
+        note.id = 'blog-ps-fbnote-' + i;
+        note.className = 'text-xs mt-1';
+        note.style.color = '#4ade80';
+        box.parentNode.insertBefore(note, box.nextSibling);
+    }
+    note.textContent = any ? "\u2713 You're providing the data above \u2014 this choice no longer applies." : '';
+}
+
 function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
     missing = missing || [];
     if (!missing.length) { openBlog(blogId); return; }
     window._blogPendingId = blogId;
     window._blogPendingTools = missing.map(m => m.tool);
+    window._blogPendingFacts = missing.map(m => (m.facts && m.facts.length) ? m.facts : ['a usable source']);
     const rows = missing.map((m, i) => {
         const dom = (m.dom || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const hint = dom ? ` — try <a href="https://${_blogEsc(dom)}/pricing" target="_blank" class="underline">${_blogEsc(dom)}/pricing</a>` : '';
@@ -13825,21 +13862,37 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
                 ? `Couldn't read a regular price for <b>${_blogEsc(m.tool)}</b> from the page you linked (<a href="${_blogEsc(m.price_link)}" target="_blank" class="underline">${_blogEsc(String(m.price_link).replace(/^https?:\/\//, '').slice(0, 48))}</a>) — it may be blocked, or the price may be drawn by JavaScript. Type the price below (e.g. "$24.99, single 9 oz bottle"), paste a different page, or choose what to drop.`
                 : `Found <b>${_blogEsc(m.tool)}</b>, but couldn't VERIFY a regular (non-sale) price from its own site or a named retailer${hint}. Type the price below or paste the exact page that shows it — or, without a price, choose whether to drop the price column or drop ${_blogEsc(m.tool)} (a blank cell is never shipped).`)
             : `Couldn't find public info for <b>${_blogEsc(m.tool)}</b>. Needed for the comparison: <b>${_blogEsc(_blogFactLabel(m.facts))}</b>. Paste a link to its page${hint}, or type the facts below.`;
-        const urlInput = isOpt ? '' :
-            `<input id="blog-ps-url-${i}" class="w-full mb-1" placeholder="https://…  (${dom ? _blogEsc(dom) + '/pricing' : "the tool's pricing / plans page"} — fetched verbatim)">`;
+        // FU239 (1): ONE box for every missing fact made the ask unanswerable — a competitor can be
+        // missing three different columns, and the operator had a single textarea to put all of them
+        // in, with no way to attach a different page to each. Each required fact now gets its OWN row:
+        // a link (fetched verbatim, so it earns a citation) and/or the value typed in. Fill either.
+        const factList = (m.facts && m.facts.length) ? m.facts : ['a usable source'];
+        const ph = isPrice ? "e.g. $24.99 for the 2-pack"
+            : isOpt ? "e.g. typical 6-12 month term"
+            : "the value for this column";
+        const grid = `
+            <div class="text-xs text-gray-400 mb-1">What's needed — fill the link, the value, or both, for each:</div>
+            <div class="grid gap-1 mb-1" style="grid-template-columns:${isOpt ? '10rem 1fr' : '10rem 1fr 1fr'};align-items:center">
+                <div class="text-xs text-gray-500">Needed</div>
+                ${isOpt ? '' : `<div class="text-xs text-gray-500">Link to the page that shows it</div>`}
+                <div class="text-xs text-gray-500">…or type the value</div>
+                ${factList.map((f, j) => `
+                <div class="text-xs" style="color:#c4b5fd">${_blogEsc(_blogFactLabel([f]))}</div>
+                ${isOpt ? '' : `<input id="blog-ps-url-${i}-${j}" class="w-full text-xs" placeholder="https://…${dom ? ' (' + _blogEsc(dom) + ')' : ''}" oninput="_blogPsTouch(${i})">`}
+                <input id="blog-ps-fact-${i}-${j}" class="w-full text-xs" placeholder="${_blogEsc(ph)}" oninput="_blogPsTouch(${i})">`).join('')}
+            </div>`;
         return `
         <div class="border border-gray-700 rounded p-2 mb-2">
             <div class="text-sm font-bold mb-1">${_blogEsc(m.tool)}${m.manual ? ' <span class="text-xs font-normal" style="color:#c4b5fd">(your competitor)</span>' : ''}${isOpt ? ' <span class="text-xs font-normal text-gray-500">(option, not a company)</span>' : ''}${isPrice ? ' <span class="text-xs font-normal text-gray-500">(price only — everything else is sourced)</span>' : ''}</div>
             <div class="text-xs text-gray-400 mb-2">${ask}</div>
-            ${urlInput}
-            <textarea id="blog-ps-fact-${i}" class="w-full text-xs" rows="2" placeholder="${isOpt ? 'the facts for each column, e.g. \'typical 6-12 month term; 8-15% APR; no collateral required\'' : isPrice ? "…or type the price, e.g. '$24.99 for the 2-pack'" : "…or paste the facts, e.g. 'Creator plan $14/mo; commercial use allowed, royalty-free'"}"></textarea>
+            ${grid}
             ${(!isThin && !isPrice) ? (() => {
                 // FU206b — a brand with NO information. "Skip" used to keep it and destroy the table;
                 // it now removes it from the whole blog. Both choices are shown, with what each costs.
                 // FU210: one of the operator's OWN competitors is never removed.
                 const canRemove = !m.manual && (m.remaining_if_removed || 0) >= 3;
                 return `
-            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+            <div id="blog-ps-fallback-${i}" class="text-xs mt-2 border-t border-gray-700 pt-2">
                 <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
                 <label class="flex items-start gap-2 ${canRemove ? 'cursor-pointer' : 'opacity-50'} mb-1">
                     <input type="radio" name="blog-ps-empty-${i}" id="blog-ps-remove-${i}" value="remove" ${canRemove ? 'checked' : 'disabled'} class="mt-0.5">
@@ -13852,7 +13905,7 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
             </div>`;
             })() : ''}
             ${isThin ? `
-            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+            <div id="blog-ps-fallback-${i}" class="text-xs mt-2 border-t border-gray-700 pt-2">
                 <div class="text-gray-400 mb-1">If you don't have a source, choose what to lose:</div>
                 <label class="flex items-start gap-2 cursor-pointer mb-1">
                     <input type="radio" name="blog-ps-thin-${i}" id="blog-ps-keep-${i}" value="keep" checked class="mt-0.5">
@@ -13870,7 +13923,7 @@ function blogProvideSourcesModal(blogId, missing, budgetWarning, isRegen) {
                 const known = m.remaining_if_removed != null;
                 const canRemove = !m.manual && (!known || m.remaining_if_removed >= 3);   // FU210
                 return `
-            <div class="text-xs mt-2 border-t border-gray-700 pt-2">
+            <div id="blog-ps-fallback-${i}" class="text-xs mt-2 border-t border-gray-700 pt-2">
                 <div class="text-gray-400 mb-1">If you don't have the price, choose what to lose:</div>
                 <label class="flex items-start gap-2 cursor-pointer mb-1">
                     <input type="radio" name="blog-ps-price-${i}" id="blog-ps-skip-${i}" value="skip" checked class="mt-0.5" style="width:auto;flex:none">
@@ -13910,8 +13963,21 @@ function _blogSubmitSources(skipAll) {
     const sources = [];
     if (!skipAll) {
         tools.forEach((tool, i) => {
-            const url = (document.getElementById('blog-ps-url-' + i)?.value || '').trim();
-            const fact = (document.getElementById('blog-ps-fact-' + i)?.value || '').trim();
+            // FU239 (1): one row per required fact, each with its own link and value. The link is
+            // fetched verbatim so that fact earns a real citation; the legacy single url/fact are
+            // still sent alongside, labelled, so the server and the price ledger keep working.
+            const labels = ((window._blogPendingFacts || [])[i] || []);
+            const items = [];
+            let url = '', factParts = [];
+            labels.forEach((label, j) => {
+                const u = (document.getElementById(`blog-ps-url-${i}-${j}`)?.value || '').trim();
+                const v = (document.getElementById(`blog-ps-fact-${i}-${j}`)?.value || '').trim();
+                if (!u && !v) return;
+                items.push({ label, url: u, fact: v });
+                if (u && !url) url = u;
+                if (v) factParts.push(labels.length > 1 ? `${label}: ${v}` : v);
+            });
+            const fact = factParts.join('; ');
             // FU209: the price-only "keep the brand, drop the price column" choice is now a pre-selected
             // radio, so it must never override a price the operator actually pasted.
             const skip = !!document.getElementById('blog-ps-skip-' + i)?.checked && !url && !fact;
@@ -13921,7 +13987,7 @@ function _blogSubmitSources(skipAll) {
             const remove = !!document.getElementById('blog-ps-remove-' + i)?.checked && !url && !fact;
             // FU206b: an explicit KEEP on an empty brand opts it out of the server's default removal.
             const keep = !!document.getElementById('blog-ps-keep-' + i)?.checked && !url && !fact;
-            sources.push({ tool, url, fact, skip, remove, keep });
+            sources.push({ tool, url, fact, items, skip, remove, keep });
         });
     }
     closeModal();

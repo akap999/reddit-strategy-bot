@@ -14,6 +14,13 @@ detached (a railway ssh session can drop; the run keeps going):
 
 Flags: --no-grounding, --no-rubric (defects only, $0); --factcheck scores what the automatic
 fact-check WOULD produce (applied in memory, never saved). Nothing here writes to a blog.
+
+FU251 adds `--replay`, which runs every DETERMINISTIC check over every stored body and reports what
+they would change — no model, no network, no write, so it costs nothing and takes about a minute:
+
+  python3 tools/blog_eval.py --replay [--detail] [--brand-ids 34] [--limit 500]
+
+Run it before AND after any generator change. It is the gate the project kept skipping.
 """
 import argparse
 import base64
@@ -124,6 +131,113 @@ def _candidates(db, brand_ids=None, limit=40):
     q += " ORDER BY b.updated_at DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in db.conn.execute(q, params).fetchall()]
+
+
+# ── FU251: replay ────────────────────────────────────────────────────────────────────────────────────
+# Every check added in FU251 is DETERMINISTIC — no model, no network, no DB write. So they can be
+# replayed over every article already stored, which is a far better test of a generator change than
+# one fresh generation: 214 real bodies across every vertical, for nothing, in about a minute.
+#
+# This exists because the discipline it enforces was not being followed. FU242 → FU249 shipped on unit
+# tests alone; unit tests prove a check FIRES, and nothing proved the article got better. The first
+# replay found 53 of 214 published articles carrying damage from our own removal passes, and two ways
+# the new price check called a correctly-cited source bad. Neither was findable by reading the code.
+def _replay_rows(db, brand_ids=None, ids=None, limit=1000):
+    q = ("SELECT b.id, b.title, b.seed, b.body_markdown, br.name AS brand, br.domain_url AS dom "
+         "FROM blogs b LEFT JOIN brands br ON br.id = b.brand_id "
+         "WHERE length(coalesce(b.body_markdown,'')) > 500")
+    params = []
+    if ids:
+        q += " AND b.id IN (%s)" % ",".join("?" * len(ids))
+        params += ids
+    if brand_ids:
+        q += " AND b.brand_id IN (%s)" % ",".join("?" * len(brand_ids))
+        params += brand_ids
+    q += " ORDER BY b.id LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in db.conn.execute(q, params).fetchall()]
+
+
+def _blocks_from_sources(body):
+    """The article's own ## Sources list back into evidence blocks. The price check reads only each
+    block's URL, so this is faithful for it — and it means a replay needs no stored evidence."""
+    import re as _re
+    tail = body.split("## Sources", 1)[-1] if "## Sources" in body else ""
+    out = []
+    for ln in tail.split("\n"):
+        m = _re.search(r"\[S(\d+)\]", ln)
+        if not m:
+            continue
+        u = _re.search(r"\((https?://[^)\s]+)\)", ln) or _re.search(r"(https?://\S+)", ln)
+        n = int(m.group(1))
+        while len(out) < n:
+            out.append({"url": "", "text": ""})
+        out[n - 1] = {"url": (u.group(1) if u else "").rstrip(">),."), "text": "x" * 800}
+    return out
+
+
+def run_replay(args):
+    """What the current deterministic passes WOULD do to every stored article. $0."""
+    import collections
+    E = _load_eval_module()
+    db = _db()
+    from generators.blog_gen import BlogGenerator
+    gen = BlogGenerator.__new__(BlogGenerator)
+    gen._claim_pages = {}
+    rows = _replay_rows(db, _ids(args.brand_ids), _ids(args.ids), args.limit or 1000)
+    dmg = collections.Counter()
+    n_dmg = dedup_n = dedup_blogs = 0
+    price_removed = price_capped = price_blogs = regressions = 0
+    detail = []
+    for r in rows:
+        body = r["body_markdown"] or ""
+        hits = E.body_damage(body)
+        if hits:
+            n_dmg += 1
+            for h in hits:
+                dmg[h["check"]] += 1
+        _, nd = BlogGenerator._dedupe_repeated_clauses(body)
+        if nd:
+            dedup_n += nd
+            dedup_blogs += 1
+        blocks = _blocks_from_sources(body)
+        note = ""
+        if blocks:
+            try:
+                out, note = gen._price_source_check(
+                    body, blocks, {"name": r["brand"] or "", "domain_url": r["dom"] or ""})
+            except Exception as e:
+                print(f"  !! #{r['id']}: {type(e).__name__}: {e}", flush=True)
+                continue
+            if note:
+                price_blogs += 1
+                m = __import__("re").search(r"removed (\d+) price", note)
+                if m:
+                    price_removed += int(m.group(1))
+                else:
+                    price_capped += 1
+                if len(E.body_damage(out)) > len(hits):
+                    regressions += 1
+                    print(f"  !! #{r['id']} REGRESSION: a removal raised the damage count", flush=True)
+        if args.detail and (hits or note):
+            detail.append((r["id"], (r["title"] or r["seed"] or "")[:54], len(hits), note[:110]))
+
+    print(f"\n=== replayed {len(rows)} stored article(s) — no model, no network, $0 ===")
+    print(f"\nDAMAGE already in stored bodies: {n_dmg} article(s)")
+    for k, v in dmg.most_common():
+        print(f"    {v:>4}  {k}")
+    print(f"\nDE-DUPLICATOR would remove {dedup_n} repeat(s) across {dedup_blogs} article(s)")
+    print(f"\nPRICE SOURCE: {price_blogs} article(s) — {price_removed} price(s) removed, "
+          f"{price_capped} reported-not-touched (over the fabrication cap)")
+    print(f"\nINVARIANT — removals that RAISED the damage count: {regressions}   "
+          f"{'OK' if regressions == 0 else '*** BROKEN ***'}")
+    if detail:
+        print("\nper article:")
+        for bid, t, nh, note in detail:
+            print(f"  #{bid:<5} dmg={nh:<3} {t}")
+            if note:
+                print(f"         {note}")
+    return 1 if regressions else 0
 
 
 # ── run ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -249,9 +363,15 @@ def main():
     ap.add_argument("--no-rubric", action="store_true")
     ap.add_argument("--factcheck", action="store_true",
                     help="Round 2 offline: apply the automatic fact-check in memory, then score the result")
+    ap.add_argument("--replay", action="store_true",
+                    help="FU251: run every DETERMINISTIC check over the stored bodies and report what "
+                         "they would change. No model, no network, no write — $0.")
+    ap.add_argument("--detail", action="store_true", help="with --replay: one line per affected article")
     args = ap.parse_args()
     if args.compare:
         return compare(*args.compare)
+    if args.replay:
+        return run_replay(args)
     run_local(args)
 
 

@@ -13184,8 +13184,11 @@ you MAY assume the description will carry: "{disc}".
             for stem in stems:
                 if t == stem:
                     return True
-                if len(t) >= 4 and len(stem) >= 4 and (t in stem or stem in t):
-                    return True
+                # Only from the START, and only for a word the article writes as a NAME. A plain
+                # SUBSTRING test is what let "care" and "same" vouch for sesamecare.com — so a
+                # consumer blog was accepted as the source of a drug's list price by two ordinary
+                # English words sitting in the same section. A suffix is reached by stripping the
+                # vanity prefix instead (getpetermd → petermd), which is a real word boundary.
                 if named and len(t) >= 3 and stem.startswith(t):
                     return True
         return False
@@ -13219,13 +13222,35 @@ you MAY assume the description will carry: "{disc}".
                 return True
             return self._domain_names_entity(url, unit)
 
+        # FU251 (second replay over 214 stored articles): the entity whose price a figure is is
+        # frequently named NOWHERE near the figure. "The exam costs $125" cited to myhspa.org is
+        # correct — HSPA administers that exam and sets that fee — but the sentence says "CRCST", the
+        # heading says "certification", and only the SECTION says "Healthcare Sterile Processing
+        # Association (HSPA)". Judged on the sentence alone, a body that genuinely sets the price
+        # looks like a blog repeating one.
+        #
+        # So the entity context is the whole SECTION the figure sits in. Deliberately the section and
+        # not the article: within one section the named entities really are the ones under
+        # discussion, whereas an article-wide scope would let a competitor's domain vouch for any
+        # price anywhere in it. This errs toward keeping a price — which, after 140 removals across
+        # 74 articles, is the side to err on.
+        sections = []          # one entry per line: the text of the section that line belongs to
+        _cur, _buf = [], []
+        for _ln in body.split("\n"):
+            if _ln.strip().startswith("#") and _buf:
+                for _ in _buf:
+                    sections.append(" ".join(_cur))
+                _buf, _cur = [], []
+            _buf.append(_ln)
+            _cur.append(_ln)
+        for _ in _buf:
+            sections.append(" ".join(_cur))
         heading = ""
 
-        def _verdict(unit, in_price_col=False, names=""):
-            """`names` is the row's own name cell and `heading` the section it sits under — the
-            entity whose price this is is frequently named in neither the cell nor the sentence
-            ("The program is priced at $129 to get started"), so matching the sentence alone called
-            every correctly-cited competitor unsourced."""
+        def _verdict(unit, in_price_col=False, names="", section=""):
+            """`names` is the row's own name cell, `heading` the section title and `section` its whole
+            text — the entity whose price this is is frequently named in none of the cell, the
+            sentence or the title ("The program is priced at $129 to get started")."""
             if not re.search(r"\[S\d+\]", unit):
                 return False
             if not any(self._is_price_figure(unit, m) for m in _MONEY_RE.finditer(unit)):
@@ -13234,7 +13259,7 @@ you MAY assume the description will carry: "{disc}".
                 return False                      # a money figure that is not a price
             cited = [int(x) for x in re.findall(r"\[S(\d+)\]", unit)]
             urls = [(blocks[n - 1].get("url") or "") for n in cited if 1 <= n <= len(blocks)]
-            whose = " ".join(x for x in (names, heading, unit) if x).strip()
+            whose = " ".join(x for x in (names, heading, unit, section) if x).strip()
             return bool(urls) and not any(_authoritative(u, whose) for u in urls)
 
         lines, hits, in_src, fence = body.split("\n"), [], False, False
@@ -13253,13 +13278,15 @@ you MAY assume the description will carry: "{disc}".
                 hdr = _table_header_cells(lines, li)
                 cells = line.split("|")
                 _row_name = cells[1] if len(cells) > 2 else ""
+                _sec = sections[li] if li < len(sections) else ""
                 for ci in range(2, len(cells) - 1):
                     if _verdict(cells[ci], _is_price_column(hdr[ci] if ci < len(hdr) else ""),
-                                names=_row_name):
+                                names=_row_name, section=_sec):
                         hits.append(("cell", li, ci, cells[ci].strip()))
             else:
+                _sec = sections[li] if li < len(sections) else ""
                 for sent in self._prose_sentences(line):
-                    if _verdict(sent):
+                    if _verdict(sent, section=_sec):
                         hits.append(("sent", li, sent, sent))
         if not hits:
             return body, ""

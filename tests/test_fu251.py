@@ -632,3 +632,40 @@ def test_a_money_figure_that_is_not_a_price_is_not_judged_as_one(unit):
 def test_a_real_price_still_reads_as_one(unit):
     """The narrowing must not become a way for a price to escape the check."""
     assert any(BlogGenerator._is_price_figure(unit, m) for m in _MONEY_RE.finditer(unit))
+
+
+def test_an_ordinary_word_cannot_vouch_for_a_domain_it_merely_sits_inside():
+    """The third replay found this: the words "care" and "same" both appear inside "sesamecare", so
+    a plain substring test let a consumer blog stand as the source of a drug's list price because
+    two ordinary English words happened to be in the same section. A name is matched from the START
+    of the stem, or exactly after a vanity prefix is stripped — both real word boundaries."""
+    sec = "Brand-name GLP-1s at retail: Wegovy's list price is $1,349, with the same level of care."
+    assert not BlogGenerator._domain_names_entity("https://sesamecare.com/blog/x", sec)
+    assert not BlogGenerator._domain_names_entity("https://www.weightwatchers.com/us/blog/x",
+                                                  "Weight-loss drugs are not covered by Medicare.")
+    assert not BlogGenerator._domain_names_entity("https://glpchart.com/x",
+                                                  "A chart of GLP-1 costs across providers.")
+    # …while a suffixed brand domain still resolves, because the vanity prefix is a real boundary
+    assert BlogGenerator._domain_names_entity("https://getpetermd.com/x", "PeterMD charges $270.")
+    assert BlogGenerator._domain_names_entity("https://calibrateme.com/x", "Calibrate charges $199.")
+
+
+def test_the_entity_may_be_named_anywhere_in_its_section(gen):
+    """"The exam costs $125" cited to myhspa.org is CORRECT — HSPA administers that exam and sets
+    that fee — but the sentence says "CRCST" and only the section says "Healthcare Sterile
+    Processing Association (HSPA)". Judged on the sentence alone, a body that genuinely sets the
+    price looks like a blog repeating one."""
+    body = ("# T\n\n## Certification\n\nThe credential is administered by the Healthcare Sterile "
+            "Processing Association (HSPA), the body that sets the schedule.\n\n"
+            "The exam costs $125 and is paid separately [S1].\n")
+    assert gen._price_source_check(body, [{"url": "https://myhspa.org/certification",
+                                           "text": "x" * 800}], PETERMD)[1] == ""
+
+
+def test_a_section_scope_does_not_reach_across_the_article(gen):
+    """Deliberately the section, not the article: an article-wide scope would let any named
+    competitor's domain vouch for any price anywhere in it."""
+    body = ("# T\n\n## About Noom\n\nNoom Med runs a coaching programme.\n\n"
+            "## LillyDirect pricing\n\nZepbound self-pay starts at $299 per month [S1].\n")
+    assert "price-source" in gen._price_source_check(
+        body, [{"url": "https://www.noom.com/med/pricing/", "text": "x" * 800}], PETERMD)[1]

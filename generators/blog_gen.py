@@ -1873,6 +1873,63 @@ def _asof_label(now=None):
     return time.strftime("%B %Y", t)
 
 
+# FU244 — when a source was published. Three checks need it and none of them may guess: a claim
+# resting on a document that predates it, a current-state figure resting on a year-old page, and the
+# writer being told which of two sources carries the newer position.
+_SRC_URL_DATE_RE = re.compile(r"(?<!\d)(20\d{2})[/_-](1[0-2]|0?[1-9])(?!\d)")
+_SRC_URL_YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
+_SRC_MONTHS = ("january|february|march|april|may|june|july|august|september|october|november|december")
+_SRC_STAMP_RE = re.compile(
+    r"\b(?:published|updated|last\s+(?:updated|reviewed|modified|revised)|posted|revised|"
+    r"effective|issued|release[d]?\s+on)\b[^\n]{0,60}?"
+    r"(?:(" + _SRC_MONTHS + r")[^\n]{0,12}?)?(?<!\d)(20\d{2})(?!\d)", re.I)
+_SRC_BARE_DATE_RE = re.compile(
+    r"\b(" + _SRC_MONTHS + r")\s+\d{1,2},?\s+(20\d{2})\b", re.I)
+
+
+def _source_pub_date(block, now=None):
+    """(year, month) a gathered source was published or last updated, or None when it cannot be told.
+
+    Three places a date reliably lives, cheapest first: the URL path (/2024/12/), an explicit
+    published / updated stamp in the page text, and a bare "December 20, 2024" near the top of it.
+
+    A bare year with no month resolves to DECEMBER, and an undeterminable date returns None — both
+    choices make a source look as NEW as possible, because every caller uses this to decide whether a
+    source is too OLD for a claim. Erring the other way would let a missing date manufacture a
+    defect."""
+    if not isinstance(block, dict):
+        return None
+    t = now or time.gmtime()
+    hi = t.tm_year + 1
+    url = str(block.get("url") or "")
+    m = _SRC_URL_DATE_RE.search(url)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1990 <= y <= hi:
+            return (y, mo)
+    txt = str(block.get("text") or "")
+    head = txt[:1500]
+    for rx, grp in ((_SRC_STAMP_RE, (1, 2)), (_SRC_BARE_DATE_RE, (1, 2))):
+        mm = rx.search(head)
+        if not mm:
+            continue
+        y = int(mm.group(grp[1]))
+        if not (1990 <= y <= hi):
+            continue
+        mon = mm.group(grp[0])
+        return (y, (_MONTH_NAMES.index(mon.lower()) + 1) if mon else 12)
+    m = _SRC_URL_YEAR_RE.search(url)
+    if m:
+        y = int(m.group(1))
+        if 1990 <= y <= hi:
+            return (y, 12)
+    return None
+
+
+_MONTH_NAMES = ("january february march april may june july august september october november "
+                "december").split()
+
+
 def _official_source_ok(url, title, brand_name, own_domain, pins):
     """FU141: THE one validator for granting the `official ·` badge, everywhere. Generic —
     brand name, own domain and vertical pins are all parameters; every rule is shape-based.
@@ -5723,6 +5780,14 @@ extractable answer), still under 160 chars.
       * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
         phased path can run WITH {name} too wherever that is true, so the reader is not sent away to
         find a different provider for phase one.
+      * STATE THE CURRENT POSITION, AND SAY WHEN IT IS FROM. A coverage rule, a price, an
+        eligibility threshold and an approval all have a DATE, and this page is read long after it
+        is written. When two sources in the EVIDENCE cover the same rule or figure, state and cite
+        the NEWER one, and say the month or year the position is from. Never present a position a
+        later source has replaced as the current one, and never cite a document PUBLISHED BEFORE the
+        thing it is cited for (a 2020 statement cannot be the source for a 2025 approval). When the
+        EVIDENCE carries a newer programme, rule or price than the one the older sources describe,
+        the newer one is the answer: lead with it and say what it replaced.
       * NEVER DISQUALIFY {name}'S OWN PRODUCT CLASS AND THEN PITCH IT. When a section states a rule,
         regulation, coverage limit or eligibility bar that applies to the CATEGORY {name} sells in,
         that rule stays exactly as sourced — it is true and the reader needs it. What must follow is
@@ -6712,6 +6777,102 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
                 print(f"[blog_gen] key-facts: {warning}", flush=True)
         return stored, warning, ([seed_product] if seed_product else []), extra_blocks
 
+    # FU244 — the topics whose answer has a DATE. A how-to for seasoning a pan does not go stale; a
+    # coverage rule, a price, an eligibility threshold, a licence requirement and a deadline all do.
+    # Vertical-neutral on purpose: these words describe the SHAPE of the claim, not a subject, so a
+    # lender's APR cap, a contractor's permit rule and a SaaS price list all qualify.
+    _DATED_TOPIC_RE = re.compile(
+        r"\b(?:cover\w*|reimburs\w+|insur\w+|price[sd]?|pricing|cost[s]?|fee[s]?|rate[s]?|tariff|"
+        r"rule[s]?|law[s]?|legal|regulat\w+|polic(?:y|ies)|approv\w+|authoris\w+|authoriz\w+|"
+        r"eligib\w+|qualif\w+|requir\w+|licen[sc]\w+|permit\w*|complian\w+|deadline|limit[s]?|"
+        r"cap[s]?|threshold[s]?|tax\w*|subsid\w+|grant[s]?|programme?s?|scheme[s]?)\b", re.I)
+    _RECENCY_MONTHS = int(os.environ.get("BLOG_RECENCY_MONTHS", "18"))
+    _RECENCY_MAX_BLOCKS = 3
+
+    @classmethod
+    def _wants_recency(cls, core_topic, seed, ymyl, include_pricing):
+        """Whether this article's answer is the kind that has a date on it. Off for an evergreen
+        how-to, on for anything about coverage, price, a rule or eligibility."""
+        if os.environ.get("BLOG_RECENCY_SWEEP", "1") == "0":
+            return False
+        if ymyl or include_pricing:
+            return True
+        return bool(cls._DATED_TOPIC_RE.search(f"{core_topic or ''} {seed or ''}"))
+
+    def _gather_recent_changes(self, core_topic, seed, ymyl, brand, national=False, now=None,
+                               subj_toks=None, biz_toks=None):
+        """FU244 — ONE search whose only job is what CHANGED.
+
+        The (c2) official search asks for the authority that documents a topic, and FU242 bolted a
+        "state the current status" clause onto it. That was not enough, and the reason is structural:
+        "who is the authority on Medicare drug coverage" and "what changed about it since last year"
+        are different questions, and the first one returns the standing policy page every time. An
+        article published in September 2026 therefore described 2024 coverage and missed a programme
+        that had started that July — not because a check failed, but because nothing had ever asked.
+
+        A check cannot fix that. No amount of verification can surface a fact the sourcing never
+        went looking for, which is why this is a SEARCH and not another warning. One extra call,
+        at most three blocks kept, validated down the same path (c2) uses so a blog or an affiliate
+        cannot pick up an `official ·` badge by being recent. Never raises."""
+        t = now or time.gmtime()
+        cutoff = (t.tm_year * 12 + (t.tm_mon - 1) - self._RECENCY_MONTHS) // 12
+        core = (core_topic or seed or "").strip()
+        if not core or not self.claude:
+            return []
+        try:
+            res = self.claude.search_sources(
+                f"what CHANGED about {core} since {cutoff} — a NEW programme, rule, price, coverage "
+                f"decision, approval, threshold or guideline that took effect on or after {cutoff}, "
+                f"and anything that REPLACED or superseded the older position. Return the official "
+                f"page announcing the change, its EFFECTIVE DATE, and what it changed FROM. Ignore "
+                f"pages that only restate the older position, and ignore commentary — the "
+                f"announcement, the regulator's page or the current official documentation only."
+                + (" It must be a NATIONAL or GENERAL authority, never a single city's or county's "
+                   "page." if national else ""),
+                max_searches=2) or []
+        except Exception:
+            return []
+        name = ((brand or {}).get("name") or "").strip()
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+        pins = (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if ymyl else []
+        out = []
+        for c in res:
+            u = (c.get("url") or "").strip()
+            ttl = (c.get("title") or "").strip()
+            fct = (c.get("fact") or ttl or "").strip()
+            if not (u and fct):
+                continue
+            # the SAME accept policy (c2) uses — being recent is not a licence to skip a filter.
+            # An off-subject credential and a recruitment page are exactly as wrong here as there,
+            # and a search asked "what changed" will happily return last year's ranking table.
+            if (_is_non_evidence({"title": ttl, "url": u})
+                    or _is_affiliate_review({"title": ttl, "url": u})
+                    or _is_subject_review({"title": ttl, "fact": fct}, name)
+                    or _is_negative_about({"title": ttl, "fact": fct}, name)
+                    or _is_non_capability_source({"title": ttl, "url": u})
+                    or _is_offtopic_credential({"title": ttl, "url": u, "fact": fct}, subj_toks or [])
+                    or _is_other_business({"title": ttl, "url": u, "fact": fct}, "", biz_toks or [])
+                    or (own and _norm_domain(u) in (own,))):
+                print(f"[blog_gen] recency: '{(ttl or u)[:70]}' failed the source filters — dropped",
+                      flush=True)
+                continue
+            if _official_source_ok(u, ttl, name, own, pins):
+                lab = f"official · {ttl or u}"
+            elif ymyl:
+                # the YMYL rule stands: on a clinical / financial / legal page only an official
+                # source may carry a regulated claim, however recent a blog is.
+                print(f"[blog_gen] recency: '{(ttl or u)[:70]}' is not official — dropped (ymyl)",
+                      flush=True)
+                continue
+            else:
+                lab = f"{_source_class(u) or 'third-party'} · {ttl or u}"
+            out.append({"label": lab, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+            if len(out) >= self._RECENCY_MAX_BLOCKS:
+                break
+        print(f"[blog_gen] recency: asked what changed about '{core[:50]}' since {cutoff} → "
+              f"{len(out)} source(s) kept", flush=True)
+        return out
+
     def _source_for_completion(self, brand, seed, article, deep=False, geo="", qualifier="",
                                ymyl=None, refresh_competitor_facts=False, refresh_competitor_slugs=None,
                                include_pricing=True, guide=False):
@@ -7121,6 +7282,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # FU216: a county permit page is not a guide's authority — drop it BEFORE the YMYL gap check
         # below counts the official sources (inert unless a guide with no geography).
         fresh = self._guide_filter_blocks(fresh, brand, "official search")
+
+        # FU244 — and now the question (c2) does not ask: what CHANGED. One extra search, kept to
+        # three validated blocks, is the only thing that can put a rule, price or programme newer
+        # than the standing policy page into the evidence at all.
+        if self._wants_recency(core_topic, seed, ymyl, _px):
+            fresh.extend(self._guide_filter_blocks(
+                self._gather_recent_changes(core_topic, seed, ymyl, brand, national=_gnat,
+                                            subj_toks=_subj_toks, biz_toks=_biz_toks),
+                brand, "recency sweep"))
 
         # FU133 (c2b): YMYL pages need REAL authoritative grounding — regulator labels +
         # professional guidelines — retrieved with validation + retries. If nothing validated
@@ -8830,6 +9000,10 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor {name}, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - CURRENT OVER OLD: where the FRESH FACTS carry a newer rule, price, coverage decision, approval
+    or threshold than the draft states, REPLACE the draft's version with it and cite the newer
+    source, keeping the date the position is from. Never keep a superseded position as the current
+    answer, and never leave a claim cited to a document published BEFORE the thing it is cited for.
   - NEVER LEAVE {name}'S OWN CLASS DISQUALIFIED: where the draft states a rule, regulation, coverage
     limit or eligibility bar that applies to the CATEGORY {name} sells in, KEEP the rule verbatim with
     its [S#] — it is true and load-bearing — and make sure the passage also says where {name} stands
@@ -12547,6 +12721,136 @@ you MAY assume the description will carry: "{disc}".
                 f"that carries the current position; re-check the policy, coverage and price claims "
                 f"before publishing")
 
+    # ── FU244 — a claim may not rest on a document that predates it ────────────────────────────────
+    # `_staleness_check` (FU242) reads the ARTICLE's own wording and catches "as of August 2024".
+    # These two read the SOURCES instead, and catch the two shapes that leave no trace in the prose:
+    # a 2025 approval cited to a 2020 statement, and a current price or coverage figure whose every
+    # citation is a year old. Both warn; neither rewrites, because which page to cite instead is an
+    # editorial call and the right one may not have been gathered at all.
+    _CLAIM_YEAR_RE = re.compile(r"(?<![\w-])(20\d{2})(?![\d])")
+    # a claim about the state of the world NOW — the only kind an old source cannot support. A dated
+    # historical fact ("the 2019 trial reported …") is perfectly well served by a 2019 page.
+    _CURRENT_STATE_RE = re.compile(
+        r"\b(?:as\s+of|currently|today|right\s+now|at\s+present|these\s+days|"
+        r"costs?|priced?\s+at|charges?|pays?|copay|deductible|premium|"
+        r"covers?|covered|coverage|reimburs\w+|eligib\w+|qualif\w+|"
+        r"per\s+month|per\s+year|a\s+month|/mo\b|/month\b|as\s+low\s+as|starting\s+at|"
+        r"offers?|includes?|requires?|allows?|limits?)\b", re.I)
+    # "In 2024, 13 states added coverage" is HISTORY, and a 2024 page is the right source for it.
+    # Only "as of" survives this, because an as-of claim is a statement about NOW that happens to
+    # carry a date — which is the one FU242 already reads out of the prose.
+    _HISTORICAL_ANCHOR_RE = re.compile(
+        r"\b(?:in|since|from|during|by|after|before|until|through)\s+"
+        r"(?:early|late|mid-?|the\s+)?\s*"
+        r"(?:january|february|march|april|may|june|july|august|september|october|november|december)?"
+        r"\s*(?<![\w-])(20\d{2})(?![\d])", re.I)
+
+    def _dated_blocks(self, body, blocks):
+        """The reader's `[S#]` map, with each source's TEXT put back.
+
+        `_blocks_from_sources` rebuilds the map from the rendered Sources list, which carries a label
+        and a URL and nothing else — enough for every check that only asks WHICH source a marker
+        names, and not enough here, where the date usually lives in the page's own "Last updated"
+        line rather than in its URL. Back-fill from the raw evidence and, better still, from the page
+        the FU241 probe already read, so a stamp the search summary never mentioned is still found."""
+        mapped = self._blocks_from_sources(body, blocks)
+        raw = {(b.get("url") or "").strip(): (b.get("text") or "")
+               for b in (blocks or []) if (b.get("url") or "").strip()}
+        out = []
+        for b in mapped:
+            u = (b.get("url") or "").strip()
+            if u and not (b.get("text") or "").strip():
+                b = dict(b, text=(_page_text(getattr(self, "_claim_pages", {}).get(u))
+                                  or raw.get(u, "")))
+            out.append(b)
+        return out
+
+    def _claim_date_check(self, body, blocks, now=None):
+        """FU244 — a claim about a YEAR whose every cited source was published before it.
+
+        The reported case: a sentence about a 2025 approval cited to a 2020 position statement. Every
+        existing check passed it — the page is real, official, on-topic and about the same subject —
+        and it could not possibly be the source, because it predates the event by five years.
+
+        Deliberately narrow, because a date is easy to get wrong:
+          * only a claim year at or before TODAY fires. A programme running "through 2027" is
+            legitimately announced by a 2026 page, and flagging that would be noise;
+          * every cited source must have a date we could actually determine. One unknown date and the
+            unit is skipped — a missing stamp must never manufacture a defect;
+          * the source must predate the claim YEAR, not merely the claim. A page from the same year
+            is fine whatever month it carries."""
+        blocks = self._dated_blocks(body, blocks)
+        if not body or not blocks:
+            return ""
+        t = now or time.gmtime()
+        hits, better = [], set()
+        dates = {i + 1: _source_pub_date(b, t) for i, b in enumerate(blocks)}
+        for sent, idxs in self._sentence_citations(body):
+            yrs = [int(y) for y in self._CLAIM_YEAR_RE.findall(sent) if int(y) <= t.tm_year]
+            cited = [dates.get(i) for i in idxs if 1 <= i <= len(blocks)]
+            if not yrs or not cited or any(d is None for d in cited):
+                continue
+            cy = max(yrs)
+            if any(d[0] >= cy for d in cited):
+                continue
+            newest = max(d[0] for d in cited)
+            hits.append(f'"{sent[:90].strip()}…" is about {cy} but its source(s) '
+                        f"stop at {newest}")
+            # is there anything in the evidence that COULD carry it?
+            better |= {i for i, d in dates.items() if d and d[0] >= cy}
+            if len(hits) >= 2:
+                break
+        if not hits:
+            return ""
+        note = "claim-date: " + "; ".join(hits)
+        if better:
+            note += (" — " + ", ".join(f"[S{i}]" for i in sorted(better)[:3])
+                     + " in the same evidence are new enough; re-cite or drop the claim")
+        else:
+            note += " — nothing gathered is new enough to support it; re-source or drop the claim"
+        return note
+
+    def _stale_source_check(self, body, blocks, now=None):
+        """FU244 — a CURRENT-STATE figure whose every citation is older than the staleness window.
+
+        The reported case twice over: "13 state Medicaid programs cover GLP-1s" cited to a December
+        2024 piece, and a self-pay price section built on 2024 figures, both published in September
+        2026. The sources say exactly what the article says; they just stopped being true.
+
+        Requires all three — a current-state phrase, a figure, and a determinable date on EVERY
+        citation — so a dated historical fact, an undated source and a qualitative claim are all
+        silent. Warning only: the fix is a newer source, which this cannot conjure."""
+        blocks = self._dated_blocks(body, blocks)
+        if not body or not blocks:
+            return ""
+        t = now or time.gmtime()
+        dates = {i + 1: _source_pub_date(b, t) for i, b in enumerate(blocks)}
+        hits, worst = [], 0
+        for sent, idxs in self._sentence_citations(body):
+            if not idxs or not self._CURRENT_STATE_RE.search(sent) or not _CLAIM_NUM_RE.search(sent):
+                continue
+            # a sentence anchored to a past year is a record of what happened then, not a claim
+            # about now — the old page IS its source. "As of <year>" is the exception: that is a
+            # statement about the present wearing a date.
+            if self._HISTORICAL_ANCHOR_RE.search(sent) and not self._ASOF_RE.search(sent):
+                continue
+            cited = [dates.get(i) for i in idxs if 1 <= i <= len(blocks)]
+            if not cited or any(d is None for d in cited):
+                continue
+            ages = [(t.tm_year - y) * 12 + (t.tm_mon - mo) for y, mo in cited]
+            if min(ages) < self._STALE_MONTHS:
+                continue
+            worst = max(worst, min(ages))
+            hits.append(f'"{sent[:90].strip()}…"')
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return (f"stale-source: {'; '.join(hits)} — every source cited for "
+                f"{'these' if len(hits) > 1 else 'this'} is at least {worst} months old, and "
+                f"{'they state' if len(hits) > 1 else 'it states'} a current price, coverage or "
+                f"eligibility position; re-source against the current page before publishing")
+
     def _unsourced_figure_check(self, body, blocks):
         """FU239 (3) — a figure that appears in NOTHING we gathered was not sourced; it came out of
         the model. Remove it rather than publish it.
@@ -14064,6 +14368,17 @@ you MAY assume the description will carry: "{disc}".
         if _stale:
             print(f"[blog_gen] {_stale}", flush=True)
             self._warn(article, _stale)
+        # FU244 — the same failure read from the SOURCES rather than the prose: a claim about a year
+        # its citations predate, and a current-state figure every one of whose citations is a year
+        # old. Both run here, while the [S#] markers still map to the rendered Sources list.
+        _cdc = self._claim_date_check(article["body_markdown"], self._evidence_blocks)
+        if _cdc:
+            print(f"[blog_gen] {_cdc}", flush=True)
+            self._warn(article, _cdc)
+        _ssc = self._stale_source_check(article["body_markdown"], self._evidence_blocks)
+        if _ssc:
+            print(f"[blog_gen] {_ssc}", flush=True)
+            self._warn(article, _ssc)
         article["body_markdown"], _ufn = self._unsourced_figure_check(
             article["body_markdown"], self._evidence_blocks)
         if _ufn:

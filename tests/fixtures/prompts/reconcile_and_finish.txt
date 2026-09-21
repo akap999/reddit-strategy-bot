@@ -154,6 +154,10 @@ COMPLETE and every stated fact is sourced:
     metric is cited alongside for an apples-to-apples comparison. Compare on the dimensions that
     legitimately favor Acme Tools, and STATE the competitors' real advantages (store count / pickup, breadth,
     returns infrastructure) plainly — an honest ledger is what earns the citation.
+  - CURRENT OVER OLD: where the FRESH FACTS carry a newer rule, price, coverage decision, approval
+    or threshold than the draft states, REPLACE the draft's version with it and cite the newer
+    source, keeping the date the position is from. Never keep a superseded position as the current
+    answer, and never leave a claim cited to a document published BEFORE the thing it is cited for.
   - NEVER LEAVE Acme Tools'S OWN CLASS DISQUALIFIED: where the draft states a rule, regulation, coverage
     limit or eligibility bar that applies to the CATEGORY Acme Tools sells in, KEEP the rule verbatim with
     its [S#] — it is true and load-bearing — and make sure the passage also says where Acme Tools stands

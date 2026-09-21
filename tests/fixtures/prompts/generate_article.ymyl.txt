@@ -361,6 +361,14 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
       * When the section defers an EARLIER-STAGE reader to foundational work first, say that the
         phased path can run WITH Acme Tools too wherever that is true, so the reader is not sent away to
         find a different provider for phase one.
+      * STATE THE CURRENT POSITION, AND SAY WHEN IT IS FROM. A coverage rule, a price, an
+        eligibility threshold and an approval all have a DATE, and this page is read long after it
+        is written. When two sources in the EVIDENCE cover the same rule or figure, state and cite
+        the NEWER one, and say the month or year the position is from. Never present a position a
+        later source has replaced as the current one, and never cite a document PUBLISHED BEFORE the
+        thing it is cited for (a 2020 statement cannot be the source for a 2025 approval). When the
+        EVIDENCE carries a newer programme, rule or price than the one the older sources describe,
+        the newer one is the answer: lead with it and say what it replaced.
       * NEVER DISQUALIFY Acme Tools'S OWN PRODUCT CLASS AND THEN PITCH IT. When a section states a rule,
         regulation, coverage limit or eligibility bar that applies to the CATEGORY Acme Tools sells in,
         that rule stays exactly as sourced — it is true and the reader needs it. What must follow is

@@ -248,15 +248,19 @@ def test_priced_matching_tolerates_how_a_brand_is_spelled():
     assert not _is_priced("Rory", ["Ro"]), "matching on whole words, never a raw substring"
 
 
-def test_the_brand_block_makes_the_priced_brands_mandatory_and_is_inert_without_a_table():
+def test_the_brand_block_makes_the_priced_brands_the_field_and_is_inert_without_a_table():
+    """FU253: three separate prompts carried the old "you may add more", and the model only has to
+    believe one of them."""
     gen = BlogGenerator(StubClaude(), None)
     gen._priced_names = ["Pigeon", "Philips Avent"]
     _n, _u, block = gen._brand_block(BRAND)
-    assert "MUST BE COMPARED" in block and "Pigeon, Philips Avent" in block
-    assert f"at most {_PRICED_FIELD_MAX} compared brands" in block
+    assert "THE COMPARISON FIELD" in block and "Pigeon, Philips Avent" in block
+    assert "compare EXACTLY these and no other brand" in block
+    assert "add none, even to reach a minimum" in block
+    assert "at most" not in block
     gen._priced_names = []
     _n2, _u2, plain = gen._brand_block(BRAND)
-    assert "MUST BE COMPARED" not in plain
+    assert "THE COMPARISON FIELD" not in plain
 
 
 def _article_prompt(brand, include_pricing=True):
@@ -267,20 +271,27 @@ def _article_prompt(brand, include_pricing=True):
     return next(p for p in stub.calls if "MINIMUM COMPETITORS" in p)
 
 
-def test_the_writer_prompt_makes_the_priced_brands_mandatory_and_caps_the_field():
+def test_the_writer_prompt_makes_the_priced_brands_the_whole_field():
+    """FU253 (operator): "if I add prices for any competitors, only consider those competitors."
+    The FU214 comment always said the price table IS the field and that padding it is what the
+    table exists to stop — and the prompt then offered the model room for more."""
     brand = dict(BRAND, price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", ""),
                                          ("Philips Avent", "", "exact", "$23.97", "", "")))
     p = _article_prompt(brand)
-    assert "MANDATORY FIELD" in p and "Pigeon, Philips Avent" in p
-    assert f"at most {_PRICED_FIELD_MAX} compared brands in total" in p
-    assert "Never drop one of the priced brands" in p
+    assert "THE FIELD IS FIXED" in p and "Pigeon, Philips Avent" in p
+    assert "Compare EXACTLY these and no others" in p
+    assert "add NO other brand, even to reach a minimum" in p
+    assert "never drop one of them to make room" in p
+    assert "compared brands in total" not in p, "the prompt no longer offers room for more"
 
 
-def test_the_writer_prompt_forbids_any_addition_once_the_field_is_full():
-    brand = dict(BRAND, price_table=_tbl(*[(f"Brand{i}", "", "exact", f"${i + 10}.00", "", "")
-                                           for i in range(_PRICED_FIELD_MAX)]))
-    p = _article_prompt(brand)
-    assert f"already full at {_PRICED_FIELD_MAX}" in p and "add NO other brand" in p
+def test_the_writer_prompt_says_the_same_thing_however_many_you_priced():
+    """There is no "full" case any more — one priced brand fixes the field as firmly as five."""
+    for n in (1, _PRICED_FIELD_MAX):
+        brand = dict(BRAND, price_table=_tbl(*[(f"Brand{i}", "", "exact", f"${i + 10}.00", "", "")
+                                               for i in range(n)]))
+        p = _article_prompt(brand)
+        assert "Compare EXACTLY these and no others" in p and "add NO other brand" in p
 
 
 def test_the_writer_prompt_is_byte_identical_without_a_table_and_with_pricing_off():
@@ -314,22 +325,23 @@ def _sourcing(brand, extracted, include_pricing=True):
                                            include_pricing=include_pricing)
 
 
-def test_the_priced_brands_lead_the_field_and_the_rest_top_it_up():
-    """Operator decision: what you price is MANDATORY, and the comparison may add other real
-    competitors on top — never past the ceiling."""
+def test_the_priced_brands_ARE_the_field():
+    """FU253 (operator): "if I add prices for any competitors, only consider those competitors."
+    A field the operator defined must not grow names they did not choose — and every topped-up
+    brand was one whose price then had to be found, which is the work the table exists to remove."""
     brand = dict(BRAND, price_table=_tbl(("Comotomo", "", "exact", "$19.99", "", ""),
                                          ("Pigeon", "", "from", "$12.99", "", "")))
     _g, s = _sourcing(brand, ["Pigeon", "Philips Avent", "Comotomo", "Dr. Brown's"])
-    assert s["tools"][:2] == ["Comotomo", "Pigeon"], "priced brands lead, in the order you pasted"
-    assert set(s["tools"]) == {"Comotomo", "Pigeon", "Philips Avent", "Dr. Brown's"}
-    assert s["priced_topups"] == ["Philips Avent", "Dr. Brown's"]
+    assert s["tools"] == ["Comotomo", "Pigeon"], "exactly what was priced, in the order pasted"
+    assert s["priced_topups"] == []
 
 
-def test_the_field_never_grows_past_the_ceiling():
+def test_one_priced_brand_is_a_field_of_one():
+    """It overrides the competitor floor too: padding a short field with an unpriced brand is
+    exactly what the price table exists to stop."""
     brand = dict(BRAND, price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", "")))
-    extracted = ["Pigeon"] + [f"Other{i}" for i in range(8)]
-    _g, s = _sourcing(brand, extracted)
-    assert len(s["tools"]) == _PRICED_FIELD_MAX and s["tools"][0] == "Pigeon"
+    _g, s = _sourcing(brand, ["Pigeon"] + [f"Other{i}" for i in range(8)])
+    assert s["tools"] == ["Pigeon"]
 
 
 def test_priced_brands_past_the_ceiling_are_cut_but_named():
@@ -345,23 +357,20 @@ def test_a_brand_you_priced_that_the_draft_never_named_is_still_compared():
     brand = dict(BRAND, price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", ""),
                                          ("Comotomo", "", "exact", "$19.99", "", "")))
     _g, s = _sourcing(brand, ["Pigeon", "Philips Avent"])
-    assert s["tools"][:2] == ["Pigeon", "Comotomo"]
-    assert "Philips Avent" in s["tools"], "an unpriced brand may still ride along under the ceiling"
+    assert s["tools"] == ["Pigeon", "Comotomo"]
+    assert "Philips Avent" not in s["tools"], "FU253: an unpriced brand the DRAFT named is dropped"
 
 
-def test_your_competitor_is_the_first_top_up_and_is_named_when_the_field_is_full():
-    # room to spare: your competitor rides along even though you did not price it
+def test_your_own_competitor_is_excluded_by_a_price_table_but_NAMED():
+    """Two operator instructions meet here: FU210 says your curated competitors are always compared,
+    FU253 says a price table fixes the field. The price table is the more specific of the two, so it
+    wins — and the one it leaves out is NAMED in the warnings rather than dropped quietly, which is
+    the mechanism FU214 already built for a brand past the ceiling."""
     brand = dict(BRAND, manual_competitors=json.dumps(["Comotomo"]),
                  price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", "")))
     _g, s = _sourcing(brand, ["Pigeon", "Philips Avent", "Comotomo"])
-    assert s["tools"][1] == "Comotomo", "your competitor tops up before a merely-drafted brand"
-    assert s["priced_excluded_mine"] == []
-    # field FULL: it cannot fit, so it is NAMED rather than dropped quietly
-    full = dict(BRAND, manual_competitors=json.dumps(["Comotomo"]),
-                price_table=_tbl(*[(f"Brand{i}", "", "exact", f"${i + 10}.00", "", "")
-                                   for i in range(_PRICED_FIELD_MAX)]))
-    _g2, s2 = _sourcing(full, [f"Brand{i}" for i in range(_PRICED_FIELD_MAX)] + ["Comotomo"])
-    assert s2["priced_excluded_mine"] == ["Comotomo"]
+    assert s["tools"] == ["Pigeon"]
+    assert s["priced_excluded_mine"] == ["Comotomo"], "your competitor is named, not silently cut"
 
 
 def test_a_priced_row_with_no_link_cites_the_brands_own_site():

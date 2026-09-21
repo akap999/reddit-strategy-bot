@@ -3152,10 +3152,11 @@ class BlogGenerator:
         # and the reconcile is not left deleting rows a prompt talked the model into.
         _priced_b = [] if _guide_b else (getattr(self, "_priced_names", None) or [])
         if _priced_b:
-            lines.append(f"MUST BE COMPARED (the operator supplied their prices — every one of these "
-                         f"gets a comparison row and a prose profile): {', '.join(_priced_b)}. You may "
-                         f"add other real competitors alongside them, to at most "
-                         f"{_PRICED_FIELD_MAX} compared brands in total.")
+            # FU253 (operator): the priced set is the WHOLE field, here too. Three prompts carried
+            # the old "you may add more" and the model only has to believe one of them.
+            lines.append(f"THE COMPARISON FIELD (the operator supplied their prices — compare "
+                         f"EXACTLY these and no other brand): {', '.join(_priced_b)}. Every one gets "
+                         f"a comparison row and a prose profile; add none, even to reach a minimum.")
         if b.get("context"):
             lines.append(f"Context: {b['context']}")
         if b.get("learned_context"):
@@ -6093,17 +6094,17 @@ extractable answer), still under 160 chars.
         _priced_a = getattr(self, "_priced_names", None) or []
         _priced_step = ""
         if _priced_a:
-            _room_a = max(0, _PRICED_FIELD_MAX - len(_priced_a))
-            _priced_step = (f"      0. MANDATORY FIELD — the operator supplied prices for these "
-                            f"brands: {', '.join(_priced_a)}. EVERY one of them gets its own "
-                            f"comparison row and prose profile, whatever this article's angle. "
-                            + (f"You MAY add up to {_room_a} more real competitor(s) from steps 1-2 "
-                               f"below, for at most {_PRICED_FIELD_MAX} compared brands in total — "
-                               f"never more. "
-                               if _room_a else
-                               f"The field is already full at {_PRICED_FIELD_MAX}: add NO other "
-                               f"brand. ")
-                            + f"Never drop one of the priced brands to make room.\n")
+            # FU253 (operator): "if I add prices for any competitors, only consider those
+            # competitors." The comment above always said the price table IS the field and that
+            # padding it is what the table exists to stop — and then the code topped it up to the
+            # ceiling with unpriced brands anyway, so a field the operator had defined grew names
+            # they had not chosen and whose prices had to be guessed. The intent and the code now
+            # agree: what you priced is what is compared.
+            _priced_step = (f"      0. THE FIELD IS FIXED — the operator supplied prices for these "
+                            f"brands: {', '.join(_priced_a)}. Compare EXACTLY these and no others. "
+                            f"Every one gets its own comparison row and prose profile, whatever this "
+                            f"article's angle; add NO other brand, even to reach a minimum, and "
+                            f"never drop one of them to make room.\n")
         # FU199 — subject fit decides WHO is compared, not position on the operator's list. Empty
         # (and so byte-identical) unless this article's subject is narrower than the brand's category.
         _sfit_p = getattr(self, "_subject_phrase", "") or ""
@@ -7599,24 +7600,13 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] price-table: {len(_priced_s)} priced brands exceeds the "
                       f"{_PRICED_FIELD_MAX}-brand comparison ceiling — not compared: "
                       f"{', '.join(_over_px)}", flush=True)
-            _room = max(0, _PRICED_FIELD_MAX - len(_lead))
-            # Top-up order = the same precedence the rest of the pipeline already uses: YOUR
-            # competitors (FU210) first, then whatever the draft named, in the draft's order.
-            # Candidates come from the FULL extracted list, not the `_VERIFY_MAX_BRANDS`-capped one:
-            # that cap bounds SEARCHES, and a priced brand is never searched — so a field of
-            # 3 priced + 2 topped up buys two lookups where an unpriced article buys four.
-            _pool = [t for t in tools_u if not _named_as_option(t, _opt_names)]
-            _cand = ([t for t in _pool if t.lower() in _mine_low and t.lower() not in _seen_px]
-                     + [t for t in _pool if t.lower() not in _mine_low
-                        and t.lower() not in _seen_px])
-            _room = min(_room, _VERIFY_MAX_BRANDS)   # never more lookups than an unpriced article
+            # FU253 (operator): "if I add prices for any competitors, only consider those
+            # competitors." No top-up. A field the operator defined must not grow names they did not
+            # choose — and every topped-up brand was one whose price then had to be found, which is
+            # the work the table exists to remove. It also removes a whole class of defect by
+            # construction: an unpriced brand in a priced comparison is the row most likely to carry
+            # a figure from a roundup or a review.
             _top = []
-            for t in _cand:
-                if len(_top) >= _room:
-                    break
-                if t.lower() in {x.lower() for x in _top}:
-                    continue
-                _top.append(t)
             # a generic OPTION (FU189 — a method/material/plan type) is not a brand: it has no price
             # to give and never displaces one, so it rides outside the ceiling exactly as before.
             _kept_px = _lead + _top + [t for t in tools if t.lower() in _options]
@@ -7624,10 +7614,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # YOUR competitors (FU210) the field still leaves out are NAMED, never dropped silently.
             self._priced_excluded_mine = [t for t in _dropped_px5 if t.lower() in _mine_low]
             self._priced_topups = list(_top)
-            if _top:
-                print(f"[blog_gen] price-table: topped the field up to {len(_lead) + len(_top)} of "
-                      f"{_PRICED_FIELD_MAX} with {', '.join(_top)} (no price supplied — looked up)",
-                      flush=True)
+            print(f"[blog_gen] price-table: the field is exactly the {len(_lead)} brand(s) you "
+                  f"priced — no unpriced brand is added", flush=True)
             if _dropped_px5:
                 print(f"[blog_gen] price-table: not compared (the field is full at "
                       f"{_PRICED_FIELD_MAX}) — {', '.join(_dropped_px5)}", flush=True)

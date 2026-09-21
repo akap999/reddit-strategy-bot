@@ -19,6 +19,7 @@ from difflib import SequenceMatcher as _SequenceMatcher   # FU167: longest-share
 
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
+from generators.brand_enrichment import relevant_text   # FU240: keep the passages about THIS article
 from generators.brand_enrichment import _fetch_page   # FU221: fetch + WHY it failed
 from generators import research as _research   # FU221 (Step 0): find → read → extract → verify
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
@@ -73,6 +74,9 @@ _WEB_FETCH_PER_DOMAIN = 3        # FU221 (R2): web-fetch fallbacks per walled do
 # exists so a walled competitor can't run up cost on guessed paths; applied to the subject it
 # starves the pages the article most needs (/case-studies, /services/*) — the publisher's own proof.
 _WEB_FETCH_OWN_DOMAIN = int(os.environ.get("BLOG_WEB_FETCH_OWN_DOMAIN", "10"))
+# FU240 (1): read the whole document, then KEEP the part that is about this article.
+_PAGE_FULL_CHARS = int(os.environ.get("BLOG_PAGE_FULL_CHARS", "400000"))
+_PAGE_KEEP_CHARS = int(os.environ.get("BLOG_PAGE_KEEP_CHARS", "6000"))
 _RESEARCH_ON = os.environ.get("BLOG_RESEARCH", "1") != "0"   # FU221 (R0): off → the old tiers only
 
 # Reputable INDEPENDENT domains for the optional web-search tier (Follow-up 7). Passed as
@@ -1813,6 +1817,28 @@ def _is_affiliate_review(src, own_domain=""):
     return bool(_REVIEWISH_RE.search(((src.get("title") or "") + " " + _path)))
 
 
+_TRIAL_PROTOCOL_RE = re.compile(r"prot_sap|/large-docs/|_prot_|statistical\s+analysis\s+plan"
+                                r"|\bprotocol\b", re.I)
+
+
+def _is_trial_protocol(url, title=""):
+    """FU240 (3) — a trial PROTOCOL or statistical analysis plan is a planning document, not an
+    authority for what a drug does.
+
+    clinicaltrials.gov is a .gov, so a protocol PDF hosted there collected the `official ·` badge and
+    then collected citations to match. In the reviewed article a cystic-fibrosis diabetes protocol
+    (NCT05788965) carried the pancreatitis rates and an alcohol-use-disorder protocol (NCT05520775)
+    carried ischemic optic neuropathy — neither is what either document is about. They win by being
+    long, readable, number-dense PDFs at exactly the moment the real authority is walled or
+    truncated. A trial's REGISTRY RECORD stays eligible; it is the protocol/SAP document that does
+    not speak for a label."""
+    u = (url or "").lower()
+    if "clinicaltrials.gov" not in _norm_domain(u) and "clinicaltrials.gov" not in u:
+        return False
+    blob = u + " " + (title or "").lower()
+    return bool(_TRIAL_PROTOCOL_RE.search(blob)) or u.endswith(".pdf")
+
+
 def _official_source_ok(url, title, brand_name, own_domain, pins):
     """FU141: THE one validator for granting the `official ·` badge, everywhere. Generic —
     brand name, own domain and vertical pins are all parameters; every rule is shape-based.
@@ -1827,6 +1853,8 @@ def _official_source_ok(url, title, brand_name, own_domain, pins):
     if d in _THIRD_PARTY_DOMAINS or d in _STALE_AGGREGATORS or d in _JOB_BOARD_DOMAINS:
         return False
     if _is_non_evidence({"title": title, "url": url}):
+        return False
+    if _is_trial_protocol(url, title):   # FU240 (3): a planning document is not an authority
         return False
     # STRONG domain credentials — the domain IS the authority; a title shape can't demote a
     # .gov / NIH / vertical-pinned page (real rules are titled "Regulation Best Interest",
@@ -3331,7 +3359,12 @@ class BlogGenerator:
         html, reason = _fetch_page(url)
         if html:
             self._fetch_reasons[url] = "ok"
-            return (_extract_visible_text(html) or "").strip()
+            # FU240 (1): a long document is cut to the passages about THIS article, not to its first
+            # 6,000 characters. An FDA label's first 6,000 characters are its HIGHLIGHTS page — the
+            # adverse-reaction tables it is cited for start around character 29,000 — so the old cut
+            # handed the writer 5% of the document and the model filled the rest from memory.
+            _full = (_extract_visible_text(html, max_chars=_PAGE_FULL_CHARS) or "").strip()
+            return relevant_text(_full, getattr(self, "_page_terms", ()), _PAGE_KEEP_CHARS)
         claude = getattr(self, "claude", None)
         if claude is not None and hasattr(claude, "web_fetch_text") and reason in ("blocked", "error"):
             d = _norm_domain(url)
@@ -3557,6 +3590,23 @@ class BlogGenerator:
               f"{len(warns)} warning(s)", flush=True)
         return out
 
+    @staticmethod
+    def _seed_page_terms(seed, brand=None):
+        """FU240 (1) — the words that decide which passages of a long source are worth keeping.
+
+        Taken from the article's own question and the brand's category, because those ARE the topic:
+        "is semaglutide safe, hair loss, fatigue and the cancer question" yields semaglutide, hair,
+        loss, fatigue, cancer — exactly what has to be found inside a 113,000-character drug label.
+        No vertical is assumed; a concrete-sealer or loan-type article yields its own terms the same
+        way."""
+        words = re.findall(r"[a-z][a-z0-9'-]{2,}", (seed or "").lower())
+        terms = [w for w in dict.fromkeys(words)
+                 if len(w) >= 4 and w not in BlogGenerator._CI_SEED_STOP]
+        cat = ((brand or {}).get("category") or "").lower()
+        terms += [w for w in dict.fromkeys(re.findall(r"[a-z][a-z0-9'-]{3,}", cat))
+                  if w not in BlogGenerator._CI_SEED_STOP and w not in terms]
+        return terms[:14]
+
     def _gather_evidence(self, brand, seed, source_urls=None, research_notes="",
                          use_web_search=False, reddit_thread=None):
         """Fetch real, citable evidence for the article and return a formatted EVIDENCE
@@ -3570,6 +3620,7 @@ class BlogGenerator:
         appears in it (validates we hit the right site)."""
         b = brand or {}
         subject = (b.get("name") or "").strip()
+        self._page_terms = self._seed_page_terms(seed, b)   # FU240 (1)
         blocks = []   # {label, url, text}
 
         def _fetch(url):
@@ -12195,6 +12246,9 @@ you MAY assume the description will carry: "{disc}".
     _CLAIM_CHECK_ON = os.environ.get("BLOG_CLAIM_SOURCE_CHECK", "1") != "0"
     _PAGE_TEXT_MIN = 400      # chars: below this a block is a summary, not a page we can judge
     _CLAIM_FETCH_MAX = int(os.environ.get("BLOG_CLAIM_FETCH_MAX", "12"))
+    # FU240 (2): the figure check matches in Python, so it reads the whole document. A drug label
+    # runs 110-130k characters and every frequency it is cited for sits past the old 20k cap.
+    _CLAIM_PAGE_CHARS = int(os.environ.get("BLOG_CLAIM_PAGE_CHARS", "400000"))
 
     @staticmethod
     def _norm_claim_text(s):
@@ -12347,8 +12401,15 @@ you MAY assume the description will carry: "{disc}".
             if not url:
                 continue
             try:
+                # FU240 (2): read the WHOLE document, not its first 20,000 characters. This text is
+                # never sent to a model — it is matched in Python by `_atom_in` — so the only cost of
+                # reading all of it is memory, while the cost of stopping early is the check silently
+                # passing on everything past the cap. The Wegovy label's fatigue row sits at
+                # character 29,241 and the Ozempic adjudicated pancreatitis rates at 27,153, so a
+                # 20,000-character read could not see either figure it was asked to verify.
                 txt, how = _research.read_page(url, claude=getattr(self, "claude", None),
-                                               cache=self._claim_pages)
+                                               cache=self._claim_pages,
+                                               max_chars=self._CLAIM_PAGE_CHARS)
             except Exception:
                 continue
             if txt and len(txt) >= self._PAGE_TEXT_MIN:
@@ -15591,6 +15652,7 @@ you MAY assume the description will carry: "{disc}".
         draft_body = ck.get("draft_body") or ""
         # restore the base evidence set so [S#] numbering + _rebuild_sources stay correct
         self._evidence_blocks = list(ck.get("evidence_blocks") or [])
+        self._page_terms = self._seed_page_terms(seed, brand)   # FU240 (1): resume fetches too
         # FU205 (R4): restore the deterministic checks' notes, so a RESUMED blog runs the same checks
         # as an unpaused one instead of silently reporting clean on all of them.
         self._restore_check_notes(ck.get("check_notes") or {})

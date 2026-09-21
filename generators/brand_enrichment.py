@@ -282,6 +282,110 @@ def _extract_visible_text(html: str, max_chars: int = 6000) -> str:
     return parser.text()[:max_chars]
 
 
+_REL_HEAD_CHARS = int(os.environ.get("PAGE_HEAD_CHARS", "1800"))
+_REL_WINDOW = int(os.environ.get("PAGE_REL_WINDOW", "1400"))
+
+
+def relevant_text(text, terms, max_chars, head_chars=None, window=None):
+    """FU240 — keep the parts of a long document that are ABOUT the article, not its first N bytes.
+
+    The 6,000-character head of a 113,551-character FDA label is its HIGHLIGHTS page: the boxed
+    warning and the indications, and not one adverse-reaction table. On the Wegovy label the fatigue
+    row sits at character 29,241 and hair loss at 29,465; on the Ozempic label the adjudicated
+    pancreatitis rates sit at 27,153. So an article citing those labels was citing a document nobody
+    had read past 5% of — it told readers fatigue affects about 5% (the label says 11% versus 5%) and
+    called hair loss an emerging signal (the label lists it at 3% versus 1%), with the label's own
+    [S#] attached to both.
+
+    Short documents are returned untouched. A long one keeps its HEAD (a label's boxed warning and
+    indications are genuinely load-bearing) plus a window around each occurrence of the article's own
+    terms, merged where they overlap and emitted in document order with an explicit gap marker so
+    nothing reads as continuous prose that isn't. With no terms, or no term found, this degrades
+    exactly to the head-truncation it replaces."""
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    head_chars = _REL_HEAD_CHARS if head_chars is None else head_chars
+    window = _REL_WINDOW if window is None else window
+    pats = []
+    for t in (terms or []):
+        t = str(t or "").strip()
+        if len(t) < 3:
+            continue
+        pats.append(re.compile(r"(?<![\w])" + re.escape(t) + r"(?![\w])", re.I))
+    # The head is held OUT of the merge. Letting it join in looks harmless and is not: in the Wegovy
+    # label the highlights mention semaglutide, thyroid and pancreatitis every few hundred
+    # characters, so window after window chain-merged onto it until the "head" span was larger than
+    # the whole budget and no term window survived — the exact truncation this function exists to
+    # replace, arrived at by a longer route.
+    head_end = min(head_chars, len(text)) if head_chars > 0 else 0
+    spans = []
+    if pats:
+        for pat in pats:
+            for m in pat.finditer(text):
+                a = max(head_end, m.start() - window // 2)
+                b = min(len(text), m.end() + window // 2)
+                if b > a:
+                    spans.append((a, b))
+                if len(spans) > 400:
+                    break
+    if not spans:
+        return text[:max_chars]          # nothing matched → the behaviour this replaces
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    head = (0, head_end) if head_end > 0 else None
+    # A merged span can run long, and taking its HEAD loses whatever sits at its end — on the Wegovy
+    # label that is literally the point: "Fatigue" and "Hair Loss" are 224 characters apart in the
+    # same linearised table, so a span anchored on the first one dropped the second. Split every long
+    # span into window-sized chunks and let each compete on its own density.
+    chunks = []
+    for a, b in merged:
+        while a < b:
+            chunks.append((a, min(a + window, b)))
+            a += window
+    merged = chunks
+    # Spend the budget on the DENSEST passages, not the earliest ones. A drug label mentions fatigue
+    # in its highlights hundreds of characters in and again in the adverse-reaction table 29,000
+    # characters in; only the second one carries the frequency. Document order spends the whole
+    # budget before reaching it, so rank by how many DISTINCT terms a passage contains — a table row
+    # listing fatigue, hair loss and their percentages beats a passing mention of one of them.
+    # Weight each term by how RARE it is in this document. Counting distinct terms rewards
+    # boilerplate: in the Wegovy label "semaglutide" occurs 107 times and "thyroid" 42, so any
+    # highlights paragraph scores 3 while the adverse-reaction table — the only place carrying the
+    # frequencies, and the whole reason we are reading — scores 2 on "fatigue" (3 occurrences) and
+    # "hair loss" (2). Inverse frequency inverts that. The numeric bonus is the second half of the
+    # same idea: a passage dense in figures is where a frequency, a rate or a price actually lives.
+    _df = {}
+    for pat in pats:
+        _df[pat.pattern] = max(1, len(pat.findall(text)))
+
+    def _density(sp):
+        seg = text[sp[0]:sp[1]]
+        score = sum(1.0 / _df[pat.pattern] for pat in pats if pat.search(seg))
+        digits = sum(c.isdigit() for c in seg)
+        return (round(score + min(digits / max(1, len(seg)) * 2.0, 0.5), 4), sp[1] - sp[0])
+    merged.sort(key=_density, reverse=True)
+    budget = max_chars - (head[1] - head[0] if head else 0)
+    keep, used = [], 0
+    for sp in merged:
+        if used >= budget:
+            break
+        take = min(sp[1] - sp[0], budget - used, window)
+        if take < 200:
+            continue
+        keep.append((sp[0], sp[0] + take))
+        used += take
+    if head:
+        keep.append(head)
+    keep.sort()                       # emit in DOCUMENT order, however it was chosen
+    return "\n […] \n".join(text[a:b] for a, b in keep)[:max_chars]
+
+
 def _extract_logo_url(html: str, domain_url: str) -> str:
     """Best-effort brand image/logo URL from homepage HTML (no LLM). Prefers og:image,
     then apple-touch-icon / <link rel=icon>, resolved to an absolute URL. "" if none."""

@@ -9231,7 +9231,15 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 "the operator pointed at, and checked to be a REGULAR (not sale) price; the comparison "
                 "cell for each is written by code after you, so a different figure in your prose would "
                 "contradict the table. A brand NOT listed here has no verified price — do NOT invent "
-                "one, and do NOT copy a figure from a review, roundup or listicle.\n" + _plines)
+                "one, and do NOT copy a figure from a review, roundup or listicle.\n"
+                "  - WHAT EACH PRICE COVERS IS PART OF THE PRICE. A figure written as \"everything "
+                "included\" is the whole monthly cost; one written as \"the product only\", "
+                "\"programme fee only\" or with a split like \"$199 + $149 membership\" is NOT — the "
+                "rest is billed on top. NEVER rank, band or tier two prices that cover different "
+                "things as if they were the same number, and never call the cheaper part-price a "
+                "premium over a larger all-in one. When you group options by cost, group them on "
+                "what a reader actually pays each month, and say what each figure covers.\n"
+                + _plines)
 
         # FU217 — the operator's verified facts, "" when none are stored (byte-identical reconcile).
         vfact_rules = _vfact_prompt_block(

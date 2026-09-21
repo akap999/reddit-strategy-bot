@@ -457,3 +457,14 @@ def test_an_all_in_price_row_is_never_checked():
     body = ("# T\n\n| Provider | Monthly Price | What's Included |\n| --- | --- | --- |\n"
             "| **Acme** | $270 (per month, everything included) | membership, medication |\n")
     assert detect_row_contradiction(body) == []
+
+
+def test_the_reconcile_pass_is_told_what_a_composition_MEANS():
+    """It receives the rendered price string and, until now, no rule at all — so it banded a
+    product-only "$149-$299" against an all-in "$270" and called the cheaper one a premium. The
+    tier prose is 100% model-written: `grep "who should consider"` has no hits in any source file."""
+    src = open(os.path.join(HERE, "..", "generators", "blog_gen.py"), encoding="utf-8").read()
+    flat = re.sub(r'"\s*\n\s*"', "", src)      # the rule spans several string literals
+    assert "WHAT EACH PRICE COVERS IS PART OF THE PRICE" in flat
+    assert "never call the cheaper part-price a premium over a larger all-in one" in flat
+    assert "group them on what a reader actually pays each month" in flat

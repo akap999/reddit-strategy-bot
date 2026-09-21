@@ -31,6 +31,7 @@ is refused and reported. A pass can no longer create a defect the scoreboard wou
 The fixtures are the operator's audited articles, unedited.
 """
 import os
+import re
 
 import pytest
 
@@ -326,3 +327,118 @@ def test_end_to_end_the_source_column_no_longer_publishes_em_dashes(gen):
     was = gen._resolve_table_punts(tbl.replace("[S4]", ""))
     assert was.count("| — |") == 3
     assert detect_blank_source_cells(published) == []
+
+
+# ── 5. a price may only rest on a page that SELLS or PUBLISHES it ────────────────────────────────
+def _blocks_from_sources(body):
+    """The article's own `## Sources` list, back into the evidence blocks the checks read."""
+    tail = body.split("## Sources", 1)[-1]
+    blocks = []
+    for m in re.finditer(r"\[S(\d+)\]\s*(.*?)\s*-\s*\[(https?://[^\]]+)\]", tail):
+        n, url = int(m.group(1)), m.group(3)
+        while len(blocks) < n:
+            blocks.append({"label": "", "url": "", "text": ""})
+        blocks[n - 1] = {"label": m.group(2)[:60], "url": url, "text": "x" * 800}
+    return blocks
+
+
+PETERMD = {"name": "PeterMD", "domain_url": "https://getpetermd.com"}
+
+
+def test_the_wegovy_list_price_came_from_four_consumer_blogs(gen, cost):
+    """The audited defect. `_accept_price_candidate` already requires the brand's own site or a
+    named retailer — but that gate only guards the LEDGER, and this figure was typed into prose with
+    a "third-party ·" citation, so nothing it passed through had an opinion about it. wegovy.com was
+    never consulted because nothing in the pipeline is capable of going there."""
+    out, note = gen._price_source_check(cost, _blocks_from_sources(cost), PETERMD)
+    assert "price-source" in note
+    assert "$1,349" in note
+    assert "$1,349" not in out.split("## Sources")[0]   # not restated elsewhere — gone
+    # the now-uncited blogs leave the Sources list in `_rebuild_sources`, which runs after this
+    assert "[S2]" not in out.split("## Sources")[0]
+
+
+def test_removing_those_prices_leaves_the_article_intact(gen, cost):
+    """Eight sentences out of a cost article, and the guard keeps every one of them clean."""
+    out, _note = gen._price_source_check(cost, _blocks_from_sources(cost), PETERMD)
+    assert body_damage(out) == []
+
+
+def test_a_correctly_sourced_competitor_price_is_untouched(gen, cost):
+    """Ro's $149, Calibrate's $199 and Noom's $129 each cite that company's own pricing page, and
+    none of them is named in the sentence or the cell that carries the figure — the entity is in the
+    row's name column or the section heading. Matching the sentence alone called all of them
+    unsourced, which would have emptied the comparison table this article exists for."""
+    out, _note = gen._price_source_check(cost, _blocks_from_sources(cost), PETERMD)
+    for kept in ("$149", "$199", "$129", "$279", "$270"):
+        assert kept in out, kept
+
+
+def test_the_publishers_own_price_is_always_sourceable(gen):
+    body = ("# T\n\n## What does it cost?\n\nOur programme is $270 per month, all in [S1].\n")
+    blocks = [{"url": "https://getpetermd.com/product/glp1m2m/", "text": "x" * 800}]
+    assert gen._price_source_check(body, blocks, PETERMD) == (body, "")
+
+
+@pytest.mark.parametrize("url,unit", [
+    ("https://getpetermd.com/product/x", "PeterMD charges $270 per month [S1]."),
+    ("https://joincalibrate.com/pricing", "Calibrate's programme is $199 per month [S1]."),
+    ("https://ro.co/weight-loss/pricing/", "Ro charges $149 per month [S1]."),
+    ("https://www.noom.com/med/pricing/", "Noom Med is $279 per month [S1]."),
+    ("https://www.amazon.com/dp/B0XYZ", "The kit lists at $49.99 [S1]."),
+    ("https://www.cms.gov/newsroom/fact-sheets/x", "The negotiated price is $149 per month [S1]."),
+])
+def test_a_page_that_sets_the_price_is_accepted(gen, url, unit):
+    """"get"/"join" prefixes, a two-letter brand, a possessive, a multi-word name, a retailer and a
+    .gov — all vertical-neutral, none hard-coded."""
+    body = "# T\n\n## Cost\n\n" + unit + "\n"
+    assert gen._price_source_check(body, [{"url": url, "text": "x" * 800}],
+                                   {"name": "Other", "domain_url": "https://other.test"})[1] == ""
+
+
+@pytest.mark.parametrize("url", [
+    "https://sesamecare.com/blog/wegovy-cost-without-insurance",
+    "https://www.buzzrx.com/blog/how-much-is-wegovy-without-insurance",
+    "https://glpchart.com/wegovy-cost/",
+    "https://www.weightwatchers.com/us/blog/weight-loss/wegovy-cost",
+    "https://www.forbes.com/health/weight-loss/wegovy-cost/",
+])
+def test_a_page_that_only_repeats_a_price_is_rejected(gen, url):
+    """Reputable or not, a page that does not set the price is not a price source. Two of these
+    belong to real health brands and one is Forbes; none of them sells Wegovy."""
+    body = "# T\n\n## Cost\n\nWegovy lists at $1,349 per month at retail [S1].\n"
+    assert "price-source" in gen._price_source_check(
+        body, [{"url": url, "text": "x" * 800}], PETERMD)[1]
+
+
+def test_a_money_figure_that_is_not_a_price_is_left_alone(gen):
+    """The check must not become a general tax on every dollar sign: a market size, a fine, a salary
+    and a funding round are not prices, and the pages that report them are the right sources."""
+    for unit in ["The GLP-1 market reached $24 billion in 2024 [S1].",
+                 "The agency issued a $2.3 million penalty against the compounder [S1].",
+                 "The company raised $150 million in its Series C round [S1]."]:
+        body = "# T\n\n## Background\n\n" + unit + "\n"
+        assert gen._price_source_check(
+            body, [{"url": "https://www.reuters.com/x", "text": "x" * 800}], PETERMD)[1] == ""
+
+
+def test_a_systematically_unsourced_article_is_reported_not_gutted(gen):
+    """More failures than the fabrication cap means the SOURCING failed, not the sentences. The
+    article is left exactly as it was, with a note that names the figures and says where to put
+    them — the same escape valve every other fabrication pass has."""
+    rows = "".join(f"\n## Section {i}\n\nOption {i} charges ${100 + i} per month [S1].\n"
+                   for i in range(12))
+    body = "# T\n" + rows
+    out, note = gen._price_source_check(body, [{"url": "https://blog.example/roundup",
+                                                "text": "x" * 800}], PETERMD)
+    assert out == body
+    assert "too many to remove safely" in note and "price table" in note
+
+
+def test_the_writer_is_told_the_rule_for_every_price_not_just_a_competitors(gen):
+    """The existing bullet says COMPETITOR price, so it never reached a drug's list price — which is
+    exactly how four consumer blogs became the source for $1,349."""
+    golden = open(os.path.join(HERE, "fixtures", "prompts", "generate_article.rich.txt"),
+                  encoding="utf-8").read()
+    assert "ANY PRICE = WHOEVER SETS IT" in golden
+    assert "REPEATING a price it does not set is NOT a price source" in golden

@@ -5789,6 +5789,14 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
     review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
     the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
     this product") — NEVER copy a number from a review-site source.
+  - ANY PRICE = WHOEVER SETS IT: the rule above is not only about a compared competitor. It applies to
+    EVERY price in the article — a manufacturer's list price, a drug's retail price, a programme fee.
+    The page you cite must be the page that SETS or PUBLISHES that price: the seller's own site, the
+    product manufacturer's own site, a named retailer's listing, or an official (.gov) publication. A
+    news article, a consumer blog, a pharmacy-discount site, a health brand's magazine or a comparison
+    site REPEATING a price it does not set is NOT a price source, however reputable it looks. If no
+    such page is in the EVIDENCE, do not state the figure at all — describe the pricing model instead.
+    Code removes a price sourced any other way, so a number taken from a blog will not survive.
   - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
     quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
     specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not
@@ -13012,6 +13020,124 @@ you MAY assume the description will carry: "{disc}".
                         f"check those claims by hand")
         return out, "source-check: " + "; ".join(bits)
 
+    # FU251 — WHOSE page a price may come from. There was no rule in code: `_accept_price_candidate`
+    # requires the brand's own site or a named retailer, but that gate only guards the LEDGER, and a
+    # price the writer types into prose never passes through it. So "Wegovy lists at $1,349 per month
+    # at retail without insurance" shipped with four citations — sesamecare.com/blog, buzzrx.com/blog,
+    # glpchart.com and weightwatchers.com/us/blog — not one of which sells or publishes that price,
+    # and none of which `_is_affiliate_review` rejects either. wegovy.com was never consulted because
+    # nothing in the pipeline is capable of going there.
+    #
+    # The rule, stated once and vertical-neutral: a price for X may be cited to X's own site, to a
+    # named retailer, to an official (.gov) publication, or to the publisher's own domain for the
+    # publisher's own price. A third party repeating a number it does not set is not a price source.
+    _PRICE_CTX_RE = re.compile(
+        r"\bpric|\bcost|\bfee\b|\bfees\b|\bcharges?\b|\bbill(?:s|ed|ing)?\b|\brate\b|"
+        r"\blists? at\b|\blist price\b|/mo\b|per month|per year|monthly|annually|a month|"
+        r"\bpays?\b|\bout-of-pocket\b|\bcash[- ]pay\b|\bstarting at\b|\bfrom \$", re.I)
+
+    @staticmethod
+    def _domain_names_entity(url, unit):
+        """Does this URL belong to something the unit NAMES? "getpetermd.com" for a sentence about
+        PeterMD, "calibrateme.com" for Calibrate, "ro.co" for Ro. Compared on letters and digits
+        only, so a "get"/"try"/"-health" prefix or a hyphen cannot break the match; a stem under
+        four characters must match a word exactly, so "ro" does not match "product"."""
+        stem = re.sub(r"[^a-z0-9]", "", (_norm_domain(url) or "").split(".")[0])
+        if len(stem) < 2:
+            return False
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9&'\u2019-]+", unit or ""):
+            # "Calibrate's" is Calibrate. The possessive goes before the letters are compared,
+            # otherwise "calibrates" matches nothing in "joincalibrate".
+            t = re.sub(r"[^a-z0-9]", "", re.sub(r"[''\u2019]s\b", "", w.lower()))
+            if len(t) < 2 or t in _FUNCTION_WORDS:
+                continue
+            if len(stem) < 4 or len(t) < 4:
+                if t == stem:
+                    return True
+            elif t in stem or stem in t:
+                return True
+        return False
+
+    def _price_source_check(self, body, blocks, brand):
+        """Every price in the body that rests only on pages which neither set nor publish it.
+
+        Reports rather than deletes when it cannot remove safely — the sourcing is what failed, and
+        an article with its central figure cut out is not an improvement on one with the figure
+        wrongly attributed. Returns (body, note)."""
+        if not body or not blocks:
+            return body, ""
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+
+        def _authoritative(url, unit):
+            d = _norm_domain(url or "")
+            if not d:
+                return False
+            if own and (d == own or d.endswith("." + own)):
+                return True                       # the publisher quoting its own price
+            if _is_retail_listing(url) or d.endswith(".gov"):
+                return True
+            return self._domain_names_entity(url, unit)
+
+        heading = ""
+
+        def _verdict(unit, in_price_col=False, names=""):
+            """`names` is the row's own name cell and `heading` the section it sits under — the
+            entity whose price this is is frequently named in neither the cell nor the sentence
+            ("The program is priced at $129 to get started"), so matching the sentence alone called
+            every correctly-cited competitor unsourced."""
+            if not _MONEY_RE.search(unit) or not re.search(r"\[S\d+\]", unit):
+                return False
+            if not in_price_col and not self._PRICE_CTX_RE.search(unit):
+                return False                      # a money figure that is not a price
+            cited = [int(x) for x in re.findall(r"\[S(\d+)\]", unit)]
+            urls = [(blocks[n - 1].get("url") or "") for n in cited if 1 <= n <= len(blocks)]
+            whose = " ".join(x for x in (names, heading, unit) if x).strip()
+            return bool(urls) and not any(_authoritative(u, whose) for u in urls)
+
+        lines, hits, in_src, fence = body.split("\n"), [], False, False
+        for li, line in enumerate(lines):
+            if line.lstrip().startswith("```"):
+                fence = not fence
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                in_src = True
+            st = line.strip()
+            if st.startswith("#"):
+                heading = st.lstrip("#").strip()
+            if in_src or fence or not st or st.startswith("#") or st.startswith(">") \
+                    or st.startswith("*[") or re.match(r"^\|[\s:|-]+\|?$", st):
+                continue
+            if st.startswith("|"):
+                hdr = _table_header_cells(lines, li)
+                cells = line.split("|")
+                _row_name = cells[1] if len(cells) > 2 else ""
+                for ci in range(2, len(cells) - 1):
+                    if _verdict(cells[ci], _is_price_column(hdr[ci] if ci < len(hdr) else ""),
+                                names=_row_name):
+                        hits.append(("cell", li, ci, cells[ci].strip()))
+            else:
+                for sent in self._prose_sentences(line):
+                    if _verdict(sent):
+                        hits.append(("sent", li, sent, sent))
+        if not hits:
+            return body, ""
+        shown = ", ".join(dict.fromkeys(
+            (_MONEY_RE.search(h[3]).group(0) if _MONEY_RE.search(h[3]) else "?") for h in hits))[:120]
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, ("price-source: %d price(s) (%s) cite only pages that neither set nor "
+                          "publish them — too many to remove safely, so nothing was changed. Enter "
+                          "these in the brand's price table or regenerate rather than publish"
+                          % (len(hits), shown))
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        note = ("price-source: removed %d price(s) (%s) that cite only pages which neither set nor "
+                "publish them — a third party repeating a number it does not set is not a price "
+                "source" % (applied, shown))
+        if widened:
+            note += f"; {widened} took the whole paragraph rather than strand what followed"
+        if refused:
+            note += (f"; {refused} left in place — removing them would have damaged the article. "
+                     f"Enter those in the brand's price table")
+        return out, note
+
     _STALE_MONTHS = int(os.environ.get("BLOG_STALE_MONTHS", "12"))
     _MONTHS = ("january february march april may june july august september october november "
                "december").split()
@@ -15149,6 +15275,14 @@ you MAY assume the description will carry: "{disc}".
         if _ufn:
             print(f"[blog_gen] {_ufn}", flush=True)
             self._warn(article, _ufn)
+        # FU251 — and a price may only rest on a page that SELLS or PUBLISHES it. Runs after the
+        # figure check, so a price that no source contains at all is already gone and what is left
+        # is a real figure attributed to the wrong kind of page.
+        article["body_markdown"], _psn = self._price_source_check(
+            article["body_markdown"], self._evidence_blocks, brand)
+        if _psn:
+            print(f"[blog_gen] {_psn}", flush=True)
+            self._warn(article, _psn)
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.

@@ -642,6 +642,30 @@ def price_ladder(facts, checked_at=""):
         entries.append(e)
     if not entries:
         return None
+    # FU251 — a ladder is ONE page's price list. `tiers` used to merge whatever verified facts came
+    # back for this brand, from whatever pages, and the cell is written with a single code-written
+    # [S#] pointing at the FIRST rung's page. So "Noom Med · $279 (billed as $837 for 12 weeks);
+    # $129 (first 4-week supply); $249 (after the first supply, billed quarterly)" cited one page
+    # for three figures that came off three. A rung from another page is not a rung — it is a
+    # different fact, and it keeps its own entry rather than borrowing someone else's citation.
+    _home = (entries[0].get("url") or "").strip()
+    _offpage = [e for e in entries[1:] if (e.get("url") or "").strip() != _home]
+    if _offpage:
+        print(f"[research] price ladder: {len(_offpage)} rung(s) came from a different page than "
+              f"{_home[:70]} — not joined into one cell", flush=True)
+    entries = [entries[0]] + [e for e in entries[1:] if (e.get("url") or "").strip() == _home]
+    # …and prices ONE thing. The same figure for two DIFFERENT plans is two real rungs ($10 Starter,
+    # $10 Team), so only a repeat with nothing to tell it apart is dropped — which is what the
+    # product-name basis used to hide: "$25 (per month, with commercial insurance)" and a second
+    # "$25" whose only distinguishing mark was a product name printed where the unit goes.
+    _seen_val, _uniq = set(), []
+    for e in entries:
+        if e["value"] in _seen_val and not (e.get("basis") or "").strip() \
+                and not (e.get("_product") or "").strip():
+            continue
+        _seen_val.add(e["value"])
+        _uniq.append(e)
+    entries = _uniq
     rungs = entries[:_MAX_TIERS]
     # Live (Mubert): three rungs came back for three DIFFERENT plans and printed as bare figures,
     # so the cell mixed tiers without saying which was which. When the rungs name different
@@ -675,7 +699,11 @@ def price_entry(fact, checked_at=""):
     if not figs or not (fact or {}).get("url"):
         return None
     val = figs[0]
-    basis = _trim_basis((fact.get("basis") or "").strip() or (fact.get("product") or "").strip())
+    # FU251: NEVER fall back to the product name. `_format_price_value` prints a basis as the unit
+    # parenthetical after the figure, so an empty basis came out as "$25 (Calibrate Metabolic
+    # Reset)" — which reads as a price whose unit is a product name. An unknown basis is empty; the
+    # product labels its RUNG instead, where it says something.
+    basis = _trim_basis((fact.get("basis") or "").strip())
     _scope = str(fact.get("scope") or "").strip().lower()      # FU225: the PAGE's scope word
     _kind = ("from" if (_FROM_RE.search(fact["answer"]) or _scope == "from")
              else ("upto" if _scope == "upto" else "exact"))

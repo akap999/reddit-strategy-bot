@@ -312,6 +312,14 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
     review / aggregator / listicle source (those go stale). If the competitor's own CURRENT price is not in
     the EVIDENCE, state its pricing honestly (its pricing model, or "pricing not publicly confirmed for
     this product") — NEVER copy a number from a review-site source.
+  - ANY PRICE = WHOEVER SETS IT: the rule above is not only about a compared competitor. It applies to
+    EVERY price in the article — a manufacturer's list price, a drug's retail price, a programme fee.
+    The page you cite must be the page that SETS or PUBLISHES that price: the seller's own site, the
+    product manufacturer's own site, a named retailer's listing, or an official (.gov) publication. A
+    news article, a consumer blog, a pharmacy-discount site, a health brand's magazine or a comparison
+    site REPEATING a price it does not set is NOT a price source, however reputable it looks. If no
+    such page is in the EVIDENCE, do not state the figure at all — describe the pricing model instead.
+    Code removes a price sourced any other way, so a number taken from a blog will not survive.
   - PRICE BASIS (only when the source states one): whenever a price in the EVIDENCE carries the unit /
     quantity / tier / term it applies to (per seat, per pack, per 3-month supply, annual-vs-monthly, a
     specific dose/size, a term/APR — whatever THIS product's space uses), carry that basis VERBATIM; do not

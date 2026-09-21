@@ -305,7 +305,8 @@ def test_an_editorial_finding_never_reaches_the_removal_guard(shipped):
     editorial = {h["check"] for h in editorial_findings(shipped)}
     damage = {h["check"] for h in body_damage(shipped)}
     assert editorial and not (editorial & damage)
-    assert {"repeated-constraint", "constraint-bloat", "price-question-unanswered"} >= editorial
+    assert {"repeated-constraint", "constraint-bloat", "price-question-unanswered",
+            "row-contradiction"} >= editorial
 
 
 @pytest.mark.parametrize("section,findings", [
@@ -416,3 +417,43 @@ def test_an_all_in_price_is_unchanged(gen):
              "composition": "all-in"}]
     entry, _ = gen._price_row_for(rows, "PeterMD", _product_tokens("semaglutide cost"))
     assert _format_price_value(entry) == "$270 (per month, everything included)"
+
+
+# ── 8. a row may not contradict itself ───────────────────────────────────────────────────────────
+from generators.blog_eval import detect_row_contradiction  # noqa: E402
+
+
+def test_the_row_that_contradicts_itself_is_detected(shipped):
+    """The price cell reads "$349 (per month, the product only)" and the cell beside it reads "Ro
+    Body membership; insurance check offered", which a reader takes to mean the membership is
+    covered. It is $74-$149 a month on top. Code wrote the first cell and the model wrote the
+    second, and nothing in the repo has ever read two cells of one row."""
+    hits = detect_row_contradiction(shipped)
+    assert len(hits) == 1
+    assert "Ro" in hits[0]["detail"] and "membership" in hits[0]["detail"]
+
+
+def test_naming_the_second_charge_honestly_is_not_a_contradiction(shipped):
+    """The same article's Hims row says "membership required" beside the same product-only price.
+    That is the row telling the truth, and it must not be flagged — the operator's complaint about
+    it was the missing AMOUNT, which is a different fix."""
+    assert not any("Hims" in h["detail"] for h in detect_row_contradiction(shipped))
+
+
+@pytest.mark.parametrize("included,flagged", [
+    ("Ro Body membership; insurance check offered", True),
+    ("Provider visit, medication; membership required", False),
+    ("Medication only; membership billed separately", False),
+    ("Medicine, supplies, shipping, unlimited consults", False),
+])
+def test_the_inclusion_cell_against_a_product_only_price(included, flagged):
+    body = ("# T\n\n| Provider | Monthly Price | What's Included |\n| --- | --- | --- |\n"
+            f"| **Acme** | $349 (per month, the product only) | {included} |\n")
+    assert bool(detect_row_contradiction(body)) is flagged
+
+
+def test_an_all_in_price_row_is_never_checked():
+    """Nothing is billed separately, so nothing in the inclusion cell can contradict it."""
+    body = ("# T\n\n| Provider | Monthly Price | What's Included |\n| --- | --- | --- |\n"
+            "| **Acme** | $270 (per month, everything included) | membership, medication |\n")
+    assert detect_row_contradiction(body) == []

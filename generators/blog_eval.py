@@ -698,6 +698,56 @@ def body_damage(body):
             + detect_trailing_orphan(body))
 
 
+# A column that DESCRIBES what a price covers. `_YESNO_DIM_RE` in blog_gen needs a trailing "?", so
+# a column headed "What's Included" is owned by nobody: code writes the price cell and the model
+# writes the one beside it, and no function in the repo reads two cells of the same row.
+_INCLUSION_COL_RE = re.compile(r"^\s*(?:what'?s?\s+)?(?:included|includes|inclusions|covers?|"
+                               r"coverage|what\s+you\s+get)\b", re.I)
+# What the rendered composition says is NOT in the price (FU251 wording, via `_format_price_value`).
+_EXCLUDES_RE = re.compile(r"the product only|product billed separately|billed separately", re.I)
+# The component a "product only" price leaves out.
+_SECOND_CHARGE_RE = re.compile(
+    r"\b(?:membership|subscription|programme|program|plan|service|consult|consultation|"
+    r"coaching|platform)\s*(?:fee|fees|cost|charge)?\b", re.I)
+# …and the words that make naming it honest rather than contradictory.
+_EXTRA_QUALIFIER_RE = re.compile(
+    r"\b(?:required|extra|additional|separate|separately|not included|excluded|on top|"
+    r"billed|charged|add-?on|plus)\b", re.I)
+
+
+def detect_row_contradiction(body, cap=4):
+    """A comparison row whose price cell and inclusion cell disagree.
+
+    The reported case: the price cell reads "$349 (per month, the product only)" and the cell beside
+    it reads "Ro Body membership; insurance check offered", which a reader takes to mean the
+    membership is covered. It is $74-$149 a month on top. Code wrote the first cell and the model
+    wrote the second, and nothing in the repo has ever read two cells of one row."""
+    hits = []
+    for hdr, rows in _tables(_prose(body)):
+        pcols = [i for i, h in enumerate(hdr) if re.search(r"pric|cost|fee", _cell_text(h), re.I)]
+        icols = [i for i, h in enumerate(hdr) if _INCLUSION_COL_RE.search(_cell_text(h))]
+        if not pcols or not icols:
+            continue
+        for cells, _raw in rows:
+            price = " ".join(cells[i] for i in pcols if i < len(cells))
+            if not _EXCLUDES_RE.search(price):
+                continue
+            for i in icols:
+                if i >= len(cells):
+                    continue
+                inc = cells[i]
+                m = _SECOND_CHARGE_RE.search(inc)
+                if not m or _EXTRA_QUALIFIER_RE.search(inc):
+                    continue
+                hits.append({"check": "row-contradiction",
+                             "detail": f'{_cell_text(cells[0])[:34] or "?"}: the price is '
+                                       f'"{_cell_text(price)[:40]}" but the "{_cell_text(hdr[i])[:22]}" '
+                                       f'cell lists "{m.group(0)}" as if it were covered'})
+                if len(hits) >= cap:
+                    return hits
+    return hits
+
+
 def editorial_findings(body, title=""):
     """FU253 — findings about what the article SAYS, as distinct from damage our own removal passes
     did to it.
@@ -710,7 +760,7 @@ def editorial_findings(body, title=""):
     so any removal at all can push it up. A detector that switches off a removal is a detector that
     protects the defect."""
     return (detect_repeated_constraint(body) + detect_constraint_bloat(body, title)
-            + detect_price_question_unanswered(body))
+            + detect_price_question_unanswered(body) + detect_row_contradiction(body))
 
 
 # ── FU252: what the REWORDING changed about what the article ASSERTS ─────────────────────────────

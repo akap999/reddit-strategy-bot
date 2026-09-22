@@ -14425,8 +14425,21 @@ function _blogPriceTableHtml(brand) {
         </div>
         ${rows.length ? `<table class="w-full mt-2 text-xs"><thead><tr class="text-gray-500">
             <th>Brand</th><th>Product</th><th>Kind</th><th>Price</th><th>to</th><th>Basis</th><th>Covers</th><th>Link</th><th></th>
-        </tr></thead><tbody>${body}</tbody></table>
-        <div class="flex gap-2 mt-1"><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowAdd()">+ Add a row</button></div>` : ''}
+        </tr></thead><tbody>${body}</tbody></table>` : ''}
+        <!-- FU256 — the table AND this button used to be gated behind rows.length, so a brand with
+             no saved rows had no way in at all: you had to paste text and run Analyse to get a
+             first row, even when you knew the price and just wanted to type it. The control is
+             always here now, and the dropdown starts the row on the brand you pick so it does not
+             land as an unmatched name. -->
+        <div class="flex gap-2 mt-1 items-center">
+            <select id="blog-price-add-brand" class="text-xs" style="width:auto;flex:none">
+                <option value="">— brand —</option>
+                ${_blogPriceLinksBrands(brand).map(n =>
+                    `<option value="${_blogEsc(n)}">${_blogEsc(n)}</option>`).join('')}
+            </select>
+            <button class="btn btn-sm btn-secondary" onclick="_blogPriceRowAdd()">+ Add a row</button>
+            ${rows.length ? '' : `<span class="text-xs text-gray-600">or paste above and Analyse</span>`}
+        </div>
         ${dropped.length ? `<div class="text-xs text-yellow-600 mt-2">Not kept (${dropped.length}):<ul class="ml-4">`
             + dropped.map(d => `<li>“${_blogEsc(String(d.raw || '').slice(0, 80))}” — ${_blogEsc(d.why || '')}</li>`).join('')
             + `</ul></div>` : ''}
@@ -14444,8 +14457,12 @@ function _blogPriceRowDel(i) {
     _blogPriceLinksRender();
 }
 function _blogPriceRowAdd() {
+    // FU256: prefill from the picker when one is chosen, so the commonest case — a brand you
+    // already compare — needs no typing and never lands as an unmatched name.
+    const sel = document.getElementById('blog-price-add-brand');
+    const pick = (sel && sel.value || '').trim();
     window._blogPriceRows = (window._blogPriceRows || []).concat(
-        [{ brand: '', product: '', kind: 'exact', value: '', value_max: '', basis: '',
+        [{ brand: pick, product: '', kind: 'exact', value: '', value_max: '', basis: '',
            composition: '', url: '' }]);
     _blogPriceLinksRender();
 }

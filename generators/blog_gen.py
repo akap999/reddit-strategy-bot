@@ -4978,7 +4978,13 @@ class BlogGenerator:
             return span, False
         if len(ents) == 1:
             return ents[0], False
+        # FU257 — the article's words and a product name are tokenised DIFFERENTLY: a product splits
+        # "Wide-neck" into "wide"+"neck", while a topic token arrives hyphenated, so the two never
+        # met and every bottle in the line-up tied on the generic word alone. Both spellings are
+        # kept — purely additive, so a match can only get better, never worse.
         want = set(topic_tokens or []) | set(_product_tokens(subject))
+        for _t in list(want):
+            want |= set(_product_tokens(_t))
         matched = [e for e in ents if (set(_product_tokens(e.get("product") or "")) & want)] if want else []
         # FU253 — whichever set we are choosing from, take the row that states what the READER PAYS.
         # The operator priced one competitor three ways: the product at $349, the membership at

@@ -672,3 +672,19 @@ def test_the_writer_block_is_inert_without_marked_rows():
         {"name": "Acme", "price_table": _json.dumps(pt)}) == []
     assert BlogGenerator._price_span_block({"name": "Acme"}) == []
     assert BlogGenerator._price_span_block({"name": "Acme", "price_table": "not json"}) == []
+
+
+def test_a_hyphenated_topic_word_matches_a_hyphenated_product_name():
+    """A product name splits "Wide-neck" into "wide"+"neck"; a topic token arrives hyphenated. The
+    two never met, so every bottle in a line-up tied on the generic word alone and the length
+    tiebreak picked whichever name was longest."""
+    g = _gen()
+    rows = [
+        {"brand": "Acme", "product": "5 oz Natural Anti-colic Baby Bottle",
+         "kind": "exact", "value": "$28.99"},
+        {"brand": "Acme", "product": "8 oz Wide-neck Baby Bottle", "kind": "exact", "value": "$30.99"},
+    ]
+    assert g._price_row_for(rows, "Acme", ["wide-neck", "bottle"])[0]["value"] == "$30.99"
+    assert g._price_row_for(rows, "Acme", ["anti-colic", "bottle"])[0]["value"] == "$28.99"
+    # and the already-split spelling keeps working
+    assert g._price_row_for(rows, "Acme", ["wide", "neck"])[0]["value"] == "$30.99"

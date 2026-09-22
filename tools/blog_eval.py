@@ -243,6 +243,10 @@ def run_replay(args):
     edi = collections.Counter()            # FU253: what the article SAYS, kept apart from damage
     n_dmg = n_edi = dedup_n = dedup_blogs = 0
     price_removed = price_capped = price_blogs = regressions = 0
+    # FU254 — the two passes added this round that need no network: the table-orientation rule and
+    # the repeated-claim reduction. Both change the BODY, so both are replayable and both are
+    # measured against the same damage floor as every other removal.
+    flip_blogs = claim_blogs = claim_removed = 0
     detail = []
     for r in rows:
         body = r["body_markdown"] or ""
@@ -260,6 +264,32 @@ def run_replay(args):
         if nd:
             dedup_n += nd
             dedup_blogs += 1
+        # FU254 (1) — does the table rule now read this article's axis differently?
+        try:
+            gen._table_punt_note = ""
+            gen._article_tools = []
+            _flipped = gen._resolve_table_punts(body)
+            _plain = BlogGenerator.__new__(BlogGenerator)
+            _plain._table_punt_note = ""
+            _plain._article_tools = []
+            _plain._table_is_transposed = lambda hdr, data: False
+            if _flipped != _plain._resolve_table_punts(body):
+                flip_blogs += 1
+        except Exception as e:
+            print(f"  !! #{r['id']} table: {type(e).__name__}: {e}", flush=True)
+        # FU254 (2) — the same uncited comparative claim, said once instead of five times
+        try:
+            _cout, _cnote = gen._repeated_claim_check(body)
+            if _cnote:
+                claim_blogs += 1
+                m2 = __import__("re").search(r"removed (\d+) restatement", _cnote)
+                claim_removed += int(m2.group(1)) if m2 else 0
+                if len(E.body_damage(_cout)) > len(hits):
+                    regressions += 1
+                    print(f"  !! #{r['id']} REGRESSION: the claim reduction raised damage",
+                          flush=True)
+        except Exception as e:
+            print(f"  !! #{r['id']} claim: {type(e).__name__}: {e}", flush=True)
         blocks = _blocks_from_sources(body)
         note = ""
         if blocks:
@@ -286,6 +316,9 @@ def run_replay(args):
     print(f"\nDAMAGE already in stored bodies: {n_dmg} article(s)")
     for k, v in dmg.most_common():
         print(f"    {v:>4}  {k}")
+    print(f"\nFU254 table orientation: {flip_blogs} article(s) whose table rule reads a "
+          f"different axis now (an option kept instead of deleted)")
+    print(f"FU254 repeated claim: {claim_blogs} article(s), {claim_removed} restatement(s) removed")
     print(f"\nEDITORIAL findings — what the article says, NOT damage: {n_edi} article(s)")
     for k, v in edi.most_common():
         print(f"    {v:>4}  {k}")

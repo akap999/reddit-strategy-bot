@@ -1344,7 +1344,8 @@ class Database:
                    "verify_session", "verified_report", "verified_cost",          # FU208
                    "imported_body", "imported_rewritten", "imported_meta",   # FU250
                    "guide",             # FU216: a generic how-to guide — no comparison, no service area
-                   "compare_level"}     # FU263: compare BRANDS or PRODUCTS — the operator decides
+                   "compare_level",     # FU263: compare BRANDS or PRODUCTS — the operator decides
+                   "price_set", "price_rows"}   # FU265: the set chosen, and the rows actually used
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
         # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
@@ -2647,6 +2648,17 @@ class Database:
             self.conn.commit()
         if "guide" not in blog_cols:   # FU216: default OFF — every existing blog stays a comparison
             self.conn.execute("ALTER TABLE blogs ADD COLUMN guide INTEGER DEFAULT 0")
+            self.conn.commit()
+        if "price_set" not in blog_cols:
+            # FU265 — which NAMED price set this blog was generated with, and the rows it actually
+            # used. Both default BLANK: an existing blog keeps exactly today's behaviour, falling
+            # back to the brand's Default set, until it is generated once under the new code.
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN price_set TEXT DEFAULT ''")
+            self.conn.commit()
+        if "price_rows" not in blog_cols:
+            # The PIN. Without it a regenerate reads the brand's table as it stands NOW, so a price
+            # entered for a different blog rewrote a published article's figures.
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN price_rows TEXT DEFAULT ''")
             self.conn.commit()
         if "compare_level" not in blog_cols:
             # FU263 — 'brand' | 'product' | '' (unset). The level the article compares AT, decided

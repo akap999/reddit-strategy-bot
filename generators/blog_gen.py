@@ -1245,6 +1245,47 @@ def _transpose_table(header, data):
     return nheader, ndata
 
 
+# FU265 — a brand holds NAMED price sets, not one table. Stored as
+#   {"v": 2, "sets": {"Default": {<slug>: {name, rows}}, "<other>": {...}}}
+# and read through `price_sets` / `price_set_rows` by every consumer, so no reader has to know the
+# shape. MIGRATE-ON-READ, not a batch conversion: the pre-FU265 flat `{<slug>: {name, rows}}` is
+# read as a single set called Default, so a brand nobody touches keeps working untouched and there
+# is no moment where half the rows are converted. `_kf_pricing_items` migrates on read for the same
+# reason and for the same kind of shape change.
+PRICE_SET_DEFAULT = "Default"
+
+
+def price_sets(brand):
+    """FU265 — {set_name: {<slug>: {name, rows}}} for a brand, whatever shape is stored."""
+    try:
+        pt = json.loads((brand or {}).get("price_table") or "{}")
+    except Exception:
+        return {}
+    if not isinstance(pt, dict) or not pt:
+        return {}
+    if isinstance(pt.get("sets"), dict):
+        return {str(k): v for k, v in pt["sets"].items() if isinstance(v, dict)}
+    # the old flat shape: one unnamed table, which IS the Default set
+    return {PRICE_SET_DEFAULT: pt}
+
+
+def price_set_rows(brand, name=""):
+    """FU265 — one named set, {<slug>: {name, rows}}. Falls back to Default, then to the only set
+    there is, so a blog naming a set that was later renamed still generates."""
+    sets = price_sets(brand)
+    if not sets:
+        return {}
+    for key in (str(name or "").strip(), PRICE_SET_DEFAULT):
+        if key and key in sets:
+            return sets[key] or {}
+    return sets[sorted(sets)[0]] or {} if len(sets) == 1 else {}
+
+
+def price_sets_blob(sets):
+    """FU265 — the stored shape, written in exactly one place."""
+    return json.dumps({"v": 2, "sets": {str(k): v for k, v in (sets or {}).items() if k}})
+
+
 def _kf_pricing_items(key_facts):
     """FU150 (#4): normalize key_facts['pricing'] to a PER-PRODUCT list of items
     [{product, value, source_url, verified_at, previous?}]. Migrate-on-read: the old single
@@ -1864,10 +1905,9 @@ def _priced_competitor_names(brand, subject_name=""):
     The subject is excluded (its rows are canonical pricing, not a competitor row), and a row marked
     "they publish no price" still counts — the brand is compared, the column is what goes."""
     out, seen = [], set()
-    try:
-        pt = json.loads((brand or {}).get("price_table") or "{}")
-    except Exception:
-        pt = {}
+    # FU265: through the normaliser, so a brand with named sets and a brand with the old flat table
+    # answer the same question the same way.
+    pt = price_set_rows(brand, (brand or {}).get("_price_set") or "")
     if not isinstance(pt, dict):
         return []
     subj = _kf_slug(subject_name or (brand or {}).get("name") or "")
@@ -4064,10 +4104,7 @@ class BlogGenerator:
         existing [S#] renumbers.
 
         Returns [] when no brand has two marked ends, so it is inert for every brand without them."""
-        try:
-            pt = json.loads((brand or {}).get("price_table") or "{}")
-        except Exception:
-            pt = {}
+        pt = price_set_rows(brand, (brand or {}).get("_price_set") or "")   # FU265
         if not isinstance(pt, dict):
             return []
         lines = []
@@ -4902,12 +4939,12 @@ class BlogGenerator:
         {slug: {name, rows: [{product, kind, value, value_max, basis, url, raw, updated_at}]}}.
 
         Deliberately NOT inside `competitor_facts`: that is a 45-day CACHE, capped at 40 and pruned by
-        `verified_at`, so operator input stored there would be evicted. This column is never evicted."""
-        try:
-            pt = json.loads((brand or {}).get("price_table") or "{}")
-            return pt if isinstance(pt, dict) else {}
-        except Exception:
-            return {}
+        `verified_at`, so operator input stored there would be evicted. This column is never evicted.
+
+        FU265 — THE accessor. A brand holds named sets now; which one this run uses is resolved here
+        and nowhere else, from `_price_set` (a blog's own choice, set by the caller) falling back to
+        Default. Every other reader goes through `price_set_rows` for the same reason."""
+        return price_set_rows(brand, (brand or {}).get("_price_set") or "")
 
     @staticmethod
     def _operator_entry_for(m, tool, slug):

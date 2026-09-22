@@ -119,7 +119,7 @@ def _saved(rows):
 
 def test_the_subjects_rows_stay_in_the_price_table():
     brand = _saved(_SUBJECT_SPAN)
-    pt = _json.loads(brand["price_table"])
+    pt = _price_set_rows(brand)
     assert "thyseed" in pt and "pigeon" in pt
     assert [r["value"] for r in pt["thyseed"]["rows"]] == ["$28.99", "$32.99"]
 
@@ -153,10 +153,10 @@ def test_a_brand_whose_rows_all_die_loses_its_stale_entry():
     ordinary entry in the column."""
     db = _seeded_db()
     app._save_price_table(db, db.get_brand(1), _SUBJECT_SPAN)
-    assert "thyseed" in _json.loads(db.get_brand(1)["price_table"])
+    assert "thyseed" in _price_set_rows(db.get_brand(1))
     app._save_price_table(db, db.get_brand(1),
                           [{"brand": "Thyseed", "kind": "exact", "value": "cheap"}])
-    assert "thyseed" not in _json.loads(db.get_brand(1)["price_table"])
+    assert "thyseed" not in _price_set_rows(db.get_brand(1))
     db.close()
 
 
@@ -176,6 +176,9 @@ _TABLE_MAP = {
 def _entry(m, tool):
     from generators.blog_gen import _kf_slug
     return BlogGenerator._operator_entry_for(m, tool, _kf_slug(tool))
+
+# FU265: a brand holds NAMED price sets; read them the way production does.
+from generators.blog_gen import price_set_rows as _price_set_rows  # noqa: E402
 
 
 def test_a_product_qualified_tool_finds_the_brand_row_you_typed():

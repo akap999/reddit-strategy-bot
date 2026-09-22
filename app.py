@@ -2541,7 +2541,50 @@ def _brand_name_twins(db, brand):
         return [brand["id"]]
 
 
-def _save_price_table(db, brand, rows, subject=""):
+def _blog_price_rows_from_sets(brand, set_name=""):
+    """FU265 — a named set flattened to the ROW LIST the UI and the pin both speak.
+
+    The brand stores {<slug>: {name, rows}}; a blog's pin stores the flat list the operator edits,
+    so re-opening a blog shows exactly the rows it was generated with."""
+    from generators.blog_gen import price_set_rows
+    out = []
+    for _slug, ent in (price_set_rows(brand, set_name) or {}).items():
+        if not isinstance(ent, dict):
+            continue
+        for r in (ent.get("rows") or []):
+            if isinstance(r, dict):
+                out.append(dict(r, brand=ent.get("name") or _slug))
+    return out
+
+
+def _brand_for_regenerate(brand, blog):
+    """FU265 — a regenerate reproduces THIS blog's prices.
+
+    It used to read the brand's table as it stands NOW, so rows entered for a DIFFERENT blog
+    rewrote a published article's figures. The pin wins; a blog generated before the pin existed
+    falls back to its named set, then to Default, which is exactly today's behaviour for all 226
+    stored blogs. Extracted from the regenerate route so the rule can be tested at all.
+    """
+    from generators.blog_gen import price_sets_blob, PRICE_SET_DEFAULT
+    pinned = (blog or {}).get("price_rows") or ""
+    rows = []
+    if pinned:
+        try:
+            rows = json.loads(pinned) if isinstance(pinned, str) else pinned
+        except Exception:
+            rows = []
+    if not rows:
+        return dict(brand, _price_set=str((blog or {}).get("price_set") or ""))
+    clean, _d, _f = _clean_price_rows(rows, known_names=[], subject=(brand.get("name") or ""))
+    if not clean:   # a pin that validates to nothing is no pin at all — fall back, do not blank
+        return dict(brand, _price_set=str((blog or {}).get("price_set") or ""))
+    print(f"[price-table] regenerate: using the {len(rows)} row(s) this blog was generated with, "
+          f"not the brand's current set", flush=True)
+    return dict(brand, price_table=price_sets_blob({PRICE_SET_DEFAULT: clean}),
+                _price_set=PRICE_SET_DEFAULT)
+
+
+def _save_price_table(db, brand, rows, subject="", set_name=""):
     """FU214 (Change 1) — persist the rows on EVERY stored copy of this brand (same name), the way
     `_save_price_links` already does, and route the SUBJECT's own rows into the CANONICAL price store.
 
@@ -2593,12 +2636,13 @@ def _save_price_table(db, brand, rows, subject=""):
             db.update_brand(brand["id"], key_facts=json.dumps(kf))
         except Exception as e:
             print(f"[price-table] canonical save failed for brand {brand['id']}: {e}", flush=True)
-    try:
-        cur = json.loads(brand.get("price_table") or "{}")
-    except Exception:
-        cur = {}
-    if not isinstance(cur, dict):
-        cur = {}
+    # FU265 — a brand holds NAMED sets. This writes exactly ONE of them and leaves the others
+    # alone, which is the whole point: before this, entering different rows for a second blog
+    # overwrote the only table there was, and regenerating the first blog then adopted them.
+    from generators.blog_gen import price_sets, price_sets_blob, PRICE_SET_DEFAULT
+    _set = str(set_name or "").strip() or PRICE_SET_DEFAULT
+    all_sets = price_sets(brand)          # migrate-on-read: a flat table becomes {Default: …}
+    cur = dict(all_sets.get(_set) or {})
     # a brand SENT with no surviving row has its entry removed; a brand not sent is untouched
     sent = {_kf_slug(str((r or {}).get("brand") or (r or {}).get("name") or ""))
             for r in (rows or []) if isinstance(r, dict)}
@@ -2606,7 +2650,8 @@ def _save_price_table(db, brand, rows, subject=""):
         if sl and sl not in clean:
             cur.pop(sl, None)
     cur.update(clean)
-    blob = json.dumps(cur)
+    all_sets[_set] = cur
+    blob = price_sets_blob(all_sets)
     targets = [brand["id"]]
     try:
         targets = [b["id"] for b in db.get_all_brands()
@@ -2620,7 +2665,7 @@ def _save_price_table(db, brand, rows, subject=""):
         except Exception as e:
             print(f"[price-table] save failed for brand {tid}: {e}", flush=True)
     print(f"[price-table] saved {sum(len(v.get('rows') or []) for v in cur.values())} row(s) across "
-          f"{len(cur)} brand(s) on {len(targets)} brand record(s); "
+          f"{len(cur)} brand(s) into set '{_set}' on {len(targets)} brand record(s); "
           f"{canonical} canonical subject price(s); {len(dropped)} dropped", flush=True)
     return cur, dropped, flagged, canonical
 
@@ -2714,7 +2759,10 @@ def api_brand_price_table(bid):
         if not brand:
             return jsonify({"error": "brand not found"}), 404
         body = request.json or {}
-        stored, dropped, flagged, canonical = _save_price_table(db, brand, body.get("rows") or [])
+        # FU265 — into the NAMED set the operator is working in. Without this the save went to
+        # Default whichever set was on screen, which is the overwrite the round exists to end.
+        stored, dropped, flagged, canonical = _save_price_table(
+            db, brand, body.get("rows") or [], set_name=str(body.get("set_name") or "").strip())
         # FU251 — the operator's own words for what the structure cannot express. Saved on the same
         # call as the rows because it is the same decision: "here is what this actually costs."
         notes = None
@@ -2725,7 +2773,13 @@ def api_brand_price_table(bid):
                     db.update_brand(tid, pricing_notes=notes or "")
                 except Exception as e:
                     print(f"[price-table] pricing notes save failed for brand {tid}: {e}", flush=True)
-        return jsonify({"ok": True, "price_table": stored, "brands": len(stored),
+        # FU265 — `stored` is ONE set. The UI caches the brand's whole price_table, so hand back the
+        # full blob as well: writing the single set into that cache would read back as a flat table
+        # and silently drop every other set the brand has.
+        _after = db.get_brand(bid) or {}
+        return jsonify({"ok": True, "price_table": stored,
+                        "price_table_blob": _after.get("price_table") or "",
+                        "brands": len(stored),
                         "rows": sum(len(v.get("rows") or []) for v in stored.values()),
                         "dropped": dropped, "flagged": flagged, "canonical_saved": canonical,
                         "pricing_notes": notes if notes is not None else (brand.get("pricing_notes") or "")})
@@ -3666,6 +3720,7 @@ def api_blog_generate():
     compare_level = str(data.get("compare_level") or "").strip().lower()
     if compare_level not in ("brand", "product"):
         compare_level = ""
+    price_set = str(data.get("price_set") or "").strip()   # FU265: which NAMED set to generate with
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
                                 if str(s).strip()]   # FU160: selectively refresh only these competitors
@@ -3710,10 +3765,14 @@ def api_blog_generate():
             if price_links_in:   # FU213 (Change 5): save the pasted links, then generate with them
                 _save_price_links(bg, brand, price_links_in)
                 brand = bg.get_brand(brand_id) or brand
+            # FU265 — the brand carries which set THIS run uses, so `_brand_price_table` (the one
+            # accessor) resolves it without every caller having to pass it down.
+            brand = dict(brand, _price_set=price_set)
             if price_table_in:   # FU214: save the pasted price rows, then generate with them
                 _stored, _pt_dropped, _pt_flagged, _canon = _save_price_table(
-                    bg, brand, price_table_in)
-                brand = bg.get_brand(brand_id) or brand
+                    bg, brand, price_table_in, set_name=price_set)   # FU265: into THAT set only
+                # the refetch drops the tag, so put it back — it is a per-run marker, not stored
+                brand = dict(bg.get_brand(brand_id) or brand, _price_set=price_set)
                 # FU259 — say what did not survive. The Save button returns the dropped rows to the
                 # operator; this path threw them away, so a table that validated to NOTHING looked
                 # exactly like a table that was never filled in. Measured on a real run: seven rows
@@ -3842,6 +3901,14 @@ def api_blog_generate():
                 bg.update_blog(blog_id, guide=1)   # FU216: persisted → regenerate reuses it
             if compare_level:
                 bg.update_blog(blog_id, compare_level=compare_level)   # FU263: regenerate reuses it
+            # FU265 — PIN the prices this blog was generated with. Without it a regenerate reads the
+            # brand's table as it stands NOW, so a price entered for a DIFFERENT blog silently
+            # rewrote this one's published figures. The set name is kept too, so the UI can show
+            # which one it was and offer to re-pick.
+            _pin = price_table_in or _blog_price_rows_from_sets(brand, price_set)
+            if _pin:
+                bg.update_blog(blog_id, price_rows=json.dumps(_pin),
+                               price_set=(price_set or ""))
             # FU133: persist the RESOLVED vertical ('off' when the user explicitly unticked).
             bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else (blog.get("ymyl") or "")))
             if qualifier:
@@ -3941,6 +4008,7 @@ def api_blog_regenerate(blog_id):
             if _wmode != "off":
                 _writer_touch()   # FU164: keep the self-hosted container warm across back-to-back blogs
             gen = BlogGenerator(claude, bg, writer=_writer, writer_mode=_wmode)
+            brand = _brand_for_regenerate(brand, blog)   # FU265: this blog's own prices
             seed = blog.get("seed") or ""
             # Reuse the sources captured at generate time so regeneration stays grounded.
             stored_urls = blog.get("source_urls") or []

@@ -14279,13 +14279,14 @@ function blogGenerate() {
     const price_links = include_pricing ? _blogPriceLinksCollect() : [];   // FU213 (Change 5/6)
     const price_table = include_pricing ? _blogPriceTableCollect() : [];   // FU214
     const compare_level = (document.getElementById('blog-gen-level')?.value || '');   // FU263
+    const price_set = (window._blogPriceSet || '');   // FU265: which named set to generate with
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
         author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, guide, compare_level, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, guide, compare_level, price_set, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);
@@ -14336,6 +14337,14 @@ function _blogPriceLinksBrands(brand) {
 }
 function _blogPriceReset() {   // FU214: a different brand has a different price table
     window._blogPriceRows = null; window._blogPriceDropped = [];
+    window._blogPriceSet = '';    // FU265: and a different brand has different NAMED sets
+}
+function _blogPriceSetPick(name) {
+    // FU265: picking a set replaces the rows on screen with that set's. Editing them afterwards
+    // changes only THIS blog — writing back to a set is the separate, explicit button below.
+    window._blogPriceSet = name || '';
+    window._blogPriceRows = null;
+    _blogPriceLinksRender();
 }
 function _blogPriceLinksRender() {
     const wrap = document.getElementById('blog-price-links-wrap');
@@ -14400,18 +14409,32 @@ const _BLOG_PRICE_COMPOSITIONS = [
     ['plus', 'membership + product (billed separately)'],
     ['product', 'the product only'],
 ];
-function _blogPriceRowsFromBrand(brand) {
+// FU265 — a brand holds NAMED price sets. Mirrors the Python normaliser: the pre-FU265 flat
+// {slug: {name, rows}} is read as one set called Default, so nothing had to be converted.
+function _blogPriceSets(brand) {
     let pt = {};
     try { pt = JSON.parse((brand || {}).price_table || '{}') || {}; } catch (_) {}
+    if (!pt || typeof pt !== 'object') return {};
+    if (pt.sets && typeof pt.sets === 'object') return pt.sets;
+    return Object.keys(pt).length ? { Default: pt } : {};
+}
+function _blogPriceRowsFromBrand(brand, setName) {
+    const sets = _blogPriceSets(brand);
+    const names = Object.keys(sets);
+    // Same order the Python reader uses, including the last clause: with several sets and neither
+    // the named one nor Default among them, show NOTHING rather than another set's prices.
+    const pick = (setName && sets[setName]) ? sets[setName]
+               : (sets.Default || (names.length === 1 ? sets[names[0]] : {}) || {});
     const out = [];
-    Object.keys(pt).forEach(slug => {
-        const ent = pt[slug] || {};
+    Object.keys(pick).forEach(slug => {
+        const ent = pick[slug] || {};
         (ent.rows || []).forEach(r => out.push(Object.assign({ brand: ent.name || slug }, r)));
     });
     return out;
 }
 function _blogPriceTableHtml(brand) {
-    if (!Array.isArray(window._blogPriceRows)) window._blogPriceRows = _blogPriceRowsFromBrand(brand);
+    if (!Array.isArray(window._blogPriceRows))
+        window._blogPriceRows = _blogPriceRowsFromBrand(brand, window._blogPriceSet || '');
     const rows = window._blogPriceRows || [];
     const dropped = window._blogPriceDropped || [];
     const kindSel = (v, i) => `<select class="text-xs" onchange="_blogPriceRowEdit(${i},'kind',this.value)">`
@@ -14436,6 +14459,25 @@ function _blogPriceTableHtml(brand) {
         <td><button class="btn btn-sm btn-secondary" onclick="_blogPriceRowDel(${i})" title="remove this row">✕</button></td>
     </tr>`).join('');
     return `<div class="mt-1">
+        <!-- FU265 — the brand's NAMED price sets. Picking one loads its rows; editing them changes
+             only this blog. Writing back to a set is the explicit button beside it, because before
+             this EVERY edit was a global edit and nothing said so: rows entered for a second blog
+             overwrote the only table there was, and regenerating the first blog then adopted them. -->
+        <div class="flex gap-2 items-center mb-1">
+            <span class="text-xs text-gray-400">Price set</span>
+            <select id="blog-price-set" class="text-xs" style="width:auto;flex:none"
+                    onchange="_blogPriceSetPick(this.value)">
+                ${(function () {
+                    const sets = Object.keys(_blogPriceSets(brand));
+                    if (!sets.length) sets.push('Default');
+                    const cur = window._blogPriceSet || 'Default';
+                    return sets.map(n => `<option value="${_blogEsc(n)}"${n === cur ? ' selected' : ''}>${_blogEsc(n)}</option>`).join('');
+                })()}
+            </select>
+            <button class="btn btn-sm btn-secondary" onclick="_blogPriceSetSaveAs()"
+                    title="Write the rows below into a named set on this brand, so other blogs can reuse them. Until you press this, your edits belong to this blog only.">💾 Save rows to a set…</button>
+            <span class="text-xs text-gray-600">— edits below belong to THIS blog; saving to a set makes them reusable.</span>
+        </div>
         <textarea id="blog-price-paste" rows="3" placeholder="Paste your pricing in any shape: a table from a sheet, a few lines, whatever you have — e.g. 'Philips Avent 3-pack $23.97 / Pigeon from $12.99 / Comotomo $19.99-$24.99 / Dr. Brown's doesn't publish a price'" style="font-family:inherit"></textarea>
         <div class="flex gap-2 items-center mt-1">
             <button class="btn btn-sm btn-secondary" onclick="_blogPriceParse()" title="Reads your paste into rows you can correct — one small call, no web search">🔎 Analyse</button>
@@ -14531,6 +14573,27 @@ function _blogPriceLinksCollect() {
         urls: (t.value || '').split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3),
     })).filter(r => r.name);
 }
+async function _blogPriceSetSaveAs() {
+    // FU265: the ONLY path that writes a brand-level set. Named, and confirmed, so the global edit
+    // that used to happen on every save can now only happen on purpose.
+    const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
+    if (!bid) { toast('Pick a brand first', 'error'); return; }
+    const cur = window._blogPriceSet || 'Default';
+    const name = (prompt('Save these rows as which set?', cur) || '').trim();
+    if (!name) return;
+    const rows = _blogPriceTableCollect();
+    if (!rows.length) { toast('No rows to save', 'error'); return; }
+    const res = await api(`/api/brands/${bid}/price-table`, { method: 'PUT',
+                                                             body: { rows, set_name: name } });
+    if (res && res.ok) {
+        window._blogPriceSet = name;
+        const b0 = _blogFindBrand(bid);
+        if (b0 && res.price_table_blob) b0.price_table = res.price_table_blob;
+        try { _blogBrands = await api('/api/brands/all') || _blogBrands; } catch (_) {}
+        _blogPriceLinksRender();
+        toast(`Saved ${rows.length} row(s) to "${name}"`, 'success');
+    }
+}
 async function _blogPriceLinksCheck() {
     const bid = +(document.getElementById('blog-gen-brand')?.value || 0);
     if (!bid) { toast('Pick a brand first', 'error'); return; }
@@ -14545,11 +14608,12 @@ async function _blogPriceLinksCheck() {
     try {
         const _notesEl = document.getElementById('blog-pricing-notes');   // FU251
         if (priced.length || _notesEl) {   // FU214: save the reviewed rows on the brand first
-            const _body = { rows: priced };
+            const _body = { rows: priced, set_name: (window._blogPriceSet || '') };   // FU265
             if (_notesEl) _body.pricing_notes = _notesEl.value || '';
             const pr = await api('/api/brands/' + bid + '/price-table', { method: 'PUT', body: _body });
             const b0 = _blogFindBrand(bid);
-            if (b0 && pr && pr.price_table) b0.price_table = JSON.stringify(pr.price_table);
+            if (b0 && pr && pr.price_table_blob) b0.price_table = pr.price_table_blob;   // FU265: the
+            // WHOLE blob, not the one set that was saved — see the note on the endpoint.
             if (b0 && pr && pr.pricing_notes !== undefined) b0.pricing_notes = pr.pricing_notes;
             toast(`✓ ${(pr && pr.rows) || 0} price row(s) saved across ${(pr && pr.brands) || 0} brand(s)`, 'success');
         }

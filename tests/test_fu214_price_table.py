@@ -19,6 +19,9 @@ from tests.stubs import StubClaude
 
 import app as _app
 
+# FU265: a brand holds NAMED price sets; read them the way production does.
+from generators.blog_gen import price_set_rows as _price_set_rows  # noqa: E402
+
 
 BRAND = {"id": 1, "name": "Thyseed", "category": "baby bottles",
          "domain_url": "https://thyseed.com",
@@ -494,7 +497,7 @@ def test_the_column_round_trips_and_rows_save_to_every_copy_of_the_brand():
         [{"brand": "Pigeon", "kind": "from", "value": "$12.99", "raw": "Pigeon from $12.99"}])
     assert "pigeon" in stored
     for bid in (1, 2):
-        pt = json.loads(db.get_brand(bid)["price_table"])
+        pt = _price_set_rows(db.get_brand(bid))
         assert pt["pigeon"]["rows"][0]["value"] == "$12.99"
     db.close()
 
@@ -506,7 +509,7 @@ def test_a_brand_sent_with_no_surviving_row_has_its_entry_removed():
                             {"brand": "Comotomo", "kind": "exact", "value": "$19.99"}])
     _app._save_price_table(db, db.get_brand(1),
                            [{"brand": "Pigeon", "kind": "exact", "value": ""}])
-    pt = json.loads(db.get_brand(1)["price_table"])
+    pt = _price_set_rows(db.get_brand(1))
     assert "pigeon" not in pt and "comotomo" in pt, "a brand you did not send is untouched"
     db.close()
 
@@ -526,7 +529,7 @@ def test_the_subjects_own_row_lands_in_key_facts_without_deleting_the_other_oper
     assert "starter set" in items, "the operator's other price must survive"
     assert items["9 oz bottle"]["value"] == "$29.99 (single)"
     assert items["9 oz bottle"]["operator_set"] is True
-    pt = json.loads(db.get_brand(1)["price_table"])
+    pt = _price_set_rows(db.get_brand(1))
     # FU260: the subject is KEPT in price_table as well as routed to key_facts. Popping it meant
     # everything built on that column skipped the publisher's own brand — its marked range could not
     # be stated, and its rows vanished from the price-table UI after saving.
@@ -652,7 +655,7 @@ def test_the_save_endpoint_stores_the_reviewed_rows_and_reports_what_it_dropped(
         body = r.get_json()
         assert body["rows"] == 1 and body["brands"] == 1
         assert body["dropped"] and "not a price figure" in body["dropped"][0]["why"]
-        assert json.loads(db.get_brand(1)["price_table"])["pigeon"]["rows"][0]["kind"] == "from"
+        assert _price_set_rows(db.get_brand(1))["pigeon"]["rows"][0]["kind"] == "from"
     finally:
         _app.get_db = orig
         db.close = db.close_real

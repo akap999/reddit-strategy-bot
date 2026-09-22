@@ -14363,7 +14363,14 @@ function _blogPriceLinksRender() {
 // Paste pricing in ANY shape -> Analyse -> reviewable rows. The model parses; the server decides what
 // survives (every figure must be verbatim in what you pasted), so a row you see is a row it kept.
 const _BLOG_PRICE_KINDS = [['exact', 'exact'], ['from', 'from'], ['range', 'range'],
-                          ['upto', 'up to'], ['none', 'not published']];
+                          ['upto', 'up to'], ['span', 'range end (brand)'], ['none', 'not published']];
+// FU255 — mark the CHEAPEST and the DEAREST thing a brand sells as 'range end (brand)' on their own
+// rows, each with its Product filled in, and the cell states the brand's range with the product
+// named at each end: "From $28.99 (5 oz PPSU Anti-colic) to $32.99 (10 oz PPSU Transition)". The
+// same sentence is handed to the writer as first-party evidence, so the prose cannot state one end
+// as if it were the price. `range` is ONE row whose two numbers share one basis, so it can never
+// say which product each end is; this is two rows that know. One marked row is not a range and
+// prints as that row's own price.
 // FU251 — what the price COVERS. `kind` describes the shape of one number and says nothing about
 // whether a second charge is coming, so "membership separate from the medication" could only be
 // typed into the basis, where it asserted nothing. This fills the comparison table's "Included?"
@@ -14618,7 +14625,7 @@ function blogCompetitorCacheModal(brandId, mode) {
         const ptRows = ((pt[slug] || {}).rows) || [];
         const ptLine = ptRows.length ? `<div class="text-xs text-green-400">Your price table: `
             + ptRows.map(r => (r.kind === 'none' ? '<i>no published price</i>'
-                : (r.kind === 'from' ? 'From ' : r.kind === 'upto' ? 'Up to ' : '')
+                : (r.kind === 'from' ? 'From ' : r.kind === 'upto' ? 'Up to ' : r.kind === 'span' ? 'Range end: ' : '')
                   + _blogEsc(r.value || '') + (r.kind === 'range' && r.value_max ? '-' + _blogEsc(r.value_max) : ''))
                 + (r.product ? ' · ' + _blogEsc(r.product) : '')).join(' &nbsp;|&nbsp; ')
             + ` <span class="text-gray-500">(edit on the generate form)</span></div>` : '';

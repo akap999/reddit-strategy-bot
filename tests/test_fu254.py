@@ -102,7 +102,8 @@ def test_an_also_whose_subject_the_heading_named_is_not_stranded():
 # two drugs from an article titled "How It Differs From Semaglutide". 22 of the 221 stored articles
 # are written that way and 2 had already shipped with a single option left.
 
-from generators.blog_gen import BlogGenerator, _transpose_table, _table_cell_name  # noqa: E402
+from generators.blog_gen import (  # noqa: E402
+    BlogGenerator, _transpose_table, _table_cell_name, _format_price_value)
 
 
 def _gen(tools=()):
@@ -604,3 +605,70 @@ def test_no_topic_at_all_still_warns_rather_than_guessing():
     g = _gen()
     _e, amb = g._price_row_for(_TWO_PRODUCTS, "Acme", [])
     assert amb, "with nothing to choose on, the operator must be told a row was picked blind"
+
+
+# ── FU255 — a brand-level range, with the product named at each end ──────────────────────────────
+# `range` is ONE row whose two numbers share one basis, so it can never say which product each end
+# is. This is two rows that know: the operator marks the cheapest and the dearest thing a brand
+# sells, and the cell states the brand's line-up.
+
+import json as _json  # noqa: E402
+
+_SPAN_ROWS = [
+    {"brand": "Acme", "product": "10 oz Transition Bottle", "kind": "span", "value": "$32.99"},
+    {"brand": "Acme", "product": "5 oz Anti-colic Bottle", "kind": "span", "value": "$28.99"},
+]
+
+
+def test_the_marked_ends_become_one_range_naming_each_product():
+    e, amb = _gen()._price_row_for(_SPAN_ROWS, "Acme", ["bottle"])
+    assert not amb
+    assert _format_price_value(e) == ("From $28.99 (5 oz Anti-colic Bottle) "
+                                      "to $32.99 (10 oz Transition Bottle)")
+
+
+def test_the_ends_are_ordered_by_AMOUNT_not_by_the_order_they_were_typed():
+    """The dearest row is first in _SPAN_ROWS on purpose — an operator who pastes it that way must
+    still get a sentence that reads forwards."""
+    out = _format_price_value(_gen()._price_row_for(_SPAN_ROWS, "Acme", [])[0])
+    assert out.index("$28.99") < out.index("$32.99"), out
+
+
+def test_a_marked_range_answers_every_article_the_same_way():
+    """It is a statement about the BRAND, so it outranks the per-article row match."""
+    g = _gen()
+    a = _format_price_value(g._price_row_for(_SPAN_ROWS, "Acme", ["anti-colic"])[0])
+    b = _format_price_value(g._price_row_for(_SPAN_ROWS, "Acme", ["transition"])[0])
+    assert a == b and "to $32.99" in a
+
+
+def test_one_marked_end_is_not_a_range():
+    e, _amb = _gen()._price_row_for(_SPAN_ROWS[:1], "Acme", ["bottle"])
+    assert _format_price_value(e) == "$32.99 (10 oz Transition Bottle)"
+
+
+def test_unmarked_rows_still_price_the_product_the_article_is_about():
+    g = _gen()
+    plain = [dict(r, kind="exact") for r in _SPAN_ROWS]
+    assert g._price_row_for(plain, "Acme", ["transition", "bottle"])[0]["value"] == "$32.99"
+    assert g._price_row_for(plain, "Acme", ["anti-colic", "bottle"])[0]["value"] == "$28.99"
+
+
+def test_the_range_reaches_the_WRITER_not_just_the_cell():
+    """The price ledger is built AFTER the draft, so nothing in it reaches the prompt: a cell could
+    state a brand's range while the prose beside it named one end as if it were the price."""
+    pt = {"acme": {"name": "Acme", "rows": _SPAN_ROWS}}
+    blocks = BlogGenerator._price_span_block(
+        {"name": "Acme", "domain_url": "https://acme.example/", "price_table": _json.dumps(pt)})
+    assert len(blocks) == 1
+    assert "Acme: From $28.99 (5 oz Anti-colic Bottle) to $32.99 (10 oz Transition Bottle)" \
+        in blocks[0]["text"]
+    assert "authoritative" in blocks[0]["text"]
+
+
+def test_the_writer_block_is_inert_without_marked_rows():
+    pt = {"acme": {"name": "Acme", "rows": [dict(r, kind="exact") for r in _SPAN_ROWS]}}
+    assert BlogGenerator._price_span_block(
+        {"name": "Acme", "price_table": _json.dumps(pt)}) == []
+    assert BlogGenerator._price_span_block({"name": "Acme"}) == []
+    assert BlogGenerator._price_span_block({"name": "Acme", "price_table": "not json"}) == []

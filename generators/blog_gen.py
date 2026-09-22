@@ -1702,6 +1702,11 @@ def _norm_price_kind(k):
         return "from"
     if t in ("range", "between", "fromto", "spread", "band"):
         return "range"
+    # FU255 — the operator MARKS the cheapest and dearest things a brand sells, and the cell states
+    # the brand's range with the product named at each end. `range` is one row whose two numbers
+    # share one basis, so it cannot say WHICH product each end is; this is two rows that know.
+    if t in ("span", "rangeend", "rangeends", "brandrange", "lineup", "spanend"):
+        return "span"
     if t in ("upto", "under", "max", "maximum", "below", "atmost"):
         return "upto"
     if t in ("none", "notpublished", "nopublishedprice", "nopublicprice", "unpublished",
@@ -1785,6 +1790,13 @@ def _format_price_value(entry):
     kind = _norm_price_kind(entry.get("kind"))
     if kind == "none" or not val:
         return ""
+    if kind == "span" and not (entry.get("span_ends") or []):
+        # One end marked is not a range — print it as the price it is. The operator filled in the
+        # PRODUCT to name that end, so it stands in for a basis they had no reason to also type;
+        # otherwise the cell would be a bare figure and the marking would have cost them the label.
+        kind = "exact"
+        if not (entry.get("basis") or "").strip() and (entry.get("product") or "").strip():
+            entry = dict(entry, basis=str(entry["product"]).strip())
 
     def _one(v, k, b, per=""):
         k = _norm_price_kind(k)
@@ -1827,6 +1839,14 @@ def _format_price_value(entry):
         comp = " + ".join(_split)
     if comp and comp not in basis.lower():
         basis = f"{basis}, {comp}" if basis else comp
+    # FU255 — a brand-level range the operator marked: each end names its own product, so a reader
+    # sees what the cheapest and the dearest option actually ARE, not just two numbers.
+    ends = [e for e in (entry.get("span_ends") or []) if isinstance(e, dict) and (e.get("value") or "").strip()]
+    if len(ends) > 1:
+        def _end(e):
+            lbl = str(e.get("label") or "").strip()
+            return f"{e['value'].strip()} ({lbl})" if lbl else e["value"].strip()
+        return f"From {_end(ends[0])} to {_end(ends[-1])}"
     if kind == "range" and vmax:
         core = f"{val}-{vmax}"
         if basis:
@@ -4030,6 +4050,47 @@ class BlogGenerator:
                           f"use these words and these figures over anything found elsewhere:\n"
                           + notes)[:_EVIDENCE_TEXT_CAP]}]
 
+    @staticmethod
+    def _price_span_block(brand):
+        """FU255 — the brand-level price RANGES the operator marked, as ONE first-party evidence
+        block, so the WRITER sees them and not only the table cell.
+
+        The price ledger is built after the draft, so nothing in it reaches the prompt: a cell could
+        say a brand runs from one product to another while the prose beside it named a single price.
+        The operator asked for the same context to reach the generator, and this is the path that
+        already carries operator pricing to it — `_pricing_notes_block`'s slot, appended last so no
+        existing [S#] renumbers.
+
+        Returns [] when no brand has two marked ends, so it is inert for every brand without them."""
+        try:
+            pt = json.loads((brand or {}).get("price_table") or "{}")
+        except Exception:
+            pt = {}
+        if not isinstance(pt, dict):
+            return []
+        lines = []
+        for _slug, ent in pt.items():
+            if not isinstance(ent, dict):
+                continue
+            nm = str(ent.get("name") or "").strip()
+            rows = [r for r in (ent.get("rows") or []) if isinstance(r, dict)]
+            if not nm or not rows:
+                continue
+            span = BlogGenerator._span_entry(
+                [e for e in (BlogGenerator._price_row_entry(r, nm) for r in rows) if e])
+            if span:
+                lines.append(f"{nm}: {_format_price_value(span)}")
+        if not lines:
+            return []
+        name = str((brand or {}).get("name") or "").strip() or "the publisher"
+        dom = _norm_domain((brand or {}).get("domain_url") or "")
+        return [{"label": f"price ranges, supplied by the publisher",
+                 "url": f"https://{dom}" if dom else "",
+                 "text": ("PRICE RANGES STATED BY THE PUBLISHER — authoritative, use these figures "
+                          "and name the product at each end exactly as written. State the RANGE, "
+                          "not one end of it, whenever the article talks about what a brand costs:\n"
+                          + "\n".join(lines))[:_EVIDENCE_TEXT_CAP]}]
+
     def _vfact_blocks(self, brand, blocks, prefetched=None):
         """FU217 — the operator's VERIFIED FACTS as citable evidence blocks, one per (brand, page).
 
@@ -4507,6 +4568,7 @@ class BlogGenerator:
         # FU251: and the operator's free-text pricing, same slot and same reasoning — appended last,
         # so nothing above it renumbers.
         blocks.extend(self._pricing_notes_block(b))
+        blocks.extend(self._price_span_block(b))      # FU255: the marked ranges reach the WRITER
         self._vfact_brand = b
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
@@ -4868,6 +4930,35 @@ class BlogGenerator:
                 "checked_at": str(row.get("updated_at") or "")
                 or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
+    @staticmethod
+    def _span_entry(ents):
+        """FU255 — the brand-level range the operator marked, as ONE ledger entry, or None.
+
+        Needs two ends to be a range; a single marked row is just that row's price. The ends are
+        ordered by AMOUNT, never by the order the rows were typed, so the cheapest is always the
+        "from" — an operator who pastes the dearest first still gets a sentence that reads forwards.
+        Each end is labelled with its own product (the basis if no product was given), which is the
+        whole point: `range` is one row whose two numbers share one basis and cannot say which
+        product each end is."""
+        marked = [e for e in ents
+                  if _norm_price_kind(e.get("kind")) == "span" and (e.get("value") or "").strip()]
+        if len(marked) < 2:
+            return None
+        def _amt(e):
+            a, _c = _price_amount(e.get("value") or "")
+            try:
+                return float(a)
+            except (TypeError, ValueError):
+                return float("inf")
+        marked.sort(key=_amt)
+        lo, hi = marked[0], marked[-1]
+        ends = [{"value": (e.get("value") or "").strip(),
+                 "label": (str(e.get("product") or "").strip()
+                           or str(e.get("basis") or "").strip())}
+                for e in (lo, hi)]
+        return dict(lo, kind="span", span_ends=ends, value_max=(hi.get("value") or "").strip(),
+                    per_unit="", basis="", composition=lo.get("composition") or "")
+
     def _price_row_for(self, rows, name, topic_tokens, subject=""):
         """FU214 (Change 3) — SEVERAL rows per brand, so pick the one this article is about.
 
@@ -4879,6 +4970,12 @@ class BlogGenerator:
         ents = [e for e in (self._price_row_entry(r, name) for r in (rows or [])) if e]
         if not ents:
             return None, False
+        # FU255 — the operator MARKED the ends of this brand's range. That is a statement about the
+        # brand, not about one article, so it outranks the per-article row match: whatever the page
+        # is about, the cell says what the brand's line-up costs and which product sits at each end.
+        span = self._span_entry(ents)
+        if span:
+            return span, False
         if len(ents) == 1:
             return ents[0], False
         want = set(topic_tokens or []) | set(_product_tokens(subject))

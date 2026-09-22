@@ -4981,10 +4981,22 @@ class BlogGenerator:
                 return float("inf")
         marked.sort(key=_amt)
         lo, hi = marked[0], marked[-1]
-        ends = [{"value": (e.get("value") or "").strip(),
-                 "label": (str(e.get("product") or "").strip()
-                           or str(e.get("basis") or "").strip())}
-                for e in (lo, hi)]
+
+        def _end(e):
+            # FU263 — the label carries BOTH the product and the basis. The first version took the
+            # product and DROPPED the basis, so an operator who typed "2-pack" beside a price had it
+            # deleted: the cell then presented a multi-pack price as one item's, and the prose
+            # ranked that brand as the dearest on a number nobody charges for a single unit. The
+            # per-unit price rides along for the same reason — it is the only figure in the cell
+            # that is comparable with a rival's single-item price.
+            parts = [x for x in (str(e.get("product") or "").strip(),
+                                 str(e.get("basis") or "").strip()) if x]
+            per = _per_unit_price(e.get("value") or "", e.get("basis") or "")
+            if per:
+                parts.append(per)
+            return {"value": (e.get("value") or "").strip(), "label": ", ".join(parts)}
+
+        ends = [_end(lo), _end(hi)]
         return dict(lo, kind="span", span_ends=ends, value_max=(hi.get("value") or "").strip(),
                     per_unit="", basis="", composition=lo.get("composition") or "")
 

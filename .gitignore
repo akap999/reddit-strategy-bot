@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .claude/
 *.db-journal
+
+# macOS finder metadata — swept in twice by a `git add <dir>` before this rule existed
+.DS_Store

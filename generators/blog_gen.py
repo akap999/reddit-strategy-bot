@@ -13504,7 +13504,12 @@ you MAY assume the description will carry: "{disc}".
             if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
                 break
             for _unit in ([_ln] if not _ln.lstrip().startswith("|") else _ln.split("|")):
-                if not (_CLAIM_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)):
+                # FU263: an ORGANISATION'S POSITION is a specific too. Without this the cited page
+                # was never fetched at all, so the claim could not be checked even in principle —
+                # four claims attributing guidance to a body shipped against a page that covers
+                # none of it.
+                if not (_CLAIM_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)
+                        or self._ORG_SAYS_RE.search(_unit)):
                     continue
                 for _x in re.findall(r"\[S(\d+)\]", _unit):
                     if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
@@ -13538,6 +13543,137 @@ you MAY assume the description will carry: "{disc}".
         r"([a-z][\w'-]*(?:[ -][a-z][\w'-]*){0,3})", re.I)
     _ATTRIB_STOP = {"well", "such", "part", "result", "consequence", "follows", "described",
                     "above", "below", "being", "having", "that", "this", "these", "those", "it"}
+
+    # FU263 — a sentence stating an ORGANISATION'S POSITION. The figure check cannot see it (no
+    # number) and `_ATTRIB_CLAIM_RE` cannot (no "… as <label>"), so four claims attributing guidance
+    # to a body that its cited page never discusses shipped carrying a citation that looked
+    # legitimate — which is worse than no citation, because a reader has no reason to doubt it.
+    #
+    # The ORG must be a multi-word proper noun, or an acronym introduced by "the"; the words between
+    # it and the verb must be LOWERCASE so a match cannot jump over a second entity. Measured on the
+    # 221 stored articles: a looser first version matched 106 sentences and most were junk
+    # ("AI", "US", "TRT" read as organisations); this matches 73.
+    _ORG_SAYS_VERBS = (r"recommends?|advises?|requires?|notes?|states?|says?|suggests?|urges?|"
+                       r"warns?|cautions?|emphasi[sz]es?|specifies?|stipulates?|mandates?")
+    _ORG_SAYS_RE = re.compile(
+        r"(?:^|(?<=[\s(\"']))(?:[Tt]he\s+)?"
+        r"((?:[A-Z][A-Za-z.&'\u2019-]{2,}\s+){1,4}[A-Z][A-Za-z.&'\u2019-]{2,}"
+        r"|(?<=[Tt]he )[A-Z]{2,6})"
+        r"(?:'s|\u2019s)?\s+(?:[a-z][a-z-]*\s+){0,4}?"
+        r"(?:" + _ORG_SAYS_VERBS + r")\s+(?:that\s+)?(.{10,200})")
+    # Words that describe any claim and so cannot tell one page from another.
+    _ORG_SAYS_STOP = frozenset("""should would could their there these those which while about after
+        before them they that this with from into more than when allowed allowing during using
+        other around first every also been being have will shall must may might such each""".split())
+    _ORG_SAYS_MIN_TOKENS = 4      # below this the ratio is noise, not evidence
+    _ORG_SAYS_MIN_SHARE = 0.5     # under half the claim's words on the page → say so
+
+    @classmethod
+    def _claim_tokens_on_page(cls, predicate, page):
+        """FU263 — (present, total) distinctive words of a claim found on a page.
+
+        Matched on the STEM at a word boundary, so a gerund finds its verb and an adverb finds its
+        adjective. A bare prefix was tried first and was worse: "control"[:4] matches "contain",
+        which credited a page with words it does not have."""
+        toks, low = [], re.sub(r"\s+", " ", (page or "").lower())
+        for w in re.findall(r"[a-z][a-z-]{4,}", (predicate or "").lower()):
+            w = w.strip("-")
+            if w and w not in cls._ORG_SAYS_STOP and w not in toks:
+                toks.append(w)
+        toks = toks[:8]
+
+        def _stem(w):
+            for suf in ("ingly", "ing", "edly", "ed", "ly", "es", "s"):
+                if w.endswith(suf) and len(w) - len(suf) >= 4:
+                    return w[:-len(suf)]
+            return w
+
+        hit = [w for w in toks if re.search(r"\b" + re.escape(_stem(w)), low)]
+        return hit, toks
+
+    def _org_position_check(self, body, blocks, walled):
+        """FU263 — a position attributed to a named organisation, against the page cited for it.
+
+        The reported article told readers an authority's guidance covered four practices. Its cited
+        page covers none of them — fetched and confirmed: not one of those four words appears on it,
+        while the page's TOPIC words do. Nothing could see this: the figure check skips a sentence
+        with no number, and the page was never even fetched, because only a figure triggers a
+        fetch.
+
+        WARNING ONLY, deliberately. The separation is real but thin — the reported defects score
+        0.38 of their words on the page and correctly-supported claims 0.50 to 1.00 — and the replay
+        holds no fetched page text, so the false-positive rate cannot be measured across the corpus
+        the way every removing check here has been. FU254 is the precedent: a check that looked
+        sound removed nothing until it was measured, and was then found to be mostly false
+        positives. Removing a true claim that is merely worded differently is its own harm.
+
+        The operator gets the sentence, the organisation, and the words that are missing, which is
+        what makes it actionable. Nothing is rewritten, so nothing can be fabricated."""
+        if not body or not blocks:
+            return ""
+        walled = set(walled or ())
+        txts = {}
+        for i, bl in enumerate(blocks, 1):
+            t = bl.get("text") or ""
+            u = (bl.get("url") or "").strip()
+            cached = _page_text(self._claim_pages.get(u)) if u else ""
+            txts[i] = t if len(t) >= len(cached or "") else cached
+        hits = []
+        for line in (body or "").split("\n"):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                break
+            st = line.strip()
+            if not st or st.startswith(("#", "|", ">", "*[")):
+                continue
+            # A trailing "[S3]" after the full stop is its own "sentence" to the splitter, so the
+            # claim it belongs to would be read as uncited. Carry a marker-only unit back onto the
+            # sentence before it.
+            _sents = []
+            for _s in self._prose_sentences(line):
+                if _sents and re.fullmatch(r"(?:\[S\d+\])+[.,;:)\s]*", _s.strip()):
+                    _sents[-1] = _sents[-1] + " " + _s.strip()
+                else:
+                    _sents.append(_s)
+            for sent in _sents:
+                m = self._ORG_SAYS_RE.search(sent)
+                if not m:
+                    continue
+                cs = [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", sent))
+                      if 1 <= n <= len(blocks)]
+                readable = [n for n in cs if n not in walled
+                            and len(txts.get(n) or "") >= self._PAGE_TEXT_MIN]
+                if not readable:
+                    continue          # unread is UNKNOWN, never unsupported
+                best_hit, best_toks = [], []
+                for n in readable:
+                    h, t = self._claim_tokens_on_page(m.group(2), txts.get(n) or "")
+                    if len(h) >= len(best_hit):
+                        best_hit, best_toks = h, t
+                if len(best_toks) < self._ORG_SAYS_MIN_TOKENS:
+                    continue          # too few distinctive words to judge
+                # TWO signals have to agree, because either alone is noisy: at most half the
+                # claim's words are on the page, AND its most distinctive word is missing. The
+                # words that DO match are the TOPIC's — a page about the subject always has
+                # those — so the share alone cannot separate a supported claim from an
+                # invented one.
+                if len(best_hit) / len(best_toks) > self._ORG_SAYS_MIN_SHARE:
+                    continue
+                _longest = max(best_toks, key=len)
+                if _longest in best_hit:
+                    continue
+                missing = [w for w in best_toks if w not in best_hit]
+                hits.append((m.group(1).strip(), sent.strip()[:90], missing[:5],
+                             ", ".join(f"[S{n}]" for n in readable)))
+        if not hits:
+            return ""
+        bits = [f'"{h[1]}" attributes this to {h[0]} and cites {h[3]}, whose page does not contain '
+                f'{", ".join(repr(w) for w in h[2])}' for h in hits[:3]]
+        return ("org-position: %d claim(s) state what a named organisation says, and the page cited "
+                "for them does not use the claim's words — %s%s. Check each against its source: a "
+                "position attributed to an authority is the citation a reader is least likely to "
+                "doubt"
+                % (len(hits), "; ".join(bits),
+                   f"; +{len(hits) - 3} more" if len(hits) > 3 else ""))
 
     def _walled_source_check(self, body, blocks, walled):
         """FU241 — a source nobody could read carries nothing, and a claim about what a readable
@@ -16344,6 +16480,13 @@ you MAY assume the description will carry: "{disc}".
         if _wsn:
             print(f"[blog_gen] {_wsn}", flush=True)
             self._warn(article, _wsn)
+        # FU263 — and a position attributed to a named organisation, against the page cited for it.
+        # Runs here, in the PRE-rebuild group, because everything after `_rebuild_sources` sees
+        # blocks whose text is empty. Warning only — see the docstring.
+        _opn = self._org_position_check(article["body_markdown"], self._evidence_blocks, _walled)
+        if _opn:
+            print(f"[blog_gen] {_opn}", flush=True)
+            self._warn(article, _opn)
         article["body_markdown"], _csn = self._claim_source_check(
             article["body_markdown"], self._evidence_blocks, brand)
         if _csn:

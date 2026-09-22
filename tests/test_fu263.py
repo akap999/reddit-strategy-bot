@@ -156,3 +156,107 @@ def test_an_options_OWN_cheapest_tier_is_not_a_ranking_of_the_field():
     # …and the adjacency boundary still lets a real field ranking through
     out, _n = _ranked(_sect("Packco's entry price is the highest of the four brands compared here."))
     assert "entry price is the highest" not in out
+
+
+# ── Step 3 — a position attributed to an organisation, against the page cited for it ─────────────
+# The reported article told readers a paediatric body's guidance covered burping frequency, paced
+# feeding, nipple flow and when to introduce a bottle. Its cited page covers none of them. Nothing
+# could see it: the figure check skips a sentence with no number, and the page was never even
+# FETCHED, because only a figure triggered a fetch.
+#
+# The fixture is that page as our own fetcher returned it, so these assertions rest on the real
+# document rather than a hand-written stand-in.
+
+_PAGE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "fixtures", "fu263_authority_page.txt"), encoding="utf-8").read()
+
+
+def _org(body, page=None):
+    g = _gen()
+    g._claim_pages = {}
+    blocks = [{"label": "official · Guidance", "url": "https://authority.example/p",
+               "text": page if page is not None else _PAGE}]
+    return g._org_position_check(body, blocks, set())
+
+
+def test_a_position_the_cited_page_never_states_is_reported():
+    note = _org("## H\n\nThe AAP's guidance on bottle feeding notes that newborns should be burped "
+                "frequently and that paced feeding (holding the bottle more horizontally, allowing "
+                "the baby to control intake) reduces swallowed air. [S1]\n")
+    assert note, "the page contains none of 'burped', 'paced', 'frequently'"
+    assert "'burped'" in note and "'paced'" in note, note
+    assert "AAP" in note
+
+
+def test_a_position_the_page_DOES_state_is_left_alone():
+    assert _org("## H\n\nThe AAP advises that the bottle should be held so that milk covers the "
+                "nipple and the baby does not swallow air. [S1]\n") == ""
+
+
+def test_a_trailing_citation_still_belongs_to_its_sentence():
+    """"…swallowed air. [S1]" — the splitter makes the marker its own sentence, so the claim would
+    read as uncited and never be judged at all."""
+    with_marker = ("## H\n\nThe AAP recommends burping newborns frequently during and after feeds "
+                   "and using paced bottle feeding to reduce air ingestion. [S1]\n")
+    assert _org(with_marker), "a trailing marker was not carried back onto its claim"
+
+
+def test_an_uncited_position_is_not_judged():
+    """No citation means no page to judge it against — a different defect, not this one."""
+    assert _org("## H\n\nThe AAP recommends burping newborns frequently during feeds.\n") == ""
+
+
+def test_an_unreadable_page_means_UNKNOWN_not_unsupported():
+    assert _org("## H\n\nThe AAP recommends burping newborns frequently during feeds. [S1]\n",
+                page="too short to judge") == ""
+
+
+def test_two_signals_must_agree_or_nothing_is_reported():
+    """Either alone is noisy. The words that DO match are the topic's — a page about the subject
+    always has those — so a low share alone cannot separate a supported claim from an invented one.
+
+    Here the share is 0.12, far below the threshold, but the claim's MOST DISTINCTIVE word is on
+    the page. One signal says unsupported, the other says the page discusses it. Nothing is
+    reported, and that conservatism is the point of a warning-only check whose false-positive rate
+    cannot yet be measured across the corpus."""
+    g = _gen()
+    pred = "pediatrician visits should be scheduled quarterly alongside routine dental screening"
+    hit, toks = g._claim_tokens_on_page(pred, _PAGE)
+    assert len(hit) / len(toks) <= g._ORG_SAYS_MIN_SHARE, (hit, toks)
+    assert max(toks, key=len) in hit, "this case exists to make the signals DISAGREE"
+    assert _org("## H\n\nThe Example Health Body advises that %s. [S1]\n" % pred) == "", \
+        "one signal alone must not be enough to report"
+
+
+def test_the_probe_gate_fetches_a_page_an_org_claim_cites():
+    """Without this the page was never read at all, so the claim could not be checked even in
+    principle. A block with no text and no URL is recorded as unreadable ONLY if it was probed."""
+    g = _gen()
+    g._claim_pages = {}
+    blocks = [{"label": "official · Guidance", "url": "", "text": ""}]
+    body = ("## H\n\nThe AAP recommends burping newborns frequently during and after feeds and "
+            "using paced bottle feeding to reduce air ingestion. [S1]\n")
+    assert g._probe_cited_sources(body, blocks) == {1}, \
+        "an organisation's position is a specific — its page has to be read"
+    # …and a sentence that is neither a figure nor an attribution is still not probed
+    assert g._probe_cited_sources("## H\n\nBottles come in several shapes. [S1]\n", blocks) == set()
+
+
+def test_a_stem_is_matched_not_a_bare_prefix():
+    """"control"[:4] matches "contain", which credits a page with words it does not have."""
+    g = _gen()
+    hit, _t = g._claim_tokens_on_page("control", "this page happens to contain many things")
+    assert hit == []
+    hit, _t = g._claim_tokens_on_page("burping", "remember to burp the baby after feeds")
+    assert hit == ["burping"], "a stem must still find its own word"
+
+
+def test_a_marker_only_unit_is_carried_back_not_dropped():
+    """Directly: "…air. [S1]" splits into two units, and without the carry-back the claim unit has
+    no citation, so nothing is judged."""
+    g = _gen()
+    line = ("The AAP recommends burping newborns frequently during and after feeds and using "
+            "paced bottle feeding to reduce air ingestion. [S1]")
+    raw = g._prose_sentences(line)
+    assert raw[-1].strip() == "[S1]", "precondition: the splitter separates the marker"
+    assert len(raw) == 2

@@ -237,6 +237,78 @@ def detect_uncited_table_cells(body, cap=6):
 # itself), so they are excluded. A bare "It is/There are" is a dummy subject, not a reference.
 _SELF_REF_NOUNS = (r"guide|article|page|post|piece|section|table|comparison|list|chart|breakdown|"
                    r"answer|faq|report")
+# FU254 — a HEADING is text the reader has just read, so it can BE the antecedent. Judged on the
+# opening sentence alone this detector produced 51 findings across the stored corpus and 45 of them
+# were ordinary English whose referent the heading had already supplied ("<section> Can men take X
+# alongside Y?" -> "This clinical question must be assessed by a licensed doctor."). It feeds
+# body_damage, which is the REMOVAL guard, so every false positive REFUSED a real removal and
+# protected the defect underneath it. That asymmetry is why the excuses below are deliberately
+# generous: a miss costs one unflagged sentence, a false positive costs a fix.
+#
+# A noun that names the HEADING ITSELF rather than a thing in the world -- the same idea as the
+# self-referential nouns above, for the shape "This <adj> <noun>" where the noun IS the question.
+_QUESTION_NOUNS = (r"question|consideration|distinction|difference|issue|matter|topic|point|"
+                   r"decision|choice|segment|part|overview|checklist|summary|explainer|scenario|"
+                   r"situation|tradeoff|trade-off|contrast|caveat|requirement")
+# A CATEGORY noun stands in for the subject the title already named, which the reader always knows.
+_CATEGORY_NOUNS = (r"medication|drug|medicine|product|tool|platform|service|provider|company|"
+                   r"companies|firm|brand|program|programme|option|approach|method|material|"
+                   r"treatment|therapy|therapies|device|plan|package|model|system|solution|"
+                   r"vendor|supplier|business|panel|test|screen|metric|measure")
+# A heading that names two or more things, or asks for a comparison, is the antecedent of a plural
+# opener: "<section> Botric vs Profound: How Do They Compare?" -> "Both platforms address...".
+_HEAD_MULTI_RE = re.compile(
+    r"\b(?:and|or|vs\.?|versus|between|both|either|neither|compares?|compared?|comparison|"
+    r"differs?|different(?:ly)?|difference|differences|same|alongside|against|combining|"
+    r"combine[ds]?)\b", re.I)
+# A heading that POINTS ("...is this checklist most relevant for?") has already introduced the thing.
+_HEAD_DEMO_RE = re.compile(r"\b(?:this|these|that|those)\b", re.I)
+_PLURAL_OPEN_RE = re.compile(
+    r"^\s*(?:They|Both|Each of them|Neither|Either|These|Those|The same)\b", re.I)
+_DEMO_OPEN_RE = re.compile(r"^\s*(?:This|That|These|Those|Such)\s+(.{0,70})", re.I | re.S)
+# The word that ends a noun phrase, so "This regulatory distinction IS crucial" yields
+# "regulatory distinction" and the head noun can be read out of it.
+_NP_STOP_RE = re.compile(
+    r"\b(?:is|are|was|were|be|been|being|can|could|will|would|may|might|must|should|shall|does|"
+    r"do|did|has|have|had|of|for|in|on|to|that|which|when|from|with|by|as|like|means|matters|"
+    r"applies|holds|carries|requires|comes|remains)\b", re.I)
+# "X and Y ALSO showed no difference" -- an additional RESULT, which only means something beside the
+# result before it. "is also used off-label", "may also include" and "(also known as)" are ordinary
+# English, and they were 15 of the 16 findings this arm produced.
+_REPORTING_VERB_RE = re.compile(
+    r"\b(?:showed?|found|reported|demonstrated|revealed|confirmed|suggested|indicated|"
+    r"improved|worsened|increased|decreased|declined|rose|fell|dropped|gained|"
+    r"averaged|reached|measured|scored|registered|outperformed|lagged|matched)\b", re.I)
+_CONTENT_WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{4,}")
+
+
+def _heading_supplies(head, first):
+    """FU254 -- True when the SECTION HEADING already gave the reader what the opening sentence
+    points back at. Shape-based and field-neutral: a comparison heading answers a plural opener, a
+    heading noun repeated in the opener answers a demonstrative one."""
+    if not head:
+        return False
+    if _PLURAL_OPEN_RE.match(first):
+        if _HEAD_MULTI_RE.search(head):
+            return True
+        # or the sentence names them itself: "Both Botric and Profound offer citation tracking."
+        lead = " ".join(first.split()[:12])
+        if re.search(r"\b(?:and|or)\b", lead, re.I) and len(_CONTENT_WORD_RE.findall(lead)) >= 2:
+            return True
+    m = _DEMO_OPEN_RE.match(first)
+    if m:
+        np = _NP_STOP_RE.split(m.group(1), 1)[0]
+        toks = [w.lower() for w in _CONTENT_WORD_RE.findall(np)][:4]
+        for t in toks:
+            if re.fullmatch(r"(?:%s)s?" % _QUESTION_NOUNS, t) or \
+                    re.fullmatch(r"(?:%s)(?:e?s)?" % _CATEGORY_NOUNS, t):
+                return True
+        hw = {w.lower()[:6] for w in _CONTENT_WORD_RE.findall(head)}
+        if any(t[:6] in hw for t in toks):
+            return True
+        if _HEAD_DEMO_RE.search(head):
+            return True
+    return False
 # "This IS the rationale" points at the heading just read and is ordinary English; "This PROTOCOL is
 # necessary" names a thing the reader was never shown. Only the second shape is damage, so a
 # demonstrative followed by a verb is let through.
@@ -244,7 +316,11 @@ _DEMONSTRATIVE_VERBS = (
     r"is|are|was|were|be|been|being|can|could|will|would|may|might|must|should|shall|"
     r"does|do|did|has|have|had|means|matters|happens|makes|allows|requires|reflects|explains|"
     r"varies|depends|applies|works|helps|changes|comes|includes|leaves|gives|remains|tends|"
-    r"differs|holds|says|shows|puts|takes|creates|becomes")
+    r"differs|holds|says|shows|puts|takes|creates|becomes|"
+    # FU254 -- every one of these was missing and turned an ordinary sentence into a "finding"
+    r"measures|covers|checks|tests|looks|tells|assesses|evaluates|captures|detects|indicates|"
+    r"affects|determines|influences|drives|reduces|raises|lowers|improves|prevents|avoids|adds|"
+    r"costs|saves|starts|ends|runs|lasts|ranges|sits|carries|reflects|signals|flags")
 _STRANDED_OPEN_RE = re.compile(
     r"^\s*(?:"
     r"(?:This|That|These|Those|Such)\s+(?!(?:%s)\b)(?!(?:%s)\b)[a-z]"
@@ -344,8 +420,20 @@ def detect_stranded_reference(body, cap=8):
             continue
         why = ""
         if _STRANDED_OPEN_RE.match(first):
+            # FU254: not stranded when the heading the reader just read IS the antecedent
+            if _heading_supplies(head, first):
+                continue
             why = "opens with a back-reference"
         elif _STRANDED_ALSO_RE.match(first):
+            # FU254: an additional RESULT is stranded ("…also SHOWED no difference"); an ordinary
+            # "is also used off-label" or "(also known as)" is not, and nor is an "also" whose
+            # subject the heading already named.
+            if not _REPORTING_VERB_RE.search(first):
+                continue
+            _subj = re.split(r"\balso\b", first, 1, re.I)[0]
+            _hw = {w.lower()[:6] for w in _CONTENT_WORD_RE.findall(head or "")}
+            if any(w.lower()[:6] in _hw for w in _CONTENT_WORD_RE.findall(_subj)):
+                continue
             why = 'opens with "also"'
         if why:
             hits.append({"check": "stranded-reference",

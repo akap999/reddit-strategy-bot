@@ -406,3 +406,150 @@ def test_a_study_that_is_already_cited_is_left_alone():
     g = _study_gen({})
     out, note = g._uncited_study_check(body, blocks, set())
     assert out == body and not note
+
+
+# ── the price table's Product field reaches the article ──────────────────────────────────────────
+# The compared name came from the BRAND column at both levels, and FU262 collapsed the draft's
+# correct product name back onto it. That is where a column headed "Philips Avent & Nipples" —
+# a category — came from on an article set to compare PRODUCTS.
+
+import json as _json  # noqa: E402
+
+from generators.blog_gen import _priced_competitor_names  # noqa: E402
+
+_TABLE = {"price_table": _json.dumps({
+    "philips-avent": {"name": "Philips Avent",
+                      "rows": [{"product": "Natural Response 4oz", "kind": "exact",
+                                "value": "$29.99"}]},
+    "pigeon": {"name": "Pigeon",
+               "rows": [{"product": "Glass Wide Neck 5.4oz", "kind": "exact", "value": "$34.99"},
+                        {"product": "PPSU Wide Neck 5.4oz", "kind": "exact", "value": "$34.99"}]}}),
+    "name": "Thyseed"}
+
+
+def test_at_product_level_the_compared_name_is_the_row_s_product():
+    assert _priced_competitor_names(_TABLE, "Thyseed", "product")[0] == \
+        "Philips Avent Natural Response 4oz"
+
+
+def test_at_brand_level_nothing_changes():
+    """The toggle decides, as FU263 established."""
+    assert _priced_competitor_names(_TABLE, "Thyseed", "brand") == ["Philips Avent", "Pigeon"]
+    assert _priced_competitor_names(_TABLE, "Thyseed") == ["Philips Avent", "Pigeon"]
+
+
+def test_a_brand_whose_rows_name_several_products_stays_a_brand():
+    """Naming one of them here would put the column header and the price cell on two different
+    products — which is the defect reported as "the row mixes two products"."""
+    assert _priced_competitor_names(_TABLE, "Thyseed", "product")[1] == "Pigeon"
+
+
+def test_a_product_already_in_the_brand_name_is_not_repeated():
+    t = {"name": "X", "price_table": _json.dumps({"acme": {"name": "Acme Pro", "rows": [
+        {"product": "Pro", "kind": "exact", "value": "$9"}]}})}
+    assert _priced_competitor_names(t, "X", "product") == ["Acme Pro"]
+
+
+def test_the_rename_pass_does_not_strip_a_product_name_it_could_not_supply():
+    """At product level with a bare-brand option, folding "Pigeon Glass Wide Neck" down to "Pigeon"
+    would destroy exactly the specificity the toggle asked for."""
+    g = B.__new__(B)
+    g._compare_level = "product"
+    g._compare_bare = ["Pigeon"]
+    body = "## Compare\n\nPigeon Glass Wide Neck costs $34.99.\n"
+    out, note = g._compare_level_pass(body, ["Pigeon"])
+    assert "Pigeon Glass Wide Neck" in out and not note
+
+
+def test_the_rename_pass_still_folds_a_name_the_table_did_supply():
+    g = B.__new__(B)
+    g._compare_level = "product"
+    g._compare_bare = []
+    body = "## Compare\n\nPhilips Avent Natural Response Nipple costs $29.99.\n"
+    out, _note = g._compare_level_pass(body, ["Philips Avent"])
+    assert "Philips Avent costs $29.99" in out
+
+
+# ── a transposed table gets its price cells written ──────────────────────────────────────────────
+
+def test_price_cells_are_written_when_the_options_are_COLUMNS():
+    """FU254 gave `_strip_price_columns` and `_resolve_table_punts` this; the price writer never
+    got it. On a transposed table `r[0]` is a DIMENSION name, so the ledger matched no row and not
+    one price cell was code-written — the model's price text shipped beside a model-written
+    material cell, free to describe a different product."""
+    g = B.__new__(B)
+    g._evidence_blocks = []
+    g._article_tools = ["Pigeon", "Dr. Brown's"]
+    body = ("## Compare\n\n| Dimension | Pigeon | Dr. Brown's |\n|---|---|---|\n"
+            "| Starting price | $99.00 | $99.00 |\n| Material | Glass | PPSU |\n")
+    ledger = {"Pigeon": {"value": "$34.99", "kind": "exact", "basis": "2-pack",
+                         "per_unit": "$17.50 each", "source": "yours"},
+              "Dr. Brown's": {"value": "$8.99", "kind": "exact", "source": "yours"}}
+    out, written = g._write_price_cells(body, ledger)
+    assert written >= 2, out
+    assert "$34.99" in out and "$8.99" in out and "$99.00" not in out
+    assert "| Dimension | Pigeon | Dr. Brown's |" in out, "the article's own orientation is kept"
+
+
+def test_the_ordinary_orientation_still_works():
+    g = B.__new__(B)
+    g._evidence_blocks = []
+    g._article_tools = ["Pigeon", "Dr. Brown's"]
+    body = ("## Compare\n\n| Brand | Starting price | Material |\n|---|---|---|\n"
+            "| Pigeon | $99.00 | Glass |\n| Dr. Brown's | $99.00 | PPSU |\n")
+    ledger = {"Pigeon": {"value": "$34.99", "kind": "exact", "source": "yours"},
+              "Dr. Brown's": {"value": "$8.99", "kind": "exact", "source": "yours"}}
+    out, written = g._write_price_cells(body, ledger)
+    assert written == 2 and "$34.99" in out and "$99.00" not in out
+
+
+# ── a sale price you typed ───────────────────────────────────────────────────────────────────────
+# `_price_is_sale` has two call sites and both are page-fetch paths: a price the OPERATOR typed was
+# never tested, on the reasoning that a typed figure has nothing to re-check — while the article
+# printed "regular list prices" over the whole table. Both of the reported Pigeon prices were sale
+# prices.
+
+import app as _app  # noqa: E402
+from generators.blog_gen import _format_price_value  # noqa: E402
+
+
+def test_the_operators_own_wording_marks_the_row_as_a_sale():
+    stored, dropped, _f = _app._clean_price_rows(
+        [{"brand": "Pigeon", "product": "Glass Wide Neck 5.4oz", "kind": "exact",
+          "value": "$34.99, on sale from $42.99"}],
+        known_names=["Pigeon"], subject="Thyseed")
+    assert not dropped
+    row = stored["pigeon"]["rows"][0]
+    assert row["value"] == "$34.99" and row["sale"] is True
+
+
+def test_an_ordinary_typed_price_is_not_marked():
+    stored, _d, _f = _app._clean_price_rows(
+        [{"brand": "Pigeon", "kind": "exact", "value": "$34.99", "basis": "2-pack"}],
+        known_names=["Pigeon"], subject="Thyseed")
+    assert stored["pigeon"]["rows"][0]["sale"] is False
+
+
+def test_the_cell_says_so_where_the_figure_is():
+    assert _format_price_value({"value": "$34.99", "kind": "exact", "basis": "2-pack",
+                                "per_unit": "$17.50 each", "sale": True}) == \
+        "$34.99 (2-pack, $17.50 each) (sale price)"
+    assert _format_price_value({"value": "$34.99", "kind": "exact", "basis": "2-pack",
+                                "per_unit": "$17.50 each"}) == "$34.99 (2-pack, $17.50 each)"
+
+
+def test_the_flag_survives_the_trip_into_the_ledger():
+    e = B._price_row_entry({"brand": "Pigeon", "kind": "exact", "value": "$34.99", "sale": True},
+                           "Pigeon")
+    assert e["sale"] is True and "(sale price)" in _format_price_value(e)
+
+
+def test_the_footnote_stops_claiming_every_figure_is_a_list_price():
+    g = B.__new__(B)
+    g._evidence_blocks = []
+    g._article_tools = ["Pigeon"]
+    body = ("## Compare\n\n| Brand | Starting price |\n|---|---|\n| Pigeon | $99.00 |\n"
+            "| Dr. Brown's | $99.00 |\n")
+    out, _w = g._write_price_cells(body, {"Pigeon": {"value": "$34.99", "kind": "exact",
+                                                     "source": "yours", "sale": True}})
+    assert "sale price" in out and "promotional, not list" in out

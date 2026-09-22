@@ -1934,6 +1934,11 @@ def _format_price_value(entry):
             core += f" ({per})"
         return core
 
+    def _sale(txt):
+        # FU266 — a sale price says so in the cell. The table's own footnote claims "regular list
+        # prices", and a figure that is not one has to be visible where the figure is.
+        return (txt + " (sale price)") if (txt and entry.get("sale")) else txt
+
     # FU222: a page usually states a LADDER, not a price — an intro figure and the ongoing one, or
     # several plans. Each rung was verified by its OWN quote (research.price_ladder), so printing
     # them all says what the page says; printing one silently dropped the rest. The rungs carry the
@@ -1980,11 +1985,11 @@ def _format_price_value(entry):
             core += f" ({basis}" + (f", {per}" if per else "") + ")"
         elif per:
             core += f" ({per})"
-        return core
-    return _one(val, kind, basis, per)
+        return _sale(core)
+    return _sale(_one(val, kind, basis, per))
 
 
-def _priced_competitor_names(brand, subject_name=""):
+def _priced_competitor_names(brand, subject_name="", level=""):
     """FU214 (Change 5) — the COMPETITORS the operator priced, in the order they were pasted.
 
     When this is non-empty it becomes the comparison field: nothing else is sourced, named or kept.
@@ -2006,7 +2011,24 @@ def _priced_competitor_names(brand, subject_name=""):
         if _kf_slug(nm) in seen:
             continue
         seen.add(_kf_slug(nm))
-        out.append(nm)
+        # FU266 — at PRODUCT level the compared option is the product, and the price table already
+        # holds its name. This took `ent["name"]` at both levels, which is the BRAND column, so a
+        # product-level article compared a category: an operator who typed "Philips Avent & Nipples"
+        # there got that as a column header, and FU262's collapse then rewrote the draft's correct
+        # "Philips Avent Natural Response 4oz" back down onto it. The toggle decides, as FU263
+        # established — at brand level nothing changes.
+        _p = ""
+        if str(level or "").strip().lower() == "product":
+            _rows = [r for r in (ent.get("rows") or []) if isinstance(r, dict)]
+            _prods = [str(r.get("product") or "").strip() for r in _rows]
+            _prods = [x for x in _prods if x]
+            # Only when the brand's priced rows agree on ONE product. With several, the article's
+            # own row pick decides which price is shown, and naming a different one here would put
+            # a column header and a price cell on two different products — the defect reported as
+            # "the row mixes two products".
+            if len(set(_prods)) == 1 and len(_prods) == len(_rows):
+                _p = _prods[0]
+        out.append(f"{nm} {_p}".strip() if _p and _kf_slug(_p) not in _kf_slug(nm) else nm)
     return out
 
 
@@ -5075,6 +5097,7 @@ class BlogGenerator:
         if url and not re.match(r"^https?://", url, re.I):
             url = ""
         return {"value": val, "value_max": str(row.get("value_max") or "").strip(), "kind": kind,
+                "sale": bool(row.get("sale")),   # FU266: the operator's own wording said so
                 "basis": basis, "per_unit": _per_unit_price(val, basis) if kind != "none" else "",
                 "composition": _norm_price_composition(row.get("composition")),   # FU251
                 "url": url, "source": "yours",
@@ -5258,9 +5281,18 @@ class BlogGenerator:
                             _row_e["url"] = f"https://{_d_px}"
                     ledger[tool] = _row_e
                     if _amb:
-                        print(f"[blog_gen] price-table: {tool} has several rows and none names this "
-                              f"article's product — used the first ({_row_e.get('product') or 'no product'})",
-                              flush=True)
+                        # FU266 — this reached nobody. `_amb` was assigned on one line and read on
+                        # the next, and the only trace was a line in a server log — the exact shape
+                        # FU259 wrote up as "the operator was told nothing at all". When a brand has
+                        # several priced rows and the article matches none of them, which product's
+                        # price is shown comes down to the order they were pasted.
+                        _pick = _row_e.get("product") or "no product named"
+                        _msg = (f"price-table: {tool} has several priced rows and none names this "
+                                f"article's product — the comparison shows “{_pick}”. Mark the ends "
+                                f"of the range, or leave only the row this article is about")
+                        print(f"[blog_gen] {_msg}", flush=True)
+                        self._price_pick_notes = getattr(self, "_price_pick_notes", [])
+                        self._price_pick_notes.append(_msg)
                     else:
                         print(f"[blog_gen] price-table: {tool} → {_format_price_value(_row_e) or 'no published price'}"
                               f" (yours)", flush=True)
@@ -5429,7 +5461,17 @@ class BlogGenerator:
             if len(rows) < 3:
                 out.extend(tbl)
                 continue
-            header = rows[0]
+            # FU266 — the same orientation fix FU254 gave `_strip_price_columns` and
+            # `_resolve_table_punts`, which this never got. On a transposed table `r[0]` is a
+            # DIMENSION name ("Price", "Material"), so the ledger lookup below missed every row and
+            # NOT ONE price cell was code-written — the model's own price text shipped unchecked,
+            # beside a model-written material cell, free to describe a different product. That is
+            # the reported row that mixed two Pigeon bottles.
+            header, sep, data = rows[0], rows[1], rows[2:]
+            _flip = self._table_is_transposed(header, data)
+            if _flip:
+                header, data = _transpose_table(header, data)
+                rows = [header, sep] + data
             pcols = [ci for ci in range(1, len(header)) if _is_price_column(header[ci])]
             # FU251: an "Included?" / "Medication Included in Fee?" column asks what the price
             # COVERS. FU247 created the column type and had to leave the cells to the model, because
@@ -5470,8 +5512,12 @@ class BlogGenerator:
                         continue
                     r[ci] = cell
                     written += 1
-            rebuilt = ["| " + " | ".join(r) + " |" for r in rows]
-            out.extend(rebuilt)
+            if _flip:
+                # back to the orientation the article was written in, exactly as FU254 does it
+                header, data = _transpose_table(rows[0], rows[2:])
+                sep = (rows[1] + ["---"] * len(header))[:len(header)]
+                rows = [header, sep] + data
+            out.extend("| " + " | ".join(r) + " |" for r in rows)
             done = True   # the comparison table is the FIRST table; never touch a later one
         body = "\n".join(out)
         if written:
@@ -5486,6 +5532,12 @@ class BlogGenerator:
             else:
                 note = (f"{self._PRICE_NOTE_PREFIX} from each brand's own site or a named retailer, "
                         f"checked {when}.")
+            # FU266 — a blanket "regular list prices" over a table that contains a sale price is a
+            # claim of its own, and it was printed whatever the cells said. Any cell the operator's
+            # own wording marked as a sale changes the sentence rather than sitting under it.
+            if any(isinstance(e, dict) and e.get("sale") and _format_price_value(e)
+                   for e in ledger.values()):
+                note = note.rstrip(".") + ". Figures marked “sale price” are promotional, not list."
             if (self._PRICE_NOTE_PREFIX not in body and self._PRICE_NOTE_YOURS not in body):
                 # put it directly under the table block we just wrote
                 nl = body.split("\n")
@@ -6426,7 +6478,8 @@ Return JSON only: {{"queries": ["...", "..."]}}"""
         # scopes the same way a first generation does.
         if include_pricing:
             if not (getattr(self, "_priced_names", None) or []):
-                self._priced_names = _priced_competitor_names(brand)
+                self._priced_names = _priced_competitor_names(
+                    brand, "", getattr(self, "_compare_level", ""))   # FU266
         else:
             self._priced_names = []
         name, url, block = self._brand_block(brand)
@@ -8127,7 +8180,20 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         if _px and not _guide and not _priced_s:
             # regenerate part=article/verify builds a fresh generator, so resolve the priced field
             # here too — the scope must not silently widen just because the entry point differed.
-            _priced_s = _priced_competitor_names(brand, name)
+            _priced_s = _priced_competitor_names(
+                brand, name, getattr(self, "_compare_level", ""))   # FU266
+            # FU266 — at product level, which of these we could NOT name a product for. Their price
+            # table gives a brand and either no product or several, so the compared option stays a
+            # bare brand. `_compare_level_pass` must then leave the draft's own product name alone
+            # rather than folding it back down, and the operator is told which ones and why.
+            self._compare_bare = []
+            if getattr(self, "_compare_level", "") == "product":
+                self._compare_bare = [n for n in _priced_s
+                                      if n in _priced_competitor_names(brand, name, "brand")]
+                if self._compare_bare:
+                    print(f"[blog_gen] compare-level: comparing PRODUCTS, but the price table names "
+                          f"no single product for {', '.join(self._compare_bare)} — add a Product "
+                          f"to those rows, or they stay compared as brands", flush=True)
             self._priced_names = list(_priced_s)
         if _priced_s:
             # The brands you priced are MANDATORY and lead the field; the comparison may then top up
@@ -11510,7 +11576,8 @@ you MAY assume the description will carry: "{disc}".
         self._compare_level = str(compare_level or "").strip().lower()
         if self._compare_level not in ("brand", "product"):
             self._compare_level = ""
-        self._priced_names = _priced_competitor_names(brand, (brand or {}).get("name") or "") \
+        self._priced_names = _priced_competitor_names(
+            brand, (brand or {}).get("name") or "", getattr(self, "_compare_level", "")) \
             if (include_pricing and not guide) else []
         self._priced_excluded_mine, self._priced_topups, self._priced_over_cap = [], [], []
         if self._priced_names:
@@ -15796,9 +15863,16 @@ you MAY assume the description will carry: "{disc}".
         if not body or not tools or not getattr(self, "_compare_level", ""):
             return body, ""
         pairs = []
+        _bare = {str(b).strip().lower() for b in (getattr(self, "_compare_bare", None) or [])}
         for _t in tools:
             _t = str(_t or "").strip()
             if not _t:
+                continue
+            if _t.lower() in _bare:
+                # FU266 — the operator asked for products and their table could not name one for
+                # this brand. Folding "Pigeon Glass Wide Neck 5.4oz" back to "Pigeon" here would
+                # DESTROY the specificity they asked for; the draft's own product name is the best
+                # answer available, and the warning above says what to fix.
                 continue
             # the draft's variants of THIS option: its name plus trailing qualifying words
             # [ \t]+ and NOT \s+: a newline would let the match run past the end of the paragraph
@@ -17006,6 +17080,8 @@ you MAY assume the description will carry: "{disc}".
             self._warn(article, _opn)
         # FU266 — every cited claim the fetched pages can settle, judged against those pages. The
         # deterministic checks above decide what they can; this decides what only meaning can.
+        for _ppn in (getattr(self, "_price_pick_notes", None) or []):
+            self._warn(article, _ppn)   # FU266: the row pick reaches the operator, not just stdout
         article["body_markdown"], _ccn = self._cited_claim_check(
             article["body_markdown"], self._evidence_blocks, _walled, _topic)
         if _ccn:

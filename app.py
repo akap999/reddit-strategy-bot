@@ -2416,6 +2416,7 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
     silently a new brand."""
     from generators.blog_gen import (_kf_slug, _PRICE_FIG_RE, _norm_price_kind, _fig_in_text,
                                      _norm_price_composition,   # FU251
+                                     _SALE_WORD_RE,             # FU266
                                      _is_priced, _range_in_text)
     out, dropped, flagged = {}, [], []
     now = _fu128_time.strftime("%Y-%m-%dT%H:%M:%SZ", _fu128_time.gmtime())
@@ -2516,6 +2517,16 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
                             # compared across rows and used to fill an "Included?" column — the one
                             # question a comparison table asks that the ledger could never answer.
                             "composition": _norm_price_composition(row.get("composition")),
+                            # FU266 — a price the OPERATOR typed was never tested for sale wording:
+                            # `_price_is_sale` has two call sites and both are page-fetch paths, on
+                            # the reasoning that a typed figure has nothing to re-check. Meanwhile
+                            # the article prints "regular list prices" over the whole table. This
+                            # does not reject their figure — they are the authority on it — it
+                            # records what their own words say, so the cell and the note can be
+                            # honest. Read from what they TYPED, never inferred.
+                            "sale": bool(_SALE_WORD_RE.search(
+                                str(row.get("value") or "") + " " + str(row.get("basis") or "")
+                                + " " + raw)),
                             "url": url, "raw": raw, "updated_at": now})
     return out, dropped, sorted(set(flagged))
 

@@ -562,3 +562,45 @@ def test_the_publisher_itself_is_never_a_candidate():
     body = "## Where\n\nAcme Care offers Acme Care Plus through its programme [S1].\n"
     _out, note = g._first_party_naming_check(body, _blocks(), _BRAND)
     assert "Acme Care" not in (note.split("offers")[1] if "offers" in note else "")
+
+
+# ── FU255 — the priced row an article is ABOUT ───────────────────────────────────────────────────
+# A generic token lets several of a brand's rows match ("bottle" matches every bottle it sells), and
+# the tiebreak then ranked by how LONG each product name is. A brand with a "5 oz Natural Anti-colic
+# Baby Bottle" ($28.99) and a "10 oz Transition Baby Bottle" ($32.99) priced the anti-colic one on an
+# article about the transition bottle, because its name has more words.
+
+_TWO_PRODUCTS = [
+    {"brand": "Acme", "product": "5 oz Natural Anti-colic Baby Bottle",
+     "kind": "exact", "value": "$28.99", "basis": "5 oz anti-colic"},
+    {"brand": "Acme", "product": "10 oz Transition Baby Bottle",
+     "kind": "exact", "value": "$32.99", "basis": "10 oz transition"},
+]
+
+
+def test_the_row_that_matches_BEST_wins_not_the_one_with_the_longest_name():
+    g = _gen()
+    e, _amb = g._price_row_for(_TWO_PRODUCTS, "Acme", ["transition", "toddler", "bottle"])
+    assert e["value"] == "$32.99", "the article's own product lost to a longer product name"
+    e, _amb = g._price_row_for(_TWO_PRODUCTS, "Acme", ["anti-colic", "newborn", "bottle"])
+    assert e["value"] == "$28.99"
+
+
+def test_an_equal_match_still_falls_back_to_the_more_specific_name():
+    """When both rows match the article equally the old tiebreak stands, so nothing a brand with one
+    row — or rows the article does not distinguish — sees changes."""
+    g = _gen()
+    e, _amb = g._price_row_for(_TWO_PRODUCTS, "Acme", ["bottle"])
+    assert e["value"] == "$28.99", "the longest-name fallback was lost"
+
+
+def test_one_row_is_still_used_as_is():
+    g = _gen()
+    e, amb = g._price_row_for(_TWO_PRODUCTS[:1], "Acme", ["transition"])
+    assert e["value"] == "$28.99" and not amb
+
+
+def test_no_topic_at_all_still_warns_rather_than_guessing():
+    g = _gen()
+    _e, amb = g._price_row_for(_TWO_PRODUCTS, "Acme", [])
+    assert amb, "with nothing to choose on, the operator must be told a row was picked blind"

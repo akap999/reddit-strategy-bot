@@ -4897,8 +4897,16 @@ class BlogGenerator:
         # before — every brand in the stored corpus that has one row, or rows the operator never
         # graded, is untouched by this.
         if matched:
-            best = min(cands, key=lambda e: (_RANK.get(_norm_price_composition(e.get("composition")), 4),
-                                             -len(_product_tokens(e.get("product") or ""))))
+            # FU255 — among the rows this article's words match, rank by HOW WELL each one matches
+            # before falling back to how specific its name is. A generic token lets several rows in
+            # ("bottle" matches every bottle a brand sells), and the length tiebreak then handed the
+            # cell to whichever product has the longest name rather than the one the article is
+            # about: a brand with a "5 oz Natural Anti-colic Baby Bottle" and a "10 oz Transition
+            # Baby Bottle" priced the anti-colic one on an article about the transition bottle.
+            best = min(cands, key=lambda e: (
+                _RANK.get(_norm_price_composition(e.get("composition")), 4),
+                -len(set(_product_tokens(e.get("product") or "")) & want),
+                -len(_product_tokens(e.get("product") or ""))))
         else:
             best = min(cands, key=lambda e: _RANK.get(_norm_price_composition(e.get("composition")), 4))
         # FU253 — name the SPLIT on a total. The operator asked for "From $348/month (Wegovy pen

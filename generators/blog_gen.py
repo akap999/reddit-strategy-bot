@@ -14998,9 +14998,12 @@ you MAY assume the description will carry: "{disc}".
             if cited and not any(_belongs(b, nm) for b in cited):
                 where = ", ".join(sorted({_norm_domain(b.get("url") or "") or (b.get("label") or "?")
                                           for b in cited}))
-                hits.append(f'"{sent[:60].strip()}…" names {nm} but cites {where}')
-            if len(hits) >= 4:
-                break
+                hits.append((nm.lower() == subj.lower(),
+                             f'"{sent[:60].strip()}…" names {nm} but cites {where}'))
+        # FU264 — the cap used to `break` the SCAN, not just the display. A shipped article hit four
+        # findings in its prose and the fifth, in the conclusion, was never examined: the publisher's
+        # own closing claim cited an unrelated authority's page and went unreported. The scan now
+        # runs to the end and the cap applies where it belongs, to the note.
 
         # FU232 — the same check for a COMPARISON-TABLE cell. `_prose_sentences` skips table rows, and
         # a cell names no brand of its own (the brand is the ROW, in the first column), so the prose
@@ -15010,7 +15013,7 @@ you MAY assume the description will carry: "{disc}".
         # ANOTHER compared brand, never merely "doesn't obviously name this one" — a third-party page
         # that names the brand only in its body (not its title) is a legitimate cite, and the rendered
         # Sources list carries no page text to confirm it with.
-        if len(hits) < 4:
+        if True:      # FU264: the table pass runs regardless of how many the prose found
             try:
                 from generators.blog_eval import _cell_text, _tables
             except Exception:
@@ -15041,17 +15044,20 @@ you MAY assume the description will carry: "{disc}".
                         _col = _cell_text(_hdr[_ci]) if _ci < len(_hdr) else f"column {_ci + 1}"
                         _where = ", ".join(sorted({_norm_domain(b.get("url") or "")
                                                    or (b.get("label") or "?") for b in _cited}))
-                        hits.append(f'the "{_col}" cell in the {_nm} row cites {_where} '
-                                    f'({_other[0]}\'s source)')
-                        if len(hits) >= 4:
-                            break
-                    if len(hits) >= 4:
-                        break
-                if len(hits) >= 4:
-                    break
+                        hits.append((_nm.lower() == subj.lower(),
+                                     f'the "{_col}" cell in the {_nm} row cites {_where} '
+                                     f'({_other[0]}\'s source)'))
         if not hits:
             return ""
-        return "citation-check: " + "; ".join(hits) + " — re-cite to that brand's own source or drop the specific"
+        # FU264: the cap lives HERE now — on what is printed, not on how far the scan gets — and the
+        # count says how many were found so a fifth is never silently invisible.
+        # A mis-cited claim about the PUBLISHER leads: its own closing claim resting on an unrelated
+        # authority's page is the most damaging of these and the easiest for a reader to check.
+        hits = [h[1] for h in sorted(hits, key=lambda h: not h[0])]
+        _shown = hits[:4]
+        return ("citation-check: " + "; ".join(_shown)
+                + (f"; +{len(hits) - 4} more" if len(hits) > 4 else "")
+                + " — re-cite to that brand's own source or drop the specific")
 
     # FU233 — an organisation's own NEWS surface. A press release, news-room item or conference
     # write-up published BY a body carries the quoted person's claim, not the body's position.

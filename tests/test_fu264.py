@@ -105,3 +105,55 @@ def test_a_removal_never_leaves_damage_behind():
     body = _sect("Heat", "Warming matters. " + _WRONG + " Use a bottle warmer instead.")
     out, _note = _run(body)
     assert not E.body_damage(out), "a removal left the paragraph damaged"
+
+
+# ── Step 4 — the cap stopped the SCAN, not the display ───────────────────────────────────────────
+# `_citation_attribution_check` is built for exactly the reported defect and was ACTIVE on the
+# shipped article, reporting four findings. The fifth — the publisher's own closing claim, resting
+# on an unrelated authority's page — was never examined, because the cap `break`s out of the loop.
+
+_SRC = ("## Sources\n\n- [S2] third-party · Baby Bottles and BPA – Authority.org "
+        "- <https://www.authority.example/English/x.aspx>\n")
+_BRAND = {"name": "Acme", "domain_url": "https://acme.example/", "competitor_domains": "{}"}
+_TOOLS = ["borosilicate glass", "PPSU", "polyethylene"]
+
+
+def _cite(body):
+    return BlogGenerator.__new__(BlogGenerator)._citation_attribution_check(
+        body, [], _BRAND, _TOOLS)
+
+
+def _noise(n):
+    return "".join("Polyethylene bottles contain no BPA by material chemistry number %d [S2]\n\n" % i
+                   for i in range(n))
+
+
+def test_a_fifth_finding_is_not_invisible():
+    """Four findings used to end the scan. A shipped article's conclusion was past that line."""
+    body = ("## Body\n\n" + _noise(4)
+            + "Acme's full feeding system is designed around exactly those criteria [S2]\n\n" + _SRC)
+    note = _cite(body)
+    assert "names Acme" in note, "the fifth finding was never examined"
+
+
+def test_the_publishers_own_claim_leads():
+    """A claim about the PUBLISHER resting on an unrelated authority's page is the most damaging of
+    these, and the easiest for a reader to check."""
+    body = ("## Body\n\n" + _noise(4)
+            + "Acme's full feeding system is designed around exactly those criteria [S2]\n\n" + _SRC)
+    first = _cite(body).split(";")[0]
+    assert "names Acme" in first, first
+
+
+def test_the_note_still_caps_and_says_how_many_more():
+    body = ("## Body\n\n" + _noise(6)
+            + "Acme's full feeding system is designed around exactly those criteria [S2]\n\n" + _SRC)
+    note = _cite(body)
+    assert note.count('" names ') == 4, "the NOTE still shows at most four"
+    assert "+3 more" in note, note
+
+
+def test_a_correctly_cited_claim_is_still_silent():
+    body = ("## Body\n\nAcme's own bottles are made of PPSU [S1]\n\n## Sources\n\n"
+            "- [S1] Acme - <https://acme.example/products/bottle>\n")
+    assert _cite(body) == ""

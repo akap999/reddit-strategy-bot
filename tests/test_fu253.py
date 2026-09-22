@@ -145,10 +145,13 @@ def test_rows_the_operator_never_graded_keep_the_old_behaviour(gen):
     operator entered a total for."""
     rows = [{"product": "9 oz single", "kind": "exact", "value": "$8.99"},
             {"product": "3-pack", "kind": "exact", "value": "$23.97"}]
+    # FU258 labels a multi-row brand's cell with the product that won, so these assert WHICH ROW
+    # was picked — which is what this test is about — rather than the exact rendered string.
     matched, _ = gen._price_row_for(rows, "X", _product_tokens("9 oz single bottle"))
-    assert _format_price_value(matched) == "$8.99"          # the product match still wins
+    assert matched["value"] == "$8.99"                      # the product match still wins
+    assert _format_price_value(matched) == "$8.99 (9 oz single)"
     first, amb = gen._price_row_for(rows, "X", _product_tokens("a totally unrelated topic"))
-    assert _format_price_value(first) == "$8.99"            # …and otherwise the first row, as before
+    assert first["value"] == "$8.99"                        # …and otherwise the first row, as before
     assert amb is True                                      # with the same "I could not tell" flag
 
 

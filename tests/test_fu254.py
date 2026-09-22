@@ -688,3 +688,35 @@ def test_a_hyphenated_topic_word_matches_a_hyphenated_product_name():
     assert g._price_row_for(rows, "Acme", ["anti-colic", "bottle"])[0]["value"] == "$28.99"
     # and the already-split spelling keeps working
     assert g._price_row_for(rows, "Acme", ["wide", "neck"])[0]["value"] == "$30.99"
+
+
+# ── FU258 — one brand priced per product, another by its range ───────────────────────────────────
+# Each brand's rows are read independently, so a table can carry both shapes at once. Two things
+# went wrong there: the per-product brand's cell was a bare figure with nothing saying WHICH of its
+# products it was, and nothing told the operator the column had stopped comparing like with like.
+
+_PER_PRODUCT = [
+    {"brand": "A", "product": "5 oz Anti-colic Bottle", "kind": "exact", "value": "$28.99"},
+    {"brand": "A", "product": "10 oz Transition Bottle", "kind": "exact", "value": "$32.99"},
+]
+
+
+def test_a_multi_row_brands_cell_says_which_product_it_is():
+    """The Product field decided the row and then never reached the reader — the cell rendered
+    "$28.99" beside rivals whose marked ranges name a product at each end."""
+    e, _a = _gen()._price_row_for(_PER_PRODUCT, "A", ["anti-colic", "bottle"])
+    assert _format_price_value(e) == "$28.99 (5 oz Anti-colic Bottle)"
+
+
+def test_a_single_row_brand_gains_no_label():
+    """With one row the product IS the brand's offering, so the label adds nothing and every
+    existing single-row cell in the corpus must stay exactly as it is."""
+    one = [{"brand": "D", "product": "9 oz Bottle", "kind": "exact", "value": "$15.00"}]
+    e, _a = _gen()._price_row_for(one, "D", ["bottle"])
+    assert _format_price_value(e) == "$15.00"
+
+
+def test_an_operators_own_basis_still_wins_over_the_product():
+    rows = [dict(_PER_PRODUCT[0], basis="3-pack")] + _PER_PRODUCT[1:]
+    e, _a = _gen()._price_row_for(rows, "A", ["anti-colic"])
+    assert _format_price_value(e) == "$28.99 (3-pack, $9.66 each)"

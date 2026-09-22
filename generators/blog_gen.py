@@ -3199,6 +3199,7 @@ class BlogGenerator:
         self._auth_note = ""          # FU142: a non-primary product with no official source
         self._facts_note = ""         # FU178: the canonical-fact verification tier tally
         self._price_warn = ""         # FU161: the subject's price could not be confirmed
+        self._price_shape_note = ""   # FU258: a range and a single price in one column
         self._invented_note = ""      # FU184: a competitor the model named itself
         self._budget_drop_note = ""   # FU239: a competitor the cost ceiling starved out
         self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
@@ -5030,6 +5031,15 @@ class BlogGenerator:
                     parts.append(f"{lab} {fig}".strip())
             if len(parts) > 1:
                 best = dict(best, split=parts)
+        # FU258 — a number on its own is not an answer when the brand sells several things. The
+        # PRODUCT field decided which row this is, and then never reached the reader: the cell
+        # rendered a bare "$28.99" beside rivals whose marked ranges name a product at each end, so
+        # the one figure in the row was the one nobody could identify. It stands in for a basis the
+        # operator had no reason to also type. Scoped to a brand with more than one priced row —
+        # with a single row the product IS the brand's offering and the label adds nothing.
+        if len(ents) > 1 and not (best.get("basis") or "").strip() \
+                and (best.get("product") or "").strip():
+            best = dict(best, basis=str(best["product"]).strip()[:80])
         # Ambiguous only when nothing decided it: no product matched the article AND the operator
         # gave no composition to rank by. Reporting a pick the operator's own data settled would be
         # noise in the warnings the operator actually has to read.
@@ -5152,6 +5162,23 @@ class BlogGenerator:
                 missing.append(tool)
                 print(f"[blog_gen] price-ledger: {tool} — no verified price "
                       f"({'; '.join(reasons[:2]) or 'nothing returned'})", flush=True)
+        # FU258 — a column that mixes a RANGE with a single product's price is not a like-for-like
+        # comparison, and the brand showing one number looks dearer or cheaper than it is. Nothing
+        # is changed: which shape each brand takes is the operator's own marking, and the fix is
+        # theirs (mark the others' ends too, or unmark these). Reported the way FU253 reports two
+        # compositions that cannot be ranked against each other.
+        _spans = sorted(t for t, e in ledger.items()
+                        if isinstance(e, dict) and (e.get("span_ends") or []))
+        _singles = sorted(t for t, e in ledger.items()
+                          if isinstance(e, dict) and not (e.get("span_ends") or [])
+                          and (e.get("value") or "").strip())
+        if _spans and _singles:
+            self._price_shape_note = (
+                "price comparison: %s show a RANGE across their line-up while %s show one "
+                "product's price — the column is not comparing like with like. Mark the range ends "
+                "for the others too, or unmark these, so every cell answers the same question"
+                % (", ".join(_spans[:4]), ", ".join(_singles[:4])))
+            print(f"[blog_gen] {self._price_shape_note}", flush=True)
         return ledger, missing, dirty
 
     def _save_price_entry(self, brand, tool, entry):
@@ -15842,7 +15869,8 @@ you MAY assume the description will carry: "{disc}".
 
     # FU205 (R4) — the check notes that survive a FU79 pause. Sourcing does not re-run on resume,
     # so without this every check that depends on it silently reports clean on a resumed blog.
-    _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_invented_note",
+    _CHECK_NOTES = ("_peer_note", "_auth_note", "_facts_note", "_price_warn", "_price_shape_note",
+                    "_invented_note",
                     "_table_punt_note", "_dup_table_note", "_core_mechanics", "_subject_phrase",
                     "_subject_peers",
                     "_budget_warn", "_vfact_note", "_budget_drop_note")
@@ -16414,6 +16442,9 @@ you MAY assume the description will carry: "{disc}".
         _pw = getattr(self, "_price_warn", "")
         if _pw:  # FU161: the subject's price for a product couldn't be confirmed from its own site
             self._warn(article, _pw)
+        _psn = getattr(self, "_price_shape_note", "")
+        if _psn:  # FU258: a range in the same column as a single product's price
+            self._warn(article, _psn)
         _fn = getattr(self, "_facts_note", "")
         if _fn:  # FU178: canonical brand facts that earned no citation (stated as positioning instead)
             self._warn(article, _fn)

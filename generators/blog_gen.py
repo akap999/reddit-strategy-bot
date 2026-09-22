@@ -14217,6 +14217,40 @@ you MAY assume the description will carry: "{disc}".
     # leave "offers  and " behind, so that case is reported and left alone.
     _PAREN_ONLY_MIN = 2
 
+    def _ymyl_authority_checks(self, article, ymyl):
+        """FU133/FU254 — what the page's clinical claims actually REST on.
+
+        (a) the body must CITE at least two `official ·` sources, and (b) FU254: those two may not
+        BOTH be the weakest designs in the literature. A narrative review or a commentary is
+        citable — it is not a basis for every clinical claim on a page on its own, and before the
+        design was named in the label this count was satisfiable by two of them.
+
+        Extracted from `_finalize_article` so it can be tested: an inline block inside a
+        thousand-line method is a block with no test, which is how it got here."""
+        body = (article or {}).get("body_markdown") or ""
+        _sat = body.find("\n## Sources")
+        prose = body[:_sat] if _sat > 0 else body
+        cited = weak = 0
+        for m in re.finditer(r"(?m)^- \[S(\d+)\] official ·(.*)$", body):
+            if f"[S{m.group(1)}]" not in prose:
+                continue
+            cited += 1
+            if _WEAK_DESIGN_RE.search(m.group(2) or ""):
+                weak += 1
+        if cited < 2:
+            note = (f"YMYL ({ymyl}): only {cited} official citation(s) in the body — "
+                    f"clinical claims lack authoritative grounding")
+        elif weak and weak == cited:
+            # The fix is another source, which no check can invent — so this warns.
+            note = (f"YMYL ({ymyl}): every official source cited is a commentary or narrative "
+                    f"review — add a guideline, a regulator label or a controlled study, or "
+                    f"attribute the claims to the authors rather than to the evidence")
+        else:
+            return ""
+        print(f"[blog_gen] {note}", flush=True)
+        self._warn(article, note)
+        return note
+
     def _first_party_naming_check(self, body, blocks, brand):
         """FU254 — the publisher does not offer what its own pages never name.
 
@@ -16306,28 +16340,7 @@ you MAY assume the description will carry: "{disc}".
             _body_final = article.get("body_markdown") or ""
             _sat = _body_final.find("\n## Sources")
             _prose = _body_final[:_sat] if _sat > 0 else _body_final
-            _off_cited = 0
-            _off_weak = 0            # FU254: of those, the ones whose design is the weakest
-            for _m in re.finditer(r"(?m)^- \[S(\d+)\] official ·(.*)$", _body_final):
-                if f"[S{_m.group(1)}]" in _prose:
-                    _off_cited += 1
-                    if _WEAK_DESIGN_RE.search(_m.group(2) or ""):
-                        _off_weak += 1
-            if _off_cited < 2:
-                _ynote = (f"YMYL ({ymyl}): only {_off_cited} official citation(s) in the body — "
-                          f"clinical claims lack authoritative grounding")
-                print(f"[blog_gen] {_ynote}", flush=True)
-                self._warn(article, _ynote)
-            elif _off_weak and _off_weak == _off_cited:
-                # FU254: the count was satisfiable by the weakest designs in the literature. A
-                # narrative review or a commentary IS citable — it is not a basis for every clinical
-                # claim on the page on its own. Warning: the fix is another source, which no check
-                # can invent.
-                _wnote = (f"YMYL ({ymyl}): every official source cited is a commentary or narrative "
-                          f"review — add a guideline, a regulator label or a controlled study, or "
-                          f"attribute the claims to the authors rather than to the evidence")
-                print(f"[blog_gen] {_wnote}", flush=True)
-                self._warn(article, _wnote)
+            self._ymyl_authority_checks(article, ymyl)
             if not ((brand or {}).get("reviewer_name") or "").strip():
                 _rnote = (f"YMYL ({ymyl}): no named medical reviewer — set a REAL reviewer in "
                           f"Edit Brand (never invented) so the page carries a professional byline")

@@ -238,7 +238,14 @@ def detect_uncited_table_cells(body, cap=6):
                     cells.append((_cell_text(cells_row[0]), cells_row[col]))
             filled = [(r, c) for r, c in cells if not _PLACEHOLDER_CELL_RE.match(_cell_text(c))]
             cited = [x for x in filled if _CITE_RE.search(x[1])]
-            if len(cited) < 2 or len(cited) * 2 < len(filled):
+            # FU254: "at least two cited" establishes that the column IS a sourced dimension —
+            # but a two-option comparison only HAS two cells per dimension, so the gate made the
+            # commonest shape ("A vs B") permanently unjudgeable. With exactly two, one cited and
+            # one not is the whole finding: the dimension was sourced for one option and filled in
+            # for the other.
+            if len(filled) > 2 and len(cited) < 2:
+                continue
+            if not cited or len(cited) * 2 < len(filled):
                 continue
             for r, c in filled:
                 if not _CITE_RE.search(c):

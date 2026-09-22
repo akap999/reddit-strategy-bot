@@ -48,6 +48,14 @@ def test_a_noun_that_names_the_heading_is_not_a_back_reference():
                              "This %s must be assessed by a licensed professional." % np), np
 
 
+def test_a_demonstrative_followed_by_a_verb_is_a_sentence_not_a_reference():
+    """"This measures total cholesterol" is ordinary English — the exclusion list simply lacked the
+    verb. Each of these was a real finding on a stored article before the list was widened, and the
+    heading above them names nothing the opener could be pointing at."""
+    for verb in ("measures", "covers", "checks", "assesses", "reduces", "applies", "carries"):
+        assert not _stranded("3. Fasting Lipid Panel", "This %s several markers at once." % verb), verb
+
+
 def test_a_category_noun_stands_in_for_the_subject():
     assert not _stranded("Who is it typically prescribed for?",
                          "This medication carries standard eligibility criteria for adults.")
@@ -190,6 +198,30 @@ def test_the_price_strip_takes_the_same_axis():
     assert "Monthly cost" not in out and "Delivery" in out
 
 
+def test_the_uncited_cell_detector_reads_the_right_axis():
+    """On a transposed table a "column" is an OPTION, so comparing down it compares across
+    dimensions that share no unit — and the finding came out with its axes swapped
+    ("<dimension> · <option>"). Swapped first, the comparison runs down a DIMENSION either way."""
+    md = ("| Dimension | Alpha | Beta |\n| --- | --- | --- |\n"
+          "| Throughput | 90 units [S1] | 80 units [S1] |\n"
+          "| Warranty | 5 years [S2] | 3 years |\n"
+          "| Footprint | 2 m [S3] | 3 m [S3] |\n")
+    hits = E.detect_uncited_table_cells(md, cap=9)
+    assert len(hits) == 1, [h["detail"] for h in hits]
+    # BOTH names appear either way — only their ORDER says which axis was read. Without the swap
+    # this reads "Warranty · Beta", comparing a warranty against a footprint down an option column.
+    assert hits[0]["detail"].startswith("Beta · Warranty:"), hits[0]["detail"]
+    assert "3 years" in hits[0]["detail"]
+
+
+def test_the_axis_swap_round_trips():
+    hdr = ["Dimension", "Alpha", "Beta"]
+    rows = [(["Price", "$1", "$2"], ""), (["Speed", "fast", "slow"], "")]
+    h2, r2 = E._swap_table_axes(hdr, rows)
+    assert h2 == ["Dimension", "Price", "Speed"]
+    assert [c for c, _ in r2] == [["Alpha", "$1", "fast"], ["Beta", "$2", "slow"]]
+
+
 # ── Step 2 — a claim is not an authority just because its host is ────────────────────────────────
 # _official_source_ok is a HOST test: every acceptance branch is a domain match and nothing reads the
 # path. A society's podcast, a society's trade magazine (the subdomain wildcard hands
@@ -238,14 +270,38 @@ def test_the_badge_is_refused_for_coverage_end_to_end():
 
 def test_a_weak_design_keeps_the_badge_and_carries_its_design():
     """A narrative review IS the literature — it stays citable. What changes is that the page says
-    what it is, so the YMYL rule can tell it apart from a guideline."""
-    lab = _official_label("https://example.org/articles/PMC1", "X vs Y: a narrative review")
+    what it is, so the YMYL rule can tell it apart from a guideline.
+
+    The design is asserted from the URL, not the title: a title that already contains "narrative
+    review" would make this pass whether the marker was minted or not."""
+    lab = _official_label("https://example.org/articles/a-narrative-review-of-options", "Options")
     assert lab.startswith("official ·"), "every startswith('official ·') reader must keep working"
-    assert "narrative review" in lab
+    assert lab == "official · narrative review · Options", lab
     assert _weak_study_design("A Systematic Review and Meta-Analysis") == ""
     assert _weak_study_design("Perspective: Telehealth in Practice") == "perspective"
     assert _official_label("https://x.gov/a", "Prescribing Information") == \
         "official · Prescribing Information"
+
+
+def test_a_ymyl_page_resting_only_on_commentary_says_so():
+    """The >=2-official count was satisfiable by the two weakest designs in the literature. Nothing
+    can invent the guideline it needs, so this warns — but it has to warn."""
+    gen = BlogGenerator.__new__(BlogGenerator)
+    warned = []
+    gen._warn = lambda _a, n: warned.append(n)
+    art = {"body_markdown": (
+        "## X\n\nOne option carries more risk [S1] than the other [S2].\n\n"
+        "## Sources\n\n"
+        "- [S1] official · narrative review · Options Compared — <https://e.org/a>\n"
+        "- [S2] official · perspective · Practice Today — <https://e.org/b>\n")}
+    gen._ymyl_authority_checks(art, "medical")
+    assert any("commentary or narrative review" in w for w in warned), warned
+    # and the inverse: a guideline beside a review is not the same page
+    warned.clear()
+    art2 = {"body_markdown": art["body_markdown"].replace(
+        "official · perspective · Practice Today", "official · Clinical Practice Guideline")}
+    gen._ymyl_authority_checks(art2, "medical")
+    assert not any("commentary or narrative review" in w for w in warned), warned
 
 
 # ── Step 3 — say it once, with a source ──────────────────────────────────────────────────────────
@@ -288,6 +344,40 @@ def test_the_cluster_keeps_a_shared_core():
     claim then has an EMPTY core. Complete linkage is what keeps the finding meaningful."""
     for hit in E.detect_repeated_uncited_claim(_REPEATED):
         assert len(hit["shared"]) >= 3, hit["detail"]
+
+
+# Three wordings of ONE comparison, plus a distractor that shares three words with the FIRST of
+# them and only one with what they have in common. Single linkage compares against that first
+# sentence, so the distractor welds in and drags the shared core down to a single word — and the
+# whole claim then falls below the "the core must name what is being compared" guard and vanishes.
+# Complete linkage compares against the running core, rejects the distractor, and keeps the claim.
+_TWO_CLAIMS = """## Output
+
+Option Alpha delivers greater throughput than Option Beta in every run.
+
+## Sustained load
+
+Option Gamma delivers greater sustained output than the others on test.
+
+## Long runs
+
+Option Delta delivers greater value over every measured interval on record.
+
+## Reliability
+
+Option Alpha shows lower throughput failure counts than Option Beta overall.
+"""
+
+
+def test_a_distractor_does_not_weld_itself_onto_a_claim():
+    """Single linkage reported one article as making one claim in five sections when it made three
+    in three, with an EMPTY shared core — and here it loses the finding altogether."""
+    hits = E.detect_repeated_uncited_claim(_TWO_CLAIMS)
+    assert len(hits) == 1, [h["detail"] for h in hits]
+    assert hits[0]["sections"] == [0, 1, 2], hits[0]["sections"]
+    assert "delivers" in hits[0]["shared"] and "greater" in hits[0]["shared"]
+    assert "failure" not in hits[0]["shared"], "the distractor was merged into the claim"
+    assert all(len(h["shared"]) >= 3 for h in hits), "a claim was reported with no shared core"
 
 
 def test_a_cited_claim_is_not_a_finding():

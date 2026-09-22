@@ -4909,6 +4909,34 @@ class BlogGenerator:
             return {}
 
     @staticmethod
+    def _operator_entry_for(m, tool, slug):
+        """FU261 — the operator's entry for this tool, found by the name THEY typed.
+
+        `tools` carries PRODUCT-QUALIFIED names ("<Brand> <Product Line>") while an operator types
+        the BRAND, so an exact slug lookup missed every row and every link they gave — and the run
+        then PAUSED asking for a price they had already entered, on a page that already had it.
+
+        `_is_priced` is this repo's own whole-word matcher and is already the rule for the
+        comparison field, so the same question gets the same answer here. Both directions, because
+        either side can be the longer name; the most specific stored name wins when several match,
+        so a brand entry never beats that brand's own product-line entry."""
+        if not isinstance(m, dict) or not m:
+            return {}
+        hit = m.get(slug)
+        if hit:
+            return hit
+        best = {}
+        best_len = -1
+        for k, v in m.items():
+            nm = str((v or {}).get("name") or k).strip()
+            if not nm:
+                continue
+            if _is_priced(tool, [nm]) or _is_priced(nm, [tool]):
+                if len(nm) > best_len:
+                    best, best_len = (v or {}), len(nm)
+        return best
+
+    @staticmethod
     def _price_row_entry(row, name):
         """FU214: one pasted row -> a ledger entry, `source: "yours"` (the operator's own value, which
         the FU213 precedence already treats as authoritative and never expires)."""
@@ -5070,12 +5098,13 @@ class BlogGenerator:
         for tool in tools:
             slug = _kf_slug(tool)
             entry = ((cfacts.get(slug) or {}).get("price")) if isinstance(cfacts.get(slug), dict) else None
-            urls = [str(u).strip() for u in ((links_map.get(slug) or {}).get("urls") or [])
+            urls = [str(u).strip() for u in
+                    (self._operator_entry_for(links_map, tool, slug).get("urls") or [])
                     if str(u).strip()]
             forced = refresh_all or slug in _refresh
             # FU214 — a pasted row is the operator speaking: it outranks the cache, the link and any
             # search, and it is never re-checked (nothing to re-check — you typed it).
-            _rows = (table_map.get(slug) or {}).get("rows") or []
+            _rows = self._operator_entry_for(table_map, tool, slug).get("rows") or []
             if _rows:
                 _row_e, _amb = self._price_row_for(_rows, tool, topic_tokens, subject)
                 if _row_e:

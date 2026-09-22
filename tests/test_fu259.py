@@ -158,3 +158,59 @@ def test_a_brand_whose_rows_all_die_loses_its_stale_entry():
                           [{"brand": "Thyseed", "kind": "exact", "value": "cheap"}])
     assert "thyseed" not in _json.loads(db.get_brand(1)["price_table"])
     db.close()
+
+
+# ── FU261 — the price you entered, found by the name you typed ───────────────────────────────────
+# `tools` carries PRODUCT-QUALIFIED competitor names ("<Brand> <Product Line>") while an operator
+# types the BRAND. The ledger looked its rows up by exact slug, so "Dr. Brown's Anti-Colic Options+"
+# never found the "Dr. Brown's" row — and the run PAUSED asking for a price already in the table.
+
+_TABLE_MAP = {
+    "dr-brown-s": {"name": "Dr. Brown's",
+                   "rows": [{"brand": "Dr. Brown's", "kind": "exact", "value": "$9.99"}]},
+    "philips-avent": {"name": "Philips Avent",
+                      "rows": [{"brand": "Philips Avent", "kind": "exact", "value": "$12.95"}]},
+}
+
+
+def _entry(m, tool):
+    from generators.blog_gen import _kf_slug
+    return BlogGenerator._operator_entry_for(m, tool, _kf_slug(tool))
+
+
+def test_a_product_qualified_tool_finds_the_brand_row_you_typed():
+    assert [r["value"] for r in _entry(_TABLE_MAP, "Dr. Brown's Anti-Colic Options+")["rows"]] \
+        == ["$9.99"]
+    assert [r["value"] for r in _entry(_TABLE_MAP, "Philips Avent Natural Response")["rows"]] \
+        == ["$12.95"]
+
+
+def test_an_exact_name_still_matches_first():
+    assert [r["value"] for r in _entry(_TABLE_MAP, "Dr. Brown's")["rows"]] == ["$9.99"]
+
+
+def test_a_brand_you_never_priced_is_still_not_found():
+    """Otherwise the pause that asks for a real gap would stop firing."""
+    assert _entry(_TABLE_MAP, "Comotomo") == {}
+    assert _entry({}, "Anything") == {}
+
+
+def test_the_most_specific_stored_name_wins():
+    m = {"a": {"name": "Dr. Brown's", "rows": [{"value": "$9.99"}]},
+         "b": {"name": "Dr. Brown's Options+", "rows": [{"value": "$14.99"}]}}
+    assert [r["value"] for r in _entry(m, "Dr. Brown's Options+ 4oz")["rows"]] == ["$14.99"]
+
+
+def test_a_short_name_does_not_swallow_a_different_brand():
+    """The whole-word rule the comparison field already uses: "Ro" never matches "Rory"."""
+    m = {"ro": {"name": "Ro", "rows": [{"value": "$349"}]}}
+    assert _entry(m, "Rory") == {}
+    assert _entry(m, "Rocket Health") == {}
+    assert [r["value"] for r in _entry(m, "Ro")["rows"]] == ["$349"]
+
+
+def test_the_same_resolver_serves_the_price_LINKS():
+    """The links map had the identical exact-slug lookup, so a page you pasted was ignored too."""
+    links = {"dr-brown-s": {"name": "Dr. Brown's", "urls": ["https://drbrowns.example/p"]}}
+    assert _entry(links, "Dr. Brown's Anti-Colic Options+")["urls"] == \
+        ["https://drbrowns.example/p"]

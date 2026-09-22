@@ -172,7 +172,10 @@ DIRTY = ("# Seed\n\n## Quick answer\nAcme ships fast — and costs less [S1].\n\
 
 def test_finalize_article_scrubs_the_body_and_the_meta_fields():
     gen = _g(call_handler=lambda p: {"linkedin_text": "post"})
-    gen._evidence_blocks = [{"label": "Acme", "url": "https://acme.com", "text": "t"}]
+    # FU266: the probe now opens EVERY cited source, so a block has to carry real page text or
+    # [S1] is stripped as unreachable. This test is about scrubbing, not about sourcing.
+    gen._evidence_blocks = [{"label": "Acme", "url": "https://acme.com",
+                             "text": "Acme ships fast and costs less. " * 30}]
     art = {"title": "seed", "meta_description": "Acme ships fast — and costs less",
            "meta_title": "Acme — the fit", "keywords": [], "body_markdown": DIRTY}
     out = gen._finalize_article(BRAND, "seed", art, DIRTY)

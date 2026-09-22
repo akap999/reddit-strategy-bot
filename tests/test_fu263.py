@@ -244,8 +244,11 @@ def test_the_probe_gate_fetches_a_page_an_org_claim_cites():
             "using paced bottle feeding to reduce air ingestion. [S1]\n")
     assert g._probe_cited_sources(body, blocks) == {1}, \
         "an organisation's position is a specific — its page has to be read"
-    # …and a sentence that is neither a figure nor an attribution is still not probed
-    assert g._probe_cited_sources("## H\n\nBottles come in several shapes. [S1]\n", blocks) == set()
+    # FU266 — and so is a sentence that is neither a figure nor an attribution. The trigger set
+    # gated the FETCH as well as the check, so a page cited only by ordinary prose was never opened
+    # and could never be found unreachable. On the reported article that left 2 of 20 cited sources
+    # unread, both of them holding a search snippet rather than a page.
+    assert g._probe_cited_sources("## H\n\nBottles come in several shapes. [S1]\n", blocks) == {1}
 
 
 def test_a_stem_is_matched_not_a_bare_prefix():

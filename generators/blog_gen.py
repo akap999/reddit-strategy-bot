@@ -908,6 +908,92 @@ _CADENCE_PATTERNS = [
 # rewrite gate keeps `_LOADBEARING_NUM_RE` byte-identical: longer atoms make a check sharper and a
 # rewrite gate stricter, and FU169/174/181 are three rounds of evidence that an over-strict gate
 # fails every rewrite and ships the watermarked body.
+# ── FU266: split on a sentence end, not on every full stop ───────────────────────────────────────
+# Every splitter in this file was `_split_sentences(…)`, which treats the dot in "Dr.
+# Brown's" as a sentence boundary. A removal pass cut "…simpler and cheaper than Dr." out of a
+# shipped article and left "Brown's." stranded on its own line — and `body_damage` could not see the
+# fragment, so the guard that is supposed to refuse a damaging removal approved it.
+#
+# `_SENT_BODY` (FU247) guards a dot with NO following whitespace, which saves domains and decimals
+# and does nothing for "Dr. ". This is the other half.
+_SENT_ABBREV = frozenset("""dr mr mrs ms prof st inc ltd co corp vs etc approx no nos fig figs
+jr sr ave rd mt dept est vol ed pp min max sec art ch pt col gen sen rep gov univ assn bros
+jan feb mar apr jun jul aug sep sept oct nov dec mon tue wed thu fri sat sun""".split())
+_SENT_END_RE = re.compile(r"([.!?])([\"\'\u201d\u2019\)\]]*)(\s+)")
+
+
+def _abbrev_dot(text, i):
+    """True when the '.' at text[i] ends an abbreviation or an initial, not a sentence."""
+    j = i - 1
+    while j >= 0 and (text[j].isalpha() or text[j] == "."):
+        j -= 1
+    tok = text[j + 1:i]
+    if not tok:
+        return False
+    flat = tok.replace(".", "").lower()
+    if flat in _SENT_ABBREV:
+        return True
+    if "." in tok and len(flat) <= 3:
+        return True          # a dotted initialism: "U.S.", "e.g.", "i.e."
+    if len(flat) == 1 and flat.isalpha():
+        # A single letter is an initial only when it sits in a RUN of them — "J. K. Rowling" — so
+        # look both ways. Alone it is far more often a sentence end ("…scored grade A. The next…"),
+        # and under-splitting is not free: it makes a removal take the following sentence too.
+        return bool(re.match(r"\s*[A-Za-z]\.", text[i + 1:i + 5])
+                    or re.search(r"\b[A-Za-z]\.\s*$", text[max(0, j - 4):j + 1]))
+    return False
+
+
+def _looks_walled_text(text):
+    """FU266 — is this stored block text a bot wall rather than the page?
+
+    `_probe_cited_sources` skipped any block already holding 400+ characters, on the reasoning that
+    we held the page. A challenge or consent interstitial served with status 200 is real text of
+    real length, so holding one counted as holding the page and the source was never re-read. The
+    wall wordings are the ones the fetch ladder already recognises — imported rather than restated,
+    so a marker added there is honoured here too.
+    """
+    if not text:
+        return True
+    try:
+        from generators.brand_enrichment import _CHALLENGE_TEXT_MARKERS as _M
+    except Exception:
+        return False
+    head = text[:2000].lower()
+    return any(m in head for m in _M)
+
+
+def _split_sentences_keep(text):
+    """FU266 — `_split_sentences`, but alternating [sentence, separator, sentence, …] so a caller
+    that rewrites in place can rejoin the line byte-for-byte."""
+    s = text or ""
+    out, start = [], 0
+    for m in _SENT_END_RE.finditer(s):
+        if _abbrev_dot(s, m.start(1)):
+            continue
+        out.append(s[start:m.end(2)])
+        out.append(m.group(3))
+        start = m.end(3)
+    out.append(s[start:])
+    return out
+
+
+def _split_sentences(text):
+    r"""The abbreviation-safe replacement for `_split_sentences(text)`.
+
+    Same output shape — pieces with the separating whitespace consumed — so a caller that already
+    strips each piece is unchanged except that "Dr. Brown's" now stays in one piece."""
+    s = text or ""
+    out, start = [], 0
+    for m in _SENT_END_RE.finditer(s):
+        if _abbrev_dot(s, m.start(1)):
+            continue
+        out.append(s[start:m.end(2)])
+        start = m.end(3)
+    out.append(s[start:])
+    return [p for p in out if p]
+
+
 _CLAIM_UNIT = (r"(?:%|mg|mcg|µg|ug|ng|mL|ml|kg|grams?|lbs?|pounds?|"
                r"units?|iu|mmol|meq|days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?|"
                r"seats?|users?|licen[sc]es?|members?|patients?|participants?|"
@@ -3646,7 +3732,7 @@ class BlogGenerator:
                 units.append((ln, _head + " " + _thead))
                 continue
             _thead = ""
-            units.extend((u, _head) for u in re.split(r"(?<=[.!?])\s+", ln))
+            units.extend((u, _head) for u in _split_sentences(ln))
         # FU254 — the figure has to answer THIS question. A comparative seed was satisfied by any
         # measured figure anywhere on the page from a non-own source, including a price in a
         # paragraph about something else, so an article could compare two things, state not one
@@ -5724,7 +5810,7 @@ class BlogGenerator:
                 if not re.match(r"^\|[\s:|-]+\|?$", st):
                     units.append(st)
             else:
-                units += [u for u in re.split(r"(?<=[.!?])\s+", st) if u.strip()]
+                units += [u for u in _split_sentences(st) if u.strip()]
         owner = {}
         for e in ents:
             for k in _vfact_tokens(e):
@@ -10659,7 +10745,7 @@ Rules:
         txt = re.sub(r"(?m)^\s{0,3}#{1,6}\s+.*$", " ", txt)
         txt = re.sub(r"[*_`>#|]+", " ", txt)
         out = []
-        for s in re.split(r"(?<=[.!?])\s+", txt):
+        for s in _split_sentences(txt):
             s = " ".join(s.split())
             if len(s.split()) >= 4:
                 out.append(s)
@@ -11553,7 +11639,7 @@ you MAY assume the description will carry: "{disc}".
             keep.append(l)
         prose = re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
         prose = re.sub(r"[\"\u201c\u201d][^\"\u201c\u201d]{12,}?[\"\u201c\u201d]", " ", prose)  # drop quoted spans
-        sents = re.split(r"(?<=[.!?])\s+", prose)          # drop deliberately-preserved clinical-directive sentences
+        sents = _split_sentences(prose)          # drop deliberately-preserved clinical-directive sentences
         # FU172 guard: only a real SENTENCE is exempt. Without a length bound an UNPUNCTUATED block counts
         # as one "sentence", so a single directive phrase could exempt an ENTIRE body from measurement.
         return " ".join(x for x in sents
@@ -12203,7 +12289,7 @@ you MAY assume the description will carry: "{disc}".
             if not st or st.startswith("#") or st.startswith("|") or st.startswith(">") \
                     or re.fullmatch(r"\*\*[^*].*\*\*", st):
                 continue
-            for sent in re.split(r"(?<=[.!?])\s+", line):
+            for sent in _split_sentences(line):
                 sent = sent.strip()
                 if len(sent.split()) >= 5:
                     out.append(sent)
@@ -13437,7 +13523,7 @@ you MAY assume the description will carry: "{disc}".
                 in_src = False
             if in_src or not st or st.startswith("|") or st.startswith("#") or st.startswith(">"):
                 continue
-            for sent in re.split(r"(?<=[.!?])\s+", st):
+            for sent in _split_sentences(st):
                 if sent.strip():
                     out.append(sent.strip())
         return out
@@ -13565,28 +13651,34 @@ you MAY assume the description will carry: "{disc}".
         walled = set()
         if not body or not blocks:
             return walled
-        # Only the sources a SPECIFIC rests on. A citation backing a general statement needs no page
-        # read — its snippet is honest evidence that the source exists and is on topic — and probing
-        # every citation would spend a fetch on each one to learn nothing. This is also what keeps
-        # the check off ordinary prose: no figure and no attributed label, no probe, no verdict.
+        # FU266 — EVERY cited source, not only the ones a "specific" rests on.
+        #
+        # This used to queue a source only when its sentence carried a number, an attributed label
+        # or an organisation's position. FU263 had already widened it once, by adding the third
+        # pattern, with the note that without it "the cited page was never fetched at all". Adding
+        # one pattern per audit is not a rule. Measured on the reported article: 35 of 64 cited
+        # sentences matched none of the three, 2 of 20 cited sources were never opened, and what is
+        # stored for those two is a ~230-character search SNIPPET — so nothing could ever be checked
+        # against them and both shipped in the Sources list.
+        #
+        # The operator's rule is that a page unreachable by every method is not a source at all, and
+        # that cannot be applied to a page nobody tried to open. `_SOURCE_PROBE_MAX` still bounds
+        # the cost, and a citation is far rarer than a sentence.
         cited = []
         for _ln in (body or "").split("\n"):
             if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", _ln):
                 break
-            for _unit in ([_ln] if not _ln.lstrip().startswith("|") else _ln.split("|")):
-                # FU263: an ORGANISATION'S POSITION is a specific too. Without this the cited page
-                # was never fetched at all, so the claim could not be checked even in principle —
-                # four claims attributing guidance to a body shipped against a page that covers
-                # none of it.
-                if not (_CLAIM_NUM_RE.search(_unit) or self._ATTRIB_CLAIM_RE.search(_unit)
-                        or self._ORG_SAYS_RE.search(_unit)):
-                    continue
-                for _x in re.findall(r"\[S(\d+)\]", _unit):
-                    if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
-                        cited.append(int(_x))
+            for _x in re.findall(r"\[S(\d+)\]", _ln):
+                if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
+                    cited.append(int(_x))
         for n in cited[:self._SOURCE_PROBE_MAX]:
             bl = blocks[n - 1]
-            if len((bl.get("text") or "")) >= self._PAGE_TEXT_MIN:
+            _held = bl.get("text") or ""
+            # FU266 — "long enough" is not "read". A bot wall or consent page served with status
+            # 200 is real text of real length, and holding it counted as holding the page, so the
+            # source was never re-read and never classed unreachable. Length alone cannot say;
+            # the wall's own wording can.
+            if len(_held) >= self._PAGE_TEXT_MIN and not _looks_walled_text(_held):
                 continue                      # we already hold the page
             url = (bl.get("url") or "").strip()
             if not url:
@@ -13627,9 +13719,18 @@ you MAY assume the description will carry: "{disc}".
                        r"warns?|cautions?|emphasi[sz]es?|specifies?|stipulates?|mandates?")
     _ORG_SAYS_RE = re.compile(
         r"(?:^|(?<=[\s(\"']))(?:[Tt]he\s+)?"
-        r"((?:[A-Z][A-Za-z.&'\u2019-]{2,}\s+){1,4}[A-Z][A-Za-z.&'\u2019-]{2,}"
+        # FU266 — a lowercase connective inside the NAME. "The American Academy of Pediatrics"
+        # broke the capitalised run on "of", so the spelled-out form of an organisation — the way a
+        # first mention is normally written — matched nothing, and the page was never even fetched.
+        # `_ORG_POSITION_RE` already allows exactly these three words; this borrows that.
+        r"((?:[A-Z][A-Za-z.&'\u2019-]{2,}\s+"
+        # "and" only when TWO more capitalised words follow, so "Food and Drug Administration" is
+        # one name while "ChatGPT and Perplexity" stays two entities — which is the jump the
+        # lowercase-filler rule was written to prevent.
+        r"(?:(?:of|for|the)\s+|and\s+(?=[A-Z][A-Za-z.&'\u2019-]{2,}\s+[A-Z]))?){1,4}"
+        r"[A-Z][A-Za-z.&'\u2019-]{2,}"
         r"|(?<=[Tt]he )[A-Z]{2,6})"
-        r"(?:'s|\u2019s)?\s+(?:[a-z][a-z-]*\s+){0,4}?"
+        r"(?:'s|\u2019s)?(?:\s*\([A-Z]{2,6}\))?\s+(?:[a-z][a-z-]*\s+){0,4}?"
         r"(?:" + _ORG_SAYS_VERBS + r")\s+(?:that\s+)?(.{10,200})")
     # Words that describe any claim and so cannot tell one page from another.
     _ORG_SAYS_STOP = frozenset("""should would could their there these those which while about after
@@ -14950,7 +15051,7 @@ you MAY assume the description will carry: "{disc}".
                 new = "|".join(_fix(p, cell=True) if i not in (0, len(parts) - 1) else p
                                for i, p in enumerate(parts))
             else:                                          # prose: each SENTENCE is a claim
-                bits = re.split(r"((?<=[.!?])\s+)", line)
+                bits = _split_sentences_keep(line)   # FU266: "Dr. Brown's" is one sentence
                 new = "".join(b if i % 2 else _fix(b) for i, b in enumerate(bits))
             changed = changed or new != line
             lines.append(new)
@@ -15295,7 +15396,7 @@ you MAY assume the description will carry: "{disc}".
                     and not re.fullmatch(r"\*\*[^*].*\*\*", ln.strip())]
             if not keep:
                 continue
-            for sent in re.split(r"(?<=[.!?])\s+", " ".join(keep)):
+            for sent in _split_sentences(" ".join(keep)):
                 sent = sent.strip()
                 if len(sent.split()) >= 5:
                     out.append(sent)
@@ -15619,7 +15720,7 @@ you MAY assume the description will carry: "{disc}".
         for li, ln in enumerate(lines):
             if ln.lstrip().startswith(("#", "|", "- [S")):
                 continue                      # a heading, a table row, the Sources list
-            for sent in re.split(r"(?<=[.!?])\s+", ln):
+            for sent in _split_sentences(ln):
                 if not (self._PRICE_RANK_SURE_RE.search(sent)
                         or (self._PRICE_RANK_CTX_RE.search(sent)
                             and self._PRICE_CTX_RE.search(sent))):
@@ -16188,7 +16289,7 @@ you MAY assume the description will carry: "{disc}".
             return ""
         live = {u for u in (getattr(self, "_sibling_urls", None) or set())}
         bad = []
-        for sent in re.split(r"(?<=[.!?])\s+", body):
+        for sent in _split_sentences(body):
             if not self._SELF_REF_RE.search(sent):
                 continue
             # only our OWN pages dangle — a third party's guide is someone else's problem
@@ -17473,7 +17574,7 @@ you MAY assume the description will carry: "{disc}".
                                "— it will break when the article is published",
                                "detail": u[:80]})
                 break
-        for _sent in re.split(r"(?<=[.!?])\s+", re.sub(r"(?m)^\s*\|.*$", "", prose)):
+        for _sent in _split_sentences(re.sub(r"(?m)^\s*\|.*$", "", prose)):
             if "](" in _sent or "<http" in _sent:
                 continue
             if _VF_LINKPROMISE_RE.search(_sent):
@@ -17486,7 +17587,7 @@ you MAY assume the description will carry: "{disc}".
         #    page its credibility. Table rows are excluded (a repeated cell is normal).
         _sent_seen, _dupe = {}, None
         _flat = re.sub(r"(?m)^\s*(?:\||#{1,6}\s).*$", "", prose)
-        for _sent in re.split(r"(?<=[.!?])\s+", _flat):
+        for _sent in _split_sentences(_flat):
             _k = " ".join(re.sub(r"\[S\d+\]", "", _sent).split()).strip().lower()
             if len(_k) < 45:
                 continue
@@ -17933,7 +18034,7 @@ you MAY assume the description will carry: "{disc}".
             s = ln.strip()
             if not s or s.startswith("#"):
                 continue
-            units = [s] if s.startswith("|") else [u for u in re.split(r"(?<=[.!?])\s+", s) if u.strip()]
+            units = [s] if s.startswith("|") else [u for u in _split_sentences(s) if u.strip()]
             for u in units:
                 lu = u.lower()
                 if core in re.sub(r"[\s,]", "", lu) and tok in lu:

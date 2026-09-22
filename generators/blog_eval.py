@@ -809,6 +809,44 @@ def detect_price_question_unanswered(body, cap=4):
     return hits
 
 
+# ── FU266: the stump a removal leaves when it cuts mid-name ─────────────────────────────────────
+# A pass removed "…simpler and cheaper than Dr." — the splitter treated the dot in "Dr. Brown's" as
+# a sentence end — and left a paragraph reading exactly `Brown's.` in a shipped article. Every
+# detector above looked straight past it: `stranded-reference` skips anything under four words and
+# only reads a section's FIRST paragraph, and `trailing-orphan` skips anything ending in a full
+# stop. So `body_damage` returned [] and the guard committed the cut instead of widening it.
+#
+# The shape is narrow on purpose: a whole paragraph that is a handful of words with NO verb-like
+# word in it, ending in a full stop. A real short paragraph ("Prices vary by retailer.") has a verb;
+# a heading does not end in a full stop; a list item is not a paragraph of its own here.
+_FRAGMENT_MAX_WORDS = 4
+_VERBISH_RE = re.compile(
+    r"\b(?:is|are|was|were|be|been|being|has|have|had|do|does|did|can|could|may|might|must|"
+    r"shall|should|will|would|see|use|uses|used|costs?|comes?|goes?|makes?|takes?|needs?|"
+    r"\w{3,}(?:s|ed|ing))\b", re.I)
+
+
+def detect_orphan_fragment(body, cap=6):
+    """A body paragraph that is a sentence fragment — the residue of a removal that cut mid-name."""
+    hits = []
+    for _head, _lvl, pars in _sections(body):
+        for par in pars:
+            st = par.strip()
+            if not st or not st.endswith((".", "!", "?")):
+                continue
+            plain = re.sub(r"\[S\d+\]|[*_`]", "", st).strip()
+            words = plain.split()
+            if not words or len(words) > _FRAGMENT_MAX_WORDS:
+                continue
+            if _VERBISH_RE.search(plain):
+                continue          # short but a sentence: "Prices vary by retailer."
+            hits.append({"check": "orphan-fragment",
+                         "detail": f'a paragraph reading only "{plain[:60]}"'})
+            if len(hits) >= cap:
+                return hits
+    return hits
+
+
 def body_damage(body):
     """Every mutilation detector at once. The removal passes call this BEFORE and AFTER a removal:
     a removal that raises the count is widened to the whole paragraph, or refused. Cheap, no
@@ -816,7 +854,7 @@ def body_damage(body):
     return (detect_blank_source_cells(body) + detect_stranded_reference(body)
             + detect_broken_join(body) + detect_duplicated_paragraph(body)
             + detect_repeated_sentence(body) + detect_stub_answer(body)
-            + detect_trailing_orphan(body))
+            + detect_trailing_orphan(body) + detect_orphan_fragment(body))
 
 
 # A column that DESCRIBES what a price covers. `_YESNO_DIM_RE` in blog_gen needs a trailing "?", so

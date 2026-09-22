@@ -123,12 +123,17 @@ def test_the_sources_section_is_never_edited():
 
 
 # ── only sources carrying a SPECIFIC are probed ──────────────────────────────────────────────────
-def test_a_citation_backing_a_general_statement_is_not_probed():
-    """Its snippet is honest evidence that the source exists and is on topic. Probing every citation
-    would spend a fetch per source to learn nothing — and would drag the network into unit tests."""
-    g = _gen({})
+def test_every_cited_source_is_probed_including_a_general_statement():
+    """FU266 — this used to assert the opposite: a citation backing a general statement was NOT
+    probed, on the reasoning that its snippet proves the source exists and is on topic.
+
+    Measured on a reported article, that reasoning cost 2 of 20 cited sources a read, and what was
+    stored for them was a ~230-character search snippet. The operator's rule is that a page
+    unreachable by every method is not a source at all — and that cannot be applied to a page
+    nobody tried to open. `[S2]` here 404s, so probing it is what finds that out."""
+    g = _gen(PAGES)
     body = "Semaglutide is prescribed under medical supervision [S1][S2].\n"
-    assert g._probe_cited_sources(body, BLOCKS) == set()
+    assert g._probe_cited_sources(body, BLOCKS) == {2}, "the 404 is found; the readable one is not"
 
 
 # ── the host wall: one challenge is a strike, not a conviction ────────────────────────────────────

@@ -597,6 +597,11 @@ def test_the_repair_gate_refuses_a_respaced_number_but_lets_the_legal_name_go():
 def test_the_finished_blog_carries_the_exact_values_and_adds_nothing():
     blocks = _blocks_after_gather()
     n = next(i for i, x in enumerate(blocks, 1) if x["label"] == "fact · Revive Kitchen & Bath · buildzoom.com")
+    # FU266: every cited source is opened now, so a block has to carry real page text or its
+    # markers are stripped as unreachable and the source drops out of the list. This test is about
+    # the values the finished blog carries, not about sourcing.
+    for _b in blocks:
+        _b["text"] = (_b.get("text") or "") + " Revive Kitchen & Bath holds CBC1264856. " * 20
     body = ("*[Add author byline before publishing]*\n\n# kitchen remodel contractors in Tampa\n\n"
             f"## Quick answer\n\nCMK Construction (CGC1516665) and Revive Kitchen & Bath [S{n}] both "
             "remodel kitchens.\n\n## Licences\n\nRevive Kitchen & Bath holds CBC1264856 "

@@ -2563,9 +2563,16 @@ def _save_price_table(db, brand, rows, subject=""):
         pass
     clean, dropped, flagged = _clean_price_rows(rows, known_names=known,
                                                 subject=(brand.get("name") or ""))
-    # the SUBJECT's own rows are canonical pricing, not a competitor row
+    # The SUBJECT's own rows are canonical pricing — and FU260: they are ALSO kept in price_table,
+    # rather than popped out of it. Popping them meant everything built on that column skipped the
+    # publisher's own brand: `_price_span_block` could not state ITS range, so marking the cheapest
+    # and dearest thing the publisher sells did nothing at all, and the rows vanished from the price
+    # table UI after saving because `_blogPriceRowsFromBrand` reads that column too.
+    #
+    # Nothing downstream mistakes it for a competitor: `_priced_competitor_names` skips the subject
+    # slug by name, and `_ensure_price_ledger` only ever looks up the brands in `tools`.
     subj_slug = _kf_slug(brand.get("name") or "")
-    subj = clean.pop(subj_slug, None) if subj_slug else None
+    subj = clean.get(subj_slug) if subj_slug else None
     canonical = 0
     if subj:
         _dom_b = re.sub(r"^https?://", "", (brand.get("domain_url") or "").strip(),
@@ -2596,7 +2603,7 @@ def _save_price_table(db, brand, rows, subject=""):
     sent = {_kf_slug(str((r or {}).get("brand") or (r or {}).get("name") or ""))
             for r in (rows or []) if isinstance(r, dict)}
     for sl in sent:
-        if sl and sl not in clean and sl != subj_slug:
+        if sl and sl not in clean:
             cur.pop(sl, None)
     cur.update(clean)
     blob = json.dumps(cur)

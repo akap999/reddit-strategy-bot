@@ -70,3 +70,91 @@ def test_the_drop_reasons_reach_the_operator_verbatim():
             f"came from automatic sourcing instead")
     assert "2 row(s) you entered were NOT saved" in note
     assert "not a price figure" in note and "no brand name" in note
+
+
+# ── FU260 — the publisher's own brand is in its own price table ──────────────────────────────────
+# `_save_price_table` popped the subject's rows OUT of price_table and routed them to key_facts, so
+# everything built on that column skipped the publisher's own brand: it could not have a marked
+# range, and its rows disappeared from the price-table UI after saving because the UI reads that
+# same column. They are now kept in BOTH — canonical pricing AND the table.
+
+import json as _json  # noqa: E402
+
+from generators.blog_gen import (  # noqa: E402
+    BlogGenerator, _priced_competitor_names, _format_price_value)
+
+_SUBJECT_SPAN = [
+    {"brand": "Thyseed", "product": "5 oz PPSU Anti-colic Bottle", "kind": "span", "value": "28.99"},
+    {"brand": "Thyseed", "product": "10 oz PPSU Transition Bottle", "kind": "span", "value": "32.99"},
+    {"brand": "Pigeon", "product": "5.4 oz 2-pack", "kind": "exact", "value": "$42.99"},
+]
+
+
+# These go through `_save_price_table`, NOT `_clean_price_rows`: the subject was popped out AFTER
+# cleaning, so a test of the cleaner passes whether the pop is there or not.
+import os as _os  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+
+from db import Database  # noqa: E402
+
+
+def _seeded_db():
+    d = _tempfile.mkdtemp()
+    db = Database(_os.path.join(d, "t.db"))
+    db.initialize()
+    sid = db.create_subreddit("s", "d")
+    db.conn.execute("INSERT INTO brands (subreddit_id,name,context) VALUES (?,?,?)",
+                    (sid, "Thyseed", "c"))
+    db.conn.commit()
+    return db
+
+
+def _saved(rows):
+    db = _seeded_db()
+    app._save_price_table(db, db.get_brand(1), rows)
+    brand = db.get_brand(1)
+    db.close()
+    return brand
+
+
+def test_the_subjects_rows_stay_in_the_price_table():
+    brand = _saved(_SUBJECT_SPAN)
+    pt = _json.loads(brand["price_table"])
+    assert "thyseed" in pt and "pigeon" in pt
+    assert [r["value"] for r in pt["thyseed"]["rows"]] == ["$28.99", "$32.99"]
+
+
+def test_the_subjects_rows_still_reach_canonical_pricing():
+    """Both, not either: the canonical store is what a per-product article prices from."""
+    brand = _saved(_SUBJECT_SPAN)
+    vals = {i["product"]: i["value"] for i in
+            (_json.loads(brand["key_facts"]).get("pricing") or {}).get("items", [])}
+    assert vals["5 oz PPSU Anti-colic Bottle"] == "$28.99 (5 oz PPSU Anti-colic Bottle)"
+    assert vals["10 oz PPSU Transition Bottle"] == "$32.99 (10 oz PPSU Transition Bottle)"
+
+
+def test_the_subject_is_still_not_a_competitor():
+    """What the pop was really protecting. The competitor field excludes it by NAME, so keeping its
+    rows in the table cannot crowd the comparison."""
+    assert _priced_competitor_names(_saved(_SUBJECT_SPAN)) == ["Pigeon"]
+
+
+def test_the_publisher_can_now_have_a_marked_RANGE():
+    """The whole point: marking the cheapest and dearest thing the PUBLISHER sells did nothing at
+    all, because the rows never reached the column the range is built from."""
+    blocks = BlogGenerator._price_span_block(_saved(_SUBJECT_SPAN))
+    assert len(blocks) == 1, blocks
+    assert ("Thyseed: From $28.99 (5 oz PPSU Anti-colic Bottle) to "
+            "$32.99 (10 oz PPSU Transition Bottle)") in blocks[0]["text"]
+
+
+def test_a_brand_whose_rows_all_die_loses_its_stale_entry():
+    """Sent with nothing surviving means the entry goes — the subject included, now that it is an
+    ordinary entry in the column."""
+    db = _seeded_db()
+    app._save_price_table(db, db.get_brand(1), _SUBJECT_SPAN)
+    assert "thyseed" in _json.loads(db.get_brand(1)["price_table"])
+    app._save_price_table(db, db.get_brand(1),
+                          [{"brand": "Thyseed", "kind": "exact", "value": "cheap"}])
+    assert "thyseed" not in _json.loads(db.get_brand(1)["price_table"])
+    db.close()

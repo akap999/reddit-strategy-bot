@@ -506,7 +506,13 @@ def test_the_subjects_own_row_lands_in_key_facts_without_deleting_the_other_oper
     assert items["9 oz bottle"]["value"] == "$29.99 (single)"
     assert items["9 oz bottle"]["operator_set"] is True
     pt = json.loads(db.get_brand(1)["price_table"])
-    assert "thyseed" not in pt and "pigeon" in pt, "the subject is not a competitor row"
+    # FU260: the subject is KEPT in price_table as well as routed to key_facts. Popping it meant
+    # everything built on that column skipped the publisher's own brand — its marked range could not
+    # be stated, and its rows vanished from the price-table UI after saving.
+    assert "thyseed" in pt and "pigeon" in pt
+    # …and it is still not a COMPETITOR, which is what the pop was really protecting
+    from generators.blog_gen import _priced_competitor_names
+    assert _priced_competitor_names(db.get_brand(1)) == ["Pigeon"]
     db.close()
 
 

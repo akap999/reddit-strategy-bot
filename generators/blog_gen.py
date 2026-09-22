@@ -7937,13 +7937,21 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         _mine = [] if _guide else _manual_competitors(brand)   # FU216: a guide compares nobody
         _mine_in = []
         for _m in _mine:
-            _hit = next((t for t in tools_u if _matches_competitor(t, [_m])), "")
-            if not _hit:
+            # FU263 — the name the OPERATOR curated is the one compared, replacing the draft's
+            # wording for the same competitor IN PLACE so the order is untouched. This used to keep
+            # the draft's name, so a competitor curated as a BRAND entered the field as whatever
+            # product line the draft happened to name — the identical defect FU262 fixed on the
+            # priced path, and this is the path every blog WITHOUT a price table travels.
+            _idx = next((i for i, t in enumerate(tools_u) if _matches_competitor(t, [_m])), -1)
+            if _idx < 0:
                 tools_u.append(_m)
-                _hit = _m
                 print(f"[blog_gen] your-competitors: {_m} was not in the draft — added to the comparison",
                       flush=True)
-            _mine_in.append(_hit)
+            elif tools_u[_idx].strip().lower() != _m.strip().lower():
+                print(f"[blog_gen] your-competitors: the draft called it '{tools_u[_idx]}' — "
+                      f"comparing '{_m}', the name you curated", flush=True)
+                tools_u[_idx] = _m
+            _mine_in.append(_m)
         _mine_low = {t.lower() for t in _mine_in}
         _prov_q = _mine_in + [t for t in tools_u if t.lower() not in _mine_low
                               and not _named_as_option(t, _opt_names)][:_VERIFY_MAX_BRANDS]

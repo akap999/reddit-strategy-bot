@@ -260,3 +260,44 @@ def test_a_marker_only_unit_is_carried_back_not_dropped():
     raw = g._prose_sentences(line)
     assert raw[-1].strip() == "[S1]", "precondition: the splitter separates the marker"
     assert len(raw) == 2
+
+
+# ── Step 5b (part 1) — the name YOU curated, on a blog with no pricing ───────────────────────────
+# FU262 made the priced names win. The curated path had the identical bug and is the one EVERY blog
+# without a price table travels: a competitor curated as a brand entered the field as whatever
+# product line the draft happened to name.
+
+import json as _json  # noqa: E402
+
+from tests.test_fu214_price_table import BRAND as _BRAND, _sourcing  # noqa: E402
+
+
+def test_the_curated_name_wins_over_the_drafts_product_line():
+    brand = dict(_BRAND, manual_competitors=_json.dumps(["Dr. Brown's", "Philips Avent"]))
+    _g, s = _sourcing(brand, ["Dr. Brown's Anti-Colic Options+",
+                              "Philips Avent Natural Response", "Comotomo"],
+                      include_pricing=False)
+    assert "Dr. Brown's" in s["tools"] and "Philips Avent" in s["tools"], s["tools"]
+    assert "Dr. Brown's Anti-Colic Options+" not in s["tools"], \
+        "the draft's product line replaced the name the operator curated"
+    assert "Philips Avent Natural Response" not in s["tools"]
+
+
+def test_the_curated_name_keeps_its_place_in_the_order():
+    """Replaced IN PLACE — the finalize loop and the [S#] numbering both walk this list in order."""
+    brand = dict(_BRAND, manual_competitors=_json.dumps(["Philips Avent"]))
+    _g, s = _sourcing(brand, ["Comotomo", "Philips Avent Natural Response", "Pigeon"],
+                      include_pricing=False)
+    assert s["tools"].index("Philips Avent") == 1, s["tools"]
+
+
+def test_a_curated_name_the_draft_never_mentioned_is_still_added():
+    brand = dict(_BRAND, manual_competitors=_json.dumps(["Comotomo"]))
+    _g, s = _sourcing(brand, ["Pigeon"], include_pricing=False)
+    assert "Comotomo" in s["tools"]
+
+
+def test_an_exact_curated_name_is_untouched():
+    brand = dict(_BRAND, manual_competitors=_json.dumps(["Pigeon"]))
+    _g, s = _sourcing(brand, ["Pigeon", "Comotomo"], include_pricing=False)
+    assert "Pigeon" in s["tools"]

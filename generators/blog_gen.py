@@ -2177,6 +2177,74 @@ def _is_trial_protocol(url, title=""):
     return bool(_TRIAL_PROTOCOL_RE.search(blob)) or u.endswith(".pdf")
 
 
+# FU254 — the DOCUMENT, not just the host. `_official_source_ok` below is a HOST test: every
+# acceptance branch is a domain match and nothing reads the path, so a society's podcast, a society's
+# trade magazine (the subdomain wildcard hands `<magazine>.<society>.org` the society's own
+# credential) and a narrative review on a NIH host all wore `official ·` on a clinical page. The YMYL
+# rule that a clinical claim MUST cite an official source was satisfied by all three.
+#
+# `_is_trial_protocol` above is the same idea hard-scoped to one domain. This is that idea as a
+# shape: COVERAGE of the work is not the work. A recording, an interview, a press release or a
+# news/magazine feature reports what an authority said; the guideline, the label or the study it
+# reports is the authority, and it is a different URL. Field-neutral — a regulator's newsroom, a bar
+# association's podcast and a standards body's blog are the same document type.
+#
+# Deliberately NOT here: a bare "/media" or "/files" segment, which is an ASSET path on several
+# society sites ("/sites/default/files/media/guideline.pdf") and would demote the guideline itself.
+_COVERAGE_PATH_RE = re.compile(
+    r"/(?:podcasts?|episodes?|listen|audio|webinars?|videos?|watch|interviews?|"
+    r"press|press-releases?|press-kits?|pressroom|press-room|press-cent(?:er|re)|"
+    r"newsroom|news-room|news|announcements?|stories|magazine|blog|blogs)(?:/|$|\?|#)", re.I)
+_COVERAGE_TITLE_RE = re.compile(
+    r"\bpodcasts?\b|\bepisodes?\b|\bwebinars?\b|\binterviews?\b|\bpress releases?\b|"
+    r"\bnewsletters?\b|\bep\.?\s*\d+\b", re.I)
+# `<magazine>.<society>.org` is the society's magazine, not the society. SEARCHED, not anchored:
+# the real one is `<society>news.<society>.org`, where the token is at the END. "media" is left out
+# on purpose — "multimedia." is a plausible asset subdomain and the path rule already covers the
+# newsroom shapes.
+_COVERAGE_SUB_RE = re.compile(r"news|press|blogs?|magazine|stories|podcasts?", re.I)
+
+
+def _is_coverage_not_evidence(url, title=""):
+    """FU254 — True when the page REPORTS an authority rather than being one. Demotes out of
+    `official ·` only; the page stays usable as ordinary third-party colour, which is where the
+    existing YMYL rules already say a clinical claim may not rest."""
+    u = (url or "").strip()
+    d = _norm_domain(u)
+    path = re.sub(r"^https?://[^/]*", "", u)
+    if _COVERAGE_PATH_RE.search(path) or _COVERAGE_TITLE_RE.search(title or ""):
+        return True
+    sub = d.split(".")[0] if d.count(".") >= 2 else ""
+    return bool(sub and _COVERAGE_SUB_RE.search(sub))
+
+
+# A real journal article, but the design that carries the least weight. Kept separate from the list
+# above because it is NOT the same failure: coverage is not evidence at all, whereas a narrative
+# review IS the literature and stays citable — it simply may not be the only thing under a clinical
+# claim. (Not derived from `rewrite_guard._DESIGN_ADJ`: that list exists to keep a design PHRASE
+# intact through a rewrite and orders nothing — "narrative" and "systematic" are equal alternates
+# in it — so reusing it here would import a vocabulary and imply a hierarchy it does not carry.)
+_WEAK_DESIGN_RE = re.compile(
+    r"\bnarrative\s+reviews?\b|\bscoping\s+reviews?\b|\bcommentar(?:y|ies)\b|\beditorials?\b|"
+    r"\bopinions?\b|\bperspectives?\b|\bviewpoints?\b|\bletters? to the editor\b", re.I)
+
+
+def _weak_study_design(title, url=""):
+    """FU254 — the design named by a source's own title, when it is one of the weakest. "" otherwise.
+    Nothing in the repo ranked study design; this is the minimum that makes the weakest visible."""
+    m = _WEAK_DESIGN_RE.search((title or "") + " " + re.sub(r"[-_/]+", " ", url or ""))
+    return re.sub(r"\s+", " ", m.group(0)).strip().lower() if m else ""
+
+
+def _official_label(url, title):
+    """FU254 — the `official ·` badge with the source's DESIGN named when it is one of the weakest.
+    The prefix is unchanged, so every `startswith("official ·")` reader (the evidence tier, the YMYL
+    count, the source-honesty checks) keeps working; what is added is that the writer, and the
+    reader of the finished page, can see that the authority under a claim is a commentary."""
+    _d = _weak_study_design(title, url)
+    return f"official · {_d} · {title or url}" if _d else f"official · {title or url}"
+
+
 def _page_text(entry):
     """The text out of a `read_page` cache entry, which is a (text, how) TUPLE. Appending the tuple
     itself raised `sequence item: expected str, tuple found` the moment any page had been read — the
@@ -2298,6 +2366,8 @@ def _official_source_ok(url, title, brand_name, own_domain, pins):
     if _is_non_evidence({"title": title, "url": url}):
         return False
     if _is_trial_protocol(url, title):   # FU240 (3): a planning document is not an authority
+        return False
+    if _is_coverage_not_evidence(url, title):   # FU254: a recording OF an authority is not one
         return False
     # STRONG domain credentials — the domain IS the authority; a title shape can't demote a
     # .gov / NIH / vertical-pinned page (real rules are titled "Regulation Best Interest",
@@ -3896,7 +3966,7 @@ class BlogGenerator:
                           f"'{(ttl or u)[:70]}'", flush=True)
                     continue
                 seen.add(uk)
-                label = (f"official · {ttl or u}" if _official_source_ok(u, ttl, subject, own, pins)
+                label = (_official_label(u, ttl or u) if _official_source_ok(u, ttl, subject, own, pins)
                          else f"preferred · {x['name']} · {ttl or u}")
                 out.append({"label": label, "url": u, "text": (fct or ttl)[:_EVIDENCE_TEXT_CAP]})
                 kept += 1
@@ -7073,7 +7143,7 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
                         continue
                 seen.add(uk)
                 print(f"[blog_gen] ymyl-sources {tag}: kept {u[:120]}", flush=True)
-                blocks.append({"label": f"official · {ttl or u}", "url": u,
+                blocks.append({"label": _official_label(u, ttl or u), "url": u,
                                "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
                 kept += 1
             print(f"[blog_gen] ymyl-sources {tag} → {len(res or [])} returned, {kept} validated",
@@ -7440,7 +7510,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
                       flush=True)
                 continue
             if _official_source_ok(u, ttl, name, own, pins):
-                lab = f"official · {ttl or u}"
+                lab = _official_label(u, ttl or u)
             elif ymyl:
                 # the YMYL rule stands: on a clinical / financial / legal page only an official
                 # source may carry a regulated claim, however recent a blog is.
@@ -7827,7 +7897,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         and not _REVIEWISH_RE.search(ttl or "")):
                     ok_off = True
             if ok_off:
-                fresh.append({"label": f"official · {ttl or u}", "url": u,
+                fresh.append({"label": _official_label(u, ttl or u), "url": u,
                               "text": fct[:_EVIDENCE_TEXT_CAP]})
             elif _is_subject_review({"title": ttl, "fact": fct}, name) \
                     or _is_negative_about({"title": ttl, "fact": fct}, name) \
@@ -8900,7 +8970,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                     if _guide and _lbl.startswith("third-party ·") and _official_source_ok(
                             u, s.get("title") or "", name, own_dom_s,
                             (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if ymyl else []):
-                        _lbl = f"official · {(s.get('title') or _dom(u) or 'source')[:70]}"
+                        _lbl = _official_label(u, (s.get('title') or _dom(u) or 'source')[:70])
                     kb.append({"label": _lbl, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
             return t, d, kb
 
@@ -16018,14 +16088,27 @@ you MAY assume the description will carry: "{disc}".
             _sat = _body_final.find("\n## Sources")
             _prose = _body_final[:_sat] if _sat > 0 else _body_final
             _off_cited = 0
-            for _m in re.finditer(r"- \[S(\d+)\] official ·", _body_final):
+            _off_weak = 0            # FU254: of those, the ones whose design is the weakest
+            for _m in re.finditer(r"(?m)^- \[S(\d+)\] official ·(.*)$", _body_final):
                 if f"[S{_m.group(1)}]" in _prose:
                     _off_cited += 1
+                    if _WEAK_DESIGN_RE.search(_m.group(2) or ""):
+                        _off_weak += 1
             if _off_cited < 2:
                 _ynote = (f"YMYL ({ymyl}): only {_off_cited} official citation(s) in the body — "
                           f"clinical claims lack authoritative grounding")
                 print(f"[blog_gen] {_ynote}", flush=True)
                 self._warn(article, _ynote)
+            elif _off_weak and _off_weak == _off_cited:
+                # FU254: the count was satisfiable by the weakest designs in the literature. A
+                # narrative review or a commentary IS citable — it is not a basis for every clinical
+                # claim on the page on its own. Warning: the fix is another source, which no check
+                # can invent.
+                _wnote = (f"YMYL ({ymyl}): every official source cited is a commentary or narrative "
+                          f"review — add a guideline, a regulator label or a controlled study, or "
+                          f"attribute the claims to the authors rather than to the evidence")
+                print(f"[blog_gen] {_wnote}", flush=True)
+                self._warn(article, _wnote)
             if not ((brand or {}).get("reviewer_name") or "").strip():
                 _rnote = (f"YMYL ({ymyl}): no named medical reviewer — set a REAL reviewer in "
                           f"Edit Brand (never invented) so the page carries a professional byline")

@@ -188,3 +188,61 @@ def test_the_price_strip_takes_the_same_axis():
     out, dropped = _gen(["Alpha", "Beta"])._strip_price_columns(md)
     assert "Alpha" in out and "Beta" in out, "an option was stripped as if it were a price column"
     assert "Monthly cost" not in out and "Delivery" in out
+
+
+# ── Step 2 — a claim is not an authority just because its host is ────────────────────────────────
+# _official_source_ok is a HOST test: every acceptance branch is a domain match and nothing reads the
+# path. A society's podcast, a society's trade magazine (the subdomain wildcard hands
+# `<magazine>.<society>.org` the society's own credential) and a narrative review on a NIH host all
+# wore `official ·` on a clinical page. Measured: 32 blocks across the 221 stored articles, 679 still
+# official, and 2 articles fall below the >=2 threshold — which is a warning, not a gate.
+
+from generators.blog_gen import (  # noqa: E402
+    _is_coverage_not_evidence, _weak_study_design, _official_label, _official_source_ok)
+
+
+def test_coverage_of_an_authority_is_not_the_authority():
+    for url, title in (
+            ("https://www.example.org/podcast/ep52-incretins", "EP52: Incretins"),
+            ("https://www.example.org/news-and-advocacy/news-room/2026/statement", "Statement"),
+            ("https://example.org/newsroom/press-releases/standards-of-care", "Standards Released"),
+            ("https://www.example.org/about-us/media-center/press-center/study", "Studies Explore"),
+            ("https://example.org/blog/access-safety-and-the-road-ahead", "Access and Safety"),
+            ("https://examplenews.example.org/beyond-the-scale", "Beyond the Scale")):
+        assert _is_coverage_not_evidence(url, title), url
+
+
+def test_the_authority_itself_keeps_its_credential():
+    for url, title in (
+            ("https://www.example.gov/media/12345/download", "Highlights of Prescribing Information"),
+            ("https://www.example.org/guidelines/guidelines/deficiency", "Clinical Guideline"),
+            ("https://www.example.org/clinical/clinical-guidance/practice-bulletin/x", "Bulletin"),
+            ("https://professional.example.org/standards", "Standards of Care"),
+            ("https://example.org/about-condition/devices-technology", "Devices")):
+        assert not _is_coverage_not_evidence(url, title), url
+
+
+def test_an_asset_path_is_not_a_newsroom():
+    """"/media" alone is an ASSET path on several society sites — demoting it would demote the
+    guideline PDF itself. The newsroom shapes are covered by their own segments."""
+    assert not _is_coverage_not_evidence(
+        "https://www.example.org/sites/default/files/media/guideline.pdf", "Guideline")
+
+
+def test_the_badge_is_refused_for_coverage_end_to_end():
+    assert not _official_source_ok(
+        "https://www.example.org/podcast/ep52", "EP52", "Acme", "acme.com", ["example.org"])
+    assert _official_source_ok(
+        "https://www.example.org/guidelines/x", "Guideline", "Acme", "acme.com", ["example.org"])
+
+
+def test_a_weak_design_keeps_the_badge_and_carries_its_design():
+    """A narrative review IS the literature — it stays citable. What changes is that the page says
+    what it is, so the YMYL rule can tell it apart from a guideline."""
+    lab = _official_label("https://example.org/articles/PMC1", "X vs Y: a narrative review")
+    assert lab.startswith("official ·"), "every startswith('official ·') reader must keep working"
+    assert "narrative review" in lab
+    assert _weak_study_design("A Systematic Review and Meta-Analysis") == ""
+    assert _weak_study_design("Perspective: Telehealth in Practice") == "perspective"
+    assert _official_label("https://x.gov/a", "Prescribing Information") == \
+        "official · Prescribing Information"

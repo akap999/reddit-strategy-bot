@@ -14206,6 +14206,86 @@ you MAY assume the description will carry: "{disc}".
                      f"check those figures by hand")
         return out, note
 
+    # FU254 — a sentence that says what the PUBLISHER offers. Field-neutral: a clinic offers a drug,
+    # an agency offers a tool, a supplier offers a material.
+    _OFFERS_RE = re.compile(
+        r"\b(?:offers?|offering|provides?|providing|includes?|including|sells?|selling|carries|"
+        r"carry|stocks?|prescribes?|prescribing|dispenses?|supplies|supplying|ships?|"
+        r"available\s+(?:through|from|at|via)|access(?:ible)?\s+through)\b", re.I)
+    # The repair that is always safe: the name sits in its OWN parenthetical, so taking the
+    # parenthetical out leaves a grammatical sentence. Removing a bare name from a list would
+    # leave "offers  and " behind, so that case is reported and left alone.
+    _PAREN_ONLY_MIN = 2
+
+    def _first_party_naming_check(self, body, blocks, brand):
+        """FU254 — the publisher does not offer what its own pages never name.
+
+        The reported article told readers the publisher offers "<category> (<product>)". That product
+        name appears on none of the five pages fetched from its site. The rule already exists as
+        prompt text — "{name}'s OWN facts are FIRST-PARTY ONLY (this is a hard rule)" — with nothing
+        behind it: `_fact_stated_in` answers exactly this question but is wired only to facts the
+        OPERATOR typed, and `_claim_source_check` verifies against fetched pages but extracts numeric
+        atoms only, so a product name is never a candidate.
+
+        The candidates are the entities the article itself treats as distinct — its compared options
+        — so this asks one narrow question: the page compares A and B; may it say the publisher
+        offers B? Only if B is on the publisher's pages.
+
+        It acts on ABSENCE, which is the sound direction. A token being present on a site does not
+        mean the site means it (FU-earlier: "licensed US physicians" passes a token check on a page
+        that never says it), but a word appearing NOWHERE is a word the publisher does not say.
+
+        Returns (body, note). Inert when nothing was fetched from the publisher's own domain — a
+        grounding failure must never become a naming finding."""
+        if not body:
+            return body, ""
+        name = ((brand or {}).get("name") or "").strip()
+        own = _norm_domain((brand or {}).get("domain_url") or "")
+        if not name or not own:
+            return body, ""
+        fp = []
+        for b in (blocks or []):
+            d = _norm_domain((b or {}).get("url") or "")
+            if d and (d == own or d.endswith("." + own)):
+                fp.append(_page_text(b.get("text")))
+        first_party = re.sub(r"\s+", " ", " ".join(fp)).lower()
+        if len(first_party) < self._PAGE_TEXT_MIN:
+            return body, ""                 # nothing long enough to judge — say nothing
+        cands = set()
+        for e in list(getattr(self, "_article_tools", None) or []) + _first_table_entities(body):
+            e = _table_cell_name(e).strip()
+            if len(e) >= 5 and _kf_slug(e) != _kf_slug(name):
+                cands.add(e)
+        if not cands:
+            return body, ""
+        nm_re = re.compile(r"\b" + re.escape(name) + r"\b", re.I)
+        missing, lines, repaired = [], body.split("\n"), 0
+        for li, ln in enumerate(lines):
+            if ln.lstrip().startswith("#") or not nm_re.search(ln) or not self._OFFERS_RE.search(ln):
+                continue
+            for e in sorted(cands):
+                if not re.search(r"\b" + re.escape(e) + r"\b", ln, re.I):
+                    continue
+                if _fact_stated_in(e, first_party):
+                    continue                # the publisher's own pages do say it
+                missing.append(e)
+                # the always-safe repair: the name is the whole of its own parenthetical
+                new = re.sub(r"\s*\(\s*" + re.escape(e) + r"\s*\)", "", ln, flags=re.I)
+                if new != ln:
+                    lines[li], ln = new, new
+                    repaired += 1
+        if not missing:
+            return body, ""
+        missing = list(dict.fromkeys(missing))
+        note = ("first-party naming: the article says %s offers %s, and no page fetched from %s "
+                "names %s — a fact about %s may only rest on %s's own pages. Remove it, or say "
+                "which of its pages states it"
+                % (name, ", ".join(missing[:4]), own,
+                   "it" if len(missing) == 1 else "them", name, name))
+        if repaired:
+            note += f"; {repaired} parenthetical(s) removed, the rest left for you to check"
+        return ("\n".join(lines) if repaired else body), note
+
     def _repeated_claim_check(self, body):
         """FU254 — the same COMPARATIVE claim, carrying no citation anywhere it appears, asserted in
         three or more sections. Say it once; the repeats go.
@@ -15961,6 +16041,12 @@ you MAY assume the description will carry: "{disc}".
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.
+        # FU254 — and what the publisher is said to offer, against what its own pages name.
+        article["body_markdown"], _fpn = self._first_party_naming_check(
+            article["body_markdown"], self._evidence_blocks, brand)
+        if _fpn:
+            print(f"[blog_gen] {_fpn}", flush=True)
+            self._warn(article, _fpn)
         # FU254 — and the same claim, over and over, with nothing under it. After the figure and
         # price passes, so a restatement built on a figure already removed is gone before this runs.
         article["body_markdown"], _rcn = self._repeated_claim_check(article["body_markdown"])

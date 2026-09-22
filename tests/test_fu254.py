@@ -404,3 +404,71 @@ def test_a_table_row_is_answered_by_the_table_it_sits_in():
             "| Silane | 85% less water absorption [S1] |\n\n"
             "## Sources\n\n- [S1] third-party · T — <https://x.com/a>\n")
     assert _answer("Which sealer is best for a garage floor?", body) == ""
+
+
+# ── Step 5 — the publisher does not offer what its own pages never name ──────────────────────────
+# The reported article told readers a clinic offers "GLP-1 (semaglutide)". The word appears on none
+# of the five pages fetched from that clinic's site. The rule has existed as prompt text — "{name}'s
+# OWN facts are FIRST-PARTY ONLY (this is a hard rule)" — with nothing behind it.
+
+_BRAND = {"name": "Acme Care", "domain_url": "https://acme.example/"}
+_FP_PAGES = ("Acme Care offers online care including supervised weight management with Bravodrug. "
+             "Licensed professionals review every case. Flat monthly pricing at every dose. " * 12)
+
+
+def _fp_gen():
+    g = _gen(["Alphadrug", "Bravodrug"])
+    return g
+
+
+def _blocks(text=_FP_PAGES):
+    return [{"label": "Acme Care", "url": "https://acme.example/", "text": text}]
+
+
+def test_a_name_the_publishers_pages_never_use_is_reported_and_removed():
+    body = ("## Where to get it\n\nAcme Care offers Bravodrug as part of its programme alongside "
+            "Alphadrug (Alphadrug) options [S1].\n")
+    out, note = _fp_gen()._first_party_naming_check(body, _blocks(), _BRAND)
+    assert "Alphadrug" in note and "Bravodrug" not in note.split("offers")[1].split(",")[0]
+    assert "(Alphadrug)" not in out, "the parenthetical was left in place"
+    assert "Bravodrug" in out, "a name the publisher's own pages DO carry was removed"
+
+
+def test_a_name_the_publishers_pages_do_carry_is_left_alone():
+    body = "## Where\n\nAcme Care offers Bravodrug through its programme [S1].\n"
+    out, note = _fp_gen()._first_party_naming_check(body, _blocks(), _BRAND)
+    assert note == "" and out == body
+
+
+def test_a_grounding_failure_is_never_a_naming_finding():
+    """Nothing fetched from the publisher's own domain means nothing is known, not that the claim is
+    false. The check must be silent, or a walled site becomes a page full of findings."""
+    body = "## Where\n\nAcme Care offers Alphadrug through its programme [S1].\n"
+    for blocks in ([], _blocks(""), _blocks("too short"),
+                   [{"label": "official · X", "url": "https://fda.example/x", "text": "Alphadrug " * 90}]):
+        out, note = _fp_gen()._first_party_naming_check(body, blocks, _BRAND)
+        assert note == "" and out == body, blocks
+
+
+def test_a_sentence_that_attributes_nothing_to_the_publisher_is_not_judged():
+    body = ("## What is it\n\nAlphadrug is a receptor agonist studied for weight management [S1].\n"
+            "\n## Who is Acme Care\n\nAcme Care is a telehealth provider founded in 2019 [S2].\n")
+    out, note = _fp_gen()._first_party_naming_check(body, _blocks(), _BRAND)
+    assert note == "" and out == body
+
+
+def test_a_bare_name_in_a_list_is_reported_but_not_cut():
+    """Removing a bare name from a list would leave "offers  and " behind. Only a name that is the
+    whole of its own parenthetical is safe to take out; the rest is the operator's call."""
+    body = "## Where\n\nAcme Care offers Alphadrug and Bravodrug through its programme [S1].\n"
+    out, note = _fp_gen()._first_party_naming_check(body, _blocks(), _BRAND)
+    assert "Alphadrug" in note
+    assert out == body, "a bare name was cut out of a list"
+    assert "parenthetical" not in note
+
+
+def test_the_publisher_itself_is_never_a_candidate():
+    g = _gen(["Acme Care", "Alphadrug"])
+    body = "## Where\n\nAcme Care offers Acme Care Plus through its programme [S1].\n"
+    _out, note = g._first_party_naming_check(body, _blocks(), _BRAND)
+    assert "Acme Care" not in (note.split("offers")[1] if "offers" in note else "")

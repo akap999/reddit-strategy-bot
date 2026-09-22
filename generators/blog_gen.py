@@ -14096,6 +14096,135 @@ you MAY assume the description will carry: "{disc}".
         return out, (f"cited-claim: {len(hits)} claim(s) the cited page does not support "
                      f"({shown}); " + ", ".join(bits))
 
+    # ── FU266: a brand's own page outranks a marketplace listing ─────────────────────────────────
+    # Operator's decision. The reported case: Dr. Brown's "breast-like nipple shape … eases the
+    # transition from breast to bottle" was cited to an Amazon gift-set listing, while the brand's
+    # OWN product page makes exactly that claim. The rule already existed — twice, in the verify and
+    # reconcile prompts ("a retail · listing may support a PRICE or AVAILABILITY and nothing else")
+    # — as prompt text, which is advice, not enforcement.
+    _RETAIL_OK_RE = re.compile(r"price|cost|\$|£|€|in stock|availab|ship|deliver|sold|retail", re.I)
+    _OWN_PAGE_SHARE = 0.5     # of the claim's words, before a marker is moved to a brand page
+
+    def _retail_claim_check(self, body, blocks, walled, topic=()):
+        """A non-price claim whose every source is a marketplace or rating page. Re-point it at the
+        brand's own page when that page carries it; remove it when nothing does. Returns
+        (body, note)."""
+        if not body or not blocks:
+            return body, ""
+        walled, names = set(walled or ()), [str(t).strip() for t in
+                                            (getattr(self, "_article_tools", None) or []) if str(t).strip()]
+        if not names:
+            return body, ""
+
+        def _class(i):
+            lab = (blocks[i - 1].get("label") or "").lower()
+            url = blocks[i - 1].get("url") or ""
+            return "retail" if (lab.startswith(("retail ·", "review ·")) or _is_retail_listing(url)) \
+                else "own"
+
+        def _text(i):
+            b = blocks[i - 1]
+            t = _page_text(self._claim_pages.get((b.get("url") or "").strip()))
+            return t if len(t) >= self._PAGE_TEXT_MIN else (b.get("text") or "")
+
+        lines, hits, moved = body.split("\n"), [], []
+        for li, line in enumerate(lines):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                break
+            st = line.strip()
+            if not st or st.startswith(("#", ">", "*[")):
+                continue
+            units = ([(ci, line.split("|")[ci]) for ci in range(1, len(line.split("|")) - 1)]
+                     if st.startswith("|") else [(None, u) for u in self._prose_sentences(line)])
+            for ci, unit in units:
+                cs = [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
+                      if 1 <= n <= len(blocks)]
+                if not cs or any(_class(n) != "retail" for n in cs):
+                    continue          # nothing cited, or a non-listing source already backs it
+                if self._RETAIL_OK_RE.search(unit):
+                    continue          # a listing IS a source for a price or availability
+                named = [nm for nm in names
+                         if re.search(r"\b" + re.escape(nm.split()[0]), unit, re.I)]
+                claim = re.sub(r"\[S\d+\]", "", unit).strip(" *|")
+                # the brand's OWN page, if the evidence has one that carries this claim
+                best, best_share = 0, 0.0
+                for n in range(1, len(blocks) + 1):
+                    if n in walled or n in cs or _class(n) != "own":
+                        continue
+                    if named and not any(w.lower() in ((blocks[n - 1].get("label") or "") + " "
+                                                       + (blocks[n - 1].get("url") or "")).lower()
+                                         for w in named[0].split()[:2]):
+                        continue
+                    hit, toks = self._claim_tokens_on_page(claim, _text(n), topic)
+                    if len(toks) >= self._ORG_SAYS_MIN_TOKENS and len(hit) / len(toks) > best_share:
+                        best, best_share = n, len(hit) / len(toks)
+                if best and best_share >= self._OWN_PAGE_SHARE:
+                    fixed = re.sub(r"\[S\d+\]", f"[S{best}]", unit, count=1)
+                    if unit in lines[li]:
+                        lines[li] = lines[li].replace(unit, fixed, 1)
+                        moved.append((claim[:46], best))
+                    continue
+                hits.append(("cell" if ci is not None else "sent", li,
+                             ci if ci is not None else unit, "retail-only"))
+        if not hits and not moved:
+            return body, ""
+        out = "\n".join(lines)
+        applied = widened = refused = 0
+        if hits:
+            if len(hits) > self._FAB_MAX_DROP:
+                return out, (f"retail-source: {len(hits)} non-price claim(s) rest only on a "
+                             f"marketplace or rating listing — too many to remove safely, so "
+                             f"nothing was changed; regenerate rather than publish")
+            out, applied, widened, refused = _apply_removals_without_damage(out.split("\n"), hits)
+        bits = []
+        if moved:
+            bits.append("re-pointed " + ", ".join(f'“{c}” → [S{n}]' for c, n in moved[:3])
+                        + " to the brand's own page")
+        if applied:
+            bits.append(f"removed {applied} that no first-party page states")
+        if widened:
+            bits.append(f"widened {widened}")
+        if refused:
+            bits.append(f"kept {refused} (removing would have broken the page)")
+        if not bits:
+            return out, ""
+        return out, ("retail-source: a marketplace listing evidences a price, never what a product "
+                     "is made of or does — " + "; ".join(bits))
+
+    _REPLACE_SHARE = 0.55     # of the claim's words, before a citation is moved to another source
+
+    def _replace_walled_cite(self, lines, li, unit, txts, walled, blocks, replaced):
+        """FU266 — a DIRECT REPLACEMENT for a source nobody could open, from the evidence we
+        already hold. Returns True when the citation was moved.
+
+        The operator's rule has three parts and only two were implemented: nothing is written from
+        an unreachable page, it is not listed as a source, and "it can look for direct replacement".
+        Nothing did the third — an unreachable source was only ever deleted, taking the claim with
+        it even when another gathered page said the same thing.
+
+        Deliberately no new fetch and no new search: this re-points to a page ALREADY read this
+        run, and only when that page carries the claim's own words. A replacement that has to be
+        found on the open web is a different, costlier round.
+        """
+        claim = re.sub(r"\[S\d+\]", "", unit).strip(" *|")
+        cited = {int(x) for x in re.findall(r"\[S(\d+)\]", unit)}
+        best, best_share = 0, 0.0
+        for n in range(1, len(blocks) + 1):
+            if n in walled or n in cited or len(txts.get(n) or "") < self._PAGE_TEXT_MIN:
+                continue
+            hit, toks = self._claim_tokens_on_page(claim, txts.get(n) or "")
+            if len(toks) >= self._ORG_SAYS_MIN_TOKENS and len(hit) / len(toks) > best_share:
+                best, best_share = n, len(hit) / len(toks)
+        if not best or best_share < self._REPLACE_SHARE:
+            return False
+        fixed = re.sub(r"\[S\d+\]", f"[S{best}]", unit, count=1)
+        fixed = re.sub(r"\[S\d+\]\s*(?=\[S\d+\])", "", fixed)      # no duplicate markers left behind
+        if unit not in lines[li]:
+            return False
+        lines[li] = lines[li].replace(unit, fixed, 1)
+        replaced.append((claim[:46], best))
+        return True
+
     def _walled_source_check(self, body, blocks, walled):
         """FU241 — a source nobody could read carries nothing, and a claim about what a readable
         source SAYS has to be in it.
@@ -14160,6 +14289,7 @@ you MAY assume the description will carry: "{disc}".
             return ""
 
         lines, hits, in_src, fence = body.split("\n"), [], False, False
+        replaced = []      # FU266: (claim, new index) for each citation re-pointed, not deleted
         for li, line in enumerate(lines):
             if line.lstrip().startswith("```"):
                 fence = not fence
@@ -14173,11 +14303,17 @@ you MAY assume the description will carry: "{disc}".
                 cells = line.split("|")
                 for ci in range(1, len(cells) - 1):
                     v = _verdict(cells[ci])
+                    if v == "walled" and self._replace_walled_cite(lines, li, cells[ci], txts,
+                                                                   walled, blocks, replaced):
+                        continue
                     if v:
                         hits.append(("cell", li, ci, v))
             else:
                 for sent in self._prose_sentences(line):
                     v = _verdict(sent)
+                    if v == "walled" and self._replace_walled_cite(lines, li, sent, txts,
+                                                                   walled, blocks, replaced):
+                        continue
                     if v:
                         hits.append(("sent", li, sent, v))
         if len(hits) > self._FAB_MAX_DROP:
@@ -14187,6 +14323,7 @@ you MAY assume the description will carry: "{disc}".
         # FU251: each removal is applied on its own and the result inspected — one that strands the
         # sentence after it, blanks a Source cell or leaves a fragment is widened or refused.
         out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        # (the replacement above edited `lines` in place, so those citations are already moved)
         # strip every remaining marker pointing at a source nobody could read — `_rebuild_sources`
         # then drops it from the list rather than advertising a page the article never opened.
         # FU251: this strip was the one removal with NO cap and no guard at all, and it ran over the
@@ -14205,6 +14342,9 @@ you MAY assume the description will carry: "{disc}".
         bits = []
         if walled:
             bits.append(f"skipped {len(walled)} source(s) nothing could read")
+        if replaced:      # FU266 — say what was SAVED, not only what went
+            bits.append("re-pointed " + ", ".join(f'“{c}” → [S{n}]' for c, n in replaced[:3])
+                        + " to a source we did read")
         if n_w:
             bits.append(f"removed {n_w} claim(s) that rested only on them")
         if n_s:
@@ -17082,6 +17222,14 @@ you MAY assume the description will carry: "{disc}".
         # deterministic checks above decide what they can; this decides what only meaning can.
         for _ppn in (getattr(self, "_price_pick_notes", None) or []):
             self._warn(article, _ppn)   # FU266: the row pick reaches the operator, not just stdout
+        # FU266 — operator's rule: a brand's own page outranks a marketplace listing for a claim
+        # about that brand. Before the page judge, so a re-pointed claim is judged against the page
+        # it now cites rather than the listing it used to.
+        article["body_markdown"], _rcl = self._retail_claim_check(
+            article["body_markdown"], self._evidence_blocks, _walled, _topic)
+        if _rcl:
+            print(f"[blog_gen] {_rcl}", flush=True)
+            self._warn(article, _rcl)
         article["body_markdown"], _ccn = self._cited_claim_check(
             article["body_markdown"], self._evidence_blocks, _walled, _topic)
         if _ccn:

@@ -553,3 +553,169 @@ def test_the_footnote_stops_claiming_every_figure_is_a_list_price():
     out, _w = g._write_price_cells(body, {"Pigeon": {"value": "$34.99", "kind": "exact",
                                                      "source": "yours", "sale": True}})
     assert "sale price" in out and "promotional, not list" in out
+
+
+# ── a brand's own page outranks a marketplace listing ────────────────────────────────────────────
+# Operator's decision. The reported case: Dr. Brown's "breast-like nipple shape … eases the
+# transition from breast to bottle" was cited to an Amazon gift-set listing, while the brand's own
+# product page makes exactly that claim. The rule already existed twice as PROMPT text, which is
+# advice, not enforcement.
+
+_OWN_PAGE = ("Dr. Brown's Anti-Colic Options+ Wide-Neck bottle. The breast-like nipple shape eases "
+             "the transition from breast to bottle and back again for a feeding baby. " * 6)
+
+
+def _retail_gen(blocks, pages=None):
+    g = B.__new__(B)
+    g._claim_pages = dict(pages or {})
+    g._article_tools = ["Dr. Brown's"]
+    return g
+
+
+_RETAIL_BLOCKS = [
+    {"label": "retail · Dr. Brown's Gift Set | Amazon",
+     "url": "https://www.amazon.com/dp/B01N34NNJK", "text": "Gift set. " * 40},
+    {"label": "Dr. Brown's", "url": "https://drbrownsbaby.com/products/options-wide-neck",
+     "text": _OWN_PAGE},
+]
+
+
+def test_a_design_claim_on_a_listing_is_repointed_to_the_brands_own_page():
+    body = ("## Nipples\n\nDr. Brown's uses a breast-like nipple shape that eases the transition "
+            "from breast to bottle [S1].\n")
+    g = _retail_gen(_RETAIL_BLOCKS)
+    out, note = g._retail_claim_check(body, _RETAIL_BLOCKS, set(), [])
+    assert "[S2]" in out and "[S1]" not in out
+    assert "re-pointed" in note and "own page" in note
+
+
+def test_a_design_claim_no_first_party_page_states_is_removed():
+    blocks = [_RETAIL_BLOCKS[0],
+              {"label": "Dr. Brown's", "url": "https://drbrownsbaby.com/x", "text": "Bottles. " * 40}]
+    body = ("## Nipples\n\nDr. Brown's uses a breast-like nipple shape that eases the transition "
+            "from breast to bottle [S1].\n")
+    g = _retail_gen(blocks)
+    out, note = g._retail_claim_check(body, blocks, set(), [])
+    assert "breast-like nipple shape" not in out
+    assert "no first-party page states" in note
+
+
+def test_a_listing_is_still_a_source_for_a_PRICE():
+    """It is the seller's own copy — for what something costs, that is exactly right."""
+    body = "## Price\n\nDr. Brown's starts at $8.99 [S1].\n"
+    g = _retail_gen(_RETAIL_BLOCKS)
+    assert g._retail_claim_check(body, _RETAIL_BLOCKS, set(), []) == (body, "")
+
+
+def test_a_claim_that_already_cites_a_first_party_page_is_untouched():
+    body = ("## Nipples\n\nDr. Brown's uses a breast-like nipple shape that eases the transition "
+            "from breast to bottle [S2].\n")
+    g = _retail_gen(_RETAIL_BLOCKS)
+    assert g._retail_claim_check(body, _RETAIL_BLOCKS, set(), []) == (body, "")
+
+
+# ── mutation-test gaps: four fixes nothing was defending ─────────────────────────────────────────
+# Found by reverting each fix and running the suite. Each of these passed either way before.
+
+def test_no_rewriting_pass_still_splits_on_a_bare_full_stop():
+    """`_claim_source_check` rewrites a line in place from its own split. Testing the shared helper
+    does not defend its CALL SITE: reverting that one line left every test green while
+    "…than Dr. Brown's." went back to being two sentences inside a pass that edits the body."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "generators", "blog_gen.py")).read()
+    assert r're.split(r"((?<=[.!?])\s+)"' not in src, \
+        "a capturing sentence split is a rewriting pass — use _split_sentences_keep"
+    assert r'''re.split(r"(?<=[.!?])\s+", ''' not in src, \
+        "use _split_sentences; the bare regex treats the dot in 'Dr. Brown's' as a sentence end"
+
+
+def test_the_topic_drop_is_in_the_scorer_the_checks_actually_call():
+    """`_specific_tokens` having the rule does not defend `_claim_tokens_on_page`, which is what
+    `_org_position_check` and the cited-claim filter score with."""
+    page = "Introducing the bottle to a breastfeeding baby is common. " * 8
+    claim = ("breastfeeding be established before introducing a bottle, typically after the first "
+             "few weeks, to avoid interfering with milk supply and latch")
+    topic = ["baby", "bottle", "bottles", "breastfed", "breastfeeding", "feeding"]
+    hit_no_topic, toks_no_topic = B._claim_tokens_on_page(claim, page)
+    hit, toks = B._claim_tokens_on_page(claim, page, topic)
+    assert "breastfeeding" in toks_no_topic and "breastfeeding" not in toks
+    assert len(hit) / len(toks) < len(hit_no_topic) / len(toks_no_topic), \
+        "dropping the topic's own words must LOWER a topic-only match, or it changes nothing"
+
+
+def test_a_table_cell_goes_to_the_judge_even_at_a_perfect_word_match():
+    """The reported Thyseed cell scores 0.75 and a correct cell scores 0.67 — a share ranks the
+    wrong one higher, so a cell must never be filtered out. The earlier test used a page whose
+    share was under the filter anyway, so it passed with the filter applied to cells too."""
+    page = "Internal anti-colic venting system fitted throughout. " * 12
+    hit, toks = B._claim_tokens_on_page("Internal anti-colic venting system", page)
+    assert len(hit) / len(toks) == 1.0, "every word is on the page — a filter would skip this"
+    blocks = [{"label": "Thyseed", "url": "https://t.example/p", "text": ""}]
+    g = _judge_gen({"c1": "contradicted"}, {"c1": "Internal anti-colic venting system fitted"},
+                   {"https://t.example/p": (page, "direct")})
+    body = ("## Compare\n\n| Dimension | Thyseed |\n|---|---|\n"
+            "| Anti-colic system | Internal anti-colic venting system [S1] |\n")
+    out, note = g._cited_claim_check(body, blocks, set(), [])
+    assert "Internal anti-colic venting system" not in out and note
+
+
+def test_the_row_pick_warning_is_collected_for_the_operator():
+    """It was a print and nothing else — assigned on one line, read on the next."""
+    g = B.__new__(B)
+    g._claim_pages = {}
+    g._price_pick_notes = []
+    brand = {"name": "Thyseed", "price_table": _json.dumps({"pigeon": {"name": "Pigeon", "rows": [
+        {"product": "Glass Wide Neck 5.4oz", "kind": "exact", "value": "$34.99"},
+        {"product": "PPSU Wide Neck 5.4oz", "kind": "exact", "value": "$39.99"}]}})}
+    ledger, _missing, _dirty = g._ensure_price_ledger(
+        brand, ["Pigeon"], {}, {}, ["tirzepatide", "dosing"], "tirzepatide dosing")
+    assert ledger.get("Pigeon")
+    assert g._price_pick_notes and "several priced rows" in g._price_pick_notes[0]
+    assert "Glass Wide Neck 5.4oz" in g._price_pick_notes[0], "it must name the product it showed"
+
+
+# ── a direct replacement, instead of only deleting ───────────────────────────────────────────────
+# The operator's rule has three parts and only two were implemented: nothing is written from an
+# unreachable page, it is not listed as a source, and "it can look for direct replacement". Nothing
+# did the third — an unreachable source was only ever deleted, taking the claim with it even when
+# another page we HAD read said the same thing.
+
+# A SPECIFIC — a claim carrying a figure. The walled rule deliberately leaves an ordinary general
+# statement alone (it keeps its prose and loses its marker), so a replacement only has a job where
+# a removal would otherwise have happened.
+_VENT_CLAIM = ("A vented base keeps the nipple filled with milk for 95% of a feed, which reduces "
+               "swallowed air [S1].")
+_VENT_PAGE = ("A vented base keeps the nipple filled with milk for 95% of a feed, reducing the "
+              "air a baby swallows during feeding. " * 6)
+
+
+def test_a_claim_on_an_unreachable_page_moves_to_one_we_did_read():
+    g = B.__new__(B)
+    g._claim_pages = {}
+    blocks = [{"label": "official · Guidance", "url": "https://walled.example/p", "text": ""},
+              {"label": "official · Paediatrics", "url": "https://ok.example/p", "text": _VENT_PAGE}]
+    out, note = g._walled_source_check(f"## Venting\n\n{_VENT_CLAIM}\n", blocks, {1})
+    assert "keeps the nipple filled with milk" in out, "the claim is kept, not deleted"
+    assert "[S2]" in out and "[S1]" not in out
+    assert "re-pointed" in note and "a source we did read" in note
+
+
+def test_it_only_moves_to_a_page_that_actually_carries_the_claim():
+    """Otherwise a replacement is just a different wrong citation."""
+    g = B.__new__(B)
+    g._claim_pages = {}
+    blocks = [{"label": "official · Guidance", "url": "https://walled.example/p", "text": ""},
+              {"label": "official · Unrelated", "url": "https://ok.example/p",
+               "text": "Car seats must be rear facing until the age of two. " * 8}]
+    out, note = g._walled_source_check(f"## Venting\n\n{_VENT_CLAIM}\n", blocks, {1})
+    assert "keeps the nipple filled with milk" not in out
+    assert "re-pointed" not in note
+
+
+def test_it_never_moves_a_citation_to_another_unreadable_page():
+    g = B.__new__(B)
+    g._claim_pages = {}
+    blocks = [{"label": "a", "url": "https://w1.example/p", "text": ""},
+              {"label": "b", "url": "https://w2.example/p", "text": _VENT_PAGE}]
+    out, note = g._walled_source_check(f"## Venting\n\n{_VENT_CLAIM}\n", blocks, {1, 2})
+    assert "keeps the nipple filled with milk" not in out and "re-pointed" not in note

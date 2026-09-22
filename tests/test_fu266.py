@@ -318,3 +318,91 @@ def test_an_uncited_sentence_is_not_this_checks_business():
     body = "## Timing\n\nBottles come in several shapes and sizes for newborn feeding.\n"
     g = _judge_gen({"c1": "not_on_page"}, {}, PAGES)
     assert g._cited_claim_check(body, BLOCKS, set(), TOPIC) == (body, "")
+
+
+# ── an unreachable page is not a source ──────────────────────────────────────────────────────────
+
+def test_an_org_claim_resting_only_on_an_unreadable_page_is_removed():
+    """The walled rule only acted on a unit carrying a figure or an attributed label, so a claim of
+    the shape "The AAP recommends X" — no number, no label — was kept while its marker was stripped,
+    leaving the assertion with no source at all where there had at least been a visible one."""
+    g = B.__new__(B)
+    g._claim_pages = {}
+    blocks = [{"label": "official · AAP", "url": "https://aap.example/p", "text": ""}]
+    body = ("## Timing\n\nThe AAP recommends that breastfeeding be established before introducing "
+            "a bottle [S1].\n")
+    out, note = g._walled_source_check(body, blocks, {1})
+    assert "The AAP recommends" not in out
+    assert "[S1]" not in out
+
+
+def test_a_general_statement_keeps_its_prose_and_loses_its_marker():
+    """Deliberately NOT widened to every unit: the page stops being a source either way, because
+    the marker is stripped and the list is rebuilt. Deleting ordinary writing that never leaned on
+    the page is a different act."""
+    g = B.__new__(B)
+    g._claim_pages = {}
+    blocks = [{"label": "x", "url": "https://x.example/p", "text": ""}]
+    body = "## Basics\n\nBottles are washed before the first use [S1].\n"
+    out, _note = g._walled_source_check(body, blocks, {1})
+    assert "Bottles are washed before the first use" in out and "[S1]" not in out
+
+
+# ── a named study: cite it or cut it ─────────────────────────────────────────────────────────────
+# `_study_reference_check` already SPOTTED this — it matches "A randomised controlled trial
+# found…" — but it only warned, and it de-duplicated by wording so the body copy and the FAQ copy
+# were reported as one line.
+
+_RCT = ("A randomised controlled trial found that the amount of time infants spent in colic was "
+        "not statistically significantly different between those using a standard bottle and "
+        "those using a fully vented anti-colic bottle design.")
+_TRIAL_PAGE = ("Feeding bottles with different venting methods and gastrointestinal discomfort. "
+               "A randomised clinical trial of infants found the amount of time spent in colic was "
+               "not statistically significantly different between a standard bottle and a fully "
+               "vented anti-colic bottle design. " * 4)
+
+
+def _study_gen(pages):
+    g = B.__new__(B)
+    g._claim_pages = dict(pages)
+    return g
+
+
+def test_a_named_study_with_no_source_anywhere_is_cut():
+    """The reported case. It appears in the body AND in an FAQ answer, and neither carries a
+    marker — both go, because de-duplicating them is what reported two occurrences as one."""
+    body = f"## Gas\n\n{_RCT}\n\n## FAQ\n\n### Do they work?\n\n{_RCT}\n"
+    blocks = [{"label": "Thyseed", "url": "https://thyseed.example/p", "text": "A bottle. " * 40}]
+    g = _study_gen({})
+    out, note = g._uncited_study_check(body, blocks, set())
+    assert "randomised controlled trial" not in out
+    assert "removed 2" in note, note
+
+
+def test_the_study_is_CITED_when_the_evidence_has_the_paper():
+    """Cut is the fallback, not the rule — the operator asked for cite-or-cut in that order."""
+    body = f"## Gas\n\n{_RCT}\n"
+    blocks = [{"label": "official · Feeding bottles trial",
+               "url": "https://pubmed.ncbi.nlm.nih.gov/41885859/", "text": _TRIAL_PAGE}]
+    g = _study_gen({})
+    out, note = g._uncited_study_check(body, blocks, set())
+    assert "randomised controlled trial [S1]" in out
+    assert "cited 1 from the evidence" in note
+
+
+def test_a_page_that_is_not_a_paper_is_never_offered_as_a_study_source():
+    """A brand page that happens to share the wording is not the trial."""
+    body = f"## Gas\n\n{_RCT}\n"
+    blocks = [{"label": "Thyseed", "url": "https://thyseed.example/p", "text": _TRIAL_PAGE}]
+    g = _study_gen({})
+    out, note = g._uncited_study_check(body, blocks, set())
+    assert "randomised controlled trial" not in out and "removed 1" in note
+
+
+def test_a_study_that_is_already_cited_is_left_alone():
+    body = f"## Gas\n\n{_RCT[:-1]} [S1].\n"
+    blocks = [{"label": "official · trial", "url": "https://pubmed.ncbi.nlm.nih.gov/41885859/",
+               "text": _TRIAL_PAGE}]
+    g = _study_gen({})
+    out, note = g._uncited_study_check(body, blocks, set())
+    assert out == body and not note

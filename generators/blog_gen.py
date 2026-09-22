@@ -14070,7 +14070,18 @@ you MAY assume the description will carry: "{disc}".
             specific = bool(_CLAIM_NUM_RE.search(unit))
             m = self._ATTRIB_CLAIM_RE.search(unit)
             label = (m.group(1) if m else "").strip().lower()
-            if all(n in walled for n in cs) and (specific or m):
+            # FU266 — an ORGANISATION'S POSITION is a specific too, the same widening FU263 made to
+            # the probe. "The AAP recommends X" carries no figure and no attributed label, so a
+            # claim of that shape resting entirely on a page nobody could open was kept.
+            #
+            # Deliberately NOT widened to every unit. The operator's rule is that an unreachable
+            # page is not a source — which it stops being, because the marker is stripped and
+            # `_rebuild_sources` then drops it from the list either way. Removing the PROSE as well
+            # is a different act, and for a general statement ("prescribed under supervision") it
+            # would delete ordinary writing that never leaned on the page. Removal stays for units
+            # that assert something the page was supposed to support.
+            if cs and all(n in walled for n in cs) \
+                    and (specific or m or self._ORG_SAYS_RE.search(unit)):
                 return "walled"
             readable = [n for n in cs if n not in walled and len(txts.get(n) or "") >= self._PAGE_TEXT_MIN]
             if m and readable and label:
@@ -16247,6 +16258,91 @@ you MAY assume the description will carry: "{disc}".
                     or _MEASURED_FIG_RE.search(after)
                     or cls._DOC_CONTEXT_RE.search(window))
 
+    # ── FU266: a study the article names, cited or cut ───────────────────────────────────────────
+    # `_study_reference_check` already SPOTS this — `_STUDY_REF_RE` matches "A randomised controlled
+    # trial found…" — and did three things that let the reported case ship: it only warned, it
+    # de-duplicated by wording so the body copy and the FAQ copy were reported as one, and it never
+    # tried to attach the source. Operator's decision: cite it or cut it, every occurrence.
+    _STUDY_SOURCE_HINT = re.compile(
+        r"pubmed|/pmc/|ncbi\.nlm|doi\.org|jamanetwork|thelancet|nejm\.org|bmj\.com|springer|"
+        r"sciencedirect|wiley|cochrane|clinicaltrials\.gov|\btrial\b|\bstudy\b|\bjournal\b", re.I)
+    _STUDY_CITE_SHARE = 0.6      # of the sentence's own words, before a marker is attached
+
+    def _uncited_study_check(self, body, blocks, walled):
+        """Attach the study's source where the evidence has it; remove the sentence where it does
+        not. Returns (body, note)."""
+        if not body or not blocks:
+            return body, ""
+        walled = set(walled or ())
+        pages = {}
+        for i, bl in enumerate(blocks, 1):
+            if i in walled:
+                continue
+            u = (bl.get("url") or "").strip()
+            txt = _page_text(self._claim_pages.get(u)) if u else ""
+            if len(txt) < self._PAGE_TEXT_MIN:
+                txt = bl.get("text") or ""
+            if len(txt) < 200:
+                continue
+            if not self._STUDY_SOURCE_HINT.search(u + " " + (bl.get("label") or "")):
+                continue            # only a paper may be offered as a study's source
+            pages[i] = txt
+
+        lines, hits, cited_n = body.split("\n"), [], 0
+        for li, line in enumerate(lines):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                break
+            st = line.strip()
+            if not st or st.startswith(("#", "|", ">", "*[")):
+                continue
+            for sent in self._prose_sentences(line):
+                refs = sorted([(m.start(), m.end()) for m in self._STUDY_REF_RE.finditer(sent)]
+                              + [(m.start(), m.end()) for m in self._NAMED_TRIAL_RE.finditer(sent)])
+                refs = [r for k, r in enumerate(refs)
+                        if not any(r[0] < refs[j][1] and refs[j][0] < r[1] for j in range(k))]
+                refs = [r for r in refs if not self._not_a_document(sent, (r[0], r[1], sent[r[0]:r[1]]))]
+                if not refs:
+                    continue
+                st0, en0 = refs[0]
+                stop = refs[1][0] if len(refs) > 1 else len(sent)
+                if re.search(r"\[S\d+\]", sent[en0:stop]):
+                    continue                       # already cited
+                # can the evidence cite it? the sentence's own words have to be on a paper's page
+                best, best_share = 0, 0.0
+                for n, txt in pages.items():
+                    hit, toks = self._claim_tokens_on_page(sent, txt)
+                    if len(toks) >= self._ORG_SAYS_MIN_TOKENS and len(hit) / len(toks) > best_share:
+                        best, best_share = n, len(hit) / len(toks)
+                if best and best_share >= self._STUDY_CITE_SHARE:
+                    fixed = sent[:en0] + f" [S{best}]" + sent[en0:]
+                    if sent in lines[li]:
+                        lines[li] = lines[li].replace(sent, fixed, 1)
+                        cited_n += 1
+                    continue
+                hits.append(("sent", li, sent, ["uncited-study"]))
+        if not hits and not cited_n:
+            return body, ""
+        out = "\n".join(lines)
+        applied = widened = refused = 0
+        if hits:
+            if len(hits) > self._FAB_MAX_DROP:
+                return out, (f"study-source: {len(hits)} named stud(y/ies) carry no source and the "
+                             f"evidence has none for them — too many to remove safely, so nothing "
+                             f"was changed; regenerate rather than publish")
+            out, applied, widened, refused = _apply_removals_without_damage(out.split("\n"), hits)
+        bits = []
+        if cited_n:
+            bits.append(f"cited {cited_n} from the evidence")
+        if applied:
+            bits.append(f"removed {applied} the evidence could not source")
+        if widened:
+            bits.append(f"widened {widened}")
+        if refused:
+            bits.append(f"kept {refused} (removing would have broken the page)")
+        if not bits:
+            return out, ""
+        return out, "study-source: " + ", ".join(bits)
+
     def _study_reference_check(self, body):
         """Every study the article names must be one it cites, and no two of them may be the same
         source. Warning only — the claim is usually true and the provenance is what is wrong, and a
@@ -17003,6 +17099,13 @@ you MAY assume the description will carry: "{disc}".
         if _rcn:
             print(f"[blog_gen] {_rcn}", flush=True)
             self._warn(article, _rcn)
+        # FU266 — a named study is cited or cut BEFORE the warnings below are built, so the note
+        # reports what happened rather than what someone might do about it.
+        article["body_markdown"], _usn = self._uncited_study_check(
+            article["body_markdown"], self._evidence_blocks, _walled)
+        if _usn:
+            print(f"[blog_gen] {_usn}", flush=True)
+            self._warn(article, _usn)
         _src = self._study_reference_check(article["body_markdown"])
         if _src:
             print(f"[blog_gen] {_src}", flush=True)

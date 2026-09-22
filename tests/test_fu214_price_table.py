@@ -353,6 +353,27 @@ def test_priced_brands_past_the_ceiling_are_cut_but_named():
     assert s["priced_over_cap"] == names[_PRICED_FIELD_MAX:]
 
 
+def test_the_field_uses_the_name_YOU_priced_not_the_drafts_product_line():
+    """FU262 — on a general question ("Best <category> for <use>") the BRAND is the unit of
+    comparison, and pricing a brand is how the operator says so. This used to take the draft's name
+    for the same brand instead, so a brand-level article came back comparing product lines the
+    operator never named — and the pause then asked for a price PER PRODUCT LINE for brands whose
+    price was already in the table."""
+    brand = dict(BRAND, price_table=_tbl(("Dr. Brown's", "", "exact", "$9.99", "", ""),
+                                         ("Philips Avent", "", "exact", "$12.95", "", "")))
+    _g, s = _sourcing(brand, ["Dr. Brown's Anti-Colic Options+",
+                              "Philips Avent Natural Response", "Comotomo"])
+    assert s["tools"] == ["Dr. Brown's", "Philips Avent"], s["tools"]
+    # the draft's variant is ABSORBED, not reported as a competitor that was left out
+    assert "Dr. Brown's Anti-Colic Options+" not in (s.get("priced_excluded_mine") or [])
+
+
+def test_an_exact_name_match_is_unchanged():
+    brand = dict(BRAND, price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", "")))
+    _g, s = _sourcing(brand, ["Pigeon", "Philips Avent"])
+    assert s["tools"] == ["Pigeon"]
+
+
 def test_a_brand_you_priced_that_the_draft_never_named_is_still_compared():
     brand = dict(BRAND, price_table=_tbl(("Pigeon", "", "exact", "$12.99", "", ""),
                                          ("Comotomo", "", "exact", "$19.99", "", "")))

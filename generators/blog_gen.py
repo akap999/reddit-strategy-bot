@@ -7959,16 +7959,28 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # The brands you priced are MANDATORY and lead the field; the comparison may then top up
             # with real competitors to `_PRICED_FIELD_MAX` in total. Ordering matters downstream —
             # the finalize loop and the [S#] numbering both walk `tools` in order.
-            _seen_px, _lead = set(), []
+            # FU262 — the name the OPERATOR typed is the one compared. This used to take the
+            # draft's name for the same brand instead ("Dr. Brown's" -> "Dr. Brown's Anti-Colic
+            # Options+"), so a brand-level article the operator had priced BRAND-WISE came back
+            # comparing product lines they never named, and the pause then asked for a price per
+            # product line. On a general question ("best <category> for <use>") the brand IS the
+            # unit of comparison, and the operator said which brands by pricing them.
+            _seen_px, _lead, _absorbed = set(), [], set()
             for _pn in _priced_s:
-                _hit = next((t for t in tools if _is_priced(t, [_pn])), "") or _pn
-                if _hit.lower() in _seen_px:
+                _hit = next((t for t in tools if _is_priced(t, [_pn])), "")
+                if _hit:
+                    _absorbed.add(_hit.lower())     # the draft's variant of the same brand
+                _key = _kf_slug(_pn)
+                if not _key or _key in _seen_px:
                     continue
-                _seen_px.add(_hit.lower())
-                _lead.append(_hit)
-                if not any(_is_priced(t, [_pn]) for t in tools):
+                _seen_px.add(_key)
+                _lead.append(_pn)
+                if not _hit:
                     print(f"[blog_gen] price-table: {_pn} was not in the draft — added to the "
                           f"comparison (you priced it)", flush=True)
+                elif _hit.strip().lower() != _pn.strip().lower():
+                    print(f"[blog_gen] price-table: the draft called it '{_hit}' — comparing "
+                          f"'{_pn}', the name you priced", flush=True)
             # Your own list wins over the floor, but it cannot win over readability: a priced brand
             # past the ceiling is CUT and NAMED, never dropped quietly.
             _over_px = _lead[_PRICED_FIELD_MAX:]
@@ -7988,7 +8000,10 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             # a generic OPTION (FU189 — a method/material/plan type) is not a brand: it has no price
             # to give and never displaces one, so it rides outside the ceiling exactly as before.
             _kept_px = _lead + _top + [t for t in tools if t.lower() in _options]
-            _dropped_px5 = [t for t in tools if t not in _kept_px]
+            # FU262: a draft name ABSORBED into the operator's name is not "not compared" — the
+            # brand is in the field, under the name they gave it.
+            _dropped_px5 = [t for t in tools
+                            if t not in _kept_px and t.lower() not in _absorbed]
             # YOUR competitors (FU210) the field still leaves out are NAMED, never dropped silently.
             self._priced_excluded_mine = [t for t in _dropped_px5 if t.lower() in _mine_low]
             self._priced_topups = list(_top)

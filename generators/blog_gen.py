@@ -4994,7 +4994,10 @@ class BlogGenerator:
             per = _per_unit_price(e.get("value") or "", e.get("basis") or "")
             if per:
                 parts.append(per)
-            return {"value": (e.get("value") or "").strip(), "label": ", ".join(parts)}
+            # `per_unit` is kept STRUCTURALLY as well as folded into the label, so a check can
+            # compare brands on comparable units without re-parsing a rendered string.
+            return {"value": (e.get("value") or "").strip(), "label": ", ".join(parts),
+                    "per_unit": per}
 
         ends = [_end(lo), _end(hi)]
         return dict(lo, kind="span", span_ends=ends, value_max=(hi.get("value") or "").strip(),
@@ -6926,7 +6929,13 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
 WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
 {_qa_rule}  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-{_field_rule}  - SAY A COMPARATIVE CLAIM ONCE. A claim that one option is higher, lower, safer, slower or worse
+{_field_rule}  - PRICE IS POSITIONING, NOT A LEAGUE TABLE. Say where an option SITS ("premium", "mid-range",
+    "entry-level") and what the buyer gets for it. Do not rank the field from dearest to cheapest,
+    and never write that one option is "the most expensive" or "the highest priced" of those
+    compared. A price is only comparable with another when both are for the SAME UNIT — one item
+    against one item. A multi-pack price is not that option's price per item, and a claim built on
+    one is wrong however carefully it is worded.
+  - SAY A COMPARATIVE CLAIM ONCE. A claim that one option is higher, lower, safer, slower or worse
     than another belongs in ONE section — the one it answers — with its NUMBERS and its [S#]. Refer to
     it elsewhere in a clause ("as noted above"), never restate it. The same uncited comparison made in
     section after section is a verdict the page has not earned, and it reads as one whoever it favours.
@@ -15215,6 +15224,133 @@ you MAY assume the description will carry: "{disc}".
             out.extend("| " + " | ".join(r) + " |" for r in rows)
         return "\n".join(out), dropped
 
+    # FU263 — a claim that ranks the compared options BY PRICE. The page's own ledger holds every
+    # figure, so this is answerable without a model.
+    # Split by whether the word is ABOUT price on its own. "most expensive" needs no context; a
+    # bare "highest" does, or the check would rank a page on its highest anything.
+    _PRICE_RANK_SURE_RE = re.compile(
+        r"\b(?:most\s+expensive|least\s+expensive|priciest|cheapest|most\s+affordable|"
+        r"premium[-\s]only)\b", re.I)
+    _PRICE_RANK_CTX_RE = re.compile(
+        r"\b(?:highest|dearest|steepest|lowest|best\s+value)\b", re.I)
+    # "its lowest tier", "<Name>'s lowest published tier" — a superlative POSSESSED by the option is
+    # about that option's OWN ladder, not a ranking of the field. Measured on the stored corpus this
+    # is most of what the sentence shapes above pick up. The possessive has to be adjacent: in
+    # "<Name>'s entry price is the highest of the four" three words separate them, and that one IS a
+    # ranking of the field.
+    _OWN_LADDER_RE = re.compile(
+        r"\b(?:its|their|his|her|[A-Z][\w.'\u2019-]*(?:'s|\u2019s))\s+(?:\w+\s+)?"
+        r"(?:highest|dearest|steepest|lowest|cheapest|priciest|most\s+expensive|"
+        r"least\s+expensive|most\s+affordable)\b", re.I)
+
+    @staticmethod
+    def _comparable_price(entry):
+        """FU263 — the figure comparable with another option's SINGLE-ITEM price, or None.
+
+        A multi-pack price is not comparable with a single's, which is the whole defect: a brand was
+        ranked dearest of four on a pack price. The per-item figure is preferred wherever a pack
+        basis made one computable, and the ENTRY price (the lowest end) is what a "starts at" or
+        "entry price" claim is about."""
+        ends = entry.get("span_ends") or []
+        if ends:
+            vals = [(x.get("per_unit") or "").strip() or (x.get("value") or "").strip()
+                    for x in ends]
+        else:
+            vals = [(entry.get("per_unit") or "").strip() or (entry.get("value") or "").strip()]
+        out = []
+        for v in vals:
+            n, _c = _price_amount(v)
+            try:
+                f = float(n)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                out.append(f)
+        return min(out) if out else None
+
+    def _price_rank_check(self, body, brand):
+        """FU263 — a price superlative the page's own ledger contradicts, and one that puts the
+        PUBLISHER last.
+
+        The reported article said a competitor's entry price was "the highest of the four brands
+        compared here, making it a premium-only option". On comparable units it was the second
+        CHEAPEST — the claim rested on a multi-pack figure read as one item's. Every number needed to
+        settle that is in the ledger, so nothing here asks a model.
+
+        Two removals, both under the existing damage guard and the `_FAB_MAX_DROP` cap:
+
+          a. CONTRADICTED — the ledger says another option holds that position.
+          b. PUBLISHER-LAST — a superlative that makes the publisher the dearest. It is removed even
+             when the arithmetic is right: this tool does not volunteer its own client as the
+             expensive one. That is the existing `_publisher_framing_pass` doctrine (FU243), applied
+             to a claim about price. It does NOT license the opposite — saying the publisher is
+             cheaper when it is not is fabrication, and no branch here writes a figure.
+
+        Returns (body, note)."""
+        led = getattr(self, "_price_ledger", None) or {}
+        if not body or len(led) < 2:
+            return body, ""
+        name = ((brand or {}).get("name") or "").strip()
+        cmp_by = {}
+        for _t, _e in led.items():
+            if not isinstance(_e, dict):
+                continue
+            _c = self._comparable_price(_e)
+            if _c is not None:
+                cmp_by[_t] = _c
+        if len(cmp_by) < 2:
+            return body, ""
+        dearest = max(cmp_by, key=lambda k: cmp_by[k])
+        cheapest = min(cmp_by, key=lambda k: cmp_by[k])
+        _subj_is_dearest = bool(name and _is_priced(dearest, [name]))
+        lines, hits, why = body.split("\n"), [], []
+        for li, ln in enumerate(lines):
+            if ln.lstrip().startswith(("#", "|", "- [S")):
+                continue                      # a heading, a table row, the Sources list
+            for sent in re.split(r"(?<=[.!?])\s+", ln):
+                if not (self._PRICE_RANK_SURE_RE.search(sent)
+                        or (self._PRICE_RANK_CTX_RE.search(sent)
+                            and self._PRICE_CTX_RE.search(sent))):
+                    continue
+                named = [t for t in cmp_by if _is_priced(sent, [t])]
+                if len(named) != 1:
+                    continue                  # 0 or 2+ options named — never guess which it ranks
+                who = named[0]
+                _high = re.search(r"highest|dearest|most\s+expensive|priciest|premium[-\s]only"
+                                  r"|steepest", sent, re.I)
+                _low = re.search(r"cheapest|lowest|least\s+expensive|most\s+affordable"
+                                 r"|best\s+value", sent, re.I)
+                if _high and _low:
+                    continue         # both directions in one sentence — not a ranking claim
+                if self._OWN_LADDER_RE.search(sent):
+                    continue         # its OWN cheapest tier, not the field's
+                bad = ""
+                if _high and who != dearest:
+                    bad = (f"the ledger's dearest on comparable units is {dearest} "
+                           f"({cmp_by[dearest]:,.2f}), not {who} ({cmp_by[who]:,.2f})")
+                elif _low and who != cheapest:
+                    bad = (f"the ledger's cheapest is {cheapest} ({cmp_by[cheapest]:,.2f}), "
+                           f"not {who} ({cmp_by[who]:,.2f})")
+                elif _high and name and _is_priced(who, [name]) and _subj_is_dearest:
+                    bad = f"it makes {name} the dearest option on the page"
+                if bad:
+                    hits.append(("sent", li, sent, [sent]))
+                    why.append(bad)
+        if not hits:
+            return body, ""
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, ("price-rank: %d price-ranking claim(s) disagree with the ledger (%s) — "
+                          "too many to remove safely, so nothing was changed; the field's units are "
+                          "what failed here" % (len(hits), "; ".join(why[:3])))
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        note = ("price-rank: removed %d claim(s) ranking the field by price — %s"
+                % (applied, "; ".join(dict.fromkeys(why))[:400]))
+        if widened:
+            note += f"; {widened} took the whole paragraph rather than strand what followed"
+        if refused:
+            note += f"; {refused} left in place — removing them would have damaged the article"
+        return out, note
+
     def _publisher_framing_pass(self, body, brand):
         """FU243 (3) — when the page is harsh on its own publisher, lets a competitor overshadow it,
         or singles out the publisher's limitation, CHANGE how that is put. Not a warning.
@@ -16270,6 +16406,13 @@ you MAY assume the description will carry: "{disc}".
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.
+        # FU263 — and the claims that RANK the field by price. After the price passes, so a figure
+        # already removed cannot be ranked on, and after the cell writer, so the ledger the check
+        # reads is the one the table shows.
+        article["body_markdown"], _prn = self._price_rank_check(article["body_markdown"], brand)
+        if _prn:
+            print(f"[blog_gen] {_prn}", flush=True)
+            self._warn(article, _prn)
         # FU254 — and what the publisher is said to offer, against what its own pages name.
         article["body_markdown"], _fpn = self._first_party_naming_check(
             article["body_markdown"], self._evidence_blocks, brand)

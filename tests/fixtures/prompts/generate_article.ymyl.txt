@@ -263,6 +263,12 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
          do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
     Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
     evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+  - PRICE IS POSITIONING, NOT A LEAGUE TABLE. Say where an option SITS ("premium", "mid-range",
+    "entry-level") and what the buyer gets for it. Do not rank the field from dearest to cheapest,
+    and never write that one option is "the most expensive" or "the highest priced" of those
+    compared. A price is only comparable with another when both are for the SAME UNIT — one item
+    against one item. A multi-pack price is not that option's price per item, and a claim built on
+    one is wrong however carefully it is worded.
   - SAY A COMPARATIVE CLAIM ONCE. A claim that one option is higher, lower, safer, slower or worse
     than another belongs in ONE section — the one it answers — with its NUMBERS and its [S#]. Refer to
     it elsewhere in a clause ("as noted above"), never restate it. The same uncited comparison made in

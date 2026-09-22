@@ -1343,7 +1343,8 @@ class Database:
                    "verified_body", "verified_meta_description", "verified_at",   # FU208
                    "verify_session", "verified_report", "verified_cost",          # FU208
                    "imported_body", "imported_rewritten", "imported_meta",   # FU250
-                   "guide"}             # FU216: a generic how-to guide — no comparison, no service area
+                   "guide",             # FU216: a generic how-to guide — no comparison, no service area
+                   "compare_level"}     # FU263: compare BRANDS or PRODUCTS — the operator decides
         # FU205 (R1): the second DB write choke point. PATCH /api/blogs/<id> writes straight through
         # here with no guards at all today, so a hand-edit could reintroduce any formatting/symbol/punt
         # defect 204 rounds removed. Sanitising here covers PATCH, regenerate, the rewrite endpoints
@@ -2646,6 +2647,13 @@ class Database:
             self.conn.commit()
         if "guide" not in blog_cols:   # FU216: default OFF — every existing blog stays a comparison
             self.conn.execute("ALTER TABLE blogs ADD COLUMN guide INTEGER DEFAULT 0")
+            self.conn.commit()
+        if "compare_level" not in blog_cols:
+            # FU263 — 'brand' | 'product' | '' (unset). The level the article compares AT, decided
+            # once by the operator instead of by whatever the draft happened to name. Default is
+            # BLANK, not a guess: an existing blog keeps exactly today's behaviour until someone
+            # sets it, so no stored article changes because a column appeared.
+            self.conn.execute("ALTER TABLE blogs ADD COLUMN compare_level TEXT DEFAULT ''")
             self.conn.commit()
         if "writer_secs" not in blog_cols:   # FU164: self-hosted writer-pass duration (visibility)
             self.conn.execute("ALTER TABLE blogs ADD COLUMN writer_secs REAL DEFAULT 0")

@@ -13320,6 +13320,23 @@ async function renderBlogs(c) {
                 💲 Include pricing
                 <span class="text-gray-600">— research &amp; compare per-product prices, canonical prices and price cells (default on). UNCHECK for a non-pricing blog (how-to, doctor-led comparison) to skip ALL pricing work — no pricing searches, no price cells, cheaper.</span>
             </label>
+            <!-- FU263 — the level the article compares AT, decided ONCE by the operator instead of
+                 by whatever the draft happened to name. AUTHORITATIVE: on Brand every name you
+                 supplied is a brand, on Product every one is a product, and nothing inspects a name
+                 to work out which it is. Pre-set from the names already on hand; "—" keeps exactly
+                 today's behaviour. -->
+            <label class="flex items-center gap-2 mt-2 text-xs text-gray-300">
+                ⚖️ Compare as
+                <select id="blog-gen-level" class="text-xs" style="width:auto;flex:none">
+                    <option value="">— not set —</option>
+                    <option value="brand">Brands</option>
+                    <option value="product">Products</option>
+                </select>
+                <span class="text-gray-600">— whatever you typed in the price table (or Edit Brand)
+                is taken as brands, or as products, and the article uses YOUR names in the table,
+                the headings and the prose. A specific product is still named where a fact belongs
+                to it. Leave unset to keep today's behaviour.</span>
+            </label>
             <label class="flex items-center gap-2 mt-2 text-xs text-gray-300 cursor-pointer">
                 <input type="checkbox" id="blog-gen-guide">
                 📘 General guide
@@ -14261,13 +14278,14 @@ function blogGenerate() {
     const qualifier = (document.getElementById('blog-gen-qualifier')?.value || '').trim();   // FU93
     const price_links = include_pricing ? _blogPriceLinksCollect() : [];   // FU213 (Change 5/6)
     const price_table = include_pricing ? _blogPriceTableCollect() : [];   // FU214
+    const compare_level = (document.getElementById('blog-gen-level')?.value || '');   // FU263
     const _g = id => (document.getElementById(id)?.value || '').trim();
     const byline = {
         author_name: _g('blog-gen-author'), author_title: _g('blog-gen-author-title'),
         reviewer_name: _g('blog-gen-reviewer'), reviewer_title: _g('blog-gen-reviewer-title'),
         disclosure: _g('blog-gen-disclosure'), image_url: _g('blog-gen-image'),
     };
-    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, guide, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
+    runTask('/api/blogs/generate', { brand_id, seed, keywords, source_urls, research_notes, use_web_search, deep_verify, internal_links, include_pricing, guide, compare_level, price_links, price_table, refresh_competitor_facts, refresh_competitor_slugs, ymyl, reddit_url, geo, qualifier, ...byline }, (res) => {
         blogReload();
         _blogRedditToast(res);
         _blogCostToast(res);

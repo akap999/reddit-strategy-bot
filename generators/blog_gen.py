@@ -3221,6 +3221,7 @@ class BlogGenerator:
         # with no geography entered — that is when the article must stay location-free. URLs the
         # operator typed for THIS blog are never filtered out, even when they are local.
         self._guide = False
+        self._compare_level = ""      # FU263: "brand" | "product" | "" (the operator has not said)
         self._guide_places = []
         self._guide_keep_urls = set()
         self._service_area_cache = {}
@@ -6543,7 +6544,25 @@ extractable answer), still under 160 chars.
         _qa_rule = f"""  - Open with a "Quick answer" — a 2-3 sentence direct answer to the seed that names {name}
     as a fit. (AI engines lift this as the extractable answer.)
 """
-        _field_rule = f"""  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
+        # FU263 — the level this article compares AT, when the operator has set one. Stated before
+        # the field rules because it governs what a "competitor" IS for this article.
+        _lvl = getattr(self, "_compare_level", "")
+        _level_rule = ""
+        if _lvl == "brand":
+            _level_rule = """  - COMPARE BRANDS, NOT PRODUCT LINES (the operator set this). Each compared option is a BRAND:
+    one row, one section, one price cell per brand, and the brand's name is what headings and prose
+    use. Name a specific product ONLY where the FACT belongs to that product — a price, a material,
+    a measured spec — and then say which product it is. Never state a product's spec as though it
+    were true of the whole brand: "<Brand> bottles are shatterproof" when only one variant is, is
+    the same error as reading a multi-pack price as one item's.
+"""
+        elif _lvl == "product":
+            _level_rule = """  - COMPARE PRODUCTS, NOT BRANDS (the operator set this). Each compared option is a SPECIFIC
+    PRODUCT and is named in full — headings, prose and the table all use the full product name, not
+    the brand alone. A fact that is true of the brand generally may be stated, attributed to the
+    brand, but it never substitutes for the product's own facts.
+"""
+        _field_rule = _level_rule + f"""  - ENTITY-TYPE MATCH (FU98, hard rule): identify the ENTITY TYPE the seed asks for (agencies,
     platforms, tools, clinics, firms, retailers, …). The comparison's PRIMARY field MUST contain
     AT LEAST 3 real entities of THAT type besides {name} — {name}'s direct competitors — profiled
     fairly with their genuine wins credited; {name} wins on its actual differentiators, never by
@@ -11318,7 +11337,7 @@ you MAY assume the description will carry: "{disc}".
                       deep_verify=False, allow_pause=False, geo="", sibling_titles=None,
                       qualifier="", internal_links=False, sibling_links=None, ymyl=None,
                       refresh_competitor_facts=False, refresh_competitor_slugs=None,
-                      include_pricing=True, guide=False):
+                      include_pricing=True, guide=False, compare_level=""):
         """Full pipeline: gather evidence → article → verify_claims → [deep_verify] → LinkedIn. Returns
         the merged dict (title, meta_description, keywords, body_markdown, claims_flagged,
         linkedin_text, prompt_version) or None if the article couldn't be generated.
@@ -11359,6 +11378,12 @@ you MAY assume the description will carry: "{disc}".
         # the MINIMUM COMPETITORS override both read this), instead of the reconcile deleting rows.
         # Ignored when "Include pricing" is off — there is no comparison on price to scope.
         # FU216: and ignored for a general guide, which compares nobody.
+        # FU263 — the level this article compares AT, set ONCE by the operator. AUTHORITATIVE, not a
+        # hint: on "brand" every name they supplied is a brand, on "product" every one is a product,
+        # and nothing inspects a name to decide what it is. "" keeps exactly today's behaviour.
+        self._compare_level = str(compare_level or "").strip().lower()
+        if self._compare_level not in ("brand", "product"):
+            self._compare_level = ""
         self._priced_names = _priced_competitor_names(brand, (brand or {}).get("name") or "") \
             if (include_pricing and not guide) else []
         self._priced_excluded_mine, self._priced_topups, self._priced_over_cap = [], [], []
@@ -15412,6 +15437,64 @@ you MAY assume the description will carry: "{disc}".
                 out.append(f)
         return min(out) if out else None
 
+    def _compare_level_pass(self, body, tools):
+        """FU263 — the article uses the names the operator supplied, everywhere.
+
+        The reported article compared at two levels at once: its table rows said "<Brand>", its
+        prose said "<Brand> <Product Line>", and the sources were that product's pages. The field
+        is fixed before sourcing, but the DRAFT was written before that and had already named a
+        product line, so fixing the field renamed the row and left the paragraphs behind.
+
+        This replaces the draft's wording for a compared option with the operator's own name, in
+        prose and headings. It is a find-and-replace, not a judgement: the LEVEL toggle already
+        decided what those names are, so nothing here inspects a name to work out what kind it is.
+
+        A product name is NOT banned. Only the compared option's own longer variant is folded back;
+        a fact that belongs to a specific product ("the PPSU variant is shatterproof") names that
+        product still, because that is where the fact is true — and stating it of the whole brand
+        would be the same class of error as reading a multi-pack price as one item's.
+
+        Inert when the operator has not set a level. Returns (body, note)."""
+        if not body or not tools or not getattr(self, "_compare_level", ""):
+            return body, ""
+        pairs = []
+        for _t in tools:
+            _t = str(_t or "").strip()
+            if not _t:
+                continue
+            # the draft's variants of THIS option: its name plus trailing qualifying words
+            # [ \t]+ and NOT \s+: a newline would let the match run past the end of the paragraph
+            # and swallow the first words of the next one.
+            _rx = re.compile(r"\b" + re.escape(_t) + r"(?:[\u2019']s)?((?:[ \t]+[A-Z][\w+.&-]*){1,4})")
+            for m in set(_rx.findall(body)):
+                _long = (_t + m).strip()
+                if _long.lower() != _t.lower():
+                    pairs.append((_long, _t))
+        if not pairs:
+            return body, ""
+        pairs.sort(key=lambda p: -len(p[0]))          # longest first, so a shorter one cannot eat it
+        lines, changed = body.split("\n"), 0
+        in_src = False
+        for li, ln in enumerate(lines):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", ln):
+                in_src = True
+            if in_src:
+                continue                               # a source's TITLE is that page's own words
+            new_ln = ln
+            for _long, _short in pairs:
+                if _long in new_ln:
+                    new_ln = new_ln.replace(_long, _short)
+            if new_ln != ln:
+                lines[li] = new_ln
+                changed += 1
+        if not changed:
+            return body, ""
+        _names = ", ".join(dict.fromkeys(f"{a} → {b}" for a, b in pairs))[:220]
+        return ("\n".join(lines),
+                "compare-level (%s): the draft named %d option(s) differently from the names you "
+                "supplied — %s. The article now uses yours throughout; a specific product is still "
+                "named where a FACT belongs to it" % (self._compare_level, len(pairs), _names))
+
     def _price_rank_check(self, body, brand):
         """FU263 — a price superlative the page's own ledger contradicts, and one that puts the
         PUBLISHER last.
@@ -16557,6 +16640,13 @@ you MAY assume the description will carry: "{disc}".
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.
+        # FU263 — the article uses the names the operator supplied, at the level they set. Runs
+        # BEFORE the name-matching checks below so they see one spelling, not two.
+        article["body_markdown"], _cln = self._compare_level_pass(
+            article["body_markdown"], getattr(self, "_article_tools", None) or [])
+        if _cln:
+            print(f"[blog_gen] {_cln}", flush=True)
+            self._warn(article, _cln)
         # FU263 — and the claims that RANK the field by price. After the price passes, so a figure
         # already removed cannot be ranked on, and after the cell writer, so the ledger the check
         # reads is the one the table shows.

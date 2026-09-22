@@ -301,3 +301,65 @@ def test_an_exact_curated_name_is_untouched():
     brand = dict(_BRAND, manual_competitors=_json.dumps(["Pigeon"]))
     _g, s = _sourcing(brand, ["Pigeon", "Comotomo"], include_pricing=False)
     assert "Pigeon" in s["tools"]
+
+
+# ── Step 5b (part 2) — the comparison LEVEL, set once by the operator ────────────────────────────
+# The article compared at two levels at once: rows said "<Brand>", prose said "<Brand> <Product
+# Line>", sources were that product's pages. The field is fixed before sourcing, but the DRAFT was
+# written before that and had already named a product line, so fixing the field renamed the row and
+# left the paragraphs behind.
+
+_TWO_LEVEL_BODY = (
+    "## Dr. Brown's Anti-Colic Options+\n\n"
+    "Dr. Brown's Anti-Colic Options+ is widely used. The PPSU variant is shatterproof. [S13]\n\n"
+    "| Brand | Price |\n| --- | --- |\n| Dr. Brown's | $8.99 |\n\n"
+    "Choose Philips Avent Natural Response if budget is the constraint.\n\n"
+    "## Sources\n\n"
+    "- [S7] retail · Dr. Brown's Anti-Colic Options+ Narrow Glass Baby Bottle - <https://a.example>\n")
+_TOOLS = ["Dr. Brown's", "Philips Avent", "Pigeon"]
+
+
+def _level(body, level="brand", tools=None):
+    g = _gen()
+    g._compare_level = level
+    return g._compare_level_pass(body, tools if tools is not None else _TOOLS)
+
+
+def test_the_prose_and_headings_use_the_names_you_supplied():
+    out, note = _level(_TWO_LEVEL_BODY)
+    assert "## Dr. Brown's\n" in out, "the heading kept the draft's product line"
+    assert "Dr. Brown's is widely used" in out
+    assert "Choose Philips Avent if" in out
+    assert "compare-level (brand)" in note
+
+
+def test_a_source_TITLE_is_that_pages_own_words():
+    """Renaming a citation's title would misquote the page it names."""
+    out, _n = _level(_TWO_LEVEL_BODY)
+    assert "Dr. Brown's Anti-Colic Options+ Narrow Glass Baby Bottle" in out
+
+
+def test_a_fact_that_belongs_to_a_PRODUCT_still_names_it():
+    """Brand level does not ban product names. Stating a variant's spec of the whole brand would be
+    the same class of error as reading a multi-pack price as one item's."""
+    out, _n = _level(_TWO_LEVEL_BODY)
+    assert "The PPSU variant is shatterproof" in out
+
+
+def test_it_is_inert_until_the_operator_sets_a_level():
+    assert _level(_TWO_LEVEL_BODY, level="") == (_TWO_LEVEL_BODY, "")
+
+
+def test_a_rename_never_runs_past_the_end_of_its_paragraph():
+    """`\\s+` would let the match cross a blank line and swallow the next paragraph's first words."""
+    body = "## H\n\nPigeon Wide Neck is good.\n\nPigeon Glass is also good.\n"
+    out, _n = _level(body, tools=["Pigeon"])
+    assert out.count("Pigeon") == 2 and "is good" in out and "is also good" in out, out
+
+
+def test_the_toggle_is_authoritative_not_a_guess():
+    """Nothing inspects a name to decide what kind it is — the toggle already did. A name that
+    LOOKS like a product, supplied under Brand, is used exactly as supplied."""
+    body = "## H\n\nDr. Brown's Options+ Narrow Glass is popular.\n"
+    out, _n = _level(body, tools=["Dr. Brown's Options+"])
+    assert "Dr. Brown's Options+ is popular" in out, out

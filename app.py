@@ -3661,6 +3661,11 @@ def api_blog_generate():
     internal_links = bool(data.get("internal_links"))   # FU114: opt-in internal linking + meta title
     include_pricing = bool(data.get("include_pricing", True))   # FU162: default ON; unchecked = skip ALL pricing
     guide = bool(data.get("guide", False))   # FU216: a generic how-to guide — default OFF (a comparison)
+    # FU263 — compare BRANDS or PRODUCTS. "" means the operator has not said, and everything behaves
+    # exactly as it did before. Normalised here so nothing downstream has to guess at the spelling.
+    compare_level = str(data.get("compare_level") or "").strip().lower()
+    if compare_level not in ("brand", "product"):
+        compare_level = ""
     refresh_competitor_facts = bool(data.get("refresh_competitor_facts"))   # FU151 (A): ignore the cache
     refresh_competitor_slugs = [str(s).strip() for s in (data.get("refresh_competitor_slugs") or [])
                                 if str(s).strip()]   # FU160: selectively refresh only these competitors
@@ -3760,7 +3765,8 @@ def api_blog_generate():
                 refresh_competitor_facts=refresh_competitor_facts,   # FU151 (A)
                 refresh_competitor_slugs=refresh_competitor_slugs,   # FU160
                 include_pricing=include_pricing,   # FU162
-                guide=guide)   # FU216
+                guide=guide,   # FU216
+                compare_level=compare_level)   # FU263
             if not blog:
                 raise ValueError(claude.last_error or "Blog generation failed")
             # FU79 — PAUSE: a tool couldn't be sourced after all retries. Persist the partial generation
@@ -3834,6 +3840,8 @@ def api_blog_generate():
                 bg.update_blog(blog_id, geo=geo)   # FU90: persisted → regenerate reuses it
             if guide:
                 bg.update_blog(blog_id, guide=1)   # FU216: persisted → regenerate reuses it
+            if compare_level:
+                bg.update_blog(blog_id, compare_level=compare_level)   # FU263: regenerate reuses it
             # FU133: persist the RESOLVED vertical ('off' when the user explicitly unticked).
             bg.update_blog(blog_id, ymyl=("off" if ymyl_in is False else (blog.get("ymyl") or "")))
             if qualifier:
@@ -3947,6 +3955,9 @@ def api_blog_regenerate(blog_id):
             stored_il = bool(blog.get("internal_links"))   # FU114: reuse the linking choice
             stored_px = (blog.get("include_pricing", 1) != 0)   # FU162: reuse the pricing choice
             stored_guide = bool(blog.get("guide"))   # FU216: reuse the general-guide choice
+            gen._compare_level = str(blog.get("compare_level") or "").strip().lower()   # FU263
+            if gen._compare_level not in ("brand", "product"):
+                gen._compare_level = ""
             # FU216: prepared BEFORE the evidence fetch below (its local filter needs the service area).
             # The effective geography may be a place the seed names; this blog's own stored source
             # URLs are the operator's input for THIS blog, so they are never filtered out.

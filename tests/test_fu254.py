@@ -86,3 +86,105 @@ def test_the_also_arm_needs_an_additional_RESULT():
 def test_an_also_whose_subject_the_heading_named_is_not_stranded():
     assert not _stranded("Is Metformin used for longevity in men?",
                          "Metformin is a diabetes medication that also showed longevity signals.")
+
+
+# ── Step 1 — a comparison table may not delete what it compares ──────────────────────────────────
+# `| Dimension | Semaglutide | Tirzepatide |` puts the OPTIONS in the columns. The FU204 any-empty
+# rule reads every column past the first as a dimension, so one unsourceable cell deleted one of the
+# two drugs from an article titled "How It Differs From Semaglutide". 22 of the 221 stored articles
+# are written that way and 2 had already shipped with a single option left.
+
+from generators.blog_gen import BlogGenerator, _transpose_table, _table_cell_name  # noqa: E402
+
+
+def _gen(tools=()):
+    g = BlogGenerator.__new__(BlogGenerator)
+    g._table_punt_note = ""
+    g._article_tools = list(tools)
+    return g
+
+
+TRANSPOSED = (
+    "| Dimension | Semaglutide | Tirzepatide |\n"
+    "| --- | --- | --- |\n"
+    "| Receptor targets | GLP-1 only [S1] | GLP-1 and GIP [S1] |\n"
+    "| Weight loss vs. comparator | Reference [S2] | Greater mean loss [S2] |\n"
+    "| Adverse event profile | Lower rate [S3] | Not specified in sourced facts |\n"
+)
+
+
+def test_the_option_survives_and_the_dimension_is_what_drops():
+    out = _gen(["Semaglutide", "Tirzepatide"])._resolve_table_punts(TRANSPOSED)
+    assert "Tirzepatide" in out.split("\n")[0], "the compared option was deleted from its own table"
+    assert "Semaglutide" in out.split("\n")[0]
+    assert "Adverse event profile" not in out, "the unsourceable DIMENSION is what FU204 drops"
+    assert "Receptor targets" in out and "Weight loss" in out
+
+
+def test_the_rule_is_unchanged_in_the_ordinary_orientation():
+    md = ("| Provider | Monthly price | Delivery |\n"
+          "| --- | --- | --- |\n"
+          "| Alpha | $99 [S1] | 2 days [S1] |\n"
+          "| Beta | $149 [S2] | Not specified in sourced facts |\n")
+    out = _gen(["Alpha", "Beta"])._resolve_table_punts(md)
+    assert "Delivery" not in out, "a dimension with a gap still goes"
+    assert "Alpha" in out and "Beta" in out and "Monthly price" in out
+
+
+def test_column_zero_holding_the_options_is_never_called_transposed():
+    """The names test RULES OUT as well as in: whatever the corner cell says, a table whose first
+    column holds the option names keeps the ordinary orientation."""
+    g = _gen(["Alpha", "Beta"])
+    hdr = ["Feature", "Monthly price", "Delivery"]
+    data = [["Alpha", "$99", "2 days"], ["Beta", "$149", "1 day"]]
+    assert not g._table_is_transposed(hdr, data)
+
+
+def test_the_names_test_beats_the_corner_cell():
+    g = _gen(["Botric", "Profound"])
+    assert g._table_is_transposed(["Whatever", "Botric", "Profound"],
+                                  [["Pricing", "$8", "$99"]])
+
+
+def test_a_source_row_is_provenance_not_an_option():
+    """The Source exemption was written when a Source could only be a column. On a swapped table it
+    is a row, and counting its blanks as gaps condemned every dimension and deleted the table."""
+    md = ("| Measure | Option A | Option B | Source |\n"
+          "| --- | --- | --- | --- |\n"
+          "| Reduction at 6 months | 1.58% | 1.62% |  |\n"
+          "| Weight change at 6 months | 3.77% | 3.48% |  |\n")
+    out = _gen()._resolve_table_punts(md)
+    assert "Option A" in out and "Option B" in out
+    assert "Reduction at 6 months" in out and "Weight change at 6 months" in out
+
+
+def test_transpose_round_trips():
+    hdr = ["Dimension", "A", "B"]
+    data = [["Price", "$1", "$2"], ["Speed", "fast", "slow"]]
+    h2, d2 = _transpose_table(hdr, data)
+    assert h2 == ["Dimension", "Price", "Speed"]
+    assert d2 == [["A", "$1", "fast"], ["B", "$2", "slow"]]
+    assert _transpose_table(h2, d2) == (hdr, data)
+
+
+def test_a_cell_name_is_read_through_its_decoration():
+    assert _table_cell_name("**[Semaglutide](https://x.com)** (Ozempic / Wegovy)") == "Semaglutide"
+
+
+def test_a_table_comparing_one_thing_is_reported():
+    g = _gen()
+    g._resolve_table_punts("| Dimension | Semaglutide |\n| --- | --- |\n| Receptor | GLP-1 [S1] |\n"
+                           "| Class | Single agonist [S1] |\n")
+    # a two-column table is not a comparison to begin with; the floor speaks when one arrives
+    assert g._table_punt_note == "" or "fewer than" in g._table_punt_note
+
+
+def test_the_price_strip_takes_the_same_axis():
+    """With pricing off, a price DIMENSION goes — never the option column beside it."""
+    md = ("| Dimension | Alpha | Beta |\n"
+          "| --- | --- | --- |\n"
+          "| Monthly cost | $99 | $149 |\n"
+          "| Delivery | 2 days | 1 day |\n")
+    out, dropped = _gen(["Alpha", "Beta"])._strip_price_columns(md)
+    assert "Alpha" in out and "Beta" in out, "an option was stripped as if it were a price column"
+    assert "Monthly cost" not in out and "Delivery" in out

@@ -93,6 +93,8 @@ COMPLETE and every stated fact is sourced:
     cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
     specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
     from the table — do NOT generalize a policy article or another tool's values to fill it.
+  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
+    the option names. If the options are in the COLUMNS instead, label the first column "Dimension".
   - CHOOSE THE DIMENSIONS THE FIELD CAN ANSWER, and keep the table READABLE: at most 5
     comparison columns besides the first (name) column. Keep only dimensions MOST of the compared
     options actually have a sourced value for — a column that two thirds of the field cannot answer is

@@ -193,14 +193,40 @@ def detect_sections_after_faq(body):
     return hits
 
 
+# FU254 — the corner cell a model writes when it puts the OPTIONS in the columns and the DIMENSIONS
+# in the rows: `| Dimension | <option A> | <option B> |`. 22 of the 221 stored articles are written
+# that way. It lives here, not in blog_gen, because this module is stdlib-only and blog_gen imports
+# from it — one copy, read by the table rules on both sides.
+DIM_AXIS_HEAD_RE = re.compile(
+    r"^\s*(?:dimension|feature|metric|attribute|aspect|criteri|categor|factor|item|comparison|"
+    r"characteristic|parameter|propert|specification|spec|measure|what|area|topic|point)\b", re.I)
+
+
+def _swap_table_axes(hdr, rows):
+    """FU254 — a parsed table with its axes exchanged, in the (hdr, [(cells, raw), ...]) shape
+    `_tables` yields. The corner cell stays put; every other header cell becomes a row label and
+    every row label becomes a header cell."""
+    n = len(hdr)
+    cells = [(list(c) + [""] * n)[:n] for c, _raw in rows]
+    new_hdr = [hdr[0]] + [c[0] for c in cells]
+    new_rows = [([hdr[ci]] + [c[ci] for c in cells], "") for ci in range(1, n)]
+    return new_hdr, new_rows
+
+
 def detect_uncited_table_cells(body, cap=6):
     """A cell with no [S#] in a column where the other cells are cited. A column that is cited
     everywhere else is a sourced dimension — an uncited cell in it is a fact with nothing behind it
-    (usually written to fill the cell). The first (name) column and any Source column are skipped."""
+    (usually written to fill the cell). The first (name) column and any Source column are skipped.
+
+    FU254: a table whose columns are the OPTIONS is swapped first, so the comparison runs down a
+    DIMENSION either way. Without it this read the axes backwards and reported "<dimension> ·
+    <option>" — the finding inverted, and compared across dimensions that share no unit."""
     hits = []
     for hdr, rows in _tables(_prose(body)):
         if len(rows) < 2:
             continue
+        if len(hdr) >= 3 and DIM_AXIS_HEAD_RE.match(_cell_text(hdr[0])):
+            hdr, rows = _swap_table_axes(hdr, rows)
         ncol = len(hdr)
         for col in range(1, ncol):
             name = _cell_text(hdr[col])

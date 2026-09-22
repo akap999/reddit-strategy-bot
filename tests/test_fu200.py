@@ -92,7 +92,9 @@ def test_the_operator_is_told_what_was_dropped():
     gen = BlogGenerator(StubClaude(), db=None)
     gen._resolve_table_punts(_table())
     note = gen._table_punt_note or ""
-    assert "column" in note and "unsourced" in note
+    # FU254: the note says "dimension", not "column" — which axis a dimension occupies depends on
+    # how the model wrote the table, and the operator is being told a dimension was lost either way.
+    assert "dimension" in note and "unsourced" in note
 
 
 # ── the cap is a cap, not a floor ─────────────────────────────────────────────────────────────

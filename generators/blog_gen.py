@@ -25,6 +25,7 @@ from generators import research as _research   # FU221 (Step 0): find → read �
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
 from generators.blog_eval import body_damage as _body_damage   # FU251: a removal may leave damage
 from generators.blog_eval import rewrite_findings as _rewrite_findings   # FU252: what a rewording changed
+from generators.blog_eval import DIM_AXIS_HEAD_RE as _DIM_AXIS_HEAD_RE   # FU254: which axis is which
 
 # FU252 — how much a rewording may get wrong before it stops being exportable. Mirrors the guard's
 # own wording budget (`rewrite_guard._BUDGET_DIV`): one budgeted defect per ten non-empty lines, and
@@ -713,6 +714,16 @@ def scrub_markdown_formatting(body):
 
 
 _DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
+# FU254 — WHICH AXIS holds the dimensions. Every table rule in this file assumes column 0 names the
+# option and every column after it is a dimension (`for ci in range(1, ncols)`). A model that writes
+# `| Dimension | <option A> | <option B> |` inverts that, and the FU204 any-empty rule then deletes
+# one of the two things the article compares. Measured on the 221 stored articles: 22 tables are
+# written that way and 2 had ALREADY shipped with a single option left — both "X vs Y" articles, one
+# of them a platform comparison, so this is a shape, not a vertical.
+# A comparison compares at least this many things, or it is not a comparison. The FU204 collapse
+# guard's floor was "one surviving column", which is what let a table naming ONE of the two options
+# ship from an article whose own title is "how <A> differs from <B>".
+_MIN_COMPARED = 2
 # FU105's comparison floor, as a named constant: a comparison needs at least this many non-subject
 # competitors to be a comparison at all. FU206 reads it to decide whether REMOVING a thin competitor
 # is even offerable — shrinking the field below the floor is the self-crowning failure the floor
@@ -1200,6 +1211,28 @@ def _is_negative_about(src, subject_name):
 def _kf_slug(s):
     """Lowercase hyphen-slug for matching product names / URL paths (vertical-neutral)."""
     return re.sub(r"[^a-z0-9]+", "-", (s or "").strip().lower()).strip("-")
+
+
+def _table_cell_name(cell):
+    """FU254 — the entity a table cell names, stripped of the decoration a model adds: bold, a link,
+    a trailing parenthetical ("<name> (<brand A> / <brand B>)"). Same normalisation
+    `_tradeoff_competitors` applies at its own call site."""
+    c = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", str(cell or ""))
+    c = re.sub(r"[*_`]+", "", c)
+    c = re.sub(r"\s*\([^)]*\)\s*$", "", c)
+    return c.strip()
+
+
+def _transpose_table(header, data):
+    """FU254 — swap a parsed table's axes. `header[0]` is the corner cell and stays put; every other
+    header cell becomes a row's first cell and vice versa. Applying the existing column rules to a
+    transposed copy and swapping back is what keeps ONE implementation of the FU204 rule instead of
+    a second one that would drift from it."""
+    ncols = len(header)
+    rows = [(r + [""] * ncols)[:ncols] for r in data]
+    nheader = [header[0]] + [r[0] for r in rows]
+    ndata = [[header[ci]] + [r[ci] for r in rows] for ci in range(1, ncols)]
+    return nheader, ndata
 
 
 def _kf_pricing_items(key_facts):
@@ -5075,6 +5108,14 @@ class BlogGenerator:
             if len(rows) < 3:
                 out.extend(tbl); continue
             header = rows[0]
+            # FU254: the same positional assumption as the FU204 rule — a price DIMENSION lives in
+            # a column only when the options are the rows. On a transposed table a column is an
+            # option, and "Ro Body membership plan" as a header would have deleted the option.
+            _sep, _body_rows = rows[1], rows[2:]
+            _flip = self._table_is_transposed(header, _body_rows)
+            if _flip:
+                header, _body_rows = _transpose_table(header, _body_rows)
+                rows = [header] + _body_rows
             drop = {ci for ci in range(1, len(header)) if _is_price_column(header[ci])}
             if not drop or len(drop) >= len(header) - 1:
                 out.extend(tbl); continue
@@ -5083,16 +5124,51 @@ class BlogGenerator:
                 for ci in sorted(drop, reverse=True):
                     if ci < len(r):
                         del r[ci]
+            if _flip:
+                header, _body_rows = _transpose_table(rows[0], rows[1:])
+                rows = [header, (_sep + ["---"] * len(header))[:len(header)]] + _body_rows
             out.extend("| " + " | ".join(r) + " |" for r in rows)
         return "\n".join(out), dropped
+
+    def _table_is_transposed(self, header, data):
+        """FU254 — True when the table's OPTIONS are its COLUMNS and its DIMENSIONS are its ROWS.
+
+        Primary test: two or more header cells past column 0 NAME a compared option (the article's
+        own tools list, plus the publisher). That rests on what the generator already knows rather
+        than on wording, and it also RULES OUT the inverse — a table whose column 0 holds the option
+        names is never called transposed, whatever its corner cell says.
+
+        Fallback, for a run with no tools resolved: column 0's header names the dimension AXIS
+        ("Dimension", "Feature", "Metric"). On the stored corpus that alone identified all 22."""
+        if len(header) < 3 or not data:
+            return False
+        names = [str(n) for n in (getattr(self, "_article_tools", None) or []) if str(n).strip()]
+        _vb = getattr(self, "_vfact_brand", None)
+        if isinstance(_vb, dict) and (_vb.get("name") or "").strip():
+            names.append(_vb["name"])
+        slugs = {_kf_slug(_table_cell_name(n)) for n in names}
+        slugs.discard("")
+        if slugs:
+            in_header = sum(1 for c in header[1:] if _kf_slug(_table_cell_name(c)) in slugs)
+            in_col0 = sum(1 for r in data if r and _kf_slug(_table_cell_name(r[0])) in slugs)
+            if in_col0 >= _MIN_COMPARED:
+                return False                    # the options are rows — the ordinary orientation
+            if in_header >= _MIN_COMPARED:
+                return True
+        return bool(_DIM_AXIS_HEAD_RE.match(_table_cell_name(header[0])))
 
     def _resolve_table_punts(self, body):
         """FU138 — STRUCTURAL resolution of data-unavailable table cells, in any phrasing:
         1. per cell, strip punt CLAUSES (";"/" — " separated) and keep any real remainder
            ("Not specified in sourced facts; billed separately [S7]" → "billed separately [S7]");
-        2. DROP a whole column (never the first/name column, never a Source column) when ANY of its
-           data cells is empty — FU204, the operator's rule: a comparison column answers for EVERY
-           option or it does not exist. A blank cell does not read as "not found", it reads as "this
+        2. DROP a whole DIMENSION (never the first/name column, never a Source column) when ANY of
+           its data cells is empty — FU204, the operator's rule: a comparison dimension answers for
+           EVERY option or it does not exist. FU254: which AXIS holds the dimensions is now asked
+           rather than assumed. A model that writes `| Dimension | <option A> | <option B> |` puts
+           the options in the COLUMNS, and this rule then deleted one of the two things the article
+           compares — an article whose title is "how <A> differs from <B>" shipped a table with no
+           <B> column. A transposed table is swapped, run through the identical rule, and
+           swapped back, so there is one implementation of it and not two. A blank cell does not read as "not found", it reads as "this
            product has none", which is worse than omitting the dimension. Measured on the two real
            tables in the repo: the Thyseed bottles table comes back 4x6 and the FU200 Osbornes table
            4x5, both 100% filled — the rule is strict but does not collapse a real comparison. It is
@@ -5117,7 +5193,7 @@ class BlogGenerator:
         self._table_punt_note = ""
         lines = body.split("\n")
         # locate contiguous table blocks
-        out, i, dropped_cols, leftover, collapsed = [], 0, 0, 0, 0
+        out, i, dropped_cols, leftover, collapsed, thin = [], 0, 0, 0, 0, 0
         while i < len(lines):
             if not (lines[i].strip().startswith("|") and lines[i].count("|") >= 2):
                 out.append(lines[i]); i += 1
@@ -5132,6 +5208,19 @@ class BlogGenerator:
                     out.append("")                 # FU186: never let the next line become a row
                 continue
             header, sep, data = rows[0], rows[1], rows[2:]
+            # FU254: ask which axis holds the dimensions, then run the ONE rule below on a
+            # normally-oriented copy and swap back. Nothing about the rule changes; what changes is
+            # that it can no longer delete a column that is an OPTION.
+            _flip = self._table_is_transposed(header, data)
+            if _flip:
+                header, data = _transpose_table(header, data)
+                # FU254: a comparison compares at least two things. In the orientation the rules run
+                # in the options are ROWS, and nothing below drops a row — so a shortfall here is
+                # what ARRIVED, and it is reported rather than silently accepted. The old collapse
+                # guard's floor was one surviving column, which is how a table naming only ONE of
+                # two compared options shipped from an article about how they differ.
+                if len(data) < _MIN_COMPARED:
+                    thin += 1
             ncols = len(header)
             # 1. strip punt clauses per data cell
             for r in data:
@@ -5142,12 +5231,16 @@ class BlogGenerator:
                     r[ci] = "; ".join(kept).strip(" ;")
             # 2. drop ANY column with an empty cell (skip col 0 and any Source column)
             drop = set()
+            # FU254: provenance is not an OPTION either. The Source exemption below was written when
+            # a Source could only be a column; on a swapped table it is a row, and counting its empty
+            # cells as gaps condemned every dimension and deleted the whole table.
+            _opts = [r for r in data if not re.search(r"source", (r[0] if r else ""), re.I)]
             for ci in range(1, ncols):
                 if re.search(r"source", header[ci], re.I):
                     continue
-                vals = [r[ci] if ci < len(r) else "" for r in data]
+                vals = [r[ci] if ci < len(r) else "" for r in _opts]
                 empty = sum(1 for v in vals if not v.strip() or v.strip() in ("—", "-"))
-                if data and empty:          # FU204: one gap is enough — see the docstring
+                if vals and empty:          # FU204: one gap is enough — see the docstring
                     drop.add(ci)
             # FU200: cap the width, keeping the best-evidenced dimensions. A Source column is never
             # dropped (it is exempt above and re-added here), and the first column is never touched.
@@ -5175,21 +5268,29 @@ class BlogGenerator:
             if drop:
                 dropped_cols += len(drop)
                 header = [c for ci, c in enumerate(header) if ci not in drop]
-                sep = [c for ci, c in enumerate(sep) if ci not in drop]
                 data = [[c for ci, c in enumerate(r) if ci not in drop] for r in data]
+                if not _flip:
+                    sep = [c for ci, c in enumerate(sep) if ci not in drop]
             # 3. leftover empties → "—" + count
             for r in data:
                 for ci in range(1, len(r)):
                     if not r[ci].strip():
                         r[ci] = "—"; leftover += 1
+            if _flip:
+                # back to the orientation the article was written in. A dropped DIMENSION was a row
+                # there, so the separator — which is sized to the option columns — is untouched.
+                header, data = _transpose_table(header, data)
+                sep = (sep + ["---"] * len(header))[:len(header)]
             for row in [header, sep] + data:
                 out.append("| " + " | ".join(row) + " |")
             if i < len(lines) and lines[i].strip():
                 out.append("")                     # FU186: never let the next line become a row
-        if dropped_cols or leftover or collapsed:
+        if dropped_cols or leftover or collapsed or thin:
             bits = []
+            if thin:
+                bits.append(f"{thin} table(s) compare fewer than {_MIN_COMPARED} options")
             if dropped_cols:
-                bits.append(f"dropped {dropped_cols} unsourced column(s)")
+                bits.append(f"dropped {dropped_cols} unsourced dimension(s)")
             if collapsed:
                 bits.append(f"removed {collapsed} table(s) with no dimension the whole field could answer")
             if leftover:
@@ -6544,7 +6645,10 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
 WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
 {_qa_rule}  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-{_field_rule}  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
+{_field_rule}  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
+    the option names. Write it that way unless the dimensions genuinely will not fit; if you do put
+    the options in the COLUMNS instead, label the first column "Dimension" so the shape is explicit.
+  - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
     fill for EVERY option in the table. If one option cannot answer a dimension, choose a DIFFERENT
     dimension that they all can — never leave a cell blank, never write "—", and never add a note under
     the table apologising that a value could not be found. A blank cell does not read as "not found",
@@ -9444,6 +9548,8 @@ COMPLETE and every stated fact is sourced:
     cell text across multiple tools — each cell must reflect THAT tool's OWN sourced facts, with its OWN
     specifics (plan names, prices, terms). If a tool has NO tool-specific FRESH FACT, REMOVE its entire row
     from the table — do NOT generalize a policy article or another tool's values to fill it.
+  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
+    the option names. If the options are in the COLUMNS instead, label the first column "Dimension".
   - CHOOSE THE DIMENSIONS THE FIELD CAN ANSWER, and keep the table READABLE: at most {_DIM_CAP}
     comparison columns besides the first (name) column. Keep only dimensions MOST of the compared
     options actually have a sourced value for — a column that two thirds of the field cannot answer is
@@ -14606,7 +14712,13 @@ you MAY assume the description will carry: "{disc}".
     def _drop_table_columns(body, headers):
         """Remove the named comparison COLUMNS from every Markdown table. Reuses the row convention
         `_strip_price_columns` established; never drops the first (name) column, a Source column, or
-        the last remaining dimension. Returns (body, [dropped headers])."""
+        the last remaining dimension. Returns (body, [dropped headers]).
+
+        FU254 note — unlike the other table rules this one needs no orientation test, because it only
+        ever drops a column whose header the CALLER named, and the caller (`_publisher_weak_check`)
+        finds its dimensions by walking ROWS, so it returns nothing at all for a table whose options
+        are the columns. It is inert there rather than wrong. If a caller is ever added that names
+        dimensions some other way, this becomes the third site that needs the axis."""
         want = {re.sub(r"[*_`]", "", h or "").strip().lower() for h in (headers or []) if str(h).strip()}
         if not body or not want:
             return body, []

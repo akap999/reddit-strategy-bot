@@ -273,6 +273,9 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
          do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
     Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
     evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
+    the option names. Write it that way unless the dimensions genuinely will not fit; if you do put
+    the options in the COLUMNS instead, label the first column "Dimension" so the shape is explicit.
   - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
     fill for EVERY option in the table. If one option cannot answer a dimension, choose a DIFFERENT
     dimension that they all can — never leave a cell blank, never write "—", and never add a note under

@@ -2431,6 +2431,27 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
                 return k
         return ""
 
+    # FU259 — a price TYPED into the Price column needs no currency symbol to be unambiguous: the
+    # column is headed "Price" and the operator is the authority. Rejecting "28.99" dropped the row
+    # silently, which on a real run threw away all seven rows an operator entered. Scoped to typed
+    # rows: when `verbatim_text` is supplied the figure must still appear in the paste exactly as
+    # written, so nothing a model produced can gain a symbol it never read.
+    _cur = "$"
+    if verbatim_text is None:
+        for _r in (payload or []):
+            if not isinstance(_r, dict):
+                continue
+            _m = re.search(r"[$£€¥₹]", str(_r.get("value") or "") + str(_r.get("value_max") or ""))
+            if _m:
+                _cur = _m.group(0)
+                break
+
+    def _with_currency(v):
+        """A bare number becomes a figure in the currency the operator is already using."""
+        if verbatim_text is not None:
+            return v
+        return (_cur + v) if re.fullmatch(r"\d[\d,]*(?:\.\d+)?", v.strip()) else v
+
     for row in (payload or [])[:max_rows]:
         if not isinstance(row, dict):
             continue
@@ -2442,7 +2463,7 @@ def _clean_price_rows(payload, known_names=None, subject="", max_rows=_PRICE_TAB
         kind = _norm_price_kind(row.get("kind"))
         figs = []
         for key in ("value", "value_max"):
-            v = str(row.get(key) or "").strip()
+            v = _with_currency(str(row.get(key) or "").strip())
             if not v:
                 continue
             m = _PRICE_FIG_RE.search(v)
@@ -3669,12 +3690,35 @@ def api_blog_generate():
             # so the byline/schema are populated without the user re-enriching the brand.
             brand = _ensure_brand_byline_logo(claude, bg, brand)
             brand = _ensure_content_context(claude, bg, brand)   # FU212: read new lines / auto once
+            # FU259: rows the operator entered that did not survive validation. Declared HERE —
+            # assigning it inside this closure makes it local to the closure, so an outer
+            # declaration is shadowed and the read below raises UnboundLocalError on every run
+            # where nothing was dropped.
+            _price_table_note = ""
             if price_links_in:   # FU213 (Change 5): save the pasted links, then generate with them
                 _save_price_links(bg, brand, price_links_in)
                 brand = bg.get_brand(brand_id) or brand
             if price_table_in:   # FU214: save the pasted price rows, then generate with them
-                _save_price_table(bg, brand, price_table_in)
+                _stored, _pt_dropped, _pt_flagged, _canon = _save_price_table(
+                    bg, brand, price_table_in)
                 brand = bg.get_brand(brand_id) or brand
+                # FU259 — say what did not survive. The Save button returns the dropped rows to the
+                # operator; this path threw them away, so a table that validated to NOTHING looked
+                # exactly like a table that was never filled in. Measured on a real run: seven rows
+                # sent, seven dropped, zero stored, and the only trace was a count in a server log
+                # nobody reads. The article then priced everything from automatic sourcing and the
+                # operator was told nothing at all.
+                if _pt_dropped:
+                    _why = "; ".join(
+                        f"\u201c{str(d.get('raw') or d.get('brand') or '')[:40]}\u201d — "
+                        f"{d.get('why') or 'rejected'}" for d in _pt_dropped[:4])
+                    _price_table_note = (
+                        f"price table: {len(_pt_dropped)} row(s) you entered were NOT saved "
+                        f"({_why}"
+                        + (f"; +{len(_pt_dropped) - 4} more" if len(_pt_dropped) > 4 else "")
+                        + "). Every price needs its currency symbol ($28.99, not 28.99) and a brand "
+                          "name. Any price on the page came from automatic sourcing instead")
+                    print(f"[price-table] {_price_table_note}", flush=True)
             # Optional: pull the brand's live Reddit thread (post + comments incl. the brand
             # comment) so the article can cite it as community social proof.
             reddit_thread, reddit_status = _blog_reddit_evidence(claude, bg, reddit_url)
@@ -3798,6 +3842,13 @@ def api_blog_generate():
             # warning list beside it so a reopened blog shows whole warnings, not a re-split string.
             if blog.get("verify_report"):
                 bg.update_blog(blog_id, verify_report=blog["verify_report"])
+            # FU259 — a price row that validated to nothing is the operator's own input vanishing,
+            # so it belongs in the same list every other check writes to, not only in a server log.
+            if _price_table_note:
+                blog["warnings"] = (blog.get("warnings") or []) + [
+                    {"check": "price-table", "detail": _price_table_note}]
+                blog["geo_warning"] = "; ".join(
+                    x for x in [(blog.get("geo_warning") or ""), _price_table_note] if x)
             if blog.get("warnings"):
                 bg.update_blog(blog_id, warnings=blog["warnings"])
             # FU202: keep BOTH versions — the body as it stood before the verification pass edited it.

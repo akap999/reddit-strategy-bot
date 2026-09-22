@@ -329,3 +329,78 @@ def test_it_is_editorial_and_never_damage():
     refuses the removal and the defect ships. FU253 learned this the hard way."""
     assert any(f["check"] == "repeated-uncited-claim" for f in E.editorial_findings(_REPEATED))
     assert not any(f["check"] == "repeated-uncited-claim" for f in E.body_damage(_REPEATED))
+
+
+# ── Step 4 — a named study, and a figure that answers the question ───────────────────────────────
+# _study_reference_check fired on 61 of the 221 stored articles and its findings were dominated by
+# ordinary words: one product-category phrase accounted for 23 of them, and "a free audit", "an
+# audit" and "the ability to study" for most of the rest. That measurement is why this check is NOT
+# made removal-eligible — it would have deleted sentences about the publisher's own service.
+
+def test_a_programme_is_not_a_trial():
+    g = _gen()
+    assert g._study_reference_check(
+        "## X\n\nOur GLP-1 program includes provider access and shipping.\n") == ""
+    assert "TAME trial" in (g._study_reference_check(
+        "## X\n\nThe TAME trial is ongoing and widely discussed.\n") or "")
+
+
+def test_an_infinitive_is_a_verb_whatever_noun_follows_it():
+    g = _gen()
+    assert g._study_reference_check(
+        "## X\n\nThat gives clinicians the ability to study longer-term outcomes.\n") == ""
+    assert g._study_reference_check(
+        "## X\n\nThere is every reason to report a side effect to your provider.\n") == ""
+
+
+def test_a_service_you_can_book_is_not_a_document():
+    g = _gen()
+    assert g._study_reference_check(
+        "## X\n\nGet a free audit of your site and see where you stand today.\n") == ""
+
+
+def test_a_document_credited_with_a_figure_is_still_a_document():
+    """The four ambiguous nouns need a research context — a reporting verb, a date, or a figure the
+    document is credited with. "a separate industry report puts it at 9.2%" is a citation shape."""
+    note = _gen()._study_reference_check(
+        "## X\n\nA survey of 400 firms put the median rate at 8.5% [S1], while a separate industry "
+        "report puts it at 9.2%.\n")
+    assert "a separate industry report" in (note or "")
+
+
+def test_an_unambiguous_design_needs_no_context():
+    assert "meta-analysis" in (_gen()._study_reference_check(
+        "## X\n\nA meta-analysis suggests one option carries more risk than the other.\n") or "").lower()
+
+
+# _answer_check: "how X differs from Y" was not in the comparative lexicon, so a guide whose whole
+# title is a comparison was never asked whether it answered one.
+
+def _answer(seed, body, brand=None):
+    return BlogGenerator._answer_check({"body_markdown": body},
+                                       brand or {"name": "Acme", "domain_url": "acme.com"}, seed)
+
+
+def test_differs_from_is_a_comparative_seed():
+    body = "## X\n\nBoth are widely used.\n\n## Sources\n\n- [S1] third-party · T — <https://x.com/a>\n"
+    assert _answer("Is A a category? How It Differs From B", body), "a comparison seed went unread"
+
+
+def test_the_figure_has_to_be_about_what_the_question_asks():
+    """A comparative seed used to be satisfied by ANY measured figure from a non-own source, so an
+    article could compare two things, state no number about either, and pass."""
+    off_topic = ("## X\n\nShipping arrives in 2 days for most addresses [S1].\n\n"
+                 "## Sources\n\n- [S1] third-party · T — <https://x.com/a>\n")
+    assert _answer("Which sealer is best for a garage floor?", off_topic)
+    on_topic = ("## X\n\nThe silane sealer cut water absorption by 85% [S1].\n\n"
+                "## Sources\n\n- [S1] third-party · T — <https://x.com/a>\n")
+    assert _answer("Which sealer is best for a garage floor?", on_topic) == ""
+
+
+def test_a_table_row_is_answered_by_the_table_it_sits_in():
+    """"| Silane | 85% less water absorption [S1] |" answers "which sealer is best" without
+    repeating the word — the table's header and the heading above it say what it is about."""
+    body = ("## How do the sealers compare?\n\n| Sealer | Result |\n|---|---|\n"
+            "| Silane | 85% less water absorption [S1] |\n\n"
+            "## Sources\n\n- [S1] third-party · T — <https://x.com/a>\n")
+    assert _answer("Which sealer is best for a garage floor?", body) == ""

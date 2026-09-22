@@ -251,8 +251,11 @@ _ANSWER_EVIDENCE_CAP = 4         # FU218: blocks kept from a general guide's ans
 # FU218 — a seed that asks WHICH option is best / better, or compares options. Read from the question's
 # SHAPE, never its topic, so it is the same test for a treatment, a sealer, a platform or a loan type.
 _COMPARATIVE_SEED_RE = re.compile(
-    r"\b(?:which|best|better|vs\.?|versus|compared?|comparison|most\s+effective)\b|\btop\s+\d",
-    re.IGNORECASE)
+    r"\b(?:which|best|better|vs\.?|versus|compared?|comparison|most\s+effective|"
+    # FU254: "how X differs from Y" is as comparative as "X vs Y", and was not in this lexicon — so
+    # a guide whose whole title is a comparison was never asked whether it answered one.
+    r"differs?|different|difference|differences|distinguish(?:es|ed)?|alternatives?\s+to)\b"
+    r"|\btop\s+\d", re.IGNORECASE)
 
 # FU218 — a MEASURED figure: a percentage, a currency amount, a decimal, a multiple, or a number with a
 # unit of measure. Identifiers ("Model-3", "ISO 9001", "Type 2") and bare years carry none of these, so they
@@ -713,6 +716,13 @@ def scrub_markdown_formatting(body):
     return _r2, fixes
 
 
+# FU254 — the words in a seed that say nothing about WHAT is being compared, so a figure sharing
+# only these with the question has not answered it.
+_SEED_STOPWORDS = frozenset("""what which best better worse than that this these those with from
+about does doing done how much many more most less least should would could will have has when
+where why compare compared comparison versus vice differ differs difference different same your
+you the and for are is it its into over under between good real cost costs price prices
+work works works using used use make makes take takes give gives need needs want wants""".split())
 _DIM_CAP = int(os.environ.get("BLOG_MAX_DIMENSIONS", "5"))
 # FU254 — WHICH AXIS holds the dimensions. Every table rule in this file assumes column 0 names the
 # option and every column after it is a dimension (`for ci in range(1, ncols)`). A model that writes
@@ -3558,20 +3568,42 @@ class BlogGenerator:
             if (bn and (lab == bn or lab.startswith(bn + " ") or lab.startswith(f"fact · {bn}"))) or \
                     (own and d and (d == own or d.endswith("." + own))):
                 own_idx.add(int(m.group(1)))
-        units = []
+        # FU254: each unit carries its CONTEXT — the nearest heading above it, and for a table row
+        # the table's own header. A row reading "| <option> | 85% less absorption [S1] |" answers
+        # "which <thing> is best" without repeating the noun: the table it sits in already says so.
+        units, _head, _thead = [], "", ""
         for ln in prose.splitlines():
-            if re.match(r"^\s*#", ln) or re.match(r"^\s*\|?\s*:?-{3,}", ln):
+            if re.match(r"^\s*#", ln):
+                _head, _thead = ln, ""
                 continue
-            units.extend([ln] if ln.lstrip().startswith("|") else re.split(r"(?<=[.!?])\s+", ln))
-        for u in units:
+            if re.match(r"^\s*\|?\s*:?-{3,}", ln):
+                continue
+            if ln.lstrip().startswith("|"):
+                if not _thead:
+                    _thead = ln                     # the first row of a table is its header
+                units.append((ln, _head + " " + _thead))
+                continue
+            _thead = ""
+            units.extend((u, _head) for u in re.split(r"(?<=[.!?])\s+", ln))
+        # FU254 — the figure has to answer THIS question. A comparative seed was satisfied by any
+        # measured figure anywhere on the page from a non-own source, including a price in a
+        # paragraph about something else, so an article could compare two things, state not one
+        # number about either, and pass. The unit must also NAME what the seed asks about.
+        _qterms = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", q)} - _SEED_STOPWORDS
+        for u, ctx in units:
             idx = [int(x) for x in re.findall(r"\[S(\d+)\]", u)]
             if not idx or all(i in own_idx for i in idx):
                 continue
-            if _MEASURED_FIG_RE.search(re.sub(r"\[S\d+\]", " ", u)):
+            if not _MEASURED_FIG_RE.search(re.sub(r"\[S\d+\]", " ", u)):
+                continue
+            if not _qterms:
+                return ""
+            _uw = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", u + " " + ctx)}
+            if _qterms & _uw:
                 return ""
         return (f"answer-check: this guide asks {q!r} but states no measured result (a study, test or "
-                f"figure) from an independent source — the answer defers instead of answering; "
-                f"regenerate, or add a source that reports the outcome")
+                f"figure) from an independent source ABOUT WHAT IT ASKS — the answer defers instead "
+                f"of answering; regenerate, or add a source that reports the outcome")
 
     # ------------------------------------------------------------ evidence sourcing
     def _resolve_brand_domains(self, names, seed=None, subject=None, subject_category=None,
@@ -15158,11 +15190,28 @@ you MAY assume the description will carry: "{disc}".
         # — "a review of your options" and "an analysis of your costs" are ordinary prose.
         r"white\s+paper|working\s+paper|report|survey|audit|study)"
         r"(?![\w-])", re.I)
+    # FU254 — the nouns above that are ALSO ordinary words. "report", "survey", "audit" and "study"
+    # name a document in a research sentence and a SERVICE, an action or a verb everywhere else:
+    # "get a free audit", "the ability to study", "a reason to report". Measured across the stored
+    # corpus these were most of what the check found, and a warning that is mostly noise is a
+    # warning the operator learns to skip. So for these four the sentence must ALSO read like a
+    # citation — the document does something (found, showed, reported) or is dated/numbered.
+    _AMBIGUOUS_DOC_RE = re.compile(r"\b(?:report|survey|audit|study)$", re.I)
+    _DOC_CONTEXT_RE = re.compile(r"\b(?:19|20)\d{2}\b|\bn\s*=|\bparticipants?\b|\bpatients?\b|"
+                                 r"\bpublished\b|\bpeer[-\s]reviewed\b|\bjournal\b|\bauthors?\b",
+                                 re.I)
+    # An infinitive is a verb, whatever noun follows the "to".
+    _INFINITIVE_DOC_RE = re.compile(r"\bto\s+$", re.I)
     # A trial referred to by name — STEP 1, SURMOUNT-2, SELECT — which is a specific document even
     # without a determiner in front of it.
+    # FU254: "programme"/"program" came OUT of this list. An upper-case token in front of it is
+    # almost always a product or service category, not a trial acronym — measured across the stored
+    # corpus, a single such phrase accounted for 23 of the check's findings and every one was the
+    # publisher's own offering. A trial named after a programme is still caught by `_STUDY_REF_RE`
+    # once a determiner individuates it ("the X trial").
     _NAMED_TRIAL_RE = re.compile(
         r"(?<![\w-])[A-Z][A-Z0-9]{2,}(?:[-\s]?\d+)?\s+"
-        r"(?:trial|study|programme|program|extension|analysis)(?![\w-])")
+        r"(?:trial|study|extension|analysis)(?![\w-])")
     _PLURAL_EVIDENCE_RE = re.compile(
         r"\b(both|two|three|four|several|multiple|numerous)\s+(?:of\s+(?:the|these)\s+)?"
         r"(analyses|studies|trials|reviews|meta[-\s]?analyses|papers|guidelines|reports|surveys)\b",
@@ -15182,6 +15231,24 @@ you MAY assume the description will carry: "{disc}".
         r"suggest(?:s|ed)|conclude[sd]?|demonstrat(?:es|ed)|indicat(?:es|ed)|note[sd]?|"
         r"underscore[sd]?|state[sd]?|agree[sd]?|confirm(?:s|ed)|observ(?:es|ed))\b", re.I)
 
+    @classmethod
+    def _not_a_document(cls, sent, ref):
+        """FU254 — True when a matched "study reference" is an ordinary word rather than a paper.
+        Only the four ambiguous nouns are judged; "meta-analysis" and "randomised controlled trial"
+        are documents in every sentence they appear in."""
+        st, en, txt = ref
+        if cls._INFINITIVE_DOC_RE.search(sent[max(0, st - 12):st]):
+            return True                     # "the ability TO study", "a reason TO report"
+        if not cls._AMBIGUOUS_DOC_RE.search(txt.strip()):
+            return False
+        after = sent[en:en + 90]
+        window = sent[max(0, st - 60):en + 90]
+        # a document CREDITED WITH A FIGURE is a document however the verb is phrased — "a separate
+        # industry report puts it at 9.2%" reads as a citation; "get a free audit" does not.
+        return not (cls._STUDY_VERB_RE.search(after)
+                    or _MEASURED_FIG_RE.search(after)
+                    or cls._DOC_CONTEXT_RE.search(window))
+
     def _study_reference_check(self, body):
         """Every study the article names must be one it cites, and no two of them may be the same
         source. Warning only — the claim is usually true and the provenance is what is wrong, and a
@@ -15197,6 +15264,8 @@ you MAY assume the description will carry: "{disc}".
             # "the STEP 1 trial extension" matches both patterns; it is ONE reference.
             refs = [r for k, r in enumerate(refs)
                     if not any(r[0] < refs[j][1] and refs[j][0] < r[1] for j in range(k))]
+            # FU254: drop the references that are not documents at all
+            refs = [r for r in refs if not self._not_a_document(sent, r)]
             # (a) a reference is cited when a marker follows it before the NEXT reference does. A
             # sentence carrying one citation and two studies has cited one of them.
             for i, (st, en, txt) in enumerate(refs):

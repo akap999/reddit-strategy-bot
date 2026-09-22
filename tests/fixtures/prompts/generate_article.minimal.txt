@@ -245,6 +245,11 @@ WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY rega
          do NOT name it; a shorter honest field beats a plausible-sounding wrong peer.
     Naming a brand as an option needs no source, though SPECIFIC claims about it still follow the
     evidence rules. Skip this rule ONLY when the article genuinely contains no comparison at all.
+  - SAY A COMPARATIVE CLAIM ONCE. A claim that one option is higher, lower, safer, slower or worse
+    than another belongs in ONE section — the one it answers — with its NUMBERS and its [S#]. Refer to
+    it elsewhere in a clause ("as noted above"), never restate it. The same uncited comparison made in
+    section after section is a verdict the page has not earned, and it reads as one whoever it favours.
+    If you cannot cite it, do not assert it in the first place.
   - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
     the option names. Write it that way unless the dimensions genuinely will not fit; if you do put
     the options in the COLUMNS instead, label the first column "Dimension" so the shape is explicit.

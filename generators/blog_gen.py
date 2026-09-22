@@ -6715,7 +6715,12 @@ GEOGRAPHY / QUALIFIER DIFFERENTIATION (FU89 — a variant page must EARN its exi
 WRITE THE ARTICLE BODY (Markdown), GEO-FIRST — this backbone is MANDATORY regardless of intent:
 {_qa_rule}  - Use QUESTION-SHAPED H2/H3 headings (the way people ask an AI), each followed IMMEDIATELY by ONE
     concise, factual, self-contained answer a model can quote verbatim.
-{_field_rule}  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
+{_field_rule}  - SAY A COMPARATIVE CLAIM ONCE. A claim that one option is higher, lower, safer, slower or worse
+    than another belongs in ONE section — the one it answers — with its NUMBERS and its [S#]. Refer to
+    it elsewhere in a clause ("as noted above"), never restate it. The same uncited comparison made in
+    section after section is a verdict the page has not earned, and it reads as one whoever it favours.
+    If you cannot cite it, do not assert it in the first place.
+  - COMPARISON TABLE SHAPE: ONE ROW PER OPTION, one column per dimension, and the first column holds
     the option names. Write it that way unless the dimensions genuinely will not fit; if you do put
     the options in the COLUMNS instead, label the first column "Dimension" so the shape is explicit.
   - EVERY COMPARISON COLUMN MUST ANSWER FOR EVERY OPTION (hard rule). Never create a column you cannot
@@ -14169,6 +14174,59 @@ you MAY assume the description will carry: "{disc}".
                      f"check those figures by hand")
         return out, note
 
+    def _repeated_claim_check(self, body):
+        """FU254 — the same COMPARATIVE claim, carrying no citation anywhere it appears, asserted in
+        three or more sections. Say it once; the repeats go.
+
+        The reported article said one drug has a higher rate of serious adverse events in four
+        sections and a table cell, and not one of them cited anything — on a page whose publisher
+        sells that drug. FU253's `detect_repeated_constraint` cannot see it: that one matches a
+        lexicon of RULES, and this is a claim.
+
+        The first statement STAYS, whether or not it is sourced — deleting it would take a true and
+        clinically important fact off the page, which is the worse failure. What it gets instead is a
+        warning naming it, because no check can invent the source it needs. Removals run through the
+        same damage guard and the same `_FAB_MAX_DROP` cap as every other removal here, so a repeat
+        that cannot be taken out without stranding what follows is left alone and reported.
+
+        Returns (body, note)."""
+        if not body:
+            return body, ""
+        from generators.blog_eval import detect_repeated_uncited_claim
+        findings = detect_repeated_uncited_claim(body)
+        if not findings:
+            return body, ""
+        lines = body.split("\n")
+        hits, cores = [], []
+        for f in findings:
+            cores.append(", ".join(f.get("shared") or []))
+            for sent in (f.get("repeats") or []):
+                for li, ln in enumerate(lines):
+                    if ln.lstrip().startswith(("|", "#")):
+                        continue              # a table cell is not a sentence; a heading is not one
+                    if sent and sent in ln:
+                        hits.append(("sent", li, sent, [sent]))
+                        break
+        if not hits:
+            return body, ""
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, ("repeated-claim: the same uncited comparative claim is asserted in "
+                          "%d places (%s) — too many to reduce safely, so nothing was changed; "
+                          "regenerate rather than publish a verdict the page never sourced"
+                          % (len(hits) + len(findings), "; ".join(cores[:3])))
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        note = ("repeated-claim: the same uncited comparative claim (%s) was asserted in %d "
+                "sections — removed %d restatement(s) and kept the first. CITE THE ONE THAT "
+                "REMAINS, with its numbers, or drop it: an uncited comparative claim is a verdict "
+                "the page has not earned"
+                % ("; ".join(cores[:3]), max(len(f.get("sections") or []) for f in findings),
+                   applied))
+        if widened:
+            note += f"; {widened} took the whole paragraph rather than strand what followed"
+        if refused:
+            note += (f"; {refused} left in place — removing them would have damaged the article")
+        return out, note
+
     def _claim_source_check(self, body, blocks, brand):
         """Re-point citations that their page does not support, prefer the most authoritative page
         that does, and report what neither pass could resolve. Returns (body, note)."""
@@ -15834,6 +15892,12 @@ you MAY assume the description will carry: "{disc}".
         # FU249 — the evidence the article DESCRIBES, judged against the evidence it CITES. This needs
         # no source text at all: a page that names two studies and points both at one marker has
         # mis-attributed one of them whatever either page says.
+        # FU254 — and the same claim, over and over, with nothing under it. After the figure and
+        # price passes, so a restatement built on a figure already removed is gone before this runs.
+        article["body_markdown"], _rcn = self._repeated_claim_check(article["body_markdown"])
+        if _rcn:
+            print(f"[blog_gen] {_rcn}", flush=True)
+            self._warn(article, _rcn)
         _src = self._study_reference_check(article["body_markdown"])
         if _src:
             print(f"[blog_gen] {_src}", flush=True)

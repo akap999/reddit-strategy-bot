@@ -862,6 +862,100 @@ def detect_row_contradiction(body, cap=4):
     return hits
 
 
+# ── FU254: the same CLAIM, over and over, with nothing under it ──────────────────────────────────
+# "<A> has a higher rate of serious adverse events" appeared in four sections of one article and in a
+# table cell, and not one of them carried a citation. FU253's `detect_repeated_constraint` cannot see
+# it: `_CATEGORY_RULE_RE` is a lexicon of RULES ("may not be compounded"), and this is a CLAIM.
+#
+# The gate is comparative force, which is what makes a repeat matter: an article may restate a
+# definition as often as it likes, but a claim that one option is worse than another, asserted in
+# section after section with no source, is a verdict the page never earned. It is also the shape that
+# hurts a publisher most when the publisher sells the thing being judged.
+#
+# Measured across the 221 stored articles: an uncited claim repeated across 3+ sections turns up in
+# eight of them, spread across four unrelated industries — a shape, not a vertical.
+_COMPARATIVE_CLAIM_RE = re.compile(
+    r"\b(?:higher|lower|greater|larger|smaller|fewer|better|worse|faster|slower|cheaper|costlier|"
+    r"stronger|weaker|safer|riskier|longer|shorter|superior|inferior|more\s+\w+|less\s+\w+|"
+    r"outperform\w*|exceed\w*|surpass\w*|outlast\w*)\b"
+    r"|\b\w+er\s+than\b", re.I)
+_CLAIM_STOPWORDS = frozenset("""about above after again against because before below between both
+during earlier every further having however therefore these those through under until where whether
+which while whose within without would their there other another often always usually simply likely
+should might could cannot generally typically includes including instead across around before""".split())
+_CLAIM_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z-]{4,}")
+_CLAIM_OVERLAP_MIN = 3      # shared distinctive words for two sentences to be the same claim
+_CLAIM_SECTION_MIN = 3      # sections it must span before repetition becomes the finding
+
+
+def _claim_tokens(sent):
+    return frozenset(w.lower() for w in _CLAIM_TOKEN_RE.findall(sent)
+                     if w.lower() not in _CLAIM_STOPWORDS)
+
+
+def detect_repeated_uncited_claim(body, cap=4):
+    """FU254 — a COMPARATIVE claim, carrying no [S#] anywhere it appears, asserted in three or more
+    sections. Clustered TRANSITIVELY: the four wordings of the reported claim share five words, then
+    four, then three, so a pairwise key finds three separate pairs and no repeat at all.
+
+    Editorial, never damage — removing the repeats must not raise the count the removal guard reads.
+    """
+    cands = []
+    for si, (head, _lvl, pars) in enumerate(_sections(body)):
+        for par in pars:
+            for sent in re.split(r"(?<=[.!?])\s+", par):
+                sent = sent.strip()
+                if len(sent.split()) < 6 or _CITE_RE.search(sent):
+                    continue
+                if not _COMPARATIVE_CLAIM_RE.search(sent):
+                    continue
+                toks = _claim_tokens(sent)
+                if len(toks) >= 4:
+                    cands.append({"si": si, "head": head, "sent": sent, "toks": toks})
+    if len(cands) < _CLAIM_SECTION_MIN:
+        return []
+    # COMPLETE linkage: a sentence joins a claim only if it still shares the core with everything
+    # already in it. Single linkage (union-find on pairwise overlap) chains two unrelated claims
+    # together through a sentence that happens to touch both, and the reported "claim" then has an
+    # EMPTY shared core — which is how the first version of this read one article as one claim in
+    # five sections when it was three different claims.
+    clusters = []
+    for c in cands:
+        for cl in clusters:
+            core = cl["core"] & c["toks"]
+            if len(core) >= _CLAIM_OVERLAP_MIN:
+                cl["core"] = core
+                cl["members"].append(c)
+                break
+        else:
+            clusters.append({"core": c["toks"], "members": [c]})
+    hits = []
+    for cl in sorted(clusters, key=lambda x: -len({m["si"] for m in x["members"]})):
+        members, shared = cl["members"], cl["core"]
+        secs = {m["si"] for m in members}
+        if len(secs) < _CLAIM_SECTION_MIN:
+            continue
+        # the core must name WHAT is being compared, not just that something is
+        if len([t for t in shared if not _COMPARATIVE_CLAIM_RE.fullmatch(t)]) < 2:
+            continue
+        # KEEPER: the earliest section the article raises it in, and the fullest wording there —
+        # the reader meets the claim where the page first has a reason to make it, and reading order
+        # is deterministic in a way "the section that is really about it" is not.
+        first = min(secs)
+        keeper = max((m for m in members if m["si"] == first), key=lambda m: len(m["sent"]))
+        hits.append({"check": "repeated-uncited-claim",
+                     "detail": f'the same comparative claim, uncited, in {len(secs)} sections '
+                               f'({", ".join(sorted(m["head"][:28] for m in members)[:3])}…): '
+                               f'"{keeper["sent"][:110]}"',
+                     "sections": sorted(secs),
+                     "shared": sorted(shared)[:6],
+                     "keeper": keeper["sent"],
+                     "repeats": [m["sent"] for m in members if m is not keeper]})
+        if len(hits) >= cap:
+            break
+    return hits
+
+
 def editorial_findings(body, title=""):
     """FU253 — findings about what the article SAYS, as distinct from damage our own removal passes
     did to it.
@@ -874,7 +968,8 @@ def editorial_findings(body, title=""):
     so any removal at all can push it up. A detector that switches off a removal is a detector that
     protects the defect."""
     return (detect_repeated_constraint(body) + detect_constraint_bloat(body, title)
-            + detect_price_question_unanswered(body) + detect_row_contradiction(body))
+            + detect_price_question_unanswered(body) + detect_row_contradiction(body)
+            + detect_repeated_uncited_claim(body))
 
 
 # ── FU252: what the REWORDING changed about what the article ASSERTS ─────────────────────────────

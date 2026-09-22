@@ -246,3 +246,86 @@ def test_a_weak_design_keeps_the_badge_and_carries_its_design():
     assert _weak_study_design("Perspective: Telehealth in Practice") == "perspective"
     assert _official_label("https://x.gov/a", "Prescribing Information") == \
         "official · Prescribing Information"
+
+
+# ── Step 3 — say it once, with a source ──────────────────────────────────────────────────────────
+# "<A> has a higher rate of serious adverse events" appeared in four sections and a table cell of the
+# reported article, uncited every time, on a page whose publisher sells <A>. FU253's
+# detect_repeated_constraint matches a lexicon of RULES; this is a CLAIM. Measured: 8 of the 221
+# stored articles, across a concrete-equipment article, a debt-collection article and a renovation
+# article as well as the clinical ones.
+
+_REPEATED = """## How do they compare?
+
+Option A produces larger average gains, but it carries a higher rate of serious side effects
+compared with Option B.
+
+## What should buyers weigh?
+
+Option A's higher rate of serious side effects means the balance may favour Option B for some
+buyers. Cost is the other factor.
+
+## Which is right for most people?
+
+Option A is stronger on output. However, serious side effects occur more frequently with Option A
+than with Option B.
+
+## Is Option B ever better?
+
+Yes. Option B has a lower rate of serious side effects, which matters for cautious buyers.
+"""
+
+
+def test_the_same_uncited_comparison_in_three_sections_is_the_finding():
+    hits = E.detect_repeated_uncited_claim(_REPEATED)
+    assert hits, "four wordings of one uncited comparison went unseen"
+    assert len(hits[0]["sections"]) >= 3
+    assert "serious" in hits[0]["shared"]
+
+
+def test_the_cluster_keeps_a_shared_core():
+    """Single-linkage chains two unrelated claims through a sentence touching both, and the reported
+    claim then has an EMPTY core. Complete linkage is what keeps the finding meaningful."""
+    for hit in E.detect_repeated_uncited_claim(_REPEATED):
+        assert len(hit["shared"]) >= 3, hit["detail"]
+
+
+def test_a_cited_claim_is_not_a_finding():
+    assert not E.detect_repeated_uncited_claim(
+        _REPEATED.replace("side effects", "side effects [S1]"))
+
+
+def test_a_repeated_NON_comparative_statement_is_left_alone():
+    """An article may restate a definition as often as it likes. Comparative force is what makes a
+    repeat a verdict."""
+    md = ("## What is it?\n\nThe programme includes provider access and shipping.\n\n"
+          "## What is included?\n\nThe programme includes provider access and shipping.\n\n"
+          "## Anything else?\n\nThe programme includes provider access and shipping.\n")
+    assert not E.detect_repeated_uncited_claim(md)
+
+
+def test_two_sections_is_not_a_pattern():
+    two = _REPEATED.split("## Which is right")[0]
+    assert not E.detect_repeated_uncited_claim(two)
+
+
+def test_the_first_statement_is_the_one_that_stays():
+    hit = E.detect_repeated_uncited_claim(_REPEATED)[0]
+    assert "larger average gains" in hit["keeper"], "the keeper must be the earliest section's"
+    assert hit["keeper"] not in hit["repeats"]
+    assert len(hit["repeats"]) >= 2
+
+
+def test_the_reduction_removes_the_repeats_and_keeps_the_first():
+    out, note = _gen()._repeated_claim_check(_REPEATED)
+    assert "larger average gains" in out, "the first statement was deleted"
+    assert out.count("serious side effects") < _REPEATED.count("serious side effects")
+    assert "CITE THE ONE THAT REMAINS" in note
+    assert not E.body_damage(out), "the reduction left damage behind"
+
+
+def test_it_is_editorial_and_never_damage():
+    """A detector inside body_damage raises the count when the defect is removed, so the guard
+    refuses the removal and the defect ships. FU253 learned this the hard way."""
+    assert any(f["check"] == "repeated-uncited-claim" for f in E.editorial_findings(_REPEATED))
+    assert not any(f["check"] == "repeated-uncited-claim" for f in E.body_damage(_REPEATED))

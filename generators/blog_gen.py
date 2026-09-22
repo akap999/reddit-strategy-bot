@@ -13600,6 +13600,18 @@ you MAY assume the description will carry: "{disc}".
         other around first every also been being have will shall must may might such each""".split())
     _ORG_SAYS_MIN_TOKENS = 4      # below this the ratio is noise, not evidence
     _ORG_SAYS_MIN_SHARE = 0.5     # under half the claim's words on the page → say so
+    # FU264 — TWO BANDS. FU263 shipped this as a warning because the false-positive rate could not
+    # be measured: the replay holds no fetched page text. One production run has now measured it —
+    # three findings, all three correct, on the exact defect the operator went on to report by
+    # hand, and every one at a share of 0.25 or less. So the tight band REMOVES and the grey band
+    # still only warns.
+    #
+    # Scored against the real page (committed as a fixture): the three wrong claims sit at 0.25,
+    # 0.25 and 0.00; the wrong claim from the round before at 0.50; and claims the page genuinely
+    # supports at 0.60, 0.67 and 1.00. The nearest supported claim to the cut is 0.67 — and note it
+    # has its longest word missing too, which is exactly why both signals must agree.
+    _ORG_SAYS_CUT_SHARE = 0.25    # at or under this, three quarters of the claim is not on the page
+    _ORG_SAYS_CUT_TOKENS = 5      # and a removal wants more evidence than a warning does
 
     @classmethod
     def _claim_tokens_on_page(cls, predicate, page):
@@ -13633,17 +13645,24 @@ you MAY assume the description will carry: "{disc}".
         with no number, and the page was never even fetched, because only a figure triggers a
         fetch.
 
-        WARNING ONLY, deliberately. The separation is real but thin — the reported defects score
-        0.38 of their words on the page and correctly-supported claims 0.50 to 1.00 — and the replay
-        holds no fetched page text, so the false-positive rate cannot be measured across the corpus
-        the way every removing check here has been. FU254 is the precedent: a check that looked
-        sound removed nothing until it was measured, and was then found to be mostly false
-        positives. Removing a true claim that is merely worded differently is its own harm.
+        FU263 shipped this as a WARNING because the false-positive rate could not be measured: the
+        replay holds no fetched page text. One production run has now measured it — three findings,
+        all three correct, on the exact defect the operator then reported by hand, every one at a
+        share of 0.25 or less. FU264 therefore gives it TWO BANDS: at or under
+        `_ORG_SAYS_CUT_SHARE` the sentence is REMOVED, above it the finding is only reported.
 
-        The operator gets the sentence, the organisation, and the words that are missing, which is
-        what makes it actionable. Nothing is rewritten, so nothing can be fabricated."""
+        Removals use the same guard as every other removal here — applied one at a time, widened to
+        the paragraph or refused when the result would be damaged, capped by `_FAB_MAX_DROP`, and
+        over that cap nothing is removed at all.
+
+        Nothing is ever rewritten, so nothing can be fabricated: the choice is between leaving a
+        sentence alone and taking it out. The operator is told which went and which words were
+        missing, because the ADVICE is often sound and it is the CITATION that is wrong — it belongs
+        back on the page with a source that states it.
+
+        Returns (body, note)."""
         if not body or not blocks:
-            return ""
+            return body, ""
         walled = set(walled or ())
         txts = {}
         for i, bl in enumerate(blocks, 1):
@@ -13652,7 +13671,7 @@ you MAY assume the description will carry: "{disc}".
             cached = _page_text(self._claim_pages.get(u)) if u else ""
             txts[i] = t if len(t) >= len(cached or "") else cached
         hits = []
-        for line in (body or "").split("\n"):
+        for li, line in enumerate((body or "").split("\n")):
             if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
                 break
             st = line.strip()
@@ -13695,18 +13714,41 @@ you MAY assume the description will carry: "{disc}".
                 if _longest in best_hit:
                     continue
                 missing = [w for w in best_toks if w not in best_hit]
+                _share = len(best_hit) / len(best_toks)
+                _cut = (_share <= self._ORG_SAYS_CUT_SHARE
+                        and len(best_toks) >= self._ORG_SAYS_CUT_TOKENS)
                 hits.append((m.group(1).strip(), sent.strip()[:90], missing[:5],
-                             ", ".join(f"[S{n}]" for n in readable)))
+                             ", ".join(f"[S{n}]" for n in readable), _cut, li, sent))
         if not hits:
-            return ""
+            return body, ""
+        cuts = [h for h in hits if h[4]]
+        out = body
+        applied = widened = refused = 0
+        if cuts:
+            if len(cuts) > self._FAB_MAX_DROP:
+                cuts = []          # too many to remove safely — every one falls back to a warning
+            else:
+                out, applied, widened, refused = _apply_removals_without_damage(
+                    body.split("\n"), [("sent", h[5], h[6], [h[6]]) for h in cuts])
         bits = [f'"{h[1]}" attributes this to {h[0]} and cites {h[3]}, whose page does not contain '
                 f'{", ".join(repr(w) for w in h[2])}' for h in hits[:3]]
-        return ("org-position: %d claim(s) state what a named organisation says, and the page cited "
-                "for them does not use the claim's words — %s%s. Check each against its source: a "
-                "position attributed to an authority is the citation a reader is least likely to "
-                "doubt"
+        note = ("org-position: %d claim(s) state what a named organisation says, and the page cited "
+                "for them does not use the claim's words — %s%s."
                 % (len(hits), "; ".join(bits),
                    f"; +{len(hits) - 3} more" if len(hits) > 3 else ""))
+        if applied:
+            # The advice itself is often sound — it is the CITATION that is wrong — so the operator
+            # is told exactly what went and which words were missing, to put it back with a source
+            # that says it.
+            note += (" %d removed (the page shares almost none of the claim's words); put any of "
+                     "them back with a source that actually states it" % applied)
+            if widened:
+                note += f"; {widened} took the whole paragraph rather than strand what followed"
+            if refused:
+                note += f"; {refused} left in place — removing them would have damaged the article"
+        note += (" Check each against its source: a position attributed to an authority is the "
+                 "citation a reader is least likely to doubt")
+        return out, note
 
     def _walled_source_check(self, body, blocks, walled):
         """FU241 — a source nobody could read carries nothing, and a claim about what a readable
@@ -16573,8 +16615,10 @@ you MAY assume the description will carry: "{disc}".
             self._warn(article, _wsn)
         # FU263 — and a position attributed to a named organisation, against the page cited for it.
         # Runs here, in the PRE-rebuild group, because everything after `_rebuild_sources` sees
-        # blocks whose text is empty. Warning only — see the docstring.
-        _opn = self._org_position_check(article["body_markdown"], self._evidence_blocks, _walled)
+        # blocks whose text is empty. FU264: it REMOVES in the tight band and warns
+        # in the grey one — see the docstring.
+        article["body_markdown"], _opn = self._org_position_check(
+            article["body_markdown"], self._evidence_blocks, _walled)
         if _opn:
             print(f"[blog_gen] {_opn}", flush=True)
             self._warn(article, _opn)

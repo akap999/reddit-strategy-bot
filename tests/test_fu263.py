@@ -172,6 +172,12 @@ _PAGE = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def _org(body, page=None):
+    """FU264 changed the contract from `note` to `(body, note)` — the check now REMOVES in its tight
+    band. These assertions are about what it REPORTS, so they keep reading the note."""
+    return _org_full(body, page)[1]
+
+
+def _org_full(body, page=None):
     g = _gen()
     g._claim_pages = {}
     blocks = [{"label": "official · Guidance", "url": "https://authority.example/p",

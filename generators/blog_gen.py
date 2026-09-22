@@ -8014,6 +8014,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
         # than `_subj_toks` on purpose — the subject, the brand's category AND the core topic, minus
         # bare numbers (a year matches everything, which would make the filter inert).
         _biz_toks = _biz_topic_tokens(_subject, cat, core_topic)
+        # FU266 — the checks in `_finalize_article` need this too: a topic word found on a cited
+        # page proves nothing, because the source was chosen for being about the topic.
+        self._topic_tokens = list(_biz_toks or [])
         if _biz_toks:
             print(f"[blog_gen] same-name guard: topic tokens {', '.join(_biz_toks[:8])}", flush=True)
         _subj_brief = (f"; specifically their {_subject} work — any ranking, credential or documented "
@@ -13733,9 +13736,17 @@ you MAY assume the description will carry: "{disc}".
         r"(?:'s|\u2019s)?(?:\s*\([A-Z]{2,6}\))?\s+(?:[a-z][a-z-]*\s+){0,4}?"
         r"(?:" + _ORG_SAYS_VERBS + r")\s+(?:that\s+)?(.{10,200})")
     # Words that describe any claim and so cannot tell one page from another.
+    # FU266 — the long ones matter now that the cut keeps the LONGEST words rather than the first
+    # eight: "because" is seven characters, so it outranked real content words and, being on almost
+    # every page, lifted a wholly unsupported claim from 0.25 to 0.38 and out of the removal band.
+    # These carry no subject matter, which is exactly what this list is for.
     _ORG_SAYS_STOP = frozenset("""should would could their there these those which while about after
         before them they that this with from into more than when allowed allowing during using
-        other around first every also been being have will shall must may might such each""".split())
+        other around first every also been being have will shall must may might such each
+        because although however therefore whether without within through between against across
+        toward towards rather instead unless until since though whereas moreover furthermore
+        nevertheless besides despite among under above below again further once where here
+        having their itself themselves""".split())
     _ORG_SAYS_MIN_TOKENS = 4      # below this the ratio is noise, not evidence
     _ORG_SAYS_MIN_SHARE = 0.5     # under half the claim's words on the page → say so
     # FU264 — TWO BANDS. FU263 shipped this as a warning because the false-positive rate could not
@@ -13752,16 +13763,28 @@ you MAY assume the description will carry: "{disc}".
     _ORG_SAYS_CUT_TOKENS = 5      # and a removal wants more evidence than a warning does
 
     @classmethod
-    def _claim_tokens_on_page(cls, predicate, page):
+    def _claim_tokens_on_page(cls, predicate, page, topic=()):
         """FU263 — (present, total) distinctive words of a claim found on a page.
 
         Matched on the STEM at a word boundary, so a gerund finds its verb and an adverb finds its
         adjective. A bare prefix was tried first and was worse: "control"[:4] matches "contain",
-        which credited a page with words it does not have."""
+        which credited a page with words it does not have.
+
+        FU266 — `topic` drops the article's own subject vocabulary before scoring. Measured on a
+        reported claim: the first eight distinctive words in sentence order were `breastfeeding,
+        introducing, bottle…` — all on a page about introducing a bottle, because the head of a
+        sentence names the topic — and the scorer never reached `interfering, supply, latch`, the
+        three words the claim was actually wrong about. It read as 62% supported.
+
+        Dropping the topic's own words is what fixes it, and it fixes the cut too: with the topic
+        gone the first eight reach the tail on their own. Re-ranking the cut by word LENGTH was
+        tried and reverted — it promotes long function words over short content ones ("because" is
+        seven characters) and it changed two calibrated findings for the worse."""
         toks, low = [], re.sub(r"\s+", " ", (page or "").lower())
+        drop = {str(t).lower()[:6] for t in (topic or []) if len(str(t)) >= 4}
         for w in re.findall(r"[a-z][a-z-]{4,}", (predicate or "").lower()):
             w = w.strip("-")
-            if w and w not in cls._ORG_SAYS_STOP and w not in toks:
+            if w and w not in cls._ORG_SAYS_STOP and w not in toks and w[:6] not in drop:
                 toks.append(w)
         toks = toks[:8]
 
@@ -13774,7 +13797,7 @@ you MAY assume the description will carry: "{disc}".
         hit = [w for w in toks if re.search(r"\b" + re.escape(_stem(w)), low)]
         return hit, toks
 
-    def _org_position_check(self, body, blocks, walled):
+    def _org_position_check(self, body, blocks, walled, topic=()):
         """FU263 — a position attributed to a named organisation, against the page cited for it.
 
         The reported article told readers an authority's guidance covered four practices. Its cited
@@ -13836,7 +13859,7 @@ you MAY assume the description will carry: "{disc}".
                     continue          # unread is UNKNOWN, never unsupported
                 best_hit, best_toks = [], []
                 for n in readable:
-                    h, t = self._claim_tokens_on_page(m.group(2), txts.get(n) or "")
+                    h, t = self._claim_tokens_on_page(m.group(2), txts.get(n) or "", topic)
                     if len(h) >= len(best_hit):
                         best_hit, best_toks = h, t
                 if len(best_toks) < self._ORG_SAYS_MIN_TOKENS:
@@ -13887,6 +13910,124 @@ you MAY assume the description will carry: "{disc}".
         note += (" Check each against its source: a position attributed to an authority is the "
                  "citation a reader is least likely to doubt")
         return out, note
+
+    # ── FU266: a cited claim judged against the page it cites ────────────────────────────────────
+    # The measurement that motivated this round showed a token test CANNOT do this job alone. On the
+    # reported article, with the topic's own words removed from the score:
+    #
+    #     WRONG  "…the AAP recommends … after the first few weeks … milk supply and latch"   0.25
+    #     WRONG  "…the AAP recommends transitioning … toward a cup at 12 months"             0.40
+    #     RIGHT  "…the AAP recommends trying a different nipple or bottle type"              0.40
+    #     WRONG  table cell "Internal anti-colic venting system"                             0.75
+    #     RIGHT  the same brand's page wording, "base vent …"                                0.67
+    #
+    # The wrong cell scores HIGHER than the right one, because the page and the claim share their
+    # vocabulary and differ on the one word that names the mechanism — the page says "base vent".
+    # No share can separate those. What separates them is meaning, and `_vx_judge_pages` already
+    # judges meaning against page text, with an anti-hallucination guard: a `page_says` excerpt that
+    # is not really on the page is discarded and a verdict resting on it is downgraded.
+    #
+    # So the token score is demoted to what it is good at — a cheap, high-recall FILTER — and the
+    # judge decides. `verify_claims` cannot do this: it runs long before `_probe_cited_sources`, so
+    # it only ever saw the 2,500-character evidence snippet. For the AAP source that snippet was 230
+    # characters and the page itself was never in front of it.
+    _CITED_JUDGE_MAX = int(os.environ.get("BLOG_CITED_JUDGE_MAX", "14"))
+    _CITED_FILTER_SHARE = 0.75    # prose at or under this specific-word share goes to the judge
+
+    @staticmethod
+    def _specific_tokens(claim, topic):
+        """The claim's distinctive words MINUS the article's own topic vocabulary.
+
+        A topic word on a cited page is uninformative — the source was chosen because it is about
+        the topic — and scoring it is what let a fabricated AAP sentence read as 62% supported. Six
+        characters of prefix, not four: FU263 measured that "control"[:4] matches "contain"."""
+        pre = {str(t).lower()[:6] for t in (topic or []) if len(str(t)) >= 4}
+        out = []
+        for w in re.findall(r"[a-z][a-z-]{4,}", (claim or "").lower()):
+            w = w.strip("-")
+            if w and w not in BlogGenerator._ORG_SAYS_STOP and w not in out and w[:6] not in pre:
+                out.append(w)
+        return out
+
+    def _cited_claim_check(self, body, blocks, walled, topic=()):
+        """Every cited claim the pages can settle, settled. Returns (body, note)."""
+        if not body or not blocks or self.claude is None:
+            return body, ""
+        walled = set(walled or ())
+        pages, by_n = {}, {}
+        for i, bl in enumerate(blocks, 1):
+            u = (bl.get("url") or "").strip()
+            if not u or i in walled:
+                continue
+            txt = _page_text(self._claim_pages.get(u))
+            if len(txt) < self._PAGE_TEXT_MIN:
+                continue          # unread is UNKNOWN — Step 2b removes it, not this check
+            pages[u] = {"ok": True, "text": txt}
+            by_n[i] = u
+
+        cands, where = [], {}
+        for li, line in enumerate((body or "").split("\n")):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                break
+            st = line.strip()
+            if not st or st.startswith("#") or st.startswith(">"):
+                continue
+            if st.startswith("|"):
+                cells = line.split("|")
+                units = [(ci, cells[ci]) for ci in range(1, len(cells) - 1)]
+            else:
+                units = [(None, u) for u in self._prose_sentences(line)]
+            for ci, unit in units:
+                if not re.search(r"\[S\d+\]", unit) or len(unit.split()) < 4:
+                    continue
+                urls = [by_n[n] for n in
+                        dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
+                        if n in by_n]
+                if not urls:
+                    continue
+                claim = re.sub(r"\[S\d+\]", "", unit).strip(" *|")
+                toks = self._specific_tokens(claim, topic)
+                if len(toks) < self._ORG_SAYS_MIN_TOKENS:
+                    continue
+                if ci is None:
+                    joined = " ".join(pages[u]["text"] for u in urls)
+                    hit, tk = self._claim_tokens_on_page(claim, joined, topic)
+                    if tk and len(hit) / len(tk) > self._CITED_FILTER_SHARE:
+                        continue      # the page plainly carries this claim's words — not a candidate
+                ref = f"c{len(cands) + 1}"
+                cands.append({"ref": ref, "text": claim[:300], "urls": urls})
+                where[ref] = (li, ci, unit, claim)
+        if not cands:
+            return body, ""
+        cands = cands[:self._CITED_JUDGE_MAX]
+        verdicts = self._vx_judge_pages(cands, pages)
+        hits = []
+        for ref, v in (verdicts or {}).items():
+            if v.get("status") == "confirmed" or ref not in where:
+                continue
+            li, ci, unit, claim = where[ref]
+            hits.append(("cell" if ci is not None else "sent", li,
+                         ci if ci is not None else unit, v.get("status")))
+        if not hits:
+            return body, ""
+        shown = "; ".join(f'"{where[r][3][:52]}" — the page {("says something different" if v["status"] == "contradicted" else "does not say it")}'
+                          for r, v in list(verdicts.items())[:3]
+                          if r in where and v.get("status") != "confirmed")
+        if len(hits) > self._FAB_MAX_DROP:
+            return body, (f"cited-claim: {len(hits)} claim(s) are not supported by the page they "
+                          f"cite ({shown}) — too many to remove safely, so nothing was changed; "
+                          f"regenerate rather than publish")
+        lines = body.split("\n")
+        out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        bits = [f"removed {applied}"] if applied else []
+        if widened:
+            bits.append(f"widened {widened}")
+        if refused:
+            bits.append(f"kept {refused} (removing would have broken the page)")
+        if not bits:
+            return out, ""
+        return out, (f"cited-claim: {len(hits)} claim(s) the cited page does not support "
+                     f"({shown}); " + ", ".join(bits))
 
     def _walled_source_check(self, body, blocks, walled):
         """FU241 — a source nobody could read carries nothing, and a claim about what a readable
@@ -16761,11 +16902,19 @@ you MAY assume the description will carry: "{disc}".
         # Runs here, in the PRE-rebuild group, because everything after `_rebuild_sources` sees
         # blocks whose text is empty. FU264: it REMOVES in the tight band and warns
         # in the grey one — see the docstring.
+        _topic = list(getattr(self, "_topic_tokens", None) or []) + _biz_topic_tokens(seed or "")
         article["body_markdown"], _opn = self._org_position_check(
-            article["body_markdown"], self._evidence_blocks, _walled)
+            article["body_markdown"], self._evidence_blocks, _walled, _topic)
         if _opn:
             print(f"[blog_gen] {_opn}", flush=True)
             self._warn(article, _opn)
+        # FU266 — every cited claim the fetched pages can settle, judged against those pages. The
+        # deterministic checks above decide what they can; this decides what only meaning can.
+        article["body_markdown"], _ccn = self._cited_claim_check(
+            article["body_markdown"], self._evidence_blocks, _walled, _topic)
+        if _ccn:
+            print(f"[blog_gen] {_ccn}", flush=True)
+            self._warn(article, _ccn)
         article["body_markdown"], _csn = self._claim_source_check(
             article["body_markdown"], self._evidence_blocks, brand)
         if _csn:

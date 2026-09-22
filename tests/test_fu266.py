@@ -205,3 +205,116 @@ def test_real_held_page_text_is_still_trusted():
     g = _probe_gen()
     blocks = [{"label": "x", "url": "https://x.example/p", "text": real}]
     assert g._probe_cited_sources("## H\n\nA claim. [S1]\n", blocks) == set()
+
+
+# ── a cited claim judged against the page it cites ───────────────────────────────────────────────
+# Measured with the topic's own words removed from the score, on the real pages:
+#
+#     WRONG  "…after the first few weeks … milk supply and latch"   0.25
+#     WRONG  "…transitioning … toward a cup at 12 months"           0.40
+#     RIGHT  "…trying a different nipple or bottle type"            0.40
+#     WRONG  cell "Internal anti-colic venting system"              0.75
+#     RIGHT  the brand's own wording, "base vent …"                 0.67
+#
+# The WRONG cell scores higher than the RIGHT one. No share separates those, so the token score is
+# a filter and `_vx_judge_pages` decides.
+
+AAP_PAGE = ("Introducing the Bottle. Many breastfeeding parents wonder when to introduce a bottle. "
+            "If your baby refuses, try a different nipple or bottle type. Have someone other than "
+            "the mother offer the bottle. " * 6)
+THY_PAGE = ("Thyseed PPSU Natural Anti-colic Baby Bottle. The base vent keeps the nipple full of "
+            "milk rather than air throughout the feed. " * 8)
+
+
+class _JudgeClaude:
+    """Returns a fixed verdict per ref, and records what it was asked."""
+
+    def __init__(self, verdicts, says):
+        self._v, self._says, self.prompts = verdicts, says, []
+
+    def call(self, prompt, **kw):
+        self.prompts.append(prompt)
+        refs = re.findall(r"^\[(c\d+)\]", prompt, re.M)
+        return {"verdicts": [{"ref": r, "status": self._v.get(r, "confirmed"), "page": "P1",
+                              "page_says": self._says.get(r, "")} for r in refs]}
+
+
+import re  # noqa: E402
+
+
+def _judge_gen(verdicts, says, pages):
+    g = B.__new__(B)
+    g.claude = _JudgeClaude(verdicts, says)
+    g._claim_pages = dict(pages)
+    return g
+
+
+BLOCKS = [{"label": "official · AAP", "url": "https://aap.example/bottle", "text": ""},
+          {"label": "Thyseed", "url": "https://thyseed.example/ppsu", "text": ""}]
+PAGES = {"https://aap.example/bottle": (AAP_PAGE, "direct"),
+         "https://thyseed.example/ppsu": (THY_PAGE, "direct")}
+TOPIC = ["baby", "bottle", "bottles", "breastfed", "breastfeeding", "refuses", "feeding"]
+
+
+def test_the_topic_vocabulary_is_not_evidence():
+    """A topic word on a cited page proves nothing — the source was chosen for being about the
+    topic. Scoring it is what let a fabricated AAP sentence read as 62% supported."""
+    toks = B._specific_tokens(
+        "breastfeeding be established before introducing a bottle, typically after the first few "
+        "weeks of life, to avoid interfering with milk supply and latch", TOPIC)
+    assert "breastfeeding" not in toks and "bottle" not in toks
+    for w in ("established", "typically", "weeks", "interfering", "supply", "latch"):
+        assert w in toks, w
+
+
+def test_a_six_character_prefix_not_four():
+    """FU263 measured that four characters makes it worse: "control"[:4] matches "contain"."""
+    assert "control" in B._specific_tokens("control group results", ["contain"])
+
+
+def test_a_claim_the_page_does_not_make_is_removed():
+    body = ("## Timing\n\nThe AAP recommends that breastfeeding be established before introducing "
+            "a bottle, typically after the first few weeks of life, to avoid interfering with milk "
+            "supply and latch [S1].\n\nOther guidance differs.\n")
+    g = _judge_gen({"c1": "not_on_page"}, {}, PAGES)
+    out, note = g._cited_claim_check(body, BLOCKS, set(), TOPIC)
+    assert "milk supply and latch" not in out
+    assert "cited-claim: 1 claim" in note and "does not say it" in note
+
+
+def test_a_table_cell_is_judged_even_when_its_words_ARE_on_the_page():
+    """The reported Thyseed cell. It scores 0.75 because the page shares its vocabulary and differs
+    on the one word that names the mechanism — the page says "base vent", the cell says "internal".
+    A share test ranks it ABOVE a correct cell, so a cell always goes to the judge."""
+    body = ("## Compare\n\n| Dimension | Thyseed |\n|---|---|\n"
+            "| Anti-colic system | Internal anti-colic venting system [S2] |\n")
+    g = _judge_gen({"c1": "contradicted"}, {"c1": "The base vent keeps the nipple full of milk"},
+                   PAGES)
+    out, note = g._cited_claim_check(body, BLOCKS, set(), TOPIC)
+    assert "Internal anti-colic venting system" not in out
+    assert "says something different" in note
+
+
+def test_a_confirmed_claim_is_left_alone():
+    body = ("## Timing\n\nThe AAP recommends trying a different nipple or bottle type when refusal "
+            "occurs [S1].\n")
+    g = _judge_gen({"c1": "confirmed"}, {"c1": "try a different nipple or bottle type"}, PAGES)
+    out, note = g._cited_claim_check(body, BLOCKS, set(), TOPIC)
+    assert out == body and not note
+
+
+def test_a_claim_whose_sources_are_all_unreadable_is_not_judged():
+    """"Unread is UNKNOWN, never unsupported" — an unreachable source is the walled check's job,
+    and judging against a page nobody read would invent a verdict."""
+    body = "## Timing\n\nThe AAP recommends something about weeks and latch and supply [S1].\n"
+    g = _judge_gen({"c1": "not_on_page"}, {}, {})
+    out, note = g._cited_claim_check(body, BLOCKS, set(), TOPIC)
+    assert out == body and not note
+    g2 = _judge_gen({"c1": "not_on_page"}, {}, PAGES)
+    assert g2._cited_claim_check(body, BLOCKS, {1, 2}, TOPIC) == (body, "")
+
+
+def test_an_uncited_sentence_is_not_this_checks_business():
+    body = "## Timing\n\nBottles come in several shapes and sizes for newborn feeding.\n"
+    g = _judge_gen({"c1": "not_on_page"}, {}, PAGES)
+    assert g._cited_claim_check(body, BLOCKS, set(), TOPIC) == (body, "")

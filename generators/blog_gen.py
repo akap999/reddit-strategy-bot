@@ -12648,6 +12648,33 @@ you MAY assume the description will carry: "{disc}".
         t = " ".join(cls._NUMWORD.get(w, w) for w in re.findall(r"[\w$%+.,/-]+", t))
         return re.sub(r"\s+", " ", t).strip(" .,")
 
+    def _repair_cadence(self, claude_body, out):
+        """FU281 — put back the SENTENCE whose price lost its cadence, not the whole article.
+
+        Live: one price in one sentence ("$14,997 lost its cadence") failed `_valid` and discarded
+        a pass in which 22 of 25 sections were fine, falling all the way back to Claude's body — so
+        nothing was stripped at all. That is the whole-article form of the disproportion FU278 and
+        FU280 removed at the section and paragraph levels, and it is the most expensive one,
+        because the fallback reinstates EVERY word of the watermark this pass exists to remove.
+
+        `_cadence_sentence_pairs` already locates the exact (original, rewritten) pair behind each
+        drift — it pairs on the exact SET of amounts, never on wording, which is the FU176 lesson.
+        Splicing the original sentence back costs one sentence and saves the pass. Never raises: a
+        fault here must not cost the rewrite it is trying to save."""
+        try:
+            pairs = self._cadence_sentence_pairs(claude_body, out)
+        except Exception:
+            return out
+        n = 0
+        for orig, rew in (pairs or [])[:8]:
+            if orig and rew and rew in out and orig != rew:
+                out = out.replace(rew, orig, 1)
+                n += 1
+        if n:
+            print(f"[writer] cadence: put back {n} sentence(s) rather than failing the pass",
+                  flush=True)
+        return out
+
     def _salvage_units(self, uo, un):
         """FU280 — pair two lists of units by fingerprint and keep each rewrite that passes its own
         gate. Shared by the paragraph and the sentence rung so both align the same way: on the
@@ -13866,6 +13893,7 @@ you MAY assume the description will carry: "{disc}".
                             sec_out = _restored
                     if not sec_out:
                         return None, None
+                    sec_out = self._repair_cadence(claude_body, sec_out)   # FU281
                     ok_s, why_s = _valid(sec_out)
                     if not ok_s:
                         print(f"[writer] section-chunked pass rejected: {why_s}", flush=True)
@@ -13921,6 +13949,7 @@ you MAY assume the description will carry: "{disc}".
                     restored = self._restore_headings(heads, out)
                     if restored is not None:
                         out = restored
+                out = self._repair_cadence(claude_body, out)   # FU281
                 ok, why = _valid(out)
                 if not ok:
                     last_why = why

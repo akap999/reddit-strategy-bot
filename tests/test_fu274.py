@@ -742,3 +742,49 @@ def test_the_look_behind_cannot_reach_across_the_previous_price():
     cads = {a: t for a, t in B._price_cadences(txt)}
     assert "MONTH" in cads["$149"], "its own cadence still attaches"
     assert "MONTH" not in cads["$249"], "but it must not leak forward to the next price"
+
+
+# ── FU281: one price must not cost the whole article ─────────────────────────────────────────────
+# Live, after the section salvage was working: 22 of 25 sections reworded, and then
+#   "⚠ watermark NOT stripped — fell back to Claude
+#    (price cadence changed: ['$14,997 lost its cadence (MONTH → none)'])"
+# One price in one sentence discarded the entire pass. That is the most expensive form of the
+# disproportion, because a fallback reinstates EVERY word of the watermark this pass removes.
+
+CAD_BODY_O = ("Jolly Search prices its service at $4,997 per month for one prompt, and $14,997 per "
+              "month for three [S2]. Victorious recommends a minimum of $6,000 a month [S4]. "
+              "Coalition Technologies quotes by proposal instead [S5].")
+CAD_BODY_N = ("Jolly Search charges $4,997 per month for a single prompt, and $14,997 for three "
+              "[S2]. Victorious advises a monthly minimum of $6,000 [S4]. "
+              "Proposals are how Coalition Technologies quotes [S5].")
+
+
+def test_a_drifted_price_sentence_is_put_back_not_the_article():
+    g = _g_real()
+    out = g._repair_cadence(CAD_BODY_O, CAD_BODY_N)
+    assert g._price_cadence_ok(CAD_BODY_O, out)[0], "the repaired body must now pass the gate"
+    assert "Proposals are how Coalition Technologies quotes" in out, "other sentences keep their rewrite"
+    assert "Victorious advises a monthly minimum of $6,000" in out, \
+        "a sentence whose cadence merely MOVED is not touched"
+
+
+def test_repair_leaves_a_clean_body_alone():
+    g = _g_real()
+    assert g._repair_cadence(CAD_BODY_O, CAD_BODY_O) == CAD_BODY_O
+
+
+def test_repair_never_raises():
+    """A fault here must not cost the rewrite it exists to save."""
+    g = _g_real()
+    g._cadence_sentence_pairs = lambda a, b: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert g._repair_cadence(CAD_BODY_O, CAD_BODY_N) == CAD_BODY_N
+
+
+def test_the_repair_runs_before_the_pass_is_judged():
+    """It is worth nothing if `_valid` has already discarded the pass."""
+    import inspect
+    src = inspect.getsource(B._apply_writer_pass)
+    for anchor in ("ok_s, why_s = _valid(sec_out)", "ok, why = _valid(out)"):
+        before = src[:src.index(anchor)]
+        assert "_repair_cadence" in before.rsplit("\n", 4)[-1] or \
+            "_repair_cadence" in before[-400:], f"repair must precede {anchor!r}"

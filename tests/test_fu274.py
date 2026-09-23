@@ -180,3 +180,58 @@ def test_the_whole_article_prompt_protects_a_direct_opener():
         import generators.blog_gen as BG
         src = open(BG.__file__, encoding="utf-8").read()
     assert "KEEP THE DIRECT OPENING WORD" in src
+
+
+# ── the A/B probe (tools/rewrite_probe.py) ───────────────────────────────────────────────────────
+# This is the instrument a model swap is judged on, so its own blind spots matter. Both classes
+# below were found by hand against the real articles AFTER the first version reported them clean.
+
+def _probe(orig, rew, brand="Jolly Search"):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "tools"))
+    import rewrite_probe
+    return rewrite_probe.probe(orig, rew, brand)
+
+
+def test_a_pronoun_subject_still_counts_as_doubt_on_the_publisher():
+    """The reported defect was "It claims to have scaled 650+ brands" inside Jolly's own profile.
+    A brand-name-only window missed it and the probe reported the article clean."""
+    orig = "## Jolly Search\nJolly Search is an AI search agency.\nIt reports 650+ brands scaled.\n"
+    rew = "## Jolly Search\nJolly Search is an AI search agency.\nIt claims to have scaled 650+ brands.\n"
+    assert _probe(orig, rew)["doubt"] == (0, 1)
+
+
+def test_the_noun_claims_is_not_a_doubt_verb():
+    """"…understand which claims are valid" carries no doubt about anyone. Requiring a subject in
+    front is what separates the verb from the noun."""
+    body = "## Jolly Search\nBefore evaluating proposals, understand which claims are valid.\n"
+    assert _probe(body, body)["doubt"] == (0, 0)
+
+
+def test_a_competitors_doubt_verb_is_not_charged_to_the_publisher():
+    """The pronoun match above is what makes paragraph scoping load-bearing: "It claims" inside a
+    COMPETITOR's profile must not be charged to the publisher. Without the scope it would be."""
+    orig = ("## NoGood\nNoGood is a growth agency.\nIt reports 27x growth.\n\n"
+            "## Jolly Search\nJolly Search lists a fixed price.\n")
+    rew = ("## NoGood\nNoGood is a growth agency.\nIt claims 27x growth.\n\n"
+           "## Jolly Search\nJolly Search lists a fixed price.\n")
+    assert _probe(orig, rew)["doubt"] == (0, 0), "scoped to paragraphs naming the publisher"
+
+
+def test_a_lost_direct_opener_is_reported_with_its_question():
+    orig = "## FAQ\n### Does ranking get me into ChatGPT?\nNot reliably. Ahrefs found 12%.\n"
+    rew = "## FAQ\n### Does ranking get me into ChatGPT?\nThe reliability is questionable. Ahrefs found 12%.\n"
+    p = _probe(orig, rew)
+    assert p["faq_direct"] == (1, 0)
+    assert p["faq_lost"] and "ranking" in p["faq_lost"][0]
+
+
+def test_a_marker_the_original_already_used_is_not_charged_to_the_rewrite():
+    """Only words the rewriter INTRODUCED count. An article that legitimately said "comprehensive"
+    once must not be penalised for still saying it."""
+    orig = "The agency offers a comprehensive service across every engine.\n"
+    rew = ("The agency delivers a comprehensive offering, a comprehensive dashboard and "
+           "comprehensive reporting.\n")
+    assert _probe(orig, rew)["markers"] == {}, \
+        "the count ROSE 1->3, but the word is the article's own — only words the rewriter " \
+        "introduced from nothing are its doing"

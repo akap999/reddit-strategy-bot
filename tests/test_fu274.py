@@ -788,3 +788,60 @@ def test_the_repair_runs_before_the_pass_is_judged():
         before = src[:src.index(anchor)]
         assert "_repair_cadence" in before.rsplit("\n", 4)[-1] or \
             "_repair_cadence" in before[-400:], f"repair must precede {anchor!r}"
+
+
+# ── FU282: a section that was never a candidate is not a dropped section ─────────────────────────
+# Operator: "still what and why dropped (I explicitly told that no sections should be dropped)".
+# The answer was ZERO — the instrumented run's failure list was empty. The three counted against us
+# are sections the code never sends to the writer at all:
+#     ## Agency Profiles   a heading with no body under it
+#     ## FAQ               a heading with no body under it
+#     ## Sources           rebuilt deterministically; rewording a URL breaks the citations
+# Reporting them as "kept the ORIGINAL text (not reworded)" reads as failure, and it over-reported
+# every run this session.
+
+def test_an_empty_heading_is_not_counted_as_a_drop():
+    g, seen = _gen(["A reworded paragraph about the agency, long enough to pass the stub gate."])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    body = ("## Agency Profiles\n\n"                       # heading, no body
+            "### Jolly Search\nIt reports 650+ brands scaled and a fixed monthly fee today.\n")
+    g._rewrite_sections(body, "Acme", timeout=5)
+    done, cand, _why = g._section_pass_stats
+    assert (done, cand) == (1, 1), f"one candidate, one reworded — got {done}/{cand}"
+
+
+def test_the_sources_list_is_not_counted_as_a_drop():
+    g, seen = _gen(["A reworded paragraph about the agency, long enough to pass the stub gate."])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    body = ("### Jolly Search\nIt reports 650+ brands scaled and a fixed monthly fee today.\n\n"
+            "## Sources\n- [S1] Jolly Search - https://jollysearch.com/\n")
+    g._rewrite_sections(body, "Acme", timeout=5)
+    done, cand, _why = g._section_pass_stats
+    assert (done, cand) == (1, 1), f"the Sources list is not a candidate — got {done}/{cand}"
+    assert not any("jollysearch.com" in p for p in seen), "and it is never sent to the writer"
+
+
+def test_a_real_failure_is_still_counted():
+    """The correction must not hide an actual drop."""
+    g = B.__new__(B)
+    g.writer_mode = "rewrite"
+    g._page_terms = []
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+
+    class _W:                      # keyed on content: the [S2] section succeeds, [S1] fails
+        def call_text(self, prompt, **kw):
+            if "650+" in prompt:
+                return "Some 650+ brands have been scaled by it so far, it reports [S2]."
+            return "Reworded prose that lost its marker entirely, long enough to clear the stub."
+
+    g.writer = _W()
+    body = ("## FAQ\n\n"                                    # not a candidate
+            "### One\nThe agency lists a fixed price of $4,997 monthly [S1].\n\n"
+            "### Two\nIt also reports 650+ brands scaled to date [S2].\n")
+    g._rewrite_sections(body, "Acme", timeout=5)
+    done, cand, whys = g._section_pass_stats
+    assert cand == 2, "the empty ## FAQ heading is excluded from the denominator"
+    assert done < cand and whys, "a genuine gate failure is still reported"

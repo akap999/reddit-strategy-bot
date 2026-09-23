@@ -12818,10 +12818,15 @@ you MAY assume the description will carry: "{disc}".
             i, head, chunk = idx_head_chunk
             src = chunk if chunk.strip() else ""
             if not src.strip():
-                return i, (head if head is not None else ""), False, ""
+                # FU282: a heading with no body under it ("## FAQ", "## Agency Profiles") was never
+                # a candidate for rewording. Reporting it as a section that "kept the original"
+                # reads as a failure and hid the real number all session.
+                return i, (head if head is not None else ""), None, ""
             # the '## Sources' section is rebuilt deterministically by _rebuild_sources — never reword it
             if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
-                return i, ((head + "\n" + chunk) if head else chunk), False, ""
+                # Rebuilt deterministically by `_rebuild_sources`; rewording a URL or a source
+                # title would break the citations. Never a candidate either.
+                return i, ((head + "\n" + chunk) if head else chunk), None, ""
             # FU277 — only the atoms that appear in THIS section. Pasting all ~120 into every call
             # is exactly the over-constraining FU275 removed; a section's own handful is short and
             # obeyable. Widened first, so a bolded bare figure arrives WITH its unit ("4.8 stars",
@@ -12972,15 +12977,21 @@ you MAY assume the description will carry: "{disc}".
                 i, txt, done, why = _one(t)
                 results[i] = (txt, done, why)
         out_parts = [results[i][0] for i in range(len(tasks))]
-        rewritten_n = sum(1 for i in range(len(tasks)) if results[i][1])
+        # FU282: `None` marks a section that was never sent to the writer. It is excluded from BOTH
+        # sides of the ratio, so "22/22" means every candidate was reworded rather than "22/25"
+        # implying three failures that never happened.
+        cand = [i for i in range(len(tasks)) if results[i][1] is not None]
+        rewritten_n = sum(1 for i in cand if results[i][1])
         if not rewritten_n:
             return None
         # FU274 — a section that kept its ORIGINAL text is Claude's wording shipping verbatim, which
         # is the thing this pass exists to remove. Record it so the warning can say so instead of
         # letting the overlap number carry the blame for a rewrite that never ran.
-        self._section_pass_stats = (rewritten_n, len(segs),
-                                    [results[i][2] for i in range(len(tasks)) if results[i][2]])
-        print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(segs)} sections reworded", flush=True)
+        self._section_pass_stats = (rewritten_n, len(cand),
+                                    [results[i][2] for i in cand if results[i][2]])
+        print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(cand)} sections reworded"
+              + (f" ({len(segs) - len(cand)} not candidates: empty heading / Sources)"
+                 if len(cand) != len(segs) else ""), flush=True)
         return "\n".join(out_parts)
 
     # ── FU172 Change 4/6: targeted residual polish + semantic fact verification ───────────────────

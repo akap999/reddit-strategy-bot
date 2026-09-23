@@ -14056,8 +14056,19 @@ you MAY assume the description will carry: "{disc}".
                 toks = self._specific_tokens(claim, topic)
                 if len(toks) < self._ORG_SAYS_MIN_TOKENS:
                     continue
-                if ci is None:
-                    joined = " ".join(pages[u]["text"] for u in urls)
+                joined = " ".join(pages[u]["text"] for u in urls)
+                # FU266b — a FIGURE the cited page does not state overrides the word filter.
+                #
+                # Measured on a reported article: "Fennel reducing colic crying by a mean of 72.1
+                # minutes per day [S1]" scores 1.00 against the AAFP page it cites, because every
+                # word is there — the page says 61 minutes, for L. reuteri, not fennel. A share
+                # filter would have skipped it entirely, which is the vocabulary-is-not-support
+                # trap the filter itself was built to work around, re-introduced one level up.
+                # The figure is the part a page either states or does not, so it decides admission.
+                _missing_fig = any(m.group(0).strip()
+                                   and not self._atom_in(m.group(0).strip(), joined)
+                                   for m in _CLAIM_NUM_RE.finditer(claim))
+                if ci is None and not _missing_fig:
                     hit, tk = self._claim_tokens_on_page(claim, joined, topic)
                     if tk and len(hit) / len(tk) > self._CITED_FILTER_SHARE:
                         continue      # the page plainly carries this claim's words — not a candidate

@@ -719,3 +719,43 @@ def test_it_never_moves_a_citation_to_another_unreadable_page():
               {"label": "b", "url": "https://w2.example/p", "text": _VENT_PAGE}]
     out, note = g._walled_source_check(f"## Venting\n\n{_VENT_CLAIM}\n", blocks, {1, 2})
     assert "keeps the nipple filled with milk" not in out and "re-pointed" not in note
+
+
+# ── FU266b: a figure the page does not state overrides the word filter ───────────────────────────
+# Found by running the new checks against a reported article rather than trusting them. The fennel
+# claim scores 1.00 against the AAFP page it cites — every word is there, because the page says
+# "61 minutes", for L. reuteri, not fennel — so the share filter would have skipped it entirely.
+# That is the vocabulary-is-not-support trap the filter exists to work around, re-introduced one
+# level up. Every disputed figure in that article is absent from the page it cites: 72.1, 30%,
+# "3% to 28%", and the meta description's "10% to 26%" (the page says 10% to 40%).
+
+_AAFP = ("Infantile colic affects 10% to 40% of infants. Lactobacillus reuteri DSM 17938 "
+         "significantly decreased colic in infants who are breastfed, an average of 61 minutes "
+         "less crying time per day at 21 days. Herbal supplements including fennel, aimed at "
+         "reducing crying, decreased crying in some studies but need more research. " * 3)
+
+
+def test_a_figure_the_page_never_states_reaches_the_judge_despite_a_perfect_word_match():
+    claim = "Fennel reducing colic crying by a mean of 72.1 minutes per day"
+    hit, toks = B._claim_tokens_on_page(claim, _AAFP)
+    assert len(hit) / len(toks) == 1.0, "every word is on the page — the filter would skip it"
+    blocks = [{"label": "third-party · AAFP", "url": "https://aafp.example/p", "text": ""}]
+    g = _judge_gen({"c1": "contradicted"}, {"c1": "an average of 61 minutes less crying time"},
+                   {"https://aafp.example/p": (_AAFP, "direct")})
+    out, note = g._cited_claim_check(f"## Colic\n\n{claim} [S1].\n", blocks, set(), [])
+    assert "72.1" not in out and note
+
+
+def test_a_figure_the_page_DOES_state_is_still_filtered_out():
+    """The override has to be about the figure being ABSENT, not about the claim having one — or
+    every sourced number in the article becomes a model call.
+
+    An earlier version of this test used a claim with only three distinctive words, which the token
+    floor rejects before the filter runs at all: it passed whether the override fired or not.
+    Mutation testing caught that."""
+    claim = "Infantile colic affects 10% to 40% of infants"
+    blocks = [{"label": "third-party · AAFP", "url": "https://aafp.example/p", "text": ""}]
+    g = _judge_gen({"c1": "not_on_page"}, {}, {"https://aafp.example/p": (_AAFP, "direct")})
+    out, note = g._cited_claim_check(f"## Colic\n\n{claim} [S1].\n", blocks, set(), [])
+    assert out.strip().endswith("[S1].") and not note
+    assert len(g.claude.prompts) == 0, "a supported figure must not cost a model call"

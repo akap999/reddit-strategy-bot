@@ -845,3 +845,24 @@ def test_a_real_failure_is_still_counted():
     done, cand, whys = g._section_pass_stats
     assert cand == 2, "the empty ## FAQ heading is excluded from the denominator"
     assert done < cand and whys, "a genuine gate failure is still reported"
+
+
+# ── FU283: we stopped modelling the style we strip ───────────────────────────────────────────────
+# Reviewer's catch, and it is a good one: the OUTPUT's em-dashes were already scrubbed by FU185's
+# `_AI_DASH_RE`, but the instructions themselves carried 8 of them. A model takes register from its
+# brief, so we were demonstrating the habit we then had to clean up afterwards.
+
+def test_the_section_prompt_contains_no_em_dash():
+    p = _section_prompt()
+    brief = p.split("SECTION TEXT:")[0]
+    assert "—" not in brief and "–" not in brief, \
+        "the brief must not demonstrate the punctuation the output scrub removes"
+
+
+def test_the_output_scrub_still_removes_them():
+    """The ban that actually matters is mechanical and already existed; this pins it so the prompt
+    cleanup is not mistaken for the whole protection."""
+    g = B.__new__(B)
+    out = g._scrub_ai_symbols("The agency — which publishes its price — reports 650+ brands.")
+    out = out[0] if isinstance(out, tuple) else out
+    assert "—" not in out

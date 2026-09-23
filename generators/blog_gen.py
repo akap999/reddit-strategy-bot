@@ -12020,7 +12020,7 @@ you MAY assume the description will carry: "{disc}".
         return len(grams_a & grams_b) / len(grams_a)
 
     @staticmethod
-    def _prose_for_overlap(body):
+    def _prose_for_overlap(body, exempt=()):
         """FU154/170: return only the DISCRETIONARY PROSE for the watermark-overlap metric — strip the
         structural / must-preserve-verbatim parts (headings, Markdown table rows, the whole ## Sources
         section, inline [S#] markers) AND the clinical-DIRECTIVE sentences we deliberately keep verbatim for
@@ -12040,6 +12040,14 @@ you MAY assume the description will carry: "{disc}".
                 continue
             keep.append(l)
         prose = re.sub(r"\[S\d+\]", "", "\n".join(keep))   # drop inline citation markers
+        # FU276 — a BOLD span the operator marked is forced verbatim, so it carries no watermark for
+        # exactly the reason the all-bold LINE above is already excluded: the model had no choice in
+        # those words. Counting them would punish the operator for using bold as the preservation
+        # control — bold more, strip better, GRADE WORSE. The list comes from the ORIGINAL only, so a
+        # rewrite cannot bold its own copied prose to hide it from the measure.
+        for _sp in (exempt or ()):
+            if _sp:
+                prose = prose.replace(_sp, " ")
         prose = re.sub(r"[\"\u201c\u201d][^\"\u201c\u201d]{12,}?[\"\u201c\u201d]", " ", prose)  # drop quoted spans
         sents = _split_sentences(prose)          # drop deliberately-preserved clinical-directive sentences
         # FU172 guard: only a real SENTENCE is exempt. Without a length bound an UNPUNCTUATED block counts
@@ -12452,7 +12460,9 @@ you MAY assume the description will carry: "{disc}".
         of free-choice prose is. Grading on raw verbatim-ness penalized exactly the text the rewrite is
         REQUIRED to keep, which is why every YMYL article read "not-confirmed" no matter how good the strip.
         Raw numbers stay reported for transparency."""
-        pa, pb = cls._prose_for_overlap(claude_body), cls._prose_for_overlap(out)
+        _bold = cls._bold_spans(claude_body)      # FU276: the INPUT's bold — forced, so exempt
+        pa, pb = (cls._prose_for_overlap(claude_body, _bold),
+                  cls._prose_for_overlap(out, _bold))
         overlap = cls._ngram_overlap(pa, pb, n=5)
         run, share, sample = cls._residual_run_stats(pa, pb)
         spans, wb_raw, _cov = cls._residual_spans(pa, pb)
@@ -12572,6 +12582,18 @@ you MAY assume the description will carry: "{disc}".
             segs.append((head, "\n".join(buf)))
         return segs
 
+    @staticmethod
+    def _bold_spans(body):
+        """FU276 — the EXACT text inside every **bold** span, longest first.
+
+        The operator's preservation control: bold anything that must survive and it survives. Until
+        now only a fully-bold LINE and a bold lead-in LABEL were enforced (`_LABEL_RE` is anchored at
+        a block's start), so a bold phrase mid-sentence was ordinary prose the rewrite could drop —
+        which is how "the fastest result documented here" and "recommended by seven AI surfaces"
+        disappeared. Longest first so a containing span is checked before the phrases inside it."""
+        out = {m.group(1).strip() for m in re.finditer(r"\*\*([^*\n]{1,200}?)\*\*", body or "")}
+        return sorted((x for x in out if x), key=len, reverse=True)
+
     def _section_gate(self, src, got):
         """FU274 — WHY this section's rewrite is unusable, or "" when it is fine.
 
@@ -12593,6 +12615,13 @@ you MAY assume the description will carry: "{disc}".
             return "changed a price's cadence: " + ", ".join(str(p) for p in (probs or [])[:2])
         if len(got) < 0.5 * len(src.strip()):
             return "returned only a stub, shorter than half the section"
+        # FU276 — the operator's bold is a CONTRACT, not a suggestion. Asked for in the prompt and
+        # verified nowhere, it was a request the model could ignore silently; checked here, a miss
+        # goes back through the FU274 retry with the exact words named, and only then gives up.
+        # Compared on the TEXT, so the rewrite may re-mark it, but may not lose or alter the words.
+        _lost = [b for b in self._bold_spans(src) if b not in got]
+        if _lost:
+            return "dropped the bolded text " + ", ".join(repr(b[:48]) for b in _lost[:3])
         return ""
 
     def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600, extra_rules=""):

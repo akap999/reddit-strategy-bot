@@ -315,3 +315,79 @@ def test_the_publisher_is_named_as_the_publisher():
     p = _section_prompt()
     assert "published BY" in p
     assert "as plainly as any competitor" in p, "the even-hand rule, derived rather than enumerated"
+
+
+# ── FU276: bold is a contract, not a suggestion ──────────────────────────────────────────────────
+# The operator marked up a real article with 112 bold spans — 3.5% of words frozen became 11.1% —
+# to pin the exact claims a rewrite kept losing: "the fastest result documented here",
+# "recommended by seven AI surfaces", "under three weeks", and the FAQ openers "Yes." /
+# "Not necessarily.". Two things had to be true for that to work, and neither was.
+
+def test_bold_spans_are_read_from_anywhere_in_the_text():
+    """`_LABEL_RE` is anchored at a block's START, so mid-sentence bold was invisible to every code
+    path in the guard. That is precisely where the lost claims lived."""
+    body = ("Its fastest result was **recommended by seven AI surfaces** in **under three weeks**, "
+            "and it reports **650+** brands.\n")
+    got = B._bold_spans(body)
+    assert "recommended by seven AI surfaces" in got
+    assert "under three weeks" in got and "650+" in got
+
+
+def test_longer_spans_are_checked_before_the_phrases_inside_them():
+    got = B._bold_spans("**the fastest result documented here** and **fastest**")
+    assert got[0] == "the fastest result documented here"
+
+
+def test_a_dropped_bold_span_is_named_and_retried():
+    g, _ = _gen([""])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    src = "It has **the fastest result documented here**: seven surfaces in three weeks. " * 4
+    rew = "It achieved visibility across all seven surfaces within three weeks. " * 5
+    why = g._section_gate(src, rew)
+    assert "bolded text" in why and "fastest result documented here" in why
+
+
+def test_re_marking_bold_is_allowed_but_losing_the_words_is_not():
+    """The contract is on the WORDS. A rewrite may move or re-mark the span; it may not drop it."""
+    g, _ = _gen([""])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    src = "Jolly reports **650+** brands scaled across every engine it tracks today. " * 4
+    ok = "Across every engine tracked, Jolly cites 650+ brands it has scaled to date. " * 4
+    assert g._section_gate(src, ok) == "", "the words survived unbolded — that is preservation"
+
+
+# ── FU276: bolding more must not make the watermark grade look worse ─────────────────────────────
+
+def test_forced_bold_text_does_not_count_against_the_strip():
+    """`_prose_for_overlap` already excludes a fully-bold LINE, reasoning that it is "required
+    verbatim by the rewrite prompt … counting them would inflate the overlap and falsely grade a
+    SAFE strip 'not-confirmed'". That argument applies word-for-word to mid-sentence bold, which was
+    NOT excluded — so the operator bolding more would strip better and grade worse."""
+    frozen = "**recommended by seven AI surfaces in under three weeks**"
+    a = f"The agency was {frozen} according to its own case study page here.\n"
+    b = f"Per its published case study, the firm was {frozen} last quarter.\n"
+    with_ex = B._ngram_overlap(B._prose_for_overlap(a, B._bold_spans(a)),
+                               B._prose_for_overlap(b, B._bold_spans(a)), n=5)
+    without = B._ngram_overlap(B._prose_for_overlap(a), B._prose_for_overlap(b), n=5)
+    assert with_ex < without, "the forced span must not be charged to the rewrite"
+
+
+def test_the_exemption_list_comes_from_the_input_only():
+    """Otherwise a rewrite hides its own copying by bolding it. Exercised through
+    `_watermark_removal_report`, because the source of the list is chosen THERE — asserting on
+    `_prose_for_overlap` alone passes whichever body the caller happens to hand it.
+
+    The two bodies must share ONLY the copied sentence, or shared filler carries the overlap and the
+    fixture cannot see the exemption at all (the first version of this test could not)."""
+    COPIED = ("The agency reported unusually strong results across every single engine that it "
+              "actively tracks throughout this particular year")
+    orig = COPIED + ". Separately the firm published a short note about its own methodology.\n"
+    # a rewrite that copies that sentence VERBATIM and bolds its own copy; everything else differs
+    cheat = ("**" + COPIED + "**. A different closing line entirely, sharing no wording with "
+             "whatever the original happened to say here.\n")
+    assert B._bold_spans(orig) == [], "the fixture's INPUT must carry no bold"
+    rep = B._watermark_removal_report(orig, cheat)
+    assert rep["n5_prose_overlap"] > 0.5, \
+        f"self-bolded copying must stay visible to the measure, got {rep['n5_prose_overlap']}"

@@ -24,9 +24,12 @@ Everything here is vertical-neutral: the needs come from the article's own colum
 brand's own domain. Nothing names a vertical, a site or a product.
 """
 
+import html as _html          # FU267: NCBI's API returns XML entities
 import json
+import os
 import re
 import unicodedata
+import urllib.request as _urlreq   # FU267: NCBI E-utilities
 
 from generators.brand_enrichment import _extract_visible_text, _fetch_page
 
@@ -259,12 +262,70 @@ def page_text_from_html(html, max_chars=20000):
     return (text + ("\n" + "\n".join(data) if data else "")).strip()
 
 
+# ── FU267 (step 4b): NCBI is read through NCBI's own API, not by scraping ───────────────────────
+# Measured from Railway on 30 authority URLs taken from stored articles: 20% readable with our own
+# fetch, 35% once Anthropic's web fetch is added. The single biggest failing family was PubMed/PMC,
+# and it fails on EVERY rung — direct, residential (the proxy refuses to tunnel to those hosts at
+# all) and web fetch — because all three receive the same reCAPTCHA interstitial:
+#
+#     title: Checking your browser - reCAPTCHA
+#     Checking your browser before accessing pubmed.ncbi.nlm.nih.gov ...
+#
+# 376 characters of challenge page, every time. Scraping NCBI is closed.
+#
+# NCBI publishes E-utilities for exactly this, and it is not CAPTCHA-walled. Measured on the same
+# host: the 1,055-infant JAMA trial an article had been mis-citing returns 5,292 characters of real
+# abstract, and the BMC Research Notes study it had confused that trial WITH returns 74,275.
+_NCBI_PMID_RE = re.compile(r"//pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", re.I)
+_NCBI_PMC_RE = re.compile(r"//(?:pmc|www)\.ncbi\.nlm\.nih\.gov/(?:pmc/)?articles/PMC(\d+)", re.I)
+_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+_NCBI_TOOL = "&tool=blog_generator&email=" + os.environ.get("NCBI_EMAIL", "sources@example.com")
+
+
+def _ncbi_api_text(url, max_chars=20000):
+    """The abstract or full text from NCBI's own API. Returns (text, how) or ("", "") to fall
+    through to the ordinary ladder — this must never become a new way to fail."""
+    m = _NCBI_PMID_RE.search(url or "")
+    if m:
+        q = f"{_EUTILS}?db=pubmed&id={m.group(1)}&rettype=abstract&retmode=text{_NCBI_TOOL}"
+        kind = "pubmed"
+    else:
+        m = _NCBI_PMC_RE.search(url or "")
+        if not m:
+            return "", ""
+        q = f"{_EUTILS}?db=pmc&id={m.group(1)}&rettype=full&retmode=xml{_NCBI_TOOL}"
+        kind = "pmc"
+    try:
+        req = _urlreq.Request(q, headers={"User-Agent": "Mozilla/5.0 (compatible; blog-sources/1.0)"})
+        with _urlreq.urlopen(req, timeout=25) as r:
+            raw = r.read().decode("utf-8", "replace")
+    except Exception as e:
+        print(f"[research] ncbi-api: {kind} {url[:70]} failed ({type(e).__name__})", flush=True)
+        return "", ""
+    if kind == "pmc":
+        raw = re.sub(r"<(?:ref-list|back|front/journal-meta)\b.*?</(?:ref-list|back|journal-meta)>",
+                     " ", raw, flags=re.S | re.I)
+        raw = re.sub(r"</(?:p|title|sec|abstract|caption)>", "\n", raw, flags=re.I)
+        raw = re.sub(r"<[^>]+>", " ", raw)
+        raw = _html.unescape(raw)
+    raw = re.sub(r"[ \t]{2,}", " ", re.sub(r"\n{3,}", "\n\n", raw)).strip()
+    if len(raw) < 200:
+        return "", ""
+    print(f"[research] ncbi-api: {kind} read {len(raw)} chars for {url[:70]}", flush=True)
+    return raw[:max_chars], "ncbi api"
+
+
 def read_page(url, claude=None, cache=None, max_chars=20000):
     """Step B for one URL: our fetch first (direct → residential), Anthropic's web fetch when the
     page is walled or errored (never for a missing page). Returns (text, how) where how is
     "direct", "web fetch", or the failure reason ("not-found", "blocked", ...)."""
     if cache is not None and url in cache:
         return cache[url]
+    _nt, _nh = _ncbi_api_text(url, max_chars)      # FU267: NCBI answers its API, never a scraper
+    if _nt:
+        if cache is not None:
+            cache[url] = (_nt, _nh)
+        return _nt, _nh
     html, reason = _fetch_page(url, retries=0)
     if html:
         out = (page_text_from_html(html, max_chars=max_chars), "direct")

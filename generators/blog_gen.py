@@ -20,6 +20,7 @@ from difflib import SequenceMatcher as _SequenceMatcher   # FU167: longest-share
 from generators.post_gen import PostGenerator
 from generators.brand_enrichment import _fetch_homepage, _extract_visible_text
 from generators.brand_enrichment import relevant_text   # FU240: keep the passages about THIS article
+from generators.brand_enrichment import _REL_HEAD_CHARS, _REL_WINDOW   # FU267: scale to the budget
 from generators.brand_enrichment import _fetch_page   # FU221: fetch + WHY it failed
 from generators import research as _research   # FU221 (Step 0): find → read → extract → verify
 from generators.brand_enrichment import CI_MAX_SOURCE_ORGS, ci_load, ci_merged   # FU212
@@ -2005,6 +2006,57 @@ def _format_price_value(entry):
 # The gloss keeps the job it can do — WHY this source was picked — and loses the one it never had.
 _AUTHORITY_TEXT_CAP = int(os.environ.get("BLOG_AUTHORITY_TEXT_CAP", "6000"))
 _RETAIL_TEXT_CAP = int(os.environ.get("BLOG_RETAIL_TEXT_CAP", "800"))
+
+
+# FU267 (step 3) — the writer's evidence is BUDGETED BY CLASS, not divided equally.
+#
+# The budget used to be `char_budget // len(blocks)`, hard-capped at 2,500 and applied as a slice.
+# Three faults in one line: a marketplace listing got the same allowance as an FDA label; the
+# ceiling undid the per-class caps the moment a budget was set; and a slice takes the HEAD, which
+# is the article's own topic, throwing away the tail where the claim lives.
+#
+# Weights are relative, not absolute — they only decide who gives way when the budget binds.
+_SOURCE_WEIGHTS = ((("official ·", "reference ·"), 3.0),      # the page a clinical claim rests on
+                   (("retail ·", "review ·"), 0.6),           # may evidence a price and nothing else
+                   (("third-party ·", "preferred ·"), 1.5),
+                   (("price ·",), 1.0))
+_EVIDENCE_TOTAL_BUDGET = int(os.environ.get("BLOG_EVIDENCE_TOTAL", "120000"))
+_EVIDENCE_MIN_PER_SOURCE = 300    # below this a block says nothing; better to keep fewer, fuller
+
+
+def _source_weight(label):
+    lab = (label or "").lower()
+    for prefixes, w in _SOURCE_WEIGHTS:
+        if lab.startswith(prefixes):
+            return w
+    return 2.0      # first-party: the brand's own pages, the operator's facts
+
+
+def _budget_evidence(blocks, total, terms=()):
+    """FU267 — how many characters of each block's PAGE the writer gets.
+
+    Water-filling by weight: a block that wants less than its share hands the remainder back, so a
+    long authority page can use what a short listing did not. Returns {index: allowance}. Nothing is
+    summarised or invented here — the allowance is spent by `relevant_text`, which keeps real
+    passages around the article's own terms."""
+    want = {i: len((b.get("text") or "")) for i, b in enumerate(blocks or [])}
+    if not want or sum(want.values()) <= total:
+        return dict(want)
+    weight = {i: _source_weight((blocks[i].get("label") or "")) for i in want}
+    out, pool, left = {}, dict(want), int(total)
+    while pool:
+        wsum = sum(weight[i] for i in pool) or 1.0
+        share = {i: max(_EVIDENCE_MIN_PER_SOURCE, int(left * weight[i] / wsum)) for i in pool}
+        done = [i for i in pool if want[i] <= share[i]]
+        if not done:                       # everyone wants more than their share — settle here
+            for i in pool:
+                out[i] = min(want[i], share[i])
+            break
+        for i in done:                     # they take what they need and return the rest
+            out[i] = want[i]
+            left -= want[i]
+            pool.pop(i)
+    return out
 
 
 def _source_text_cap(label):
@@ -4771,10 +4823,36 @@ class BlogGenerator:
                  "EARLIEST source that supports it. Sources labeled 'review ·' are third-party reviews "
                  "OF the subject brand: never authoritative, never clinical/safety support, at most "
                  "color for program facts):"]
-        for i, bl in enumerate(blocks, 1):
-            src = f"{bl['label']}" + (f" — {bl['url']}" if bl["url"] else "")
-            parts.append(f"[S{i}] {src}\n{bl['text']}")
+        parts.extend(self._render_evidence_blocks(blocks))
         return "\n\n".join(parts)
+
+    def _render_evidence_blocks(self, blocks, char_budget=None):
+        """FU267 — "[S#] label — url\ntext" for each block, inside a per-class budget.
+
+        Blocks carry PAGES now, not one-line glosses, so the render needs a ceiling it never needed
+        before. The allowance is spent by `relevant_text`, which keeps the passages about THIS
+        article — a slice would take the head, which is the topic, and drop the tail, which is the
+        claim. Nothing here summarises or rewrites: every character survives from the page."""
+        blocks = list(blocks or [])
+        alw = _budget_evidence(blocks, _EVIDENCE_TOTAL_BUDGET if char_budget is None
+                               else int(char_budget))
+        terms = list(getattr(self, "_page_terms", ()) or [])
+        out = []
+        for i, bl in enumerate(blocks, 1):
+            src = f"{(bl.get('label') or '').strip()}" \
+                + (f" — {bl.get('url')}" if (bl.get("url") or "").strip() else "")
+            txt = (bl.get("text") or "").strip()
+            cap = alw.get(i - 1, len(txt))
+            if len(txt) > cap:
+                # Scale the head to the allowance. `relevant_text` defaults to an 1,800-character
+                # head plus 1,400-character windows; at a 2,500-character allowance the head eats
+                # it and NO term window fits, so the selector silently degrades into the head
+                # truncation it exists to prevent. A third each leaves room for two windows.
+                txt = relevant_text(txt, terms, cap,
+                                    head_chars=max(300, min(_REL_HEAD_CHARS, cap // 3)),
+                                    window=max(300, min(_REL_WINDOW, cap // 3)))
+            out.append(f"[S{i}] {src}" + (f"\n{txt}" if txt else ""))
+        return out
 
     # FU138 — the punt ban is on MEANING, not wording: after the literal bans, the model
     # evaded with fresh phrasing ("Not specified in sourced facts", "data not present"). This
@@ -12973,17 +13051,11 @@ you MAY assume the description will carry: "{disc}".
         blocks = getattr(self, "_evidence_blocks", None) or []
         if not blocks:
             return ""
-        per = 2500
-        if char_budget:
-            per = max(400, min(2500, (int(char_budget) // len(blocks)) - 140))
-        parts = []
-        for i, b in enumerate(blocks, 1):
-            lbl = (b.get("label") or "").strip()
-            url = (b.get("url") or "").strip()
-            txt = (b.get("text") or "").strip()[:per]
-            head = f"[S{i}] {lbl}" + (f" — {url}" if url else "")
-            parts.append(head + ("\n" + txt if txt else ""))
-        return "\n\n".join(parts)
+        # FU267 — was `char_budget // len(blocks)`, capped at 2,500 and sliced. That divided the
+        # budget equally between an FDA label and a marketplace listing, undid the per-class caps
+        # the moment a budget was set, and took the head of every page. Same renderer as the writer's.
+        return "\n\n".join(self._render_evidence_blocks(
+            blocks, (int(char_budget) - 140 * len(blocks)) if char_budget else None))
 
     def _apply_writer_pass(self, article, draft_body, brand, seed, surface="blog"):
         """FU153: re-author the finished blog body on the self-hosted open model so a Claude SynthID

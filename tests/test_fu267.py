@@ -198,3 +198,102 @@ def test_the_reads_happen_in_parallel():
     blocks = g._read_sources_parallel(pending, ["reference"])
     assert len(blocks) == 6 and g._read_sources == 6
     assert g._claim_pages.max_inflight >= 2, "the reads must overlap"
+
+
+# ── step 3: the budget is per class, and it is spent on real page text ───────────────────────────
+# The writer's evidence used to be `char_budget // len(blocks)`, hard-capped at 2,500 and applied
+# as a slice. Three faults in one line: a marketplace listing got the same allowance as an FDA
+# label; the ceiling undid the per-class caps as soon as a budget was set; and a slice takes the
+# HEAD, which is the article's own topic, throwing away the tail where the claim lives.
+
+from generators.blog_gen import (  # noqa: E402
+    _budget_evidence, _source_weight, _EVIDENCE_MIN_PER_SOURCE)
+from generators.brand_enrichment import relevant_text  # noqa: E402
+
+
+def _blk(label, n):
+    return {"label": label, "text": "x" * n}
+
+
+MIX = ([_blk("official · FDA label", 6000) for _ in range(6)]
+       + [_blk("Thyseed", 2500) for _ in range(5)]
+       + [_blk("retail · Amazon", 800) for _ in range(4)])
+
+
+def test_an_authority_page_outweighs_a_marketplace_listing():
+    assert _source_weight("official · FDA label") == 3.0
+    assert _source_weight("retail · Amazon") == 0.6
+    assert _source_weight("Thyseed") == 2.0, "a first-party page sits between them"
+
+
+def test_nothing_is_trimmed_when_it_all_fits():
+    want = sum(len(b["text"]) for b in MIX)
+    assert _budget_evidence(MIX, want + 1000) == {i: len(b["text"]) for i, b in enumerate(MIX)}
+
+
+def test_a_block_that_wants_less_than_its_share_hands_the_rest_back():
+    """Water-filling. An equal division would leave a listing holding budget it cannot use while
+    the page carrying the clinical claim is cut."""
+    a = _budget_evidence(MIX, 40000)
+    assert sum(a[i] for i in range(6, 15)) == 2500 * 5 + 800 * 4, "the small blocks stay whole"
+    assert sum(a[i] for i in range(6)) == 40000 - (2500 * 5 + 800 * 4), "authority takes the rest"
+
+
+def test_under_real_pressure_the_listing_gives_way_first():
+    a = _budget_evidence(MIX, 20000)
+    per_auth = a[0]
+    per_retail = a[11]
+    assert per_auth > per_retail * 3, (per_auth, per_retail)
+    assert sum(a.values()) <= 20000
+
+
+def test_no_source_is_starved_below_the_floor():
+    """A block cut to nothing is a source the writer cannot use but still sees cited."""
+    many = [_blk("official · X", 6000) for _ in range(60)]
+    a = _budget_evidence(many, 5000)
+    assert min(a.values()) >= min(_EVIDENCE_MIN_PER_SOURCE, 6000)
+
+
+def test_the_budget_is_spent_on_the_passage_not_the_head():
+    """The whole point of trimming with `relevant_text` rather than a slice."""
+    page = "Intro. " * 50 + "THE CLAIM IS HERE. " + "Tail. " * 500
+    out = relevant_text(page, ["claim"], 800)
+    assert "THE CLAIM IS HERE" in out and len(out) <= 900
+
+
+def test_trimming_never_invents_text():
+    """No summary, no paraphrase — every character survives from the page."""
+    page = "Alpha beta. " * 200 + "THE CLAIM. " + "Gamma delta. " * 200
+    out = relevant_text(page, ["claim"], 600)
+    for frag in out.replace("…", "\n").split("\n"):
+        frag = frag.strip(" []")
+        if len(frag) > 20:
+            assert frag in page, frag[:60]
+
+
+def test_the_renderer_applies_the_budget():
+    """Functional, and on the renderer BOTH writers share — the Claude prompt and the open-model
+    one. A source-level check on one of them left the other undefended."""
+    g = B.__new__(B)
+    g._page_terms = ["claim"]
+    # the claim must sit BEYOND the allowance, or a hard slice would keep it by luck and the test
+    # would pass whether the budget is spent on relevance or on the first N characters
+    page = "Intro. " * 1000 + "THE CLAIM IS HERE. " + "Tail. " * 400
+    blocks = ([{"label": "official · FDA", "url": "https://x.gov/a", "text": page}] * 4
+              + [{"label": "retail · Shop", "url": "https://s.example/b", "text": page}] * 4)
+    rendered = g._render_evidence_blocks(blocks, char_budget=12000)
+    assert len(rendered) == 8, "every source stays represented"
+    body = "\n\n".join(rendered)
+    assert len(body) <= 13000, len(body)
+    assert len(rendered[0]) < page.index("THE CLAIM IS HERE"), \
+        "the allowance must be smaller than the head, or a slice would pass this too"
+    auth = len(rendered[0])
+    listing = len(rendered[-1])
+    assert auth > listing * 2, (auth, listing)
+    assert "THE CLAIM IS HERE" in rendered[0], "the allowance buys the passage, not the head"
+
+
+def test_both_writers_share_one_renderer():
+    import inspect
+    assert "_render_evidence_blocks" in inspect.getsource(B._writer_evidence_str)
+    assert "_render_evidence_blocks" in inspect.getsource(B._gather_evidence)

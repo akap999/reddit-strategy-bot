@@ -3408,6 +3408,31 @@ def _doc_title_key(label):
     return t if len(t.split()) >= 5 else ""
 
 
+# FU267 — a document's own identifiers, read out of its text.
+_DOI_IN_TEXT_RE = re.compile(r"\bdoi:?\s*(10\.\d{4,9}/[^\s\"<>,;]+)", re.I)
+_PMID_IN_TEXT_RE = re.compile(r"\bPMID:?\s*(\d{6,9})\b|pub-id-type=\"pmid\">(\d{6,9})<", re.I)
+_PMCID_IN_TEXT_RE = re.compile(r"\bPMC(\d{6,9})\b")
+
+
+def _doc_ids_in_text(text):
+    """doi: / PMID: / PMC ids stated INSIDE a fetched record. Bounded to the head, where a paper
+    states its own identity — a reference list further down names other people's."""
+    head = (text or "")[:4000]
+    if not head:
+        return []
+    out = []
+    m = _DOI_IN_TEXT_RE.search(head)
+    if m:
+        out.append("doi:" + m.group(1).rstrip(".").lower())
+    m = _PMID_IN_TEXT_RE.search(head)
+    if m:
+        out.append("pmid:" + (m.group(1) or m.group(2)))
+    m = _PMCID_IN_TEXT_RE.search(head)
+    if m:
+        out.append("pmc:" + m.group(1))
+    return out
+
+
 def _doc_keys(block):
     """Every identity an evidence block answers to: its URL's public identifier, AND — for a
     scholarly / regulator / third-party reference — its normalised title. Two keys, not one, because
@@ -3421,6 +3446,15 @@ def _doc_keys(block):
     ident = _doc_identity(block.get("url"))
     if ident:
         keys.append(ident)
+    # FU267 — identifiers found in the PAGE, not just the URL. The two routes to a paper carry ids
+    # from different schemes — a PubMed url gives a PMID, the PMC copy gives a PMCID — and no URL
+    # parsing reconciles them. Both records state the same DOI, and the PMC record states the PMID
+    # too. A reported article cited one trial twice, as [S2] and [S4], for exactly this reason:
+    # different schemes, and titles truncated at different lengths so the title key missed as well.
+    #
+    # Only possible now that those pages are actually read; before this they were 376 characters of
+    # reCAPTCHA and carried no identifier at all.
+    keys.extend(_doc_ids_in_text(block.get("text")))
     label = block.get("label") or ""
     if _DOC_TITLED_LABEL_RE.match(label):
         tk = _doc_title_key(label)

@@ -116,3 +116,62 @@ def test_read_page_prefers_the_api_and_caches_it(monkeypatch):
     text, how = R.read_page("https://pubmed.ncbi.nlm.nih.gov/41885859/", cache=cache)
     assert how == "ncbi api" and not called, "the scraper must not be tried first"
     assert cache["https://pubmed.ncbi.nlm.nih.gov/41885859/"][1] == "ncbi api"
+
+
+# ── the same paper, cited twice under two labels ─────────────────────────────────────────────────
+# Reported on a shipped article: "[S4] is the JAMA 1,055-infant trial (the PMC copy), which is also
+# [S2] via a different URL. So the post cites the same trial twice under two labels and attributes
+# another trial's findings to it."
+#
+# Deduplication existed and could not see it. The two routes carry ids from DIFFERENT schemes — a
+# PubMed url gives a PMID, the PMC copy a PMCID — and the titles were truncated at different
+# lengths, so the title key missed too. Both records state the same DOI; reading it was impossible
+# until those pages stopped returning 376 characters of reCAPTCHA.
+
+from generators.blog_gen import _doc_keys, _doc_ids_in_text  # noqa: E402
+
+_PUBMED_BLOCK = {
+    "label": "reference · Feeding Bottles With Different Venting Methods and Gastrointestinal Di",
+    "url": "https://pubmed.ncbi.nlm.nih.gov/41885859/",
+    "text": "1. JAMA Netw Open. 2026 Mar 2;9(3):e263749. doi: 10.1001/jamanetworkopen.2026.3749.\n\n"
+            "Feeding Bottles With Different Venting Methods and Gastrointestinal Discomfort."}
+_PMC_BLOCK = {
+    "label": "official · Feeding Bottles With Different Venting Methods and Gastrointestinal "
+             "Discomfort in Infants: A Randomized Clinical Trial (PMC)",
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9999999/",
+    "text": "JAMA Netw Open. doi: 10.1001/jamanetworkopen.2026.3749. PMID: 41885859. Feeding "
+            "Bottles With Different Venting Methods."}
+
+
+def test_the_two_routes_to_one_paper_now_share_an_identity():
+    shared = set(_doc_keys(_PUBMED_BLOCK)) & set(_doc_keys(_PMC_BLOCK))
+    assert "doi:10.1001/jamanetworkopen.2026.3749" in shared
+    assert "pmid:41885859" in shared
+
+
+def test_the_truncated_title_alone_would_not_have_matched():
+    """Why the existing title key missed: one label is cut at 70 characters and the other is not."""
+    t1 = [k for k in _doc_keys(_PUBMED_BLOCK) if k.startswith("title:")]
+    t2 = [k for k in _doc_keys(_PMC_BLOCK) if k.startswith("title:")]
+    assert t1 and t2 and t1 != t2
+
+
+def test_ids_are_read_from_the_head_not_the_bibliography():
+    """A paper's reference list names OTHER people's identifiers. A page carrying no id of its own
+    must come away with none — picking one out of the bibliography would merge two unrelated
+    sources into one. (Testing this with an id in the head as well proves nothing: the search
+    returns the first match whether or not the scan is bounded.)"""
+    no_id_of_its_own = "Findings here. " + ("Filler sentence. " * 500) + " doi: 10.9999/someone-else"
+    assert _doc_ids_in_text(no_id_of_its_own) == []
+    own = "doi: 10.1000/mine. Findings. " + ("Filler. " * 500) + " doi: 10.9999/someone-else"
+    assert _doc_ids_in_text(own) == ["doi:10.1000/mine"]
+
+
+def test_a_block_with_no_identifier_is_unchanged():
+    assert _doc_ids_in_text("A brand page about bottles.") == []
+    assert _doc_ids_in_text("") == []
+
+
+def test_a_trailing_full_stop_is_not_part_of_the_doi():
+    assert _doc_ids_in_text("doi: 10.1001/jamanetworkopen.2026.3749.") == \
+        ["doi:10.1001/jamanetworkopen.2026.3749"]

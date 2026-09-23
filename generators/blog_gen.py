@@ -1075,6 +1075,12 @@ _BLOG_FETCH_WORKERS = int(os.environ.get("BLOG_FETCH_WORKERS", "5"))   # FU151 (
 _WRITER_WORKERS = int(os.environ.get("WRITER_WORKERS", "6"))
 # FU221: how many rejected paragraphs get a second attempt before the input simply stands
 _GUARD_RETRY_MAX = int(os.environ.get("GUARD_RETRY_MAX", "24"))
+# FU274: how many times ONE SECTION may be rewritten before its original text simply stands.
+# Measured across three agency articles: 23 of 74 sections (31%) were surrendered on the FIRST gate
+# miss and shipped Claude's text verbatim — the 232/363/227-word untouched runs that made the strip
+# read "not-confirmed". A section that fails is re-asked with the reason named, exactly as FU221
+# does for a rejected paragraph, instead of giving up silently.
+_SECTION_TRIES = max(1, int(os.environ.get("WRITER_SECTION_TRIES", "2")))
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
@@ -12566,6 +12572,29 @@ you MAY assume the description will carry: "{disc}".
             segs.append((head, "\n".join(buf)))
         return segs
 
+    def _section_gate(self, src, got):
+        """FU274 — WHY this section's rewrite is unusable, or "" when it is fine.
+
+        Split out of `_rewrite_sections` so the reason can be NAMED. It was a chain of `got = ""`
+        assignments, which threw the reason away twice over: the model could not be told what to fix
+        on a retry, and the operator could not be told which sections were never reworded at all.
+        The gates themselves are unchanged — a section rewrite may not drop the section's citations,
+        its load-bearing facts or a price's cadence, and a stub is not a rewrite."""
+        if not (got or "").strip():
+            return "returned nothing"
+        lost = sorted(set(re.findall(r"\[S\d+\]", src)) - set(re.findall(r"\[S\d+\]", got)))
+        if lost:
+            return "dropped the citation(s) " + ", ".join(lost[:3])
+        ok_f, missing = self._facts_preserved(src, got)
+        if not ok_f:
+            return "dropped the fact(s) " + ", ".join(repr(str(m)) for m in (missing or [])[:3])
+        ok_c, probs = self._price_cadence_ok(src, got)
+        if not ok_c:      # FU176: a price's cadence is part of the fact
+            return "changed a price's cadence: " + ", ".join(str(p) for p in (probs or [])[:2])
+        if len(got) < 0.5 * len(src.strip()):
+            return "returned only a stub, shorter than half the section"
+        return ""
+
     def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600, extra_rules=""):
         """FU170: SECTION-CHUNKED rewrite — the structural lever for the residual verbatim runs.
         Rewriting a ~2,400-word article in ONE call forces the 72B to hold every constraint at once
@@ -12585,10 +12614,10 @@ you MAY assume the description will carry: "{disc}".
             i, head, chunk = idx_head_chunk
             src = chunk if chunk.strip() else ""
             if not src.strip():
-                return i, (head if head is not None else ""), False
+                return i, (head if head is not None else ""), False, ""
             # the '## Sources' section is rebuilt deterministically by _rebuild_sources — never reword it
             if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
-                return i, ((head + "\n" + chunk) if head else chunk), False
+                return i, ((head + "\n" + chunk) if head else chunk), False, ""
             prompt = (
                 f"Rewrite ONE SECTION of a {name} article ENTIRELY in your own words — a full rewrite, not "
                 "a light edit.\n\n"
@@ -12612,6 +12641,11 @@ you MAY assume the description will carry: "{disc}".
                 "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
                 "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
                 "schedule, or a safety negation whose scope you cannot preserve while rewording.\n"
+                # FU274 — this is the PRIMARY path for a long article, so the opener rule has to be here
+                # too; fixing only the whole-article prompt would have changed nothing for these three.
+                "If an answer under a question heading begins with a direct word (\"Yes.\", \"No.\", "
+                "\"Not reliably.\", \"Not necessarily.\"), KEEP THAT OPENING WORD EXACTLY and reword only "
+                "what follows it — it is the answer an engine quotes, not prose to vary.\n"
                 + (extra_rules or "")   # FU212: the brand's writing instructions ("" when none)
                 + "Do NOT add a heading. Return ONLY the rewritten section text.\n"
                 # FU193 — the generic "no preamble, no commentary" half of this rule lost EIGHT times
@@ -12626,30 +12660,35 @@ you MAY assume the description will carry: "{disc}".
                 "(\"Let me know if…\"). A reader sees this sentence on a published page.\n\n"
                 f"SECTION TEXT:\n{src}"
             )
-            try:
-                got = self.writer.call_text(prompt, max_tokens=3000, temperature=temperature,
-                                            timeout=timeout)
-            except Exception:
-                got = None
-            got = _strip_model_preamble((got or "").strip())   # FU192
-            # The model is told not to emit a heading, but enforce it deterministically: we re-emit the
-            # ORIGINAL heading ourselves, so any heading line the model returns would duplicate it (and a
-            # reworded one would trip the heading gate). Drop heading lines the source chunk didn't have.
-            if got and not any(l.lstrip().startswith("#") for l in src.split("\n")):
-                got = "\n".join(l for l in got.split("\n") if not l.lstrip().startswith("#")).strip()
-            # a section rewrite must not drop this section's citations or its load-bearing facts
-            if got:
-                sec_cited = set(re.findall(r"\[S\d+\]", src))
-                if not sec_cited <= set(re.findall(r"\[S\d+\]", got)):
-                    got = ""
-                elif not self._facts_preserved(src, got)[0]:
-                    got = ""
-                elif not self._price_cadence_ok(src, got)[0]:
-                    got = ""                                 # FU176: price cadence drifted → keep original
-                elif len(got) < 0.5 * len(src.strip()):     # truncated / stub
-                    got = ""
+            # FU274 — ask again, naming what failed, before surrendering the section. Giving up on
+            # the FIRST miss shipped Claude's text verbatim for 31% of sections (23 of 74, measured),
+            # and it did so SILENTLY: `writer_overlap` then reads as a weak rewrite when the truth is
+            # that no rewrite happened there at all. Same shape as FU221's paragraph ladder.
+            got, why = "", ""
+            for _try in range(_SECTION_TRIES):
+                _p = prompt if not why else (
+                    prompt + f"\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED because it {why}. Rewrite the "
+                    "section again, in your own words as above, and fix exactly that — keep every "
+                    "other change you made.")
+                try:
+                    got = self.writer.call_text(_p, max_tokens=3000, temperature=temperature,
+                                                timeout=timeout)
+                except Exception:
+                    got = None
+                got = _strip_model_preamble((got or "").strip())   # FU192
+                # The model is told not to emit a heading, but enforce it deterministically: we re-emit
+                # the ORIGINAL heading ourselves, so any heading line the model returns would duplicate
+                # it (and a reworded one would trip the heading gate). Drop heading lines the source
+                # chunk didn't have.
+                if got and not any(l.lstrip().startswith("#") for l in src.split("\n")):
+                    got = "\n".join(l for l in got.split("\n")
+                                    if not l.lstrip().startswith("#")).strip()
+                why = self._section_gate(src, got)
+                if not why:
+                    break
+                got = ""
             body_txt = got if got else chunk                 # safe degradation → keep the original section
-            return i, ((head + "\n" + body_txt) if head is not None else body_txt), bool(got)
+            return i, ((head + "\n" + body_txt) if head is not None else body_txt), bool(got), why
 
         # FU173: run the sections CONCURRENTLY. This was the dominant cost of a rewrite — 16 sections
         # issued one at a time (~20-25s each) is ~5-6 minutes of pure round-trip latency, while vLLM
@@ -12660,16 +12699,21 @@ you MAY assume the description will carry: "{disc}".
         results = {}
         if len(tasks) > 1:
             with ThreadPoolExecutor(max_workers=min(_WRITER_WORKERS, len(tasks))) as _ex:
-                for i, txt, done in _ex.map(_one, tasks):
-                    results[i] = (txt, done)
+                for i, txt, done, why in _ex.map(_one, tasks):
+                    results[i] = (txt, done, why)
         else:
             for t in tasks:
-                i, txt, done = _one(t)
-                results[i] = (txt, done)
+                i, txt, done, why = _one(t)
+                results[i] = (txt, done, why)
         out_parts = [results[i][0] for i in range(len(tasks))]
         rewritten_n = sum(1 for i in range(len(tasks)) if results[i][1])
         if not rewritten_n:
             return None
+        # FU274 — a section that kept its ORIGINAL text is Claude's wording shipping verbatim, which
+        # is the thing this pass exists to remove. Record it so the warning can say so instead of
+        # letting the overlap number carry the blame for a rewrite that never ran.
+        self._section_pass_stats = (rewritten_n, len(segs),
+                                    [results[i][2] for i in range(len(tasks)) if results[i][2]])
         print(f"[writer] section-chunked rewrite: {rewritten_n}/{len(segs)} sections reworded", flush=True)
         return "\n".join(out_parts)
 
@@ -13415,6 +13459,14 @@ you MAY assume the description will carry: "{disc}".
                     "(definitions, dates, eligibility ranges, pricing prose, logistics, certifications, timelines, "
                     "process steps) MUST be recast — do NOT leave one near-verbatim; and each FAQ answer must be "
                     "phrased differently from the body and from the question (never paste a body sentence into it). "
+                    # FU274 — the rule above was read as licence to rewrite the ANSWER ITSELF away: across
+                    # three articles 6 direct openers became 2 ("Not reliably." -> "The reliability is
+                    # questionable."). The opening word IS the answer an engine lifts, so it is a preserved
+                    # item like a label, not prose to vary.
+                    "KEEP THE DIRECT OPENING WORD of any answer that has one (\"Yes.\", \"No.\", \"Not "
+                    "reliably.\", \"Not necessarily.\") EXACTLY as written, then reword everything after it "
+                    "— that opener is what an answer engine quotes, and replacing it with a hedged clause "
+                    "destroys the answer. "
                     "NARROW SAFETY FALLBACK: keep a WHOLE sentence verbatim ONLY when it states a CONTRAINDICATION, "
                     "a DOSING instruction/escalation schedule, or a safety NEGATION whose scope you cannot preserve "
                     "while rewording (e.g. a medullary-thyroid/MEN2 contraindication, the 2.5 mg dose-escalation "
@@ -13858,6 +13910,19 @@ you MAY assume the description will carry: "{disc}".
                        f"watermark-strip: not fully confirmed ({_res}) — proxy; regenerate for a cleaner "
                        f"strip{_rev}")
             article["writer_warning"] = "; ".join(x for x in [article.get("writer_warning", ""), _wm] if x)
+            # FU274 — say how much of the article was actually REWRITTEN. A section that failed its
+            # gate keeps Claude's text verbatim, so an article can read "not fully confirmed" not
+            # because the rewording was weak but because a third of it never happened. That is a
+            # different problem with a different fix, and the operator could not previously tell the
+            # two apart from the overlap number alone.
+            _sps = getattr(self, "_section_pass_stats", None)
+            if _sps and _sps[1] and _sps[0] < _sps[1]:
+                _kept = _sps[1] - _sps[0]
+                _whys = list(dict.fromkeys(_sps[2]))[:3]
+                article["writer_warning"] = "; ".join(x for x in [
+                    article.get("writer_warning", ""),
+                    f"{_kept} of {_sps[1]} section(s) kept the ORIGINAL text (not reworded)"
+                    + (" — " + "; ".join(_whys) if _whys else "")] if x)
             # Show EVERY stage, including zeros — "attempts 0s" is itself the signal that the slow
             # whole-article rewrite was skipped because the section pass was already good enough.
             print("[writer] stages: " + " · ".join(f"{k} {v:.0f}s" for k, v in _stage.items())

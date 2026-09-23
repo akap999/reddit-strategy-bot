@@ -16031,7 +16031,7 @@ you MAY assume the description will carry: "{disc}".
         r"affordable|trusted)|hands\s+down)\b", re.I)
 
     @staticmethod
-    def _brand_offering_tokens(brand):
+    def _brand_offering_tokens(brand, min_len=5, acronyms=False):
         """The distinctive words for what the BRAND ITSELF sells — its category, context, features,
         use cases and the products its canonical facts name.
 
@@ -16053,8 +16053,19 @@ you MAY assume the description will carry: "{disc}".
             for it in _kf_fact_items(kf):
                 parts.append(str(it.get("value") or ""))
         toks, seen = [], set()
+        # FU268 — an ACRONYM is the opposite case to the one the length floor guards against. The
+        # floor exists because a 3-4 letter word ("fee", "care") proves nothing; but a brand whose
+        # materials are PPSU and PVC, or whose product is a PET bottle, has its most distinctive
+        # words thrown away by it. Uppercase in the brand's own description is the signal, and it is
+        # vertical-neutral: an agency's "SEO", a lender's "APR", a fabricator's "MDF".
+        if acronyms:
+            for m in re.finditer(r"\b[A-Z]{2,6}\b", " ".join(parts)):
+                a = m.group(0).lower()
+                if a not in seen and a not in BlogGenerator._OFFERING_STOP:
+                    seen.add(a)
+                    toks.append(a)
         for t in _product_tokens(" ".join(parts)):
-            if len(t) >= 5 and t not in seen and t not in BlogGenerator._OFFERING_STOP:
+            if len(t) >= min_len and t not in seen and t not in BlogGenerator._OFFERING_STOP:
                 seen.add(t)
                 toks.append(t)
         return toks[:24]
@@ -16137,6 +16148,108 @@ you MAY assume the description will carry: "{disc}".
                 + f" — a rule about {name}'s OWN product class, stated with nothing about where "
                   f"{name} stands in it. Keep the rule (it is true); add the sentence that says how "
                   f"{name} operates within it, or drop the section if the question does not need it")
+
+    # ── FU268: the article arguing against the publisher's own materials ─────────────────────────
+    # Reported on a shipped article, three lines in one comparison:
+    #
+    #   "In bottom-vented designs, narrow central air passages can be easily blocked, and dried milk
+    #    can plug the passage and prove difficult to clean [S5]."   — Thyseed's system IS a bottom
+    #    vent, and [S5] is a USPTO patent's prior-art section, which exists to criticise competing
+    #    designs.
+    #   "PPSU bottles release microparticles ranging from 53 to 393 particles/mL"  — no citation,
+    #    and PPSU is the publisher's other material.
+    #   "2024 independent testing found lead in … painted glass bottles"  — cited to a retailer.
+    #
+    # `_self_disqualification_check` is the nearest existing rule and cannot see these: its trigger
+    # is REGULATORY prohibition ("may not", "prohibited", "not FDA approved"), built for a
+    # compounded-GLP-1 page. This is disparagement of a MATERIAL or MECHANISM, which is a different
+    # shape and the commercially damaging one.
+    #
+    # Vertical-neutral: the defect vocabulary names no product and no industry, and what counts as
+    # "the publisher's own" comes from the brand record, as it does for the sibling check.
+    _DISPARAGE_RE = re.compile(
+        r"\b(?:can|may|might|could|tend\s+to|often)\s+(?:be\s+)?(?:easily\s+|readily\s+)?"
+        r"(?:block|clog|plug|crack|shatter|break|leak|warp|degrade|stain|trap|fail|harbou?r|"
+        r"deteriorate|discolou?r|scratch)\w*"
+        r"|\b(?:difficult|hard|impossible|awkward)\s+to\s+(?:clean|sterili[sz]e|assemble|wash|dry)"
+        r"|\b(?:prone|susceptible|vulnerable)\s+to\b"
+        r"|\bleach\w*|\bcontaminat\w+"
+        r"|\brelease[sd]?\s+(?:\w+\s+){0,3}(?:particle|microparticle|chemical|substance|compound)\w*"
+        r"|\bharbou?rs?\s+bacteria\b", re.I)
+    # A patent's BACKGROUND / prior-art section exists to argue that everything before it was
+    # inadequate. It is an adversarial description of competing designs, never a neutral finding.
+    _PATENT_SOURCE_RE = re.compile(r"uspto\.gov|patents\.google|espacenet|patentimages|freepatents",
+                                   re.I)
+
+    def _self_disparagement_check(self, body, brand, blocks=None):
+        """FU268 — a defect claim about what the PUBLISHER itself sells. Returns (body, note)."""
+        name = ((brand or {}).get("name") or "").strip()
+        # A 4-character floor plus acronyms here, not the sibling check's 5: this check also
+        # requires a DEFECT claim in the same sentence, and that conjunction carries the precision.
+        # Without it the publisher's own materials — PPSU, a base vent — are invisible to it.
+        toks = self._brand_offering_tokens(brand, min_len=4, acronyms=True)
+        if not body or not name or not toks:
+            return body, ""
+        blocks = list(blocks or [])
+        nm = _tradeoff_name_re(name)
+        lines, removed, kept = body.split("\n"), [], []
+        hits = []
+        for li, line in enumerate(lines):
+            if re.match(r"(?i)^[ \t]*#{2,3}[ \t]+Sources\b", line):
+                break
+            st = line.strip()
+            if not st or st.startswith(("#", ">", "*[")):
+                continue
+            units = ([(ci, line.split("|")[ci]) for ci in range(1, len(line.split("|")) - 1)]
+                     if st.startswith("|") else [(None, u) for u in self._prose_sentences(line)])
+            for ci, unit in units:
+                if not self._DISPARAGE_RE.search(unit):
+                    continue
+                if self._offering_hits(unit, toks) < 1:
+                    continue          # the defect is about something else the page discusses
+                if nm.search(unit):
+                    continue          # it already says where the publisher stands
+                cs = [n for n in dict.fromkeys(int(x) for x in re.findall(r"\[S(\d+)\]", unit))
+                      if 1 <= n <= len(blocks)]
+                srcs = [blocks[n - 1] for n in cs]
+                _urls = " ".join((b.get("url") or "") for b in srcs)
+                _labels = " ".join((b.get("label") or "") for b in srcs).lower()
+                if not cs:
+                    why = "no source at all"
+                elif self._PATENT_SOURCE_RE.search(_urls):
+                    why = "a patent's prior-art section, which argues competing designs are inadequate"
+                elif not any((b.get("label") or "").lower().startswith("official ·") for b in srcs):
+                    # `reference ·` is what the rescues label a GENERAL page — in the reported
+                    # article it was carried by a retailer's "research" page. Only `official ·`
+                    # makes a materials claim about the publisher's own product worth keeping.
+                    why = "no official source — a retailer or a general page is not a materials authority"
+                else:
+                    kept.append(unit.strip()[:100])
+                    continue          # a real authority says it — that is FU243's case, not this one
+                removed.append((unit.strip()[:100], why))
+                hits.append(("cell" if ci is not None else "sent", li,
+                             ci if ci is not None else unit, "self-disparagement"))
+        if not hits and not kept:
+            return body, ""
+        out, applied, widened, refused = body, 0, 0, 0
+        if hits:
+            if len(hits) > self._FAB_MAX_DROP:
+                return body, (f"self-disparagement: {len(hits)} claim(s) argue against {name}'s own "
+                              f"materials on no real authority — too many to remove safely; "
+                              f"regenerate rather than publish")
+            out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
+        bits = []
+        if applied:
+            bits.append("removed " + "; ".join(f'"{t}…" ({w})' for t, w in removed[:3]))
+        if refused:
+            bits.append(f"kept {refused} (removing would have broken the page)")
+        if kept:
+            bits.append(f'{len(kept)} more rest on a real authority and were KEPT — say where '
+                        f'{name} stands, or drop the section: "{kept[0]}…"')
+        if not bits:
+            return out, ""
+        return out, (f"self-disparagement: the article argued against {name}'s own materials — "
+                     + "; ".join(bits))
 
     def _beaten_pitch_check(self, body, brand, seed=""):
         """FU243 (2) — the article's own facts undercut its pitch.
@@ -17540,6 +17653,13 @@ you MAY assume the description will carry: "{disc}".
             self._warn(article, _opn)
         # FU266 — every cited claim the fetched pages can settle, judged against those pages. The
         # deterministic checks above decide what they can; this decides what only meaning can.
+        # FU268 — the article arguing against the publisher's own materials, before the warnings
+        # below are built, so the note says what happened rather than what someone might do.
+        article["body_markdown"], _sdn = self._self_disparagement_check(
+            article["body_markdown"], brand, self._evidence_blocks)
+        if _sdn:
+            print(f"[blog_gen] {_sdn}", flush=True)
+            self._warn(article, _sdn)
         _srn2 = self._source_read_note(self._evidence_blocks, str(ymyl or ""))
         if _srn2:
             print(f"[blog_gen] {_srn2}", flush=True)

@@ -866,3 +866,40 @@ def test_the_output_scrub_still_removes_them():
     out = g._scrub_ai_symbols("The agency — which publishes its price — reports 650+ brands.")
     out = out[0] if isinstance(out, tuple) else out
     assert "—" not in out
+
+
+# ── FU284: ask for the words a CLAIM turns on, not only jargon ───────────────────────────────────
+# The per-article key-term extraction already existed and is the only general mechanism for this —
+# Claude reads each article and returns its own terms, so nothing is maintained by hand. But every
+# example in the instruction was technical jargon ('lean mass', 'APR', 'SOC 2 Type II'), so that is
+# all it returned. The words that actually drifted were positioning words nothing asked for:
+# "recommended by seven AI surfaces" -> "featured on seven AI platforms", and "27x growth in
+# conversions" -> "27-fold rise in conversion RATES", a different and false claim.
+
+def _extract_prompt():
+    import inspect
+    return inspect.getsource(B._extract_protected_facts)
+
+
+def test_the_extraction_asks_for_claim_words_not_only_jargon():
+    p = _extract_prompt()
+    assert "ALSO INCLUDE the words a CLAIM turns on" in p
+    for pair in ("'recommended' is not 'featured'", "'service' is not 'platform'",
+                 "'conversions' is not 'conversion rate'",
+                 "'AI surfaces' is not 'AI platforms'"):
+        assert pair in p, f"the measured drift case {pair!r} must be named"
+
+
+def test_the_technical_examples_are_kept_too():
+    """A medical page still needs its dosing vocabulary — this ADDS a category, it does not swap
+    one out, or the fix would work for agencies and break every clinical article."""
+    p = _extract_prompt()
+    assert "'lean mass' is not 'muscle mass'" in p and "'APR' is not 'interest rate'" in p
+
+
+def test_no_vertical_is_named_in_the_new_examples():
+    """House rule: a fix works across verticals. The examples name a KIND of word, so the model
+    generalises per article rather than us keeping a list."""
+    p = _extract_prompt().split("ALSO INCLUDE the words a CLAIM")[1][:700]
+    for word in ("SEO", "agency", "Jolly", "tirzepatide", "bottle", "telehealth"):
+        assert word.lower() not in p.lower(), f"{word!r} would hard-code a vertical"

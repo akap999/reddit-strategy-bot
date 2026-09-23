@@ -13463,6 +13463,19 @@ you MAY assume the description will carry: "{disc}".
                 "its precision. Cross-domain examples: 'lean mass' is not 'muscle mass'; 'narrative "
                 "review' is not 'review article'; 'APR' is not 'interest rate'; 'general contractor' is "
                 "not 'builder'; 'SOC 2 Type II' is not 'SOC 2'; 'Quick answer' as a section label. "
+                # FU284 - every example above is technical JARGON, so that is all this returned. The
+                # words a rewrite actually drifted on were the ones the CLAIM turns on, and nothing
+                # asked for them: "recommended by seven AI surfaces" came back "featured on seven AI
+                # platforms", and "27x growth in conversions" became "27-fold rise in conversion
+                # RATES", which is a different and false claim. Naming the KIND of word keeps this
+                # per-article and maintenance-free: a medical page still yields dosing terms, an
+                # agency page yields positioning terms, and no list is kept anywhere.
+                "ALSO INCLUDE the words a CLAIM turns on, not only technical vocabulary: the verb "
+                "for what happened to the subject ('recommended' is not 'featured', 'defends' is "
+                "not 'maintains'), what something IS ('service' is not 'platform'), what was "
+                "MEASURED ('conversions' is not 'conversion rate', 'citations' is not 'mentions'), "
+                "the unit a figure is counted in ('AI surfaces' is not 'AI platforms'), and any "
+                "word marking a result as best/first/fastest. "
                 "EXCLUDE everyday wording a rewrite may freely vary.\n\n"
                 'Return JSON ONLY: {"atoms": ["..."], "verbatim_sentences": ["..."], "key_terms": ["..."]}\n\n'
                 f"ARTICLE:\n{claude_body[:14000]}", max_tokens=2000, temperature=0)

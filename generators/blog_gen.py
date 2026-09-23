@@ -12582,6 +12582,37 @@ you MAY assume the description will carry: "{disc}".
             segs.append((head, "\n".join(buf)))
         return segs
 
+    # FU277 — a bolded BARE FIGURE draws a boundary the fact gate does not recognise. Measured on
+    # the operator's own markup: 30 of 78 spans were a figure with the unit left outside
+    # ("ratings of **4.8** stars", "a minimum of **$6,000** a month", "lift over **19** months").
+    # The gate's atom is "4.8 stars" — number AND unit, because the unit carries the meaning — so
+    # the bold said "4.8 is frozen, 'stars' is prose", the model reworded the unit, the atom broke,
+    # and the WHOLE rewrite fell back with no watermark stripped. Same lesson as FU176: a price's
+    # cadence is part of the fact. So a bare-figure span is widened to the atom that contains it —
+    # protection is the UNION of the operator's bold and the extracted facts, and bold may only ever
+    # ADD. The operator's markup is never rewritten; only what we CHECK and what we TELL the model.
+    _BARE_FIGURE_RE = re.compile(r"^[$£€]?\d[\d,. ]*(?:%|\+|x|×)?$|^\d[\d,.]*\s*(?:million|billion|k)$",
+                                 re.I)
+
+    @classmethod
+    def _bold_with_units(cls, body, atoms=()):
+        """The operator's bold spans, each widened to the shortest extracted atom that CONTAINS it
+        when the span is a bare figure. Never shrinks a span, never invents one."""
+        # The atom spans the bold markers ("**4.8** stars" contains "4.8 stars" only once the
+        # markers are gone), so containment is tested against the UNMARKED text.
+        plain = (body or "").replace("**", "")
+        out = []
+        for sp in cls._bold_spans(body):
+            if cls._BARE_FIGURE_RE.match(sp.strip()):
+                owners = sorted((a for a in (atoms or [])
+                                 if isinstance(a, str) and sp in a and len(a) > len(sp)
+                                 and a in plain), key=len)
+                if owners:
+                    sp = owners[0]
+            if sp not in out:
+                out.append(sp)
+        return sorted(out, key=len, reverse=True)
+
     @staticmethod
     def _bold_spans(body):
         """FU276 — the EXACT text inside every **bold** span, longest first.
@@ -12619,12 +12650,14 @@ you MAY assume the description will carry: "{disc}".
         # verified nowhere, it was a request the model could ignore silently; checked here, a miss
         # goes back through the FU274 retry with the exact words named, and only then gives up.
         # Compared on the TEXT, so the rewrite may re-mark it, but may not lose or alter the words.
-        _lost = [b for b in self._bold_spans(src) if b not in got]
+        _lost = [b for b in self._bold_with_units(src, getattr(self, "_section_atoms", ()))
+                 if b not in got]
         if _lost:
             return "dropped the bolded text " + ", ".join(repr(b[:48]) for b in _lost[:3])
         return ""
 
-    def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600, extra_rules=""):
+    def _rewrite_sections(self, claude_body, name, temperature=1.0, timeout=600, extra_rules="",
+                          atoms=()):
         """FU170: SECTION-CHUNKED rewrite — the structural lever for the residual verbatim runs.
         Rewriting a ~2,400-word article in ONE call forces the 72B to hold every constraint at once
         (23 citations + 15 headings + a table + every number/negation), so it anchors on the original
@@ -12636,6 +12669,13 @@ you MAY assume the description will carry: "{disc}".
         segs = self._split_heading_segments(claude_body)
         if not segs:
             return None
+        # FU277 — the per-article atom list never reached this path at all. It went only into the
+        # whole-article prompt, while THIS is the primary path for any article over 4,000 chars with
+        # 3+ headings — every article the operator generates. So the path doing the work ran on
+        # generic shape categories alone (numbers, names, citations, bold, negations) with no
+        # article-specific list, which is how claims no category covers ("the fastest result
+        # documented here", "screenshot-verified, engine by engine") were droppable at all.
+        self._section_atoms = [a for a in (atoms or []) if isinstance(a, str) and a.strip()]
 
         def _one(idx_head_chunk):
             """Rewrite ONE section. Returns (index, text_to_emit, was_rewritten). Pure per-section work —
@@ -12647,6 +12687,17 @@ you MAY assume the description will carry: "{disc}".
             # the '## Sources' section is rebuilt deterministically by _rebuild_sources — never reword it
             if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
                 return i, ((head + "\n" + chunk) if head else chunk), False, ""
+            # FU277 — only the atoms that appear in THIS section. Pasting all ~120 into every call
+            # is exactly the over-constraining FU275 removed; a section's own handful is short and
+            # obeyable. Widened first, so a bolded bare figure arrives WITH its unit ("4.8 stars",
+            # not "4.8") and the model is never told a boundary the fact gate will then reject.
+            _plain = src.replace("**", "")
+            _here = [x for x in self._bold_with_units(src, getattr(self, "_section_atoms", ()))
+                     if x in _plain]
+            for _a in (getattr(self, "_section_atoms", ()) or []):
+                if _a in _plain and _a not in _here:
+                    _here.append(_a)
+            _here = list(dict.fromkeys(_here))[:28]
             prompt = (
                 # FU275 — the brief, rewritten. What was here was thirty unexplained MUSTs whose
                 # FIRST rule ("share no run of more than 4 consecutive words — the single most
@@ -12719,6 +12770,9 @@ you MAY assume the description will carry: "{disc}".
                 f"not reworded. And because the page is {name}'s own, state {name}'s figures as "
                 "plainly as any competitor's: if a rival's numbers are 'reported' then so are "
                 f"{name}'s, and never hedge one side while leaving the other unqualified.\n"
+                + (("KEEP THESE EXACTLY, character-for-character — this section's own facts and "
+                    "the operator's marked text:\n" + "".join(f"  - {a}\n" for a in _here))
+                   if _here else "")
                 + (extra_rules or "")   # FU212: the brand's writing instructions ("" when none)
                 + "Do NOT add a heading. Return ONLY the rewritten section text.\n"
                 # FU193 — the generic "no preamble, no commentary" half of this rule lost EIGHT times
@@ -13667,7 +13721,8 @@ you MAY assume the description will carry: "{disc}".
                     sec_out = self._rewrite_sections(
                         claude_body, name, temperature=1.1,
                         timeout=int(os.environ.get("WRITER_CALL_TIMEOUT", "600")),
-                        extra_rules=_content_instructions_block(brand, "rewrite"))   # FU212
+                        extra_rules=_content_instructions_block(brand, "rewrite"),   # FU212
+                        atoms=_atoms)   # FU277: the per-article fact list reaches the PRIMARY path
                     _sdt = _t.time() - _s0
                     secs += _sdt
                     _stage["sections"] = round(_sdt, 1)

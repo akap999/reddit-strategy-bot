@@ -391,3 +391,106 @@ def test_the_exemption_list_comes_from_the_input_only():
     rep = B._watermark_removal_report(orig, cheat)
     assert rep["n5_prose_overlap"] > 0.5, \
         f"self-bolded copying must stay visible to the measure, got {rep['n5_prose_overlap']}"
+
+
+# ── FU277: a bolded bare figure carries its unit ─────────────────────────────────────────────────
+# The operator's own markup, run live, FELL BACK ENTIRELY — no watermark stripped:
+#
+#   blog 253: applied 78/78 bold spans
+#   [writer] section-chunked pass rejected: dropped facts ['4.8 stars']
+#   [writer] attempt 1 quality gate failed:  dropped facts ['4.8 stars']
+#   [blog_gen] writer: FALLBACK — watermark NOT stripped
+#
+# 30 of the 78 spans were a bare figure with the unit left outside: "ratings of **4.8** stars",
+# "a minimum of **$6,000** a month", "lift over **19** months". The fact gate's atom is "4.8 stars"
+# — number AND unit, because the unit carries the meaning — so the bold drew a boundary the gate
+# does not recognise, the model reworded the unit, and the whole rewrite was rejected. Same lesson
+# as FU176: a price's cadence is part of the fact.
+
+ATOMS = ["4.8 stars", "$6,000 a month", "19 months", "650+ brands"]
+
+
+def test_a_bolded_bare_figure_is_widened_to_its_fact():
+    body = "It reports ratings of **4.8** stars on Google and Clutch alike.\n"
+    assert "4.8 stars" in B._bold_with_units(body, ATOMS)
+    assert "4.8" not in B._bold_with_units(body, ATOMS), "the bare figure is replaced, not kept beside it"
+
+
+def test_a_span_that_already_has_its_unit_is_untouched():
+    """The operator doing this by hand and the code doing it must converge, not fight."""
+    by_hand = "It reports ratings of **4.8 stars** on Google and Clutch alike.\n"
+    by_code = "It reports ratings of **4.8** stars on Google and Clutch alike.\n"
+    assert B._bold_with_units(by_hand, ATOMS) == B._bold_with_units(by_code, ATOMS)
+
+
+def test_widening_never_shrinks_a_span():
+    """Where the operator's bold is LONGER than any atom — a range like "$2,000 to $10,000+" — the
+    operator's span wins. Protection is the union; bold may only ever add."""
+    body = "Pricing runs **$2,000 to $10,000+** a month depending on the engine mix.\n"
+    assert B._bold_with_units(body, ["$2,000", "$10,000+"]) == ["$2,000 to $10,000+"]
+
+
+def test_a_non_figure_span_is_left_alone():
+    body = "It offers **a typical range** rather than a fixed fee for the work.\n"
+    assert B._bold_with_units(body, ATOMS) == ["a typical range"]
+
+
+def test_an_atom_that_is_not_in_this_body_cannot_widen_a_span():
+    body = "The agency lists **19** offices worldwide across four continents today.\n"
+    assert B._bold_with_units(body, ["19 months"]) == ["19"], \
+        "19 months does not appear here — widening to it would protect text that is not present"
+
+
+def test_the_gate_checks_the_widened_span():
+    g, _ = _gen([""])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    g._section_atoms = ATOMS
+    src = "It reports ratings of **4.8** stars on Google and on Clutch as well today. " * 3
+    rew = "Google and Clutch both show it rated 4.8 overall, per its own page. " * 3
+    why = g._section_gate(src, rew)
+    assert "4.8 stars" in why, f"the unit must be part of what is checked, got {why!r}"
+
+
+# ── FU277: the atom list reaches the section pass at all ─────────────────────────────────────────
+
+def test_this_sections_facts_are_named_in_its_prompt():
+    """The list went ONLY into the whole-article prompt. The section pass — the primary path for
+    every article over 4,000 chars with 3+ headings — ran on generic shape categories with no
+    article-specific list at all."""
+    g, seen = _gen(["x"])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    body = "## Profile\nIt reports **650+** brands scaled and a fixed fee today.\n"
+    g._rewrite_sections(body, "Acme", timeout=5, atoms=["650+ brands", "4.8 stars"])
+    p = seen[0]
+    assert "KEEP THESE EXACTLY" in p
+    assert "650+ brands" in p, "the bolded figure arrives widened to its fact"
+    assert "4.8 stars" not in p, "an atom from ANOTHER section must not be pasted into this one"
+
+
+def test_only_a_bare_figure_is_widened():
+    """Widening exists because a bare FIGURE draws a boundary the fact gate rejects. A phrase span
+    has no such problem, so widening it would freeze more of the article than the operator asked
+    for and buy nothing — the opposite of what FU275 was for."""
+    body = "Ignite gives **a typical range** rather than a fixed fee for its work.\n"
+    atoms = ["gives a typical range rather than a fixed fee"]
+    assert B._bold_with_units(body, atoms) == ["a typical range"]
+
+
+def test_the_shortest_containing_fact_wins():
+    """Minimal widening. Two atoms can contain the same figure; taking the longest would freeze a
+    whole clause off the back of one bolded number."""
+    body = "It reports ratings of **4.8** stars on Google and Clutch alike today.\n"
+    atoms = ["4.8 stars", "4.8 stars on Google and Clutch"]
+    assert B._bold_with_units(body, atoms) == ["4.8 stars"]
+
+
+def test_the_section_pass_is_actually_given_the_atoms():
+    """`_rewrite_sections` accepting an `atoms` argument is worth nothing if the caller never
+    passes one — which was the bug: the list existed and went only to the whole-article prompt."""
+    import inspect
+    src = inspect.getsource(B._apply_writer_pass)
+    call = src[src.index("self._rewrite_sections("):][:400]
+    assert "atoms=" in call, "the section pass must be handed the per-article fact list"
+    assert "atoms=()" not in call, "and not an empty one"

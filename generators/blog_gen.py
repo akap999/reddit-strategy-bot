@@ -12648,6 +12648,46 @@ you MAY assume the description will carry: "{disc}".
         t = " ".join(cls._NUMWORD.get(w, w) for w in re.findall(r"[\w$%+.,/-]+", t))
         return re.sub(r"\s+", " ", t).strip(" .,")
 
+    def _salvage_units(self, uo, un):
+        """FU280 — pair two lists of units by fingerprint and keep each rewrite that passes its own
+        gate. Shared by the paragraph and the sentence rung so both align the same way: on the
+        [S#] markers and figures a rewrite may NOT change, never on wording, which is the FU176
+        mis-pair lesson. Returns (list_to_emit, kept_count) or (None, 0) when nothing pairs."""
+        def _fp(t):
+            return (tuple(re.findall(r"\[S\d+\]", t)), tuple(_NUM_FP_RE.findall(t)))
+        ko, kn = [_fp(x) for x in uo], [_fp(x) for x in un]
+        pairs = []
+        for op, a1, a2, b1, b2 in _SequenceMatcher(None, ko, kn, autojunk=False).get_opcodes():
+            if op == "equal" or (op == "replace" and (a2 - a1) == (b2 - b1)):
+                pairs += list(zip(range(a1, a2), range(b1, b2)))
+        if not pairs:
+            return None, 0
+        paired = {x: y for x, y in pairs}
+        out, kept = [], 0
+        for idx, o in enumerate(uo):
+            n = un[paired[idx]] if idx in paired else None
+            if not o.strip() or n is None or self._section_gate(o, n):
+                out.append(o)
+            else:
+                out.append(n)
+                kept += 1
+        return out, kept
+
+    def _salvage_sentences(self, o, n):
+        """FU280 — the finest rung. Over half this article's sections are a SINGLE paragraph (every
+        FAQ answer, every numbered checklist item), so "revert the paragraph" was "revert the
+        section" for 13 of 25 — and one missing "a month" in a 62-word FAQ answer took all of it.
+        A sentence is the smallest unit a fact can be localised to without risking a splice."""
+        so, sn = _split_sentences_keep(o), _split_sentences_keep(n)
+        if len(so) < 3 or len(sn) < 3:          # [sent, sep, sent, …] — fewer means one sentence
+            return None
+        oo, nn = so[0::2], sn[0::2]             # sentences; the odd slots are separators
+        merged, kept = self._salvage_units(oo, nn)
+        if not kept:
+            return None
+        return "".join(x + (so[2 * k + 1] if 2 * k + 1 < len(so) else "")
+                       for k, x in enumerate(merged))
+
     def _salvage_section(self, src, got):
         """FU278 — keep the parts of a failed section that are FINE.
 
@@ -12666,38 +12706,31 @@ you MAY assume the description will carry: "{disc}".
         Returns (text, salvaged_any)."""
         so = [p for p in (src or "").split("\n\n")]
         sn = [p for p in (got or "").split("\n\n")]
-        if not got or len(so) < 2:
+        if not got:
             return src, False
-        # FU279 — requiring an EQUAL paragraph count meant salvage almost never fired: a rewrite
-        # that merges two paragraphs or splits one takes the whole section down with it, which is
-        # the blunt revert this exists to prevent. Paragraphs are aligned the way `rewrite_guard`
-        # aligns sections — difflib over a fingerprint that survives rewording. The fingerprint is
-        # the citation markers and figures a paragraph carries, because those are exactly what a
-        # rewrite may NOT change; its wording is what it may.
-        def _fp(t):
-            return (tuple(re.findall(r"\[S\d+\]", t)), tuple(_NUM_FP_RE.findall(t)))
-        ko, kn = [_fp(x) for x in so], [_fp(x) for x in sn]
-        pairs = []
-        for op, a1, a2, b1, b2 in _SequenceMatcher(None, ko, kn, autojunk=False).get_opcodes():
-            if op == "equal":
-                pairs += list(zip(range(a1, a2), range(b1, b2)))
-            elif op == "replace" and (a2 - a1) == (b2 - b1):
-                pairs += list(zip(range(a1, a2), range(b1, b2)))   # same shape, genuine rewording
-            # insert / delete / unequal replace: no safe pairing, the input stands for that range
-        if not pairs:
-            return src, False
-        paired = {a: b for a, b in pairs}
-        out, kept = [], 0
-        for idx, o in enumerate(so):
-            n = sn[paired[idx]] if idx in paired else None
-            if not o.strip():
-                out.append(o)
-            elif n is None or self._section_gate(o, n):
-                out.append(o)                      # only THIS paragraph goes back
-            else:
-                out.append(n)
-                kept += 1
-        return ("\n\n".join(out), True) if kept else (src, False)
+        # FU280 — a section is salvaged at the finest unit that works: paragraph first, then the
+        # SENTENCE inside a paragraph that failed. Without the sentence rung, 13 of this article's
+        # 25 sections (every FAQ answer, every numbered checklist item) are a single paragraph, so
+        # "revert the paragraph" WAS "revert the section" and one missing "a month" in a 62-word
+        # answer cost the whole thing.
+        if len(so) >= 2 and len(sn) >= 2:
+            merged, kept = self._salvage_units(so, sn)
+        else:
+            merged, kept = list(so), 0
+        if merged is None:
+            merged, kept = list(so), 0
+        paired = {}
+        if len(so) == len(merged):
+            for idx, o in enumerate(so):
+                if merged[idx] == o and o.strip():      # this paragraph reverted — try its sentences
+                    n = sn[idx] if idx < len(sn) else None
+                    if n:
+                        fine = self._salvage_sentences(o, n)
+                        if fine:
+                            merged[idx] = fine
+                            kept += 1
+                            paired[idx] = True
+        return ("\n\n".join(merged), True) if kept else (src, False)
 
     def _section_gate(self, src, got):
         """FU274 — WHY this section's rewrite is unusable, or "" when it is fine.
@@ -13228,7 +13261,19 @@ you MAY assume the description will carry: "{disc}".
         the next price / ';' / '.' so a neighbouring price's terms cannot bleed in. Returns a sorted list
         of (amount, frozenset(cadences)) so two documents can be compared as multisets."""
         t = re.sub(r"\s+", " ", text or "")
-        out = []
+        # FU280 — the window now also looks BEHIND the figure. It was forward-only, so "$6,000 a
+        # month" recast as "a MONTHLY investment of at least $6,000" read as MONTH -> none and
+        # failed the gate, reverting the whole section. The cadence was never lost; it moved in
+        # front of the figure, which is one of the most natural ways to recast a price. Measured:
+        # that one false positive cost two sections on every run of an article.
+        #
+        # The look-behind may NOT cross the previous price's FORWARD window. In "initially costing
+        # $149 monthly, followed by $249 quarterly", the words between the two prices belong to
+        # $149; letting $249 reach back for them hands it a MONTH it never had and launders exactly
+        # the 3x understatement FU176 exists to catch. Stopping at the previous "$" is not enough —
+        # that leaves "149 monthly" behind — so each look-behind is floored at where the previous
+        # figure's forward window ended.
+        spans = []
         for m in _MONEY_RE.finditer(t):
             rest = t[m.end():m.end() + 70]
             cut = len(rest)
@@ -13236,9 +13281,18 @@ you MAY assume the description will carry: "{disc}".
                 i = rest.find(stop)
                 if i != -1:
                     cut = min(cut, i)
-            win = m.group(0) + rest[:cut]
+            spans.append((m, cut))
+        out, floor = [], 0
+        for k, (m, cut) in enumerate(spans):
+            before = t[max(floor, m.start() - 60):m.start()]
+            for stop in (";", ". ", "€", "£"):
+                j = before.rfind(stop)
+                if j != -1:
+                    before = before[j + 1:]
+            win = before + m.group(0) + t[m.end():m.end() + cut]
             tags = frozenset(tag for rx, tag in _CADENCE_PATTERNS if rx.search(win))
             out.append((m.group(0).replace(" ", ""), tags))
+            floor = m.end() + cut
         return sorted(out)
 
     @classmethod

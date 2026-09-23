@@ -637,3 +637,108 @@ def test_a_changed_value_is_still_a_dropped_span():
     got = "Across every engine tracked, the agency reports 650 brands scaled. " * 3
     why = g._section_gate(src, got)
     assert "bolded text" in why, "650+ is not 650 — normalisation must not launder a value"
+
+
+# ── FU280: the sentence rung, and a cadence that moved rather than vanished ──────────────────────
+# Operator: "even if this acronym thing failed, still it should not have resulted in drop of
+# sections." Right — and the reason it did is structural. 13 of this article's 25 sections are a
+# SINGLE paragraph (every FAQ answer, every numbered checklist item), so "revert the paragraph" was
+# "revert the section" for over half of it, and paragraph-level salvage could never fire there.
+
+FAQ_O = ("Among the agencies compared here, Victorious recommends a minimum of $6,000 a month "
+         "[S4]. Ignite Visibility says its programs require $2,000 to $10,000 a month [S11]. "
+         "Coalition Technologies quotes by proposal instead [S5].")
+FAQ_N = ("Of the agencies here, Victorious asks at least $6,000 monthly [S4]. "
+         "Ignite Visibility puts its programs at $2,000 to $10,000 [S11]. "
+         "Proposals are how Coalition Technologies quotes [S5].")
+
+
+def _g_real():
+    """Like `_g`, but with the REAL cadence check — `_g` stubs it to always pass, which disables
+    the only thing these fixtures fail on."""
+    g, _ = _gen([""])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._section_atoms = []
+    return g
+
+
+def test_a_single_paragraph_section_is_salvaged_by_sentence():
+    """The case paragraph granularity could not reach: one 62-word FAQ answer, one bad sentence."""
+    g = _g_real()
+    out, salvaged = g._salvage_section(FAQ_O, FAQ_N)
+    assert salvaged, "a one-paragraph section must still be salvageable"
+    assert "Proposals are how Coalition Technologies quotes" in out, "good sentences keep their rewrite"
+    assert "$2,000 to $10,000 a month" in out, "only the sentence that lost the cadence reverts"
+
+
+def test_sentence_salvage_needs_more_than_one_sentence():
+    g = _g()
+    g._price_cadence_ok = lambda a, b: (False, ["x"])
+    one = "Victorious recommends a minimum of $6,000 a month [S4]."
+    assert g._salvage_sentences(one, "Victorious asks $6,000 [S4].") is None
+
+
+def test_sentence_salvage_rejoins_the_text_faithfully():
+    """`_split_sentences_keep` alternates [sentence, separator, …] so the line rejoins byte for
+    byte; losing a separator would run two sentences together."""
+    g = _g_real()
+    out, _s = g._salvage_section(FAQ_O, FAQ_N)
+    assert ".  " not in out and "[S4].Ignite" not in out, "sentences must not run together"
+    # the separator itself must survive — joining on a bare space silently deletes the full stop
+    assert "[S4]. " in out, "the sentence-ending punctuation is part of the text, not a delimiter"
+    assert out.count(". ") == FAQ_O.count(". "), "every sentence boundary is rejoined as it was"
+    assert out.count("[S") == FAQ_O.count("[S"), "every citation survives the rejoin"
+
+
+# ── the cadence look-behind ──────────────────────────────────────────────────────────────────────
+# Instrumented from the live run — what the model ACTUALLY wrote when the gate failed:
+#   IN : Victorious recommends a minimum of $6,000 a month with a 12-month commitment
+#   OUT: Victorious advises a MONTHLY investment of at least $6,000 with a 12-month commitment
+# reported as "$6,000 lost its cadence (MONTH → ['none'])". The cadence was never lost; it moved in
+# FRONT of the figure, and the window only ever looked forward.
+
+CAD_O = "Victorious recommends a minimum of $6,000 a month with a 12-month commitment [S4]."
+
+
+def test_a_cadence_in_front_of_the_price_is_found():
+    n = "Victorious advises a monthly investment of at least $6,000 with a 12-month commitment [S4]."
+    assert B._price_cadence_ok(CAD_O, n)[0], "recasting a price is not losing its cadence"
+
+
+def test_a_genuinely_dropped_cadence_still_fails():
+    n = "Victorious advises an investment of at least $6,000 with a 12-month commitment [S4]."
+    ok, probs = B._price_cadence_ok(CAD_O, n)
+    assert not ok and "MONTH" in probs[0], "the FU176 protection must survive the widening"
+
+
+def test_a_neighbouring_prices_cadence_cannot_bleed_backwards():
+    """The look-behind stops at the same delimiters as the forward half — otherwise the cadence of
+    the price BEFORE this one attaches to it and hides a real loss."""
+    o = "It charges $99 per month. A separate setup fee of $500 applies once [S1]."
+    n = "It charges $99 per month. A separate setup fee of $500 applies [S1]."
+    cads = {a: t for a, t in B._price_cadences(n)}
+    assert "MONTH" not in cads.get("$500", frozenset()), "the $99 cadence must not reach $500"
+
+
+def test_a_line_break_between_sentences_survives_the_rejoin():
+    """`" ".join(...)` is equivalent while every separator is a single space — which is why the
+    plainer fixture above cannot tell the two apart. A newline inside a paragraph is normal
+    markdown, and flattening it silently reflows the author's line breaks."""
+    g = _g_real()
+    o = ("Victorious recommends a minimum of $6,000 a month [S4].\n"
+         "Ignite Visibility says its programs require $2,000 to $10,000 a month [S11].")
+    n = ("Victorious asks at least $6,000 monthly [S4].\n"
+         "Ignite Visibility puts its programs at $2,000 to $10,000 [S11].")
+    out = g._salvage_sentences(o, n)
+    assert out is not None and "\n" in out, "the newline separator must be rejoined, not flattened"
+
+
+def test_the_look_behind_cannot_reach_across_the_previous_price():
+    """The FU176 case the first look-behind broke. In "$149 monthly, followed by $249 quarterly"
+    the words between the two prices belong to $149; letting $249 reach back for them hands it a
+    MONTH it never had and launders the 3x understatement FU176 exists to catch. Stopping at the
+    previous "$" is NOT enough — that leaves "149 monthly" in range."""
+    txt = "PeterMD costs $149 monthly, followed by $249 quarterly for the 60mg dose."
+    cads = {a: t for a, t in B._price_cadences(txt)}
+    assert "MONTH" in cads["$149"], "its own cadence still attaches"
+    assert "MONTH" not in cads["$249"], "but it must not leak forward to the next price"

@@ -2851,6 +2851,95 @@ def _norm_domain(u):
     d = u.split("/")[0].lower()
     return d[4:] if d.startswith("www.") else d
 
+# ── FU273: the source TIER ───────────────────────────────────────────────────────────────────────
+# Everything the writer knew about a source's standing was its label — a domain allowlist plus a
+# title shape, decided before the page was opened. Since FU267 the page is actually READ, since
+# FU270 an NCBI paper carries its design and year, and since FU271 a page is asked what it says
+# about itself. Those signals existed on the block and nothing ranked by them.
+#
+# TWO AXES, and collapsing them into one number is why a single score cannot work. SCOPE — what a
+# class of source may be used to evidence — is absolute and is enforced elsewhere: the brand's own
+# page is the best source in the world for its own price and a worthless one for a clinical claim,
+# and no score may trade one against the other. TIER is the weight WITHIN a scope, and that is all
+# this decides.
+_SUMMARY_MARK = "[SUMMARY ONLY"
+_TIER_POINTER = "pointer"
+_TIER_DROPPED = "dropped"
+_TIER_WHAT = {
+    1: "strongest evidence",
+    2: "strong",
+    3: "first-party",
+    4: "third-party, cites its own sources",
+    5: "third-party, no citations — weakest",
+}
+
+
+def _authority_domain(url):
+    """A regulator or a guideline body, read from the DOMAIN rather than from the label.
+
+    Deliberately NOT `label.startswith("official ·")`. The labeller is imperfect and its misses are
+    the expensive kind: aafp.org — the American Academy of Family Physicians, and already in
+    `_AUTHORITY_ORGS` — was labelled `third-party ·` on a shipped article, which would have put a
+    guideline body below a blog. The domain cannot be got wrong in the same way."""
+    d = _norm_domain(url or "")
+    if not d:
+        return ""
+    if d.endswith(".gov") or ".gov." in d or "nlm.nih" in d or "ncbi.nlm" in d:
+        return "regulator"
+    for o in _AUTHORITY_ORGS:
+        if d == o or d.endswith("." + o):
+            return "guideline body"
+    return ""
+
+
+def _source_tier(block, first_party=()):
+    """What this source is worth: (tier, what_it_is). First match wins.
+
+    `tier` is 1-5, or "pointer" for a page we never read, or "dropped" for a monetised listing."""
+    b = block if isinstance(block, dict) else {}
+    url, lab = (b.get("url") or "").strip(), (b.get("label") or "").lower()
+    if b.get("intent") == "commerce":
+        return _TIER_DROPPED, ("affiliate/commerce page — may support a price or availability, "
+                               "nothing else")
+    # A page unreachable by every method is not a source. It keeps its place so the operator can
+    # see what was reached for, and it may never carry a specific.
+    if str(b.get("text") or "").startswith(_SUMMARY_MARK):
+        return _TIER_POINTER, "NOT READ — a pointer, never support for a specific"
+    lvl, design, year = b.get("level"), (b.get("design") or "").strip(), b.get("year")
+    named = design + (f", {year}" if year else "")
+    # A meta-analysis or a randomised trial, or a practice guideline, which is what a guideline body
+    # publishes — the same standing by a different route.
+    if isinstance(lvl, int) and (lvl <= 2 or lvl == 5):
+        return 1, named
+    auth = _authority_domain(url)
+    if auth:
+        return 1, (f"{auth} — {named}" if named else auth)
+    if named or lab.startswith("official ·"):
+        return 2, (named or "official source")
+    dom = _norm_domain(url)
+    if dom and dom in {d for d in (first_party or ()) if d}:
+        return 3, "its own specs and prices only — never comparative or clinical"
+    if b.get("intent") == "reference":
+        return 4, "cites its own sources"
+    return 5, ""
+
+
+def _tier_note(block, first_party=()):
+    """The one bracket the evidence line carries. Nothing is reordered by it yet — the writer is
+    told what each source IS and left to weigh it, and the next step reorders on the same number."""
+    tier, what = _source_tier(block, first_party)
+    if tier in (_TIER_POINTER, _TIER_DROPPED):
+        return what
+    head = _TIER_WHAT.get(tier, "")
+    if tier in (4, 5):
+        return head
+    note = f"tier {tier}: {head}" + (f" — {what}" if what else "")
+    # Tier 4 IS "cites its own sources", so it needs no suffix. ABOVE tier 4 the fact still earns
+    # its characters: a source that shows its own working can be followed, and a claim resting on
+    # it re-cited to the primary paper. Folding it into the tier alone would have thrown it away.
+    if (block if isinstance(block, dict) else {}).get("intent") == "reference":
+        note += ", cites its own sources"
+    return note
 
 # ── FU217 ─────────────────────────────────────────────────────────────────────────────────────────
 # Operator-VERIFIED facts for the subject AND the competitors it names: licence numbers and classes,
@@ -3482,6 +3571,10 @@ class BlogGenerator:
         self._fetch_reasons = {}
         self._web_fetch_per_domain = {}
         self._own_domain = ""       # FU232: the subject's registrable domain (a bigger fetch budget)
+        # FU273: every VENDOR domain in play — the subject's and the competitors' — because a
+        # vendor's own page is tier 3 whoever owns it: full weight for its own specs and prices,
+        # none for anything comparative or clinical.
+        self._first_party_domains = set()
         self._research_notes = []    # FU221: per-brand research outcomes, for the log / quality report
         # FU213 (Change 1): the LAST ## Sources section this instance rendered — its exact lines and
         # the new-number → raw-evidence-index map. A later `_rebuild_sources` over a body that still
@@ -4577,6 +4670,7 @@ class BlogGenerator:
         if b.get("domain_url"):
             targets.append((subject, b["domain_url"].strip(), False))
             self._own_domain = _norm_domain(b["domain_url"])   # FU232: bigger web-fetch budget
+            self._first_party_domains.add(self._own_domain)       # FU273: tier 3
         else:
             print(f"[blog_gen] evidence: subject {subject!r} has NO domain_url — "
                   "no first-party source can be fetched", flush=True)
@@ -4655,6 +4749,12 @@ class BlogGenerator:
                 targets.append((cn, dom, True))
         # subject first, then seed/comparison brands, then stored competitors — capped
         targets = targets[:_MAX_EVIDENCE_BRANDS]
+        # FU273: a competitor's own site is first-party too. Taken from `targets` rather than from
+        # `cached`, so the set holds the domains actually fetched this run and not a stale cache.
+        for _lab, _d, _v in targets:
+            _d = _norm_domain(_d)
+            if _d:
+                self._first_party_domains.add(_d)
 
         # Topic terms for relevance validation: a competitor page must share some topical
         # signal with the subject's space, not just contain the brand name — so a same-named
@@ -4917,12 +5017,12 @@ class BlogGenerator:
         for i, bl in enumerate(blocks, 1):
             src = f"{(bl.get('label') or '').strip()}" \
                 + (f" — {bl.get('url')}" if (bl.get("url") or "").strip() else "")
-            if bl.get("design"):      # FU270: what this source IS, so the writer can prefer it
-                src += f"  [{bl['design']}" + (f", {bl['year']}" if bl.get("year") else "") + "]"
-            elif bl.get("intent") == "commerce":   # FU271: a monetised page, whatever its domain
-                src += "  [affiliate/commerce page — may support a price or availability, nothing else]"
-            elif bl.get("intent") == "reference":
-                src += "  [cites its own sources]"
+            # FU273 — ONE bracket saying what this source is, on the tier that ranks it. It
+            # subsumes the three the render grew separately (FU270's design, FU271's intent),
+            # which could not be compared with each other because they were different sentences.
+            _note = _tier_note(bl, getattr(self, "_first_party_domains", ()) or ())
+            if _note:
+                src += f"  [{_note}]"
             txt = (bl.get("text") or "").strip()
             cap = alw.get(i - 1, len(txt))
             if len(txt) > cap:
@@ -8914,6 +9014,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
             for t in _need_dom:
                 if t.lower() in _res_lc:
                     dom_map[t] = _res_lc[t.lower()]
+        # FU273: the comparison leg resolves its own vendor domains — same tier 3, same set.
+        for _d in dom_map.values():
+            _d = _norm_domain(_d or "")
+            if _d:
+                self._first_party_domains.add(_d)
+
         def _is_option(t):
             """FU189 — PROVIDER (fetch its site) or generic OPTION (reference material)? The model's
             own GENERIC_OPTIONS list decides; the products BACKSTOP only fires for an entity that ALSO
@@ -13921,8 +14027,8 @@ you MAY assume the description will carry: "{disc}".
 
     _SOURCE_PROBE_MAX = int(os.environ.get("BLOG_SOURCE_PROBE_MAX", "24"))
 
-    _SUMMARY_PREFIX = ("[SUMMARY ONLY — this page could not be read. Treat it as a pointer, not as "
-                       "evidence: do not attribute any figure, wording or specific to it.]\n")
+    _SUMMARY_PREFIX = (_SUMMARY_MARK + " — this page could not be read. Treat it as a pointer, not "
+                       "as evidence: do not attribute any figure, wording or specific to it.]\n")
 
     # ── FU271: what a page says about ITSELF ─────────────────────────────────────────────────────
     # Everything the pipeline knew about source quality was a domain allowlist plus a title shape,

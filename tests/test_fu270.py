@@ -112,9 +112,12 @@ def test_the_design_and_year_reach_the_writer(monkeypatch):
     blocks = [TRIAL, REVIEW, BRAND]
     g = _tagged(monkeypatch, blocks)
     rendered = g._render_evidence_blocks(blocks)
-    assert "[randomised trial, 2026]" in rendered[0]
-    assert "[systematic review, 2016]" in rendered[1]
-    assert "[" not in rendered[2].split("\n")[0].split("—")[-1], "a brand page gets no design"
+    # FU273 folded the design into the tier bracket, so the assertion is on the SUBSTANCE the
+    # test was always about — the writer being told what the paper IS and when — not on the
+    # sentence that carries it.
+    assert "randomised trial, 2026" in rendered[0]
+    assert "systematic review, 2016" in rendered[1]
+    assert "trial" not in rendered[2].split("\n")[0], "a brand page gets no design"
 
 
 def test_the_label_is_not_rewritten(monkeypatch):

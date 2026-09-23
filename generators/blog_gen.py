@@ -3508,6 +3508,7 @@ class BlogGenerator:
         self._claim_pages = {}        # FU230: pages read once to check the figures cited from them
         self._read_sources = 0        # FU267: sources whose PAGE we actually read
         self._summary_sources = []    # FU267: (label, url, why) we could only point at
+        self._commerce_sources = []   # FU271: pages that read as monetised listings
         self._dup_table_note = ""     # FU228: a draft comparison section the guard did not restore
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
@@ -4917,6 +4918,10 @@ class BlogGenerator:
                 + (f" — {bl.get('url')}" if (bl.get("url") or "").strip() else "")
             if bl.get("design"):      # FU270: what this source IS, so the writer can prefer it
                 src += f"  [{bl['design']}" + (f", {bl['year']}" if bl.get("year") else "") + "]"
+            elif bl.get("intent") == "commerce":   # FU271: a monetised page, whatever its domain
+                src += "  [affiliate/commerce page — may support a price or availability, nothing else]"
+            elif bl.get("intent") == "reference":
+                src += "  [cites its own sources]"
             txt = (bl.get("text") or "").strip()
             cap = alw.get(i - 1, len(txt))
             if len(txt) > cap:
@@ -13914,6 +13919,65 @@ you MAY assume the description will carry: "{disc}".
     _SUMMARY_PREFIX = ("[SUMMARY ONLY — this page could not be read. Treat it as a pointer, not as "
                        "evidence: do not attribute any figure, wording or specific to it.]\n")
 
+    # ── FU271: what a page says about ITSELF ─────────────────────────────────────────────────────
+    # Everything the pipeline knew about source quality was a domain allowlist plus a title shape,
+    # so a listicle on a domain nobody had listed passed as an ordinary third-party source. That is
+    # how BestReviews, Mom Loves Best, Today's Parent and Birch came to carry clinical claims.
+    #
+    # Now that the pages are read, they say it themselves. Measured live on the sources from the
+    # reported article:
+    #
+    #   babygearlab.com   36,007c   affiliate · author · dated · method · BUY
+    #   todaysparent.com  22,474c   affiliate · author · dated · BUY
+    #   birchstore.com    35,154c   author · dated
+    #   aafp.org          22,851c   author · CITES SOURCES
+    #
+    # Vertical-neutral by construction: "we may earn a commission" and "add to cart" mean the same
+    # thing on a mortgage comparison site as on a bottle roundup, and neither names an industry.
+    _COMMERCE_RE = re.compile(
+        r"we may (?:earn|receive)|affiliate (?:link|commission|disclosure|partner)|"
+        r"commissions? (?:from|on)\b|earn(?:s|ed)? a commission|as an amazon associate|"
+        r"paid (?:link|placement)|sponsored (?:post|content)", re.I)
+    _BUY_RE = re.compile(
+        r"add to (?:cart|basket)|buy now|shop now|check (?:the )?price|view on amazon|"
+        r"best price|lowest price|in stock now|free shipping on", re.I)
+    # The counter-signal: a document that shows where its facts came from.
+    _RIGOR_RE = re.compile(
+        r"\breferences\b|\bbibliograph|\bdoi[:\s]|\bet al\.|\[\d{1,3}\]|"
+        r"\bwe (?:tested|measured|evaluated|assessed|surveyed)\b|\bmethods?\b|"
+        r"\bn\s*=\s*\d+|\bsample size\b|\bconfidence interval\b|\bp\s*[<=]\s*0?\.", re.I)
+
+    @classmethod
+    def _page_intent(cls, text):
+        """FU271 — ("commerce" | "reference" | "", why) for a page, from the page.
+
+        Two signals each way, because either alone is noisy: one "free shipping" line does not make
+        a shop, and one bracketed number does not make a paper. A page that is BOTH — a retailer
+        citing a standard — is left unclassified rather than guessed at."""
+        t = (text or "")[:40000]
+        if len(t) < 400:
+            return "", ""
+        com = len(cls._COMMERCE_RE.findall(t))
+        buy = len(cls._BUY_RE.findall(t))
+        rig = len(cls._RIGOR_RE.findall(t))
+        # An AFFILIATE marker is required, never buy language alone: a brand selling its own
+        # product is a legitimate first-party source for its own specs, and drbrownsbaby.com shows
+        # 13 buy prompts with no affiliate disclosure. What separates a listicle is earning a
+        # commission on OTHER people's products.
+        commercial = com >= 1 and (com + buy) >= 2
+        reference = rig >= 3 and not commercial
+        # The "a retailer that also cites a standard" escape has to be RELATIVE. An absolute floor
+        # of six was wrong on real data: babygearlab.com scores com=1, buy=3, rig=7 — a monetised
+        # review site that says "we tested" a few times — and the escape handed it a free pass.
+        if commercial and rig >= 6 * (com + buy):
+            return "", ""
+        if commercial:
+            return "commerce", (f"{com} affiliate/sponsorship mention(s)"
+                                + (f" and {buy} buy prompt(s)" if buy else ""))
+        if reference:
+            return "reference", f"{rig} citation/method marker(s)"
+        return "", ""
+
     def _source_block(self, url, label, terms=(), gloss="", cap=None):
         """FU267 — an evidence block that carries THE PAGE.
 
@@ -13939,16 +14003,20 @@ you MAY assume the description will carry: "{disc}".
             except Exception as e:
                 text, how = "", f"error: {type(e).__name__}"
         text = (text or "").strip()
+        _intent, _why = "", ""
         if len(text) >= self._PAGE_TEXT_MIN and not _looks_walled_text(text):
             body = relevant_text(text, [t for t in (terms or []) if t], cap)
             self._read_sources += 1
+            _intent, _why = self._page_intent(text)   # FU271: what the page says about itself
         else:
             # keep the pointer, never let it read as the page
             body = (self._SUMMARY_PREFIX + (gloss or label))[:cap]
             how = how if (how and how != "direct") else "thin"
             self._summary_sources.append((label, url, how))
+        if _intent == "commerce":
+            self._commerce_sources.append((label, url, _why))
         return {"label": label, "url": url, "text": body, "how": how,
-                "picked_because": gloss[:300]}
+                "intent": _intent, "intent_why": _why, "picked_because": gloss[:300]}
 
     def _tag_study_levels(self, blocks):
         """FU270 — mark each NCBI paper with WHAT IT IS: its design and year, from NCBI itself.
@@ -14004,6 +14072,13 @@ you MAY assume the description will carry: "{disc}".
         bits = []
         unread = list(getattr(self, "_summary_sources", None) or [])
         read = int(getattr(self, "_read_sources", 0) or 0)
+        commerce = list(getattr(self, "_commerce_sources", None) or [])
+        if commerce:
+            bits.append("read as monetised listing(s), not references — "
+                        + "; ".join(f"{lab[:40]} ({why})" for lab, _u, why in commerce[:3])
+                        + (f"; +{len(commerce) - 3} more" if len(commerce) > 3 else "")
+                        + ". A page that earns a commission may support a price or availability "
+                          "and nothing else")
         if unread:
             shown = "; ".join(f"{lab[:44]} ({why})" for lab, _u, why in unread[:4])
             bits.append(f"{len(unread)} of {read + len(unread)} source(s) could not be read and are "

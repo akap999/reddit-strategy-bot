@@ -5,6 +5,7 @@ Extracted from comment_generator.py + 5 new personas.
 
 import anthropic
 import json
+import os
 import re
 import time
 import random
@@ -14,6 +15,12 @@ import requests
 from config import DEFAULT_MODEL
 from generators.pdf_text import is_base64_pdf, pdf_text_from_base64
 
+
+# FU272 (A3) — web-fetch error codes worth a SECOND attempt. A rate limit or a momentary outage
+# says nothing about the page; `url_not_allowed`, `url_not_accessible` and `unsupported_content_type`
+# are settled facts about the URL, and a retry only pays for the same answer twice.
+_WEB_FETCH_RETRY = {"too_many_requests", "unavailable"}
+_WEB_FETCH_RETRY_WAIT = float(os.environ.get("BLOG_WEB_FETCH_RETRY_WAIT", "3.0"))
 
 # --- Anti-detection: Persona pool (20 total) ---
 PERSONAS = [
@@ -1149,36 +1156,52 @@ class ClaudeClient:
             return "", "budget"
         tool = {"type": self._WEB_FETCH_TOOL, "name": "web_fetch", "max_uses": 1,
                 "max_content_tokens": int(max_content_tokens)}
-        try:
-            message = self.client.messages.create(
-                model=self.model, max_tokens=400, tools=[tool],
-                messages=[{"role": "user", "content": f"Fetch {url} and reply only OK."}],
-                extra_headers={"anthropic-beta": self._WEB_FETCH_BETA})
-            self._track(message)
-        except Exception as e:
-            print(f"    web_fetch error ({url}): {e}", flush=True)
-            return "", "error"
-        try:
-            blocks = message.model_dump(warnings=False).get("content") or []
-        except Exception:
-            blocks = []
-        for b in blocks:
-            if (b or {}).get("type") != "web_fetch_tool_result":
-                continue
-            c = b.get("content") or {}
-            if c.get("type") == "web_fetch_result":
-                data = (((c.get("content") or {}).get("source") or {}).get("data")) or ""
-                if data.strip():
-                    # FU227: web fetch does NOT read a PDF — it hands the file back base64-encoded.
-                    # Left alone, megabytes of base64 entered the evidence as though they were the
-                    # page's text. Decode and read it, or say plainly that it could not be read.
-                    if is_base64_pdf(data):
-                        _t = pdf_text_from_base64(data)
-                        return (_t, "ok") if _t else ("", "pdf-unreadable")
-                    return data, "ok"
-                return "", "empty"
-            return "", str(c.get("error_code") or "error")
-        return "", "no-fetch"
+
+        def _once():
+            try:
+                message = self.client.messages.create(
+                    model=self.model, max_tokens=400, tools=[tool],
+                    messages=[{"role": "user", "content": f"Fetch {url} and reply only OK."}],
+                    extra_headers={"anthropic-beta": self._WEB_FETCH_BETA})
+                self._track(message)
+            except Exception as e:
+                print(f"    web_fetch error ({url}): {e}", flush=True)
+                return "", "error"
+            try:
+                blocks = message.model_dump(warnings=False).get("content") or []
+            except Exception:
+                blocks = []
+            for b in blocks:
+                if (b or {}).get("type") != "web_fetch_tool_result":
+                    continue
+                c = b.get("content") or {}
+                if c.get("type") == "web_fetch_result":
+                    data = (((c.get("content") or {}).get("source") or {}).get("data")) or ""
+                    if data.strip():
+                        # FU227: web fetch does NOT read a PDF — it hands the file back
+                        # base64-encoded. Left alone, megabytes of base64 entered the evidence as
+                        # though they were the page's text. Decode and read it, or say plainly
+                        # that it could not be read.
+                        if is_base64_pdf(data):
+                            _t = pdf_text_from_base64(data)
+                            return (_t, "ok") if _t else ("", "pdf-unreadable")
+                        return data, "ok"
+                    return "", "empty"
+                return "", str(c.get("error_code") or "error")
+            return "", "no-fetch"
+
+        txt, code = _once()
+        # FU272 (A3) — a rate limit is not a verdict on the page. Measured on Railway, three of the
+        # ten remaining authority failures came back `too_many_requests` and became "unreadable"
+        # with no second attempt, which is how a readable regulator page ended up as a pointer.
+        # Only the TRANSIENT codes are retried: `url_not_allowed`, `url_not_accessible` and
+        # `unsupported_content_type` are settled facts about the URL, and paying for a second call
+        # to be told the same thing is waste.
+        if code in _WEB_FETCH_RETRY and not self._over_budget():
+            time.sleep(_WEB_FETCH_RETRY_WAIT * (0.5 + random.random()))   # jittered: six workers
+            txt, code = _once()                                           # hit the limit together
+            print(f"    web_fetch retry ({url}): {code}", flush=True)
+        return txt, code
 
     def extract_facts(self, brand, needs, pages, context="", guidance="", page_chars=12000):
         """Step C: answer each need from ONLY the given page texts ({url: text}), with the exact quote

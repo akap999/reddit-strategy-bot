@@ -14137,6 +14137,13 @@ you MAY assume the description will carry: "{disc}".
         pending = [t for t in (pending or []) if t and t[0]]
         if not pending:
             return []
+        # FU272 — one request for every NCBI paper in this batch, before the pool starts. Six
+        # workers each making their own call is what tripped NCBI's 3/second limit and sent seven
+        # readable papers back to the scraper, which gets a reCAPTCHA.
+        try:
+            _research.ncbi_prefetch([a[0] for a in pending], self._claim_pages)
+        except Exception:
+            pass
         _t = [x for x in (terms or []) if x]
         if len(pending) == 1:
             return [self._source_block(pending[0][0], pending[0][1], _t, gloss=pending[0][2])]
@@ -14178,6 +14185,11 @@ you MAY assume the description will carry: "{disc}".
             for _x in re.findall(r"\[S(\d+)\]", _ln):
                 if 1 <= int(_x) <= len(blocks) and int(_x) not in cited:
                     cited.append(int(_x))
+        try:      # FU272: the same batch, for the sources the finished article cites
+            _research.ncbi_prefetch([(blocks[n - 1].get("url") or "")
+                                     for n in cited[:self._SOURCE_PROBE_MAX]], self._claim_pages)
+        except Exception:
+            pass
         for n in cited[:self._SOURCE_PROBE_MAX]:
             bl = blocks[n - 1]
             _held = bl.get("text") or ""

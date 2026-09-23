@@ -282,6 +282,92 @@ _EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _NCBI_TOOL = "&tool=blog_generator&email=" + os.environ.get("NCBI_EMAIL", "sources@example.com")
 
 
+def _ncbi_clean(raw, kind):
+    """One record's text, tidied. Shared by the single read and the batched prefetch."""
+    if kind == "pmc":
+        raw = re.sub(r"<(?:ref-list|back|front/journal-meta)\b.*?</(?:ref-list|back|journal-meta)>",
+                     " ", raw, flags=re.S | re.I)
+        raw = re.sub(r"</(?:p|title|sec|abstract|caption)>", "\n", raw, flags=re.I)
+        raw = re.sub(r"<[^>]+>", " ", raw)
+        raw = _html.unescape(raw)
+    return re.sub(r"[ \t]{2,}", " ", re.sub(r"\n{3,}", "\n\n", raw)).strip()
+
+
+# FU272 — ONE request per database, not one per source.
+#
+# Measured from Railway: seven of ten remaining authority failures were NCBI papers that had been
+# readable minutes earlier. NCBI allows 3 requests/second without a key and sources are fetched on a
+# pool of six workers, so we rate-limited ourselves; the exception was caught and the source
+# silently degraded to the scraper, which gets a reCAPTCHA. Tested:
+#
+#   ONE efetch call, 6 pmids  ->  18,473 chars in 0.3s
+#   ONE efetch call, 4 pmcids -> 241,428 chars in 0.8s
+_PMC_SPLIT_RE = re.compile(r"(?=<article[ >])")          # NOT \b — that also splits <article-title>
+_PMC_ID_RE = re.compile(r'pub-id-type="pmc(?:id)?"[^>]*>(\d+)<|\bPMC(\d+)\b')
+_PUBMED_SPLIT_RE = re.compile(r"\n\n(?=\d+\.\s)")
+_PUBMED_ID_RE = re.compile(r"\bPMID:\s*(\d+)")
+
+
+def _efetch(db, ids, rettype, retmode):
+    q = (f"{_EUTILS}?db={db}&id={','.join(ids)}&rettype={rettype}&retmode={retmode}{_NCBI_TOOL}")
+    req = _urlreq.Request(q, headers={"User-Agent": "Mozilla/5.0 (compatible; blog-sources/1.0)"})
+    with _urlreq.urlopen(req, timeout=40) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def ncbi_prefetch(urls, cache, max_chars=400000):
+    """Read every NCBI paper among `urls` in one request per database, into `cache` keyed by URL.
+
+    `read_page` consults that cache first, so the ordinary per-source path then costs nothing.
+    Returns how many URLs were filled. Never raises — a prefetch that fails leaves the ladder
+    exactly as it was."""
+    if cache is None:
+        return 0
+    by_pmid, by_pmc = {}, {}
+    for u in (urls or []):
+        u = (u or "").strip()
+        if not u or u in cache:
+            continue
+        m = _NCBI_PMID_RE.search(u)
+        if m:
+            by_pmid.setdefault(m.group(1), []).append(u)
+            continue
+        m = _NCBI_PMC_RE.search(u)
+        if m:
+            by_pmc.setdefault(m.group(1), []).append(u)
+    filled = 0
+    # `id_head` bounds WHERE the record's own id is looked for. PubMed prints "PMID: …" at the END
+    # of a record, so it must be searched whole — bounding it to the head silently dropped the
+    # longest abstract in a batch, which is the one most worth having. PMC states its id in <front>
+    # at the top, and bounding it there is protective: a reference list names other papers' ids.
+    for ids, db, rettype, retmode, split_rx, id_rx, kind, id_head in (
+            (by_pmid, "pubmed", "abstract", "text", _PUBMED_SPLIT_RE, _PUBMED_ID_RE, "pubmed", None),
+            (by_pmc, "pmc", "full", "xml", _PMC_SPLIT_RE, _PMC_ID_RE, "pmc", 4000)):
+        if not ids:
+            continue
+        try:
+            blob = _efetch(db, list(ids)[:100], rettype, retmode)
+        except Exception as e:
+            print(f"[research] ncbi-prefetch: {db} x{len(ids)} failed ({type(e).__name__})",
+                  flush=True)
+            continue
+        for rec in split_rx.split(blob):
+            m = id_rx.search(rec if id_head is None else rec[:id_head])
+            if not m:
+                continue
+            rid = next((g for g in m.groups() if g), "")
+            text = _ncbi_clean(rec, kind)
+            if len(text) < 200 or rid not in ids:
+                continue
+            for u in ids[rid]:
+                cache[u] = (text[:max_chars], "ncbi api")
+                filled += 1
+    if filled:
+        print(f"[research] ncbi-prefetch: {filled} paper(s) in "
+              f"{(1 if by_pmid else 0) + (1 if by_pmc else 0)} request(s)", flush=True)
+    return filled
+
+
 def _ncbi_api_text(url, max_chars=20000):
     """The abstract or full text from NCBI's own API. Returns (text, how) or ("", "") to fall
     through to the ordinary ladder — this must never become a new way to fail."""
@@ -302,13 +388,7 @@ def _ncbi_api_text(url, max_chars=20000):
     except Exception as e:
         print(f"[research] ncbi-api: {kind} {url[:70]} failed ({type(e).__name__})", flush=True)
         return "", ""
-    if kind == "pmc":
-        raw = re.sub(r"<(?:ref-list|back|front/journal-meta)\b.*?</(?:ref-list|back|journal-meta)>",
-                     " ", raw, flags=re.S | re.I)
-        raw = re.sub(r"</(?:p|title|sec|abstract|caption)>", "\n", raw, flags=re.I)
-        raw = re.sub(r"<[^>]+>", " ", raw)
-        raw = _html.unescape(raw)
-    raw = re.sub(r"[ \t]{2,}", " ", re.sub(r"\n{3,}", "\n\n", raw)).strip()
+    raw = _ncbi_clean(raw, kind)
     if len(raw) < 200:
         return "", ""
     print(f"[research] ncbi-api: {kind} read {len(raw)} chars for {url[:70]}", flush=True)

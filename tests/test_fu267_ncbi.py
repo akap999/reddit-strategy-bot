@@ -175,3 +175,175 @@ def test_a_block_with_no_identifier_is_unchanged():
 def test_a_trailing_full_stop_is_not_part_of_the_doi():
     assert _doc_ids_in_text("doi: 10.1001/jamanetworkopen.2026.3749.") == \
         ["doi:10.1001/jamanetworkopen.2026.3749"]
+
+
+# ── FU272: one request per database, not one per source ──────────────────────────────────────────
+# Measured from Railway: seven of ten remaining authority failures were NCBI papers that had been
+# readable minutes earlier. NCBI allows 3 requests/second without a key and sources are fetched on a
+# pool of six workers, so we rate-limited ourselves; the exception was caught and the source
+# silently degraded to the scraper, which gets a reCAPTCHA.
+#
+#   ONE efetch call, 6 pmids  ->  18,473 chars in 0.3s
+#   ONE efetch call, 4 pmcids -> 241,428 chars in 0.8s
+
+LONG_ABSTRACT = "Background and methods described at length. " * 120      # > 4,000 chars
+
+_PUBMED_BLOB = (
+    "1. JAMA Netw Open. 2026;9(3):e263749.\n\nFeeding Bottles trial.\n\n" + LONG_ABSTRACT
+    + "\n\nPMID: 41885859 [Indexed for MEDLINE]\n\n"
+    # NOTE the parentheses: adjacent string literals concatenate BEFORE `* 20`, so without them
+    # the whole second record repeats twenty times and the batch looks like 21 papers.
+    + "2. J Pediatr Gastroenterol Nutr. 2016;62(5):668.\n\nInfant Colic - What works.\n\n"
+    + ("A systematic review of interventions. " * 20) + "\n\nPMID: 26655941 [Indexed for MEDLINE]\n")
+
+_PMC_BLOB = (
+    '<pmc-articleset><article xmlns="x"><front><article-id pub-id-type="pmc">3328286</article-id>'
+    '</front><body><p>' + "Infant feeding bottle design findings. " * 40 + '</p></body>'
+    '<back><ref-list><ref>PMC9999999 someone else</ref></ref-list></back></article>'
+    '<article xmlns="x"><front><article-id pub-id-type="pmc">5857083</article-id></front>'
+    '<body><p>' + "Sucking behaviour with and without an anticolic system. " * 40 + '</p></body>'
+    '</article></pmc-articleset>')
+
+
+def _stub_efetch(monkeypatch, blobs, seen=None):
+    """Returns only the records whose ids the URL actually asked for. A stub that hands back
+    everything regardless cannot tell a batched request from N single ones — which is the whole
+    property under test."""
+    def _open(req, timeout=None):
+        u = req.full_url if hasattr(req, "full_url") else str(req)
+        if seen is not None:
+            seen.append(u)
+        asked = set(re.search(r"[?&]id=([^&]*)", u).group(1).split(","))
+        if "db=pubmed" in u:
+            recs = [r for r in R._PUBMED_SPLIT_RE.split(_PUBMED_BLOB)
+                    if (R._PUBMED_ID_RE.search(r) or [None]) and
+                    (R._PUBMED_ID_RE.search(r).group(1) if R._PUBMED_ID_RE.search(r) else "") in asked]
+            return _Resp("\n\n".join(recs))
+        recs = [p for p in R._PMC_SPLIT_RE.split(_PMC_BLOB)
+                if p.startswith("<article ")
+                and (R._PMC_ID_RE.search(p[:4000]).group(1) if R._PMC_ID_RE.search(p[:4000]) else "") in asked]
+        return _Resp("<pmc-articleset>" + "".join(recs) + "</pmc-articleset>")
+    monkeypatch.setattr(R._urlreq, "urlopen", _open)
+
+
+import re  # noqa: E402
+
+
+def test_every_paper_arrives_in_one_request_per_database(monkeypatch):
+    seen = []
+    _stub_efetch(monkeypatch, None, seen)
+    cache = {}
+    urls = ["https://pubmed.ncbi.nlm.nih.gov/41885859/",
+            "https://pubmed.ncbi.nlm.nih.gov/26655941/",
+            "https://pmc.ncbi.nlm.nih.gov/articles/PMC3328286/",
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5857083/"]
+    assert R.ncbi_prefetch(urls, cache) == 4
+    assert len(seen) == 2, f"one per database, got {len(seen)}"
+    assert all(cache[u][1] == "ncbi api" for u in urls)
+
+
+def test_a_long_abstract_is_not_lost_to_the_id_bound(monkeypatch):
+    """PubMed prints "PMID:" at the END of a record. Bounding the id search to the head silently
+    dropped the LONGEST abstract in a batch — the one most worth having. That is how the 1,055-
+    infant JAMA trial went missing from a batch where everything else arrived."""
+    _stub_efetch(monkeypatch, None)
+    cache = {}
+    R.ncbi_prefetch(["https://pubmed.ncbi.nlm.nih.gov/41885859/"], cache)
+    assert len(_PUBMED_BLOB.split("PMID: 41885859")[0]) > 4000, "the fixture must bury the id"
+    assert "https://pubmed.ncbi.nlm.nih.gov/41885859/" in cache
+
+
+def test_a_pmc_reference_list_does_not_claim_the_record(monkeypatch):
+    """The opposite bound: PMC states its own id in <front> at the top, and a reference list names
+    OTHER papers' ids. A record with no id of its own must come away with none — searching the
+    whole document would hand it the first id in its bibliography and cache someone else's paper
+    under this URL."""
+    orphan = ('<pmc-articleset><article xmlns="x"><front><journal-title>J</journal-title></front>'
+              # the bibliography must fall BEYOND the head bound, or the fixture proves nothing
+              '<body><p>' + "Findings without a stated article id. " * 200 + '</p></body>'
+              '<back><ref-list><ref>PMC3328286 a different paper entirely</ref></ref-list>'
+              '</article></pmc-articleset>')
+    monkeypatch.setattr(R._urlreq, "urlopen", lambda req, timeout=None: _Resp(orphan))
+    cache = {}
+    assert R.ncbi_prefetch(["https://pmc.ncbi.nlm.nih.gov/articles/PMC3328286/"], cache) == 0
+    assert cache == {}, "a bibliography id must never key a record"
+
+
+def test_the_prefetch_runs_before_the_read_pool():
+    """Six workers each making their own call is what tripped NCBI's 3/second limit."""
+    import inspect
+    from generators.blog_gen import BlogGenerator as B
+    src = inspect.getsource(B._read_sources_parallel)
+    assert "ncbi_prefetch" in src
+    assert src.index("ncbi_prefetch") < src.index("ThreadPoolExecutor"), \
+        "it has to run BEFORE the pool, or the pool makes the calls it was meant to replace"
+
+
+def test_the_prefetch_runs_for_the_cited_sources_too():
+    import inspect
+    from generators.blog_gen import BlogGenerator as B
+    assert "ncbi_prefetch" in inspect.getsource(B._probe_cited_sources)
+
+
+def test_a_non_ncbi_url_is_left_for_the_ordinary_ladder(monkeypatch):
+    seen = []
+    _stub_efetch(monkeypatch, None, seen)
+    cache = {}
+    assert R.ncbi_prefetch(["https://www.aafp.org/pubs/afp/2015/p577.html"], cache) == 0
+    assert not seen and not cache
+
+
+def test_a_url_already_in_the_cache_is_not_refetched(monkeypatch):
+    seen = []
+    _stub_efetch(monkeypatch, None, seen)
+    cache = {"https://pubmed.ncbi.nlm.nih.gov/41885859/": ("already here", "direct")}
+    assert R.ncbi_prefetch(list(cache), cache) == 0 and not seen
+
+
+def test_a_prefetch_failure_leaves_the_ladder_exactly_as_it_was(monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("ncbi down")
+    monkeypatch.setattr(R._urlreq, "urlopen", _boom)
+    cache = {}
+    assert R.ncbi_prefetch(["https://pubmed.ncbi.nlm.nih.gov/41885859/"], cache) == 0
+    assert cache == {}, "a failed prefetch must not poison the cache"
+
+
+def test_the_pmc_split_does_not_break_on_article_title(monkeypatch):
+    """`<article-title>` starts with "<article" and a \\b boundary matches before the hyphen — which
+    split one paper into nine fragments, none of them carrying an id."""
+    assert R._PMC_SPLIT_RE.split("<article-title>x</article-title>") == ["<article-title>x</article-title>"]
+    assert len([p for p in R._PMC_SPLIT_RE.split(_PMC_BLOB) if p.startswith("<article ")]) == 2
+
+
+def test_a_record_we_did_not_ask_for_is_not_cached(monkeypatch):
+    """A batch is answered as one document, so the reply can carry records beyond the ids in the
+    request — an id translation, a companion correction. Only the ids we asked for have a URL to be
+    filed under; anything else must be dropped rather than keyed by guesswork."""
+    both = ('<pmc-articleset>'
+            '<article xmlns="x"><front><article-id pub-id-type="pmc">3328286</article-id></front>'
+            '<body><p>' + "The paper we asked for. " * 40 + '</p></body></article>'
+            '<article xmlns="x"><front><article-id pub-id-type="pmc">9999999</article-id></front>'
+            '<body><p>' + "A paper nobody requested. " * 40 + '</p></body></article>'
+            '</pmc-articleset>')
+    monkeypatch.setattr(R._urlreq, "urlopen", lambda req, timeout=None: _Resp(both))
+    asked = "https://pmc.ncbi.nlm.nih.gov/articles/PMC3328286/"
+    cache = {}
+    assert R.ncbi_prefetch([asked], cache) == 1
+    assert list(cache) == [asked], "an unrequested record has no URL and must be dropped"
+    assert "nobody requested" not in cache[asked][0]
+
+
+def test_an_empty_record_does_not_pre_empt_the_ladder(monkeypatch):
+    """PMC answers a paper it cannot serve in full with a stub carrying the right id and almost no
+    text. Caching that would be worse than failing: `read_page` reads the cache first, so a
+    60-character stub would stand in for a page the web fetch could still have read."""
+    stub = ('<pmc-articleset><article xmlns="x">'
+            '<front><article-id pub-id-type="pmc">3328286</article-id></front>'
+            '<body><p>The publisher of this article does not allow downloading.</p></body>'
+            '</article></pmc-articleset>')
+    monkeypatch.setattr(R._urlreq, "urlopen", lambda req, timeout=None: _Resp(stub))
+    cache = {}
+    assert len(R._ncbi_clean(stub, "pmc")) < 200, "the fixture must actually be a stub"
+    assert R.ncbi_prefetch(["https://pmc.ncbi.nlm.nih.gov/articles/PMC3328286/"], cache) == 0
+    assert cache == {}, "an empty record must leave the URL to the rest of the ladder"

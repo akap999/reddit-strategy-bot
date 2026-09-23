@@ -359,3 +359,56 @@ def test_a_menu_head_buys_a_whole_claim_window_when_it_is_dropped():
         [{"label": "Thyseed", "url": "https://t.example/p", "text": page}], char_budget=2400)[0]
     kept = [n for n in names if f"CLAIMPOINT {n}" in out]
     assert len(kept) >= 3, f"the menu is still eating the budget: only {kept} survived"
+
+
+# ── step 3c: the menu is never recorded in the first place ───────────────────────────────────────
+# Skipping the head only stopped the menu EATING the budget; it was still in the stored text, still
+# counted toward a block's length, and a term window landing beside it still pulled it in. The page
+# says which parts are navigation — `nav`, `footer`, `aside`, `role="navigation"`, a nav-ish class —
+# and the extractor was ignoring all of it, keeping only `script` and `style` out.
+
+from generators.brand_enrichment import _extract_visible_text, _looks_blocked  # noqa: E402
+
+_PAGE = """<html><head><title>Thyseed</title></head><body>
+<nav class="site-nav">Skip to content Shop Baby Bottles About Us Search Cart</nav>
+<header><h1>Thyseed PPSU Anti-Colic Baby Bottle</h1></header>
+<div id="cookie-consent">We use cookies. Accept all.</div>
+<div class="newsletter">Subscribe for 10% off your first order.</div>
+<main><p>The base vent keeps the nipple full of milk rather than air throughout the feed.</p></main>
+<aside class="sidebar">You may also like: Bottle Brush, Pacifier</aside>
+<footer>Free shipping on orders over $59. Privacy Policy Terms of Service</footer>
+</body></html>"""
+
+
+def test_navigation_footers_and_cookie_bars_are_not_recorded():
+    out = _extract_visible_text(_PAGE, 6000)
+    for gone in ("Skip to content", "Shop Baby Bottles", "We use cookies", "Subscribe for 10%",
+                 "You may also like", "Free shipping", "Privacy Policy"):
+        assert gone not in out, gone
+
+
+def test_the_content_and_the_h1_survive():
+    """`header` is deliberately NOT skipped by tag — on many sites it holds the article's own H1."""
+    out = _extract_visible_text(_PAGE, 6000)
+    assert "Thyseed PPSU Anti-Colic Baby Bottle" in out
+    assert "base vent keeps the nipple full of milk" in out
+
+
+def test_a_page_with_no_semantic_tags_is_still_cleaned():
+    """Sites that predate `nav` say it in the class or the role instead."""
+    html = ('<body><div role="navigation">Home Shop Cart</div>'
+            '<div class="mega-menu">Bottles Pacifiers</div>'
+            '<div><p>The vented base reduces swallowed air during a feed.</p></div></body>')
+    out = _extract_visible_text(html, 6000)
+    assert "Home Shop Cart" not in out and "Bottles Pacifiers" not in out
+    assert "vented base reduces swallowed air" in out
+
+
+def test_the_thin_content_check_still_sees_the_whole_page():
+    """Two different questions. "Is this useful evidence?" drops the menu; "did the server give us
+    a document at all?" must not — or stripping navigation would push real pages under the
+    thin-content floor and send the fetch ladder to the METERED residential proxy for nothing."""
+    nav_only = ('<body><nav>' + "Home Shop Cart About Contact Search Login " * 30
+                + '</nav><main><p>Hi.</p></main></body>')
+    assert len(_extract_visible_text(nav_only, 6000)) < 200, "as evidence it is nearly empty"
+    assert _looks_blocked(nav_only) == "", "but the server did return a page"

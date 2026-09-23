@@ -22,20 +22,48 @@ from generators.pdf_text import as_page_html, looks_like_pdf, pdf_text
 class _VisibleTextExtractor(HTMLParser):
     """Stdlib-only HTML text extractor — strips scripts/styles, keeps visible content."""
 
-    _SKIP_TAGS = {"script", "style", "noscript", "svg", "template", "iframe"}
+    # FU267 — the page says which parts are the menu, and we were ignoring it. `nav`, `footer` and
+    # `aside` exist for exactly this; `header` is deliberately NOT here, because on many sites it
+    # holds the article's own H1. Measured before this: 59% of every stored evidence block holding
+    # 400+ characters was navigation-heavy or had two sentences or fewer, and the text of three
+    # brand pages opened "Skip to content Pause slideshow Play slideshow Free shipping on orders…".
+    _SKIP_TAGS = {"script", "style", "noscript", "svg", "template", "iframe",
+                  "nav", "footer", "aside"}
+    # …and the sites that predate those tags say it in the role or the class instead.
+    _SKIP_ROLES = {"navigation", "banner", "contentinfo", "search", "menubar", "menu"}
+    _SKIP_ATTR_RE = re.compile(
+        r"(?:^|[\s_-])(?:nav|navbar|navigation|menu|submenu|megamenu|breadcrumbs?|"
+        r"site-?header|site-?footer|topbar|toolbar|sidebar|cookie|consent|newsletter|"
+        r"skip-?link|social-?links?|footer-?links?)(?:$|[\s_-])", re.I)
 
     def __init__(self):
         super().__init__()
         self._buf = []
         self._skip_depth = 0
+        self._skip_tag = None        # the tag that opened the skipped region
+
+    def _is_chrome(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            return True
+        a = {(k or "").lower(): (v or "") for k, v in (attrs or [])}
+        if a.get("role", "").lower() in self._SKIP_ROLES:
+            return True
+        return bool(self._SKIP_ATTR_RE.search(a.get("class", "") + " " + a.get("id", "")))
 
     def handle_starttag(self, tag, attrs):
-        if tag in self._SKIP_TAGS:
-            self._skip_depth += 1
+        if self._skip_depth:
+            if tag == self._skip_tag:
+                self._skip_depth += 1
+            return
+        if self._is_chrome(tag, attrs):
+            self._skip_tag = tag
+            self._skip_depth = 1
 
     def handle_endtag(self, tag):
-        if tag in self._SKIP_TAGS and self._skip_depth > 0:
+        if self._skip_depth and tag == self._skip_tag:
             self._skip_depth -= 1
+            if not self._skip_depth:
+                self._skip_tag = None
 
     def handle_data(self, data):
         if self._skip_depth == 0:
@@ -125,7 +153,8 @@ def _looks_blocked(html: str) -> str:
     title = (tm.group(1) if tm else "").lower()
     if any(m in title for m in _CHALLENGE_TEXT_MARKERS):
         return "challenge-page"
-    visible = _extract_visible_text(html, max_chars=_CHALLENGE_SHORT_PAGE + 1)
+    # keep_chrome: the question here is whether a DOCUMENT came back, not whether it is useful
+    visible = _extract_visible_text(html, max_chars=_CHALLENGE_SHORT_PAGE + 1, keep_chrome=True)
     if len(visible) <= _CHALLENGE_SHORT_PAGE and any(m in visible.lower()
                                                       for m in _CHALLENGE_TEXT_MARKERS):
         return "challenge-page"
@@ -403,11 +432,26 @@ def _fetch_page(domain_url: str, timeout: int = 10, retries: int = 2, ignore_wal
     return "", reason
 
 
-def _extract_visible_text(html: str, max_chars: int = 6000) -> str:
-    """Strip HTML tags and return the visible text, capped at max_chars."""
+class _VisibleTextExtractorRaw(_VisibleTextExtractor):
+    """Everything the browser would show, navigation included — for "is this a page at all?"."""
+
+    _SKIP_TAGS = {"script", "style", "noscript", "svg", "template", "iframe"}
+
+    def _is_chrome(self, tag, attrs):
+        return tag in self._SKIP_TAGS
+
+
+def _extract_visible_text(html: str, max_chars: int = 6000, keep_chrome: bool = False) -> str:
+    """Strip HTML tags and return the visible text, capped at max_chars.
+
+    FU267 — navigation, footers and cookie bars are dropped by default: they are not evidence, and
+    on a storefront they were half the text and all of the head. `keep_chrome=True` answers a
+    DIFFERENT question — "did the server give us a document at all" — which `_looks_blocked` asks.
+    Without that split, stripping the menu could push a real page under the thin-content floor and
+    send the fetch ladder to the metered residential proxy for nothing."""
     if not html:
         return ""
-    parser = _VisibleTextExtractor()
+    parser = _VisibleTextExtractorRaw() if keep_chrome else _VisibleTextExtractor()
     try:
         parser.feed(html)
     except Exception as e:

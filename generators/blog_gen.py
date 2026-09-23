@@ -1081,6 +1081,10 @@ _GUARD_RETRY_MAX = int(os.environ.get("GUARD_RETRY_MAX", "24"))
 # read "not-confirmed". A section that fails is re-asked with the reason named, exactly as FU221
 # does for a rejected paragraph, instead of giving up silently.
 _SECTION_TRIES = max(1, int(os.environ.get("WRITER_SECTION_TRIES", "2")))
+# FU279: the part of a paragraph a rewrite may NOT change — its figures. Paired with its [S#]
+# markers this fingerprints a paragraph across a rewording, so salvage can align two lists of
+# paragraphs whose COUNT differs (a merged or split paragraph) instead of giving up on the section.
+_NUM_FP_RE = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?")
 _BLOG_COST_CEILING = float(os.environ.get("BLOG_COST_CEILING", "3.0"))   # FU150: 2.0→3.0 — the $2 ceiling
 # FU56: the LOW-priority independent-source sweep runs in _gather_evidence FIRST. Cap that stage to a
 # FRACTION of the budget so it can't starve the higher-priority official/vendor searches that come later —
@@ -12625,6 +12629,25 @@ you MAY assume the description will carry: "{disc}".
         out = {m.group(1).strip() for m in re.finditer(r"\*\*([^*\n]{1,200}?)\*\*", body or "")}
         return sorted((x for x in out if x), key=len, reverse=True)
 
+    # FU279 — "seven AI surfaces" came back as "7 AI surfaces" and an exact-string check called the
+    # claim DROPPED, reverting a whole section for a rendering the reader cannot distinguish. The
+    # contract the operator asked for is on the WORDS, not on their typography, so the comparison
+    # normalises what carries no meaning: digit/word numerals, curly quotes, dashes, the serial
+    # comma and whitespace. Anything that changes a VALUE still fails.
+    _NUMWORD = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+                "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+                "twelve": "12", "twenty": "20", "thirty": "30", "fifty": "50", "hundred": "100"}
+
+    @classmethod
+    def _norm_for_match(cls, t):
+        t = (t or "").lower().replace("\u2019", "'").replace("\u2018", "'")
+        t = t.replace("\u201c", '"').replace("\u201d", '"')
+        t = re.sub(r"[\u2010-\u2015]", "-", t)
+        t = re.sub(r",\s+and\b", " and", t)          # serial comma
+        t = re.sub(r"[*_`]", "", t)                   # emphasis markers
+        t = " ".join(cls._NUMWORD.get(w, w) for w in re.findall(r"[\w$%+.,/-]+", t))
+        return re.sub(r"\s+", " ", t).strip(" .,")
+
     def _salvage_section(self, src, got):
         """FU278 — keep the parts of a failed section that are FINE.
 
@@ -12641,15 +12664,35 @@ you MAY assume the description will carry: "{disc}".
         splice unrelated text — so it reverts as before.
 
         Returns (text, salvaged_any)."""
-        so = (src or "").split("\n\n")
-        sn = (got or "").split("\n\n")
-        if not got or len(so) != len(sn) or len(so) < 2:
+        so = [p for p in (src or "").split("\n\n")]
+        sn = [p for p in (got or "").split("\n\n")]
+        if not got or len(so) < 2:
             return src, False
+        # FU279 — requiring an EQUAL paragraph count meant salvage almost never fired: a rewrite
+        # that merges two paragraphs or splits one takes the whole section down with it, which is
+        # the blunt revert this exists to prevent. Paragraphs are aligned the way `rewrite_guard`
+        # aligns sections — difflib over a fingerprint that survives rewording. The fingerprint is
+        # the citation markers and figures a paragraph carries, because those are exactly what a
+        # rewrite may NOT change; its wording is what it may.
+        def _fp(t):
+            return (tuple(re.findall(r"\[S\d+\]", t)), tuple(_NUM_FP_RE.findall(t)))
+        ko, kn = [_fp(x) for x in so], [_fp(x) for x in sn]
+        pairs = []
+        for op, a1, a2, b1, b2 in _SequenceMatcher(None, ko, kn, autojunk=False).get_opcodes():
+            if op == "equal":
+                pairs += list(zip(range(a1, a2), range(b1, b2)))
+            elif op == "replace" and (a2 - a1) == (b2 - b1):
+                pairs += list(zip(range(a1, a2), range(b1, b2)))   # same shape, genuine rewording
+            # insert / delete / unequal replace: no safe pairing, the input stands for that range
+        if not pairs:
+            return src, False
+        paired = {a: b for a, b in pairs}
         out, kept = [], 0
-        for o, n in zip(so, sn):
+        for idx, o in enumerate(so):
+            n = sn[paired[idx]] if idx in paired else None
             if not o.strip():
                 out.append(o)
-            elif self._section_gate(o, n):
+            elif n is None or self._section_gate(o, n):
                 out.append(o)                      # only THIS paragraph goes back
             else:
                 out.append(n)
@@ -12681,8 +12724,9 @@ you MAY assume the description will carry: "{disc}".
         # verified nowhere, it was a request the model could ignore silently; checked here, a miss
         # goes back through the FU274 retry with the exact words named, and only then gives up.
         # Compared on the TEXT, so the rewrite may re-mark it, but may not lose or alter the words.
+        _ng = self._norm_for_match(got)
         _lost = [b for b in self._bold_with_units(src, getattr(self, "_section_atoms", ()))
-                 if b not in got]
+                 if b not in got and self._norm_for_match(b) not in _ng]
         if _lost:
             return "dropped the bolded text " + ", ".join(repr(b[:48]) for b in _lost[:3])
         return ""

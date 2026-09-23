@@ -582,3 +582,58 @@ def test_a_failing_section_is_salvaged_rather_than_reverted_end_to_end():
     assert GOOD_N in out, "the good paragraph keeps its rewrite instead of the section reverting"
     assert BAD_O in out and BAD_N not in out, "only the failing paragraph goes back"
     assert len(seen) == 2, "it still retried before salvaging"
+
+
+# ── FU279: salvage aligns by fingerprint, so it actually fires ───────────────────────────────────
+# Requiring an EQUAL paragraph count meant salvage almost never fired in production — 7 of 25
+# sections still reverted whole. A rewrite that merges two paragraphs or splits one took the entire
+# section with it, which is the blunt revert salvage exists to prevent. Paragraphs are now aligned
+# the way `rewrite_guard` aligns sections: difflib over a fingerprint that survives rewording — the
+# [S#] markers and figures, which are exactly what a rewrite may NOT change.
+
+def test_a_split_paragraph_elsewhere_no_longer_sinks_the_section():
+    g = _g()
+    src = ("Victorious calls itself a 5x winner [S1].\n\n"
+           "It recommends a minimum of $6,000 a month [S2].\n\n"
+           "Its services cover answer engine optimization [S3].")
+    # the rewrite SPLITS the middle paragraph in two — four paragraphs against three
+    got = ("Describing itself as a 5x winner [S1].\n\n"
+           "A floor of $6,000 a month is recommended [S2].\n\n"
+           "That is its stated minimum.\n\n"
+           "Answer engine optimization is among its services [S3].")
+    out, salvaged = g._salvage_section(src, got)
+    assert salvaged, "the unaffected paragraphs must still be salvageable"
+    assert "Describing itself as a 5x winner" in out
+    assert "Answer engine optimization is among its services" in out, \
+        "the paragraph AFTER the split still pairs, by fingerprint rather than position"
+
+
+def test_a_paragraph_with_no_safe_pair_keeps_the_input():
+    g = _g()
+    src = ("Victorious calls itself a 5x winner [S1].\n\n"
+           "It recommends a minimum of $6,000 a month [S2].")
+    got = ("Describing itself as a 5x winner [S1].\n\n"
+           "An entirely unrelated sentence about something else [S9].")
+    out, _salv = g._salvage_section(src, got)
+    assert "It recommends a minimum of $6,000 a month [S2]." in out, \
+        "no confident pair means the input stands — never splice unrelated text (FU176)"
+    assert "unrelated sentence" not in out
+
+
+def test_an_equivalent_rendering_is_not_a_dropped_span():
+    """"seven" vs "7", a serial comma, a curly apostrophe — the contract is on the WORDS, not their
+    typography. An exact-string check reverts a whole section over a difference no reader sees."""
+    g = _g()
+    g._section_atoms = []
+    src = "It was **recommended by seven AI surfaces** in under three weeks after launch. " * 3
+    got = "Recommended by 7 AI surfaces within three weeks of launching, it was. " * 3
+    assert g._section_gate(src, got) == ""
+
+
+def test_a_changed_value_is_still_a_dropped_span():
+    g = _g()
+    g._section_atoms = []
+    src = "The agency reports **650+ brands** scaled across every engine it tracks. " * 3
+    got = "Across every engine tracked, the agency reports 650 brands scaled. " * 3
+    why = g._section_gate(src, got)
+    assert "bolded text" in why, "650+ is not 650 — normalisation must not launder a value"

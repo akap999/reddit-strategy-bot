@@ -412,3 +412,78 @@ def test_the_thin_content_check_still_sees_the_whole_page():
                 + '</nav><main><p>Hi.</p></main></body>')
     assert len(_extract_visible_text(nav_only, 6000)) < 200, "as evidence it is nearly empty"
     assert _looks_blocked(nav_only) == "", "but the server did return a page"
+
+
+# ── step 4: the operator is told what could not be read ──────────────────────────────────────────
+# `_summary_sources` was being collected and never surfaced — the same defect this round has been
+# finding everywhere else, in this round's own code.
+
+def _read_gen(read=0, unread=()):
+    g = B.__new__(B)
+    g._read_sources = read
+    g._summary_sources = list(unread)
+    return g
+
+
+def test_a_clean_run_says_nothing():
+    assert _read_gen(read=12)._source_read_note([], "") == ""
+
+
+def test_the_unread_sources_are_named_and_counted():
+    g = _read_gen(read=7, unread=[("official · AAP", "https://aap.example/p", "blocked"),
+                                  ("official · PubMed", "https://pm.example/p", "not-found")])
+    note = g._source_read_note([], "")
+    assert "2 of 9 source(s) could not be read" in note
+    assert "official · AAP (blocked)" in note and "PubMed" in note
+
+
+def test_a_ymyl_article_with_no_readable_authority_says_so():
+    """The article that prompted this round carried clinical claims on BestReviews, Mom Loves Best
+    and two patent PDFs, because every AAP, PubMed and PMC source it cited was a snippet."""
+    g = _read_gen(read=6, unread=[("official · AAP", "https://a/p", "blocked")])
+    blocks = [{"label": "reference · BestReviews", "url": "https://b/p", "text": "x" * 3000},
+              {"label": "official · AAP", "url": "https://a/p",
+               # LONG, so only the pointer marker can disqualify it — not its length
+               "text": B._SUMMARY_PREFIX + ("a pointer to a page nobody opened. " * 60)}]
+    note = g._source_read_note(blocks, "medical")
+    assert "NO authority page could be READ for this medical article" in note
+    assert "regenerate rather than publish" in note
+
+
+def test_a_short_authority_page_does_not_satisfy_the_ymyl_floor():
+    """Separately from the pointer marker: 200 characters of a page is not a page. Testing both
+    with one fixture let either check cover for the other."""
+    g = _read_gen(read=6)
+    blocks = [{"label": "official · AAP", "url": "https://a/p", "text": "Real but tiny. " * 8}]
+    note = g._source_read_note(blocks, "medical")
+    assert "NO authority page could be READ" in note
+
+
+def test_the_read_report_reaches_the_operators_warnings():
+    """It was being collected and never surfaced — which is the defect this round keeps finding."""
+    import inspect
+    src = inspect.getsource(B._finalize_article)
+    assert "_source_read_note" in src, "the report must be built in the finalize pass"
+    i = src.index("_source_read_note")
+    assert "self._warn(article, _srn2)" in src[i:i + 400], "…and handed to the operator channel"
+
+
+def test_one_readable_authority_page_is_enough_to_stay_quiet():
+    g = _read_gen(read=6)
+    blocks = [{"label": "official · AAP", "url": "https://a/p", "text": "Real page text. " * 60}]
+    assert "NO authority page" not in g._source_read_note(blocks, "medical")
+
+
+def test_a_non_ymyl_article_is_not_held_to_the_authority_rule():
+    g = _read_gen(read=6)
+    blocks = [{"label": "reference · BestReviews", "url": "https://b/p", "text": "x" * 3000}]
+    assert "NO authority page" not in g._source_read_note(blocks, "")
+
+
+def test_a_general_reference_page_does_not_get_a_regulators_budget():
+    """`reference ·` is what the option and dimension rescues label a general page. In the reported
+    article it was carried by BestReviews, beside a real clinical trial — so it cannot be treated
+    as an authority for either the budget or the YMYL floor."""
+    assert _source_text_cap("reference · Best Anti-Colic Bottles – BestReviews") == _EVIDENCE_TEXT_CAP
+    assert _source_weight("reference · BestReviews") == 2.0
+    assert _source_text_cap("official · FDA guidance") == _AUTHORITY_TEXT_CAP

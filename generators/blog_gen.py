@@ -2016,7 +2016,7 @@ _RETAIL_TEXT_CAP = int(os.environ.get("BLOG_RETAIL_TEXT_CAP", "800"))
 # is the article's own topic, throwing away the tail where the claim lives.
 #
 # Weights are relative, not absolute — they only decide who gives way when the budget binds.
-_SOURCE_WEIGHTS = ((("official ·", "reference ·"), 3.0),      # the page a clinical claim rests on
+_SOURCE_WEIGHTS = ((("official ·",), 3.0),                    # the page a clinical claim rests on
                    (("retail ·", "review ·"), 0.6),           # may evidence a price and nothing else
                    (("third-party ·", "preferred ·"), 1.5),
                    (("price ·",), 1.0))
@@ -2101,7 +2101,10 @@ def _source_text_cap(label):
     lab = (label or "").lower()
     if lab.startswith(("retail ·", "review ·")):
         return _RETAIL_TEXT_CAP
-    if lab.startswith("official ·") or lab.startswith("reference ·"):
+    # `official ·` only. `reference ·` is what the option/dimension rescues label a general page,
+    # and in the reported article it was carried by BestReviews — giving that a regulator's budget
+    # is the opposite of the point. It takes the ordinary allowance.
+    if lab.startswith("official ·"):
         return _AUTHORITY_TEXT_CAP
     return _EVIDENCE_TEXT_CAP
 
@@ -13910,6 +13913,38 @@ you MAY assume the description will carry: "{disc}".
         return {"label": label, "url": url, "text": body, "how": how,
                 "picked_because": gloss[:300]}
 
+    def _source_read_note(self, blocks=None, ymyl=""):
+        """FU267 (step 4) — what the operator needs to know about what was READ.
+
+        `_summary_sources` was being collected and never surfaced — the same defect this round has
+        been finding everywhere else, in this round's own code. Two things belong in front of a
+        person: how much of the evidence is a pointer rather than a page, and — on a YMYL article —
+        whether any AUTHORITY page was readable at all.
+
+        The second is the one that matters. The article that prompted this round carried clinical
+        claims on BestReviews, Mom Loves Best, Birch and two patent PDFs, because every AAP, PubMed
+        and PMC source it cited was a search snippet nobody had opened.
+        """
+        bits = []
+        unread = list(getattr(self, "_summary_sources", None) or [])
+        read = int(getattr(self, "_read_sources", 0) or 0)
+        if unread:
+            shown = "; ".join(f"{lab[:44]} ({why})" for lab, _u, why in unread[:4])
+            bits.append(f"{len(unread)} of {read + len(unread)} source(s) could not be read and are "
+                        f"pointers, not pages — {shown}"
+                        + (f"; +{len(unread) - 4} more" if len(unread) > 4 else ""))
+        if ymyl:
+            _readable_authority = [
+                b for b in (blocks or [])
+                if str(b.get("label") or "").lower().startswith("official ·")
+                and len(str(b.get("text") or "")) >= self._PAGE_TEXT_MIN
+                and not str(b.get("text") or "").startswith(self._SUMMARY_PREFIX[:24])]
+            if not _readable_authority:
+                bits.append(f"NO authority page could be READ for this {ymyl} article — every "
+                            f"official/reference source is a pointer. A clinical claim here can "
+                            f"only rest on a page nobody opened: regenerate rather than publish")
+        return ("source-reading: " + "; ".join(bits)) if bits else ""
+
     def _read_sources_parallel(self, pending, terms=()):
         """FU267 — (url, label, gloss) triples become READ blocks, on the existing fetch pool.
 
@@ -17471,6 +17506,10 @@ you MAY assume the description will carry: "{disc}".
             self._warn(article, _opn)
         # FU266 — every cited claim the fetched pages can settle, judged against those pages. The
         # deterministic checks above decide what they can; this decides what only meaning can.
+        _srn2 = self._source_read_note(self._evidence_blocks, str(ymyl or ""))
+        if _srn2:
+            print(f"[blog_gen] {_srn2}", flush=True)
+            self._warn(article, _srn2)
         for _ppn in (getattr(self, "_price_pick_notes", None) or []):
             self._warn(article, _ppn)   # FU266: the row pick reaches the operator, not just stdout
         # FU266 — operator's rule: a brand's own page outranks a marketplace listing for a claim

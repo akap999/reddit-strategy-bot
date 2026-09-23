@@ -146,6 +146,7 @@ def test_a_scanned_pdf_spends_no_residential_gb_and_no_web_fetch(monkeypatch):
     assert len(calls) == 1 and calls[0] is None          # direct only, never the proxy
 
 
+@pytest.mark.network      # FU267: drives the REAL fetch stack (requests is stubbed, not _fetch_page)
 def test_read_page_returns_the_document_text(monkeypatch):
     import generators.research as R
     monkeypatch.setattr("generators.brand_enrichment.requests.get",

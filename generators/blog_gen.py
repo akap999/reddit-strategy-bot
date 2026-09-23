@@ -3898,6 +3898,7 @@ class BlogGenerator:
         fallback). Merge + dedup by url, capped at _MAX_WEB_SOURCES. Returns [{label,url,text}].
         Never raises (each failing brief is skipped)."""
         out, seen = [], set()
+        _pending = []      # FU267: (url, label, gloss) — READ on the pool before returning
         cat = (category or "").strip()
         # FU150 (#2/#3): the SUBJECT is NOT third-party-swept — brand info is first-party only, and a
         # third-party subject page could be negative about the brand. Sweep only the top competitor.
@@ -3930,8 +3931,9 @@ class BlogGenerator:
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append({"label": f"{_source_class(url) or 'third-party'} · {s.get('title') or url}",
-                            "url": url, "text": fact[:_EVIDENCE_TEXT_CAP]})
+                _pending.append((url,
+                                 f"{_source_class(url) or 'third-party'} · {s.get('title') or url}",
+                                 fact))   # FU267: read it, do not store the gloss
 
         # FU98 — peer discovery, SUBJECT only: the writer needs REAL same-type competitors to
         # name (the model defaults to famous SaaS tools it already knows). One brief, ~2 searches.
@@ -3953,7 +3955,7 @@ class BlogGenerator:
                 print(f"[blog_gen] peer-discovery search skipped: {e}", flush=True)
         for nm in brands:
             for ang in angles:
-                if len(out) >= _MAX_WEB_SOURCES:
+                if len(out) + len(_pending) >= _MAX_WEB_SOURCES:   # FU267: the unread count too
                     break
                 brief = (f'Find {ang} about "{nm}"' + (f' ({cat})' if cat else "")
                          + f'. Topic: {seed}. Prefer recent (2024-2025) coverage. It MUST be an '
@@ -3970,12 +3972,13 @@ class BlogGenerator:
                     _take(got)
                 except Exception as e:
                     print(f"[blog_gen] independent-source search ({nm} / {ang[:18]}) skipped: {e}", flush=True)
-            if len(out) >= _MAX_WEB_SOURCES:
+            if len(out) + len(_pending) >= _MAX_WEB_SOURCES:   # FU267: the unread count too
                 break
         if out:
             print(f"[blog_gen] evidence: {len(out)} independent third-party source(s) found", flush=True)
         else:
             print("[blog_gen] evidence: NO independent third-party sources found", flush=True)
+        out.extend(self._read_sources_parallel(_pending, getattr(self, "_page_terms", ())))
         return out[:_MAX_WEB_SOURCES]
 
     def _guide_answer_evidence(self, brand, seed, blocked_domains=None):
@@ -4018,8 +4021,9 @@ class BlogGenerator:
                 print(f"[blog_gen] guide: answer evidence ({tag}) search failed: {e}", flush=True)
                 res = []
             kept = 0
+            _pending = []      # FU267: read this attempt's keepers before the ladder moves on
             for s in (res or []):
-                if len(out) >= _ANSWER_EVIDENCE_CAP:
+                if len(out) + len(_pending) >= _ANSWER_EVIDENCE_CAP:
                     break
                 u = (s.get("url") or "").strip()
                 ttl = (s.get("title") or "").strip()
@@ -4051,9 +4055,11 @@ class BlogGenerator:
                           f"'{ttl[:60]}' — not an official source on a {vertical} page", flush=True)
                     continue
                 seen.add(key)
-                out.append({"label": f"{'official' if official else 'third-party'} · {ttl or u}",
-                            "url": u, "text": fact[:_EVIDENCE_TEXT_CAP]})
+                _pending.append((u, f"{'official' if official else 'third-party'} · {ttl or u}",
+                                 fact))   # FU267: read it, do not store the gloss
                 kept += 1
+            out.extend(self._read_sources_parallel(
+                _pending, list(getattr(self, "_page_terms", ()) or []) + list(toks or [])))
             print(f"[blog_gen] guide: answer evidence ({tag}) → {len(res or [])} returned, {kept} kept",
                   flush=True)
         if not out:
@@ -4179,7 +4185,7 @@ class BlogGenerator:
         with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(srcs))) as _ex:
             results = list(_ex.map(_one, srcs))
         seen = {str(u or "").rstrip("/").lower() for u in (existing_urls or []) if u}
-        out = []
+        out, _pending = [], []      # FU267: (url, label, gloss) — READ on the pool below
         for x, res in results:
             kept = 0
             for r in res:
@@ -4201,11 +4207,16 @@ class BlogGenerator:
                 seen.add(uk)
                 label = (_official_label(u, ttl or u) if _official_source_ok(u, ttl, subject, own, pins)
                          else f"preferred · {x['name']} · {ttl or u}")
-                out.append({"label": label, "url": u, "text": (fct or ttl)[:_EVIDENCE_TEXT_CAP]})
+                # FU267 — READ it. This is the path an operator uses to NAME an authority ("should
+                # source from AAP"), and the docstring above already said it fetches pages. It
+                # searched, took the model's one-line gloss and stamped it `official ·`.
+                _pending.append((u, label, (fct or ttl)))
                 kept += 1
                 print(f"[blog_gen] content-instructions {x['name']}: kept {u[:120]}", flush=True)
             print(f"[blog_gen] content-instructions: {x['name']} ({', '.join(x['domains'])}) → "
                   f"{len(res)} returned, {kept} kept", flush=True)
+        out.extend(self._read_sources_parallel(
+            _pending, list(getattr(self, "_page_terms", ()) or []) + list(toks or [])))
         return out
 
     @staticmethod
@@ -7601,11 +7612,8 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
                 _pending.append((u, _official_label(u, ttl or u),
                                  (s.get("fact") or ttl or "").strip()))
                 kept += 1
-            if _pending:
-                _terms = list(getattr(self, "_page_terms", ()) or []) + list(toks or [])
-                with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_pending))) as _ex:
-                    blocks.extend(_ex.map(
-                        lambda a: self._source_block(a[0], a[1], _terms, gloss=a[2]), _pending))
+            blocks.extend(self._read_sources_parallel(
+                _pending, list(getattr(self, "_page_terms", ()) or []) + list(toks or [])))
             print(f"[blog_gen] ymyl-sources {tag} → {len(res or [])} returned, {kept} validated",
                   flush=True)
             return kept
@@ -7979,7 +7987,7 @@ Return JSON only: {{"items": [{{"product": "<name or ''>", "value": "<verbatim p
                 continue
             else:
                 lab = f"{_source_class(u) or 'third-party'} · {ttl or u}"
-            out.append({"label": lab, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+            out.append(self._source_block(u, lab, getattr(self, "_page_terms", ()), gloss=fct))   # FU267
             if len(out) >= self._RECENCY_MAX_BLOCKS:
                 break
         print(f"[blog_gen] recency: asked what changed about '{core[:50]}' since {cutoff} → "
@@ -8396,8 +8404,8 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         and not _REVIEWISH_RE.search(ttl or "")):
                     ok_off = True
             if ok_off:
-                fresh.append({"label": _official_label(u, ttl or u), "url": u,
-                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+                fresh.append(self._source_block(u, _official_label(u, ttl or u),
+                                                getattr(self, "_page_terms", ()), gloss=fct))   # FU267
             elif _is_subject_review({"title": ttl, "fact": fct}, name) \
                     or _is_negative_about({"title": ttl, "fact": fct}, name) \
                     or _is_affiliate_review({"title": ttl, "url": u}) \
@@ -8412,8 +8420,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 print(f"[blog_gen] c2: '{(ttl or u)[:70]}' is a review-of / negative-about {name}, "
                       f"affiliate, non-capability or off-subject — dropped", flush=True)
             elif not ymyl:
-                fresh.append({"label": f"{_source_class(u) or 'third-party'} · {ttl or u}", "url": u,
-                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+                fresh.append(self._source_block(
+                    u, f"{_source_class(u) or 'third-party'} · {ttl or u}",
+                    getattr(self, "_page_terms", ()), gloss=fct))   # FU267
             else:
                 print(f"[blog_gen] c2: '{(ttl or u)[:70]}' failed official validation — "
                       f"dropped (ymyl page)", flush=True)
@@ -8552,7 +8561,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                 seen_.add(key)
                 label = tool if _same_site(u, dom) else \
                     f"{_source_class(u) or 'third-party'} · {(s.get('title') or _dom(u) or 'review')}"
-                out_.append({"label": label, "url": u, "text": fc[:_EVIDENCE_TEXT_CAP]})
+                out_.append(self._source_block(u, label, getattr(self, "_page_terms", ()), gloss=fc))   # FU267
                 if len(out_) >= cap:
                     break
             return out_
@@ -8636,10 +8645,14 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                             res2 = []
                         pp = _best_product_price(res2, prod, _dd) or _fetch_product_price(_dd, tool, prod)
                     if pp and not any((b.get("url") or "") == pp["url"] for b in blocks):
-                        _ptxt = (pp.get("fact") or "")[:_EVIDENCE_TEXT_CAP]
+                        # FU267 — READ the product page. This stored the search gloss, which is
+                        # how a per-product PRICE came to rest on a sentence about a page nobody
+                        # had opened. The gloss still says why this page was picked.
+                        _ptxt = (pp.get("fact") or "")
                         if prod.lower() not in _ptxt.lower():
                             _ptxt = f"{prod}: {_ptxt}"   # FU161: label the block product-wise (per-product cache)
-                        blocks.insert(0, {"label": tool, "url": pp["url"], "text": _ptxt})
+                        blocks.insert(0, self._source_block(
+                            pp["url"], tool, getattr(self, "_page_terms", ()), gloss=_ptxt))
             return blocks
 
         def _tier2(tool, dom):
@@ -8916,8 +8929,9 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                         if _guide and _official_source_ok(u, _s.get("title") or "", name,
                                                           _dom(brand.get("domain_url") or ""), _opins):
                             _olab = "official"
-                        blocks.append({"label": f"{_olab} · {(_s.get('title') or _dom(u))[:70]}",
-                                       "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                        blocks.append(self._source_block(
+                            u, f"{_olab} · {(_s.get('title') or _dom(u))[:70]}",
+                            getattr(self, "_page_terms", ()), gloss=fct))   # FU267
                 st["blocks"] = blocks
                 st["t3"] = len(blocks)
                 st["option"] = True
@@ -9470,7 +9484,7 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                             u, s.get("title") or "", name, own_dom_s,
                             (_YMYL_OFFICIAL_DOMAINS.get(ymyl) or []) if ymyl else []):
                         _lbl = _official_label(u, (s.get('title') or _dom(u) or 'source')[:70])
-                    kb.append({"label": _lbl, "url": u, "text": fct[:_EVIDENCE_TEXT_CAP]})
+                    kb.append(self._source_block(u, _lbl, getattr(self, "_page_terms", ()), gloss=fct))   # FU267
             return t, d, kb
 
         if _selected:
@@ -9650,11 +9664,12 @@ Return JSON only: {{"tools": ["..."], "peer_tools": ["..."], "dimensions": ["...
                           f"'{ttl[:60]}'", flush=True)
                     continue
                 _rev_kept += 1
-                fresh.append({"label": f"review · {ttl or u}", "url": u,
-                              "text": fct[:_EVIDENCE_TEXT_CAP]})
+                fresh.append(self._source_block(u, f"review · {ttl or u}",
+                                                getattr(self, "_page_terms", ()), gloss=fct))   # FU267
                 continue
-            fresh.append({"label": f"{_source_class(u) or 'third-party'} · {ttl or u}", "url": u,
-                          "text": fct[:_EVIDENCE_TEXT_CAP]})
+            fresh.append(self._source_block(
+                u, f"{_source_class(u) or 'third-party'} · {ttl or u}",
+                getattr(self, "_page_terms", ()), gloss=fct))   # FU267
 
         # FU189 — the FU142 dim-rescue runs AFTER the finalize loop and keeps blocks on a LOOSER
         # first-token filter, so it can source an entity every earlier tier missed. Until now the pause
@@ -13785,6 +13800,21 @@ you MAY assume the description will carry: "{disc}".
             self._summary_sources.append((label, url, how))
         return {"label": label, "url": url, "text": body, "how": how,
                 "picked_because": gloss[:300]}
+
+    def _read_sources_parallel(self, pending, terms=()):
+        """FU267 — (url, label, gloss) triples become READ blocks, on the existing fetch pool.
+
+        Serial reads would put a slow host on the critical path of every gather; the pool is the
+        same one `_gather_evidence` and the vfact fetch already use."""
+        pending = [t for t in (pending or []) if t and t[0]]
+        if not pending:
+            return []
+        _t = [x for x in (terms or []) if x]
+        if len(pending) == 1:
+            return [self._source_block(pending[0][0], pending[0][1], _t, gloss=pending[0][2])]
+        with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(pending))) as ex:
+            return list(ex.map(
+                lambda a: self._source_block(a[0], a[1], _t, gloss=a[2]), pending))
 
     def _probe_cited_sources(self, body, blocks):
         """FU241 — read every source the article CITES, not only the ones cited for a figure.

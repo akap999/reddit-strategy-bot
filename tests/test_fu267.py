@@ -131,7 +131,70 @@ def test_the_ymyl_gather_reads_every_source_it_keeps():
     is the leg that supplies the regulator label and the guideline page on a YMYL article."""
     import inspect, re
     src = inspect.getsource(B._gather_authoritative_sources)
-    assert "_source_block" in src, "the authority leg must go through the reader"
+    assert "_read_sources_parallel" in src or "_source_block" in src, \
+        "the authority leg must go through the reader"
     # The gloss may still be PASSED (as `gloss=`); what it may never be again is the block's text.
     assert not re.search(r'"text"\s*:', src), \
         "this leg must not build a block's text itself — `_source_block` reads the page"
+
+
+# ── the gloss is nowhere the evidence ────────────────────────────────────────────────────────────
+
+def test_no_gather_path_stores_a_search_gloss_as_a_blocks_text():
+    """The defect was not one site. `base.py` asks a model for a one-line `fact` about each search
+    result, and that string was an evidence block's text at forty places. This is the guard that
+    stops the next one being added: a block's text comes from `_source_block`, which reads."""
+    import re
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "generators", "blog_gen.py")).read()
+    bad = re.findall(r'"text":\s*(?:\(?\s*)?(?:fct|fc|fact|_ptxt)\b[^\n]*', src)
+    assert not bad, "a search gloss is being stored as evidence text again:\n  " + "\n  ".join(bad)
+
+
+def test_the_reader_is_used_by_the_paths_that_supply_a_ymyl_article():
+    """The legs that carry a clinical claim: the regulator/guideline search, the operator's own
+    "source from AAP" instruction, the primary-source completion, and the newest-change sweep."""
+    import inspect
+    for fn in (B._gather_authoritative_sources, B._instruction_source_blocks,
+               B._gather_recent_changes, B._gather_independent_sources,
+               B._guide_answer_evidence):
+        src = inspect.getsource(fn)
+        assert "_read_sources_parallel" in src or "_source_block" in src, fn.__name__
+
+
+def test_the_reads_happen_in_parallel():
+    """Serial reads would put one slow host on the critical path of every gather. A dozen sources
+    at ten seconds each is the difference between a generation and a timeout."""
+    import threading
+    import time
+
+    class _SlowPages(dict):
+        def __init__(self):
+            super().__init__()
+            self.inflight = 0
+            self.max_inflight = 0
+            self._lock = threading.Lock()
+
+        def __contains__(self, _url):
+            return True
+
+        def __getitem__(self, _url):
+            with self._lock:
+                self.inflight += 1
+                self.max_inflight = max(self.max_inflight, self.inflight)
+            try:
+                time.sleep(0.05)
+                return ("Reference page with several sentences of ordinary prose. " * 20, "direct")
+            finally:
+                with self._lock:
+                    self.inflight -= 1
+
+    g = B.__new__(B)
+    g._claim_pages = _SlowPages()
+    g._read_sources = 0
+    g._summary_sources = []
+    g.claude = None
+    pending = [(f"https://x{i}.example/p", f"official · S{i}", "gloss") for i in range(6)]
+    blocks = g._read_sources_parallel(pending, ["reference"])
+    assert len(blocks) == 6 and g._read_sources == 6
+    assert g._claim_pages.max_inflight >= 2, "the reads must overlap"

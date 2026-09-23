@@ -1989,6 +1989,35 @@ def _format_price_value(entry):
     return _sale(_one(val, kind, basis, per))
 
 
+# ── FU267: one constructor for an evidence block, and it READS the page ─────────────────────────
+# Measured across the 27 most recent articles: 92% of the AUTHORITY sources an article cites (gov,
+# NIH, PubMed, PMC, AAP, AAFP, journals) were never opened — their evidence text was the one-line
+# gloss `base.py` asks a model to write from search results ("one specific, sourced fact this page
+# supports"). Commercial pages were fetched properly. So the writer received a median of 7.7x more
+# marketing copy than science, and on one article 203 characters of clinical evidence for an
+# 18,000-character YMYL page. The clinical specifics had to come from memory, and did.
+#
+# The read path already existed — `research.read_page` (direct → residential → Anthropic web fetch)
+# and `relevant_text` (a head plus windows around the article's own terms, which is what stops a
+# 113k-character FDA label being read at 5%). It was wired only to the subject brand and its
+# competitors, and disabled for guides.
+#
+# The gloss keeps the job it can do — WHY this source was picked — and loses the one it never had.
+_AUTHORITY_TEXT_CAP = int(os.environ.get("BLOG_AUTHORITY_TEXT_CAP", "6000"))
+_RETAIL_TEXT_CAP = int(os.environ.get("BLOG_RETAIL_TEXT_CAP", "800"))
+
+
+def _source_text_cap(label):
+    """Per-class budget. One number for every class meant the page that carries the clinical claim
+    got the same 2,500 characters as a marketplace listing that may only evidence a price."""
+    lab = (label or "").lower()
+    if lab.startswith(("retail ·", "review ·")):
+        return _RETAIL_TEXT_CAP
+    if lab.startswith("official ·") or lab.startswith("reference ·"):
+        return _AUTHORITY_TEXT_CAP
+    return _EVIDENCE_TEXT_CAP
+
+
 def _priced_competitor_names(brand, subject_name="", level=""):
     """FU214 (Change 5) — the COMPETITORS the operator priced, in the order they were pasted.
 
@@ -3352,6 +3381,8 @@ class BlogGenerator:
         self._budget_drop_note = ""   # FU239: a competitor the cost ceiling starved out
         self._table_punt_note = ""    # FU138: the unsourced-table resolution outcome
         self._claim_pages = {}        # FU230: pages read once to check the figures cited from them
+        self._read_sources = 0        # FU267: sources whose PAGE we actually read
+        self._summary_sources = []    # FU267: (label, url, why) we could only point at
         self._dup_table_note = ""     # FU228: a draft comparison section the guard did not restore
         self._core_mechanics = []     # FU198: the subject's defining mechanics
         self._sibling_urls = set()    # FU197: the brand's PUBLISHED pages, for the self-reference check
@@ -7536,6 +7567,7 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
                     res = []
             toks = _subj_tokens(must_name) if must_name else []
             kept = 0
+            _pending = []      # FU267: (url, label, gloss) — fetched in parallel below
             for s in (res or []):
                 if keep_cap is not None and kept >= keep_cap:
                     break
@@ -7563,9 +7595,17 @@ Anything you change for these reasons MUST appear in `flagged` so the count is a
                         continue
                 seen.add(uk)
                 print(f"[blog_gen] ymyl-sources {tag}: kept {u[:120]}", flush=True)
-                blocks.append({"label": _official_label(u, ttl or u), "url": u,
-                               "text": ((s.get("fact") or ttl or "").strip())[:_EVIDENCE_TEXT_CAP]})
+                # FU267 — READ the page. This stored the search gloss and never opened the URL,
+                # which is how 92% of the authority sources an article cites came to be a sentence
+                # a model wrote about a page nobody had read.
+                _pending.append((u, _official_label(u, ttl or u),
+                                 (s.get("fact") or ttl or "").strip()))
                 kept += 1
+            if _pending:
+                _terms = list(getattr(self, "_page_terms", ()) or []) + list(toks or [])
+                with ThreadPoolExecutor(max_workers=min(_BLOG_FETCH_WORKERS, len(_pending))) as _ex:
+                    blocks.extend(_ex.map(
+                        lambda a: self._source_block(a[0], a[1], _terms, gloss=a[2]), _pending))
             print(f"[blog_gen] ymyl-sources {tag} → {len(res or [])} returned, {kept} validated",
                   flush=True)
             return kept
@@ -13706,6 +13746,45 @@ you MAY assume the description will carry: "{disc}".
     _FAB_MAX_DROP = int(os.environ.get("BLOG_FAB_MAX_DROP", "8"))
 
     _SOURCE_PROBE_MAX = int(os.environ.get("BLOG_SOURCE_PROBE_MAX", "24"))
+
+    _SUMMARY_PREFIX = ("[SUMMARY ONLY — this page could not be read. Treat it as a pointer, not as "
+                       "evidence: do not attribute any figure, wording or specific to it.]\n")
+
+    def _source_block(self, url, label, terms=(), gloss="", cap=None):
+        """FU267 — an evidence block that carries THE PAGE.
+
+        Returns {label, url, text, how, picked_because}. `how` is "direct" / "web fetch" or the
+        failure reason, and it is kept ON the block: every downstream rule about an unreadable
+        source ("a page unreachable by every method is not a source") needs to know, and until now
+        nothing recorded it at gather time.
+
+        A page we cannot read still returns a block, marked, with the gloss as its text — dropping
+        it outright belongs with the replacement step, and a silent disappearance now would be a
+        different failure from the one this fixes. What it must never do is read as the page.
+        """
+        url = (url or "").strip()
+        label = (label or "").strip()
+        gloss = (gloss or "").strip()
+        cap = cap or _source_text_cap(label)
+        text, how = "", "no-url"
+        if url:
+            try:
+                text, how = _research.read_page(url, claude=getattr(self, "claude", None),
+                                                cache=self._claim_pages,
+                                                max_chars=_PAGE_FULL_CHARS)
+            except Exception as e:
+                text, how = "", f"error: {type(e).__name__}"
+        text = (text or "").strip()
+        if len(text) >= self._PAGE_TEXT_MIN and not _looks_walled_text(text):
+            body = relevant_text(text, [t for t in (terms or []) if t], cap)
+            self._read_sources += 1
+        else:
+            # keep the pointer, never let it read as the page
+            body = (self._SUMMARY_PREFIX + (gloss or label))[:cap]
+            how = how if (how and how != "direct") else "thin"
+            self._summary_sources.append((label, url, how))
+        return {"label": label, "url": url, "text": body, "how": how,
+                "picked_because": gloss[:300]}
 
     def _probe_cited_sources(self, body, blocks):
         """FU241 — read every source the article CITES, not only the ones cited for a figure.

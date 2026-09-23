@@ -2024,6 +2024,42 @@ _EVIDENCE_TOTAL_BUDGET = int(os.environ.get("BLOG_EVIDENCE_TOTAL", "120000"))
 _EVIDENCE_MIN_PER_SOURCE = 300    # below this a block says nothing; better to keep fewer, fuller
 
 
+# FU267 (step 3b) — `relevant_text` keeps a HEAD plus windows around the article's terms. The head
+# exists for a good reason: an FDA label's boxed warning and indications are load-bearing and sit at
+# the top. On a commercial page the top is the MENU. Measured on one article's stored evidence, the
+# 1,800-character head of three brand pages opened:
+#
+#   "Products – Dr. Brown's Skip to content Pause slideshow Play slideshow Free shipping on …"
+#   "Thyseed | Premium Anti-Colic Baby Bottles … Skip to content Free shipping … Shop Baby Bottles"
+#
+# and 59% of every block holding 400+ characters is navigation-heavy or has two sentences or fewer.
+# So the head allowance was being spent on chrome, and the term windows — the part that carries the
+# claim — were what got squeezed out. A page whose head is a menu gets no head.
+_NAV_PHRASE_RE = re.compile(
+    r"skip to (?:content|main)|pause slideshow|play slideshow|free shipping|add to cart|"
+    r"shopping cart|log ?in|sign ?in|create account|no account yet|my account|wishlist|checkout|"
+    r"newsletter|subscribe|follow us|privacy policy|terms of (?:service|use)|all rights reserved|"
+    r"cookie(?:s| policy| settings)|shop all|view cart|main menu|site navigation", re.I)
+
+
+def _head_is_chrome(text, head_chars):
+    """Is the top of this page navigation rather than prose?
+
+    Two signals, because either alone is noisy: several navigation phrases, AND fewer sentence ends
+    than navigation phrases. A page that merely MENTIONS free shipping in prose keeps its head."""
+    head = (text or "")[:max(0, int(head_chars))]
+    if not head.strip():
+        return False
+    nav = len(_NAV_PHRASE_RE.findall(head))
+    stops = len(re.findall(r"[.!?](?:\s|$)", head))
+    if nav >= 3:
+        return True          # a storefront header: "Skip to content · Free shipping · Shop All"
+    # ...and the other shape, which carries no navigation WORDING at all — a bare link list.
+    # Measured: philips.com opens "Products Support Products Personal care Oral health" with zero
+    # sentence ends in 1,800 characters, while a guideline page runs 8+ per thousand.
+    return len(head) >= 400 and (stops * 1000.0 / len(head)) < 2.0
+
+
 def _source_weight(label):
     lab = (label or "").lower()
     for prefixes, w in _SOURCE_WEIGHTS:
@@ -4848,8 +4884,9 @@ class BlogGenerator:
                 # head plus 1,400-character windows; at a 2,500-character allowance the head eats
                 # it and NO term window fits, so the selector silently degrades into the head
                 # truncation it exists to prevent. A third each leaves room for two windows.
-                txt = relevant_text(txt, terms, cap,
-                                    head_chars=max(300, min(_REL_HEAD_CHARS, cap // 3)),
+                _head = 0 if _head_is_chrome(txt, _REL_HEAD_CHARS) \
+                    else max(300, min(_REL_HEAD_CHARS, cap // 3))
+                txt = relevant_text(txt, terms, cap, head_chars=_head,
                                     window=max(300, min(_REL_WINDOW, cap // 3)))
             out.append(f"[S{i}] {src}" + (f"\n{txt}" if txt else ""))
         return out

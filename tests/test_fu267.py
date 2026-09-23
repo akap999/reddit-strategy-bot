@@ -297,3 +297,65 @@ def test_both_writers_share_one_renderer():
     import inspect
     assert "_render_evidence_blocks" in inspect.getsource(B._writer_evidence_str)
     assert "_render_evidence_blocks" in inspect.getsource(B._gather_evidence)
+
+
+# ── step 3b: a menu must not eat the budget ──────────────────────────────────────────────────────
+# `relevant_text` keeps a HEAD plus windows around the article's terms. The head exists for a good
+# reason — an FDA label's boxed warning and indications are load-bearing and sit at the top. On a
+# commercial page the top is the menu, and 59% of every stored block holding 400+ characters is
+# navigation-heavy or has two sentences or fewer. So the head allowance was being spent on chrome
+# and the term windows, which carry the claim, were what got squeezed out.
+
+from generators.blog_gen import _head_is_chrome, _REL_HEAD_CHARS  # noqa: E402
+
+# verbatim from the stored evidence of a real article
+_STOREFRONT = ("Products – Dr. Brown's Skip to content Pause slideshow Play slideshow Free "
+               "shipping on orders over $25. See details Free shipping on orders over $25. See "
+               "details Shop Bottles Pacifiers Log in Create account Cart " * 6)
+_LINK_LIST = ("View and compare Baby bottles & nipples products | Philips Products Support "
+              "Products Personal care Oral health Mother and child care Beauty Shaving " * 12)
+_LABEL = ("HIGHLIGHTS OF PRESCRIBING INFORMATION. WARNING: RISK OF THYROID C-CELL TUMOURS. In "
+          "rodents, semaglutide causes dose-dependent thyroid C-cell tumours. It is unknown "
+          "whether this occurs in humans. The recommended starting dose is 0.25 mg weekly. " * 8)
+
+
+def test_a_storefront_header_is_chrome():
+    assert _head_is_chrome(_STOREFRONT, _REL_HEAD_CHARS)
+
+
+def test_a_bare_link_list_with_no_sentences_is_chrome():
+    """The other shape, which carries no navigation WORDING at all. philips.com opens with zero
+    sentence ends in 1,800 characters, where a guideline page runs eight or more per thousand."""
+    assert _head_is_chrome(_LINK_LIST, _REL_HEAD_CHARS)
+
+
+def test_a_regulator_label_keeps_its_head():
+    """The head is not a mistake — on a label the boxed warning and indications ARE the top, and
+    that is why `relevant_text` reserves one."""
+    assert not _head_is_chrome(_LABEL, _REL_HEAD_CHARS)
+
+
+def test_prose_that_merely_mentions_shipping_keeps_its_head():
+    import random
+    random.seed(1)
+    words = "infant colic trial endpoint crying duration parental report cohort analysis".split()
+    sents = ["Free shipping of study materials was arranged for all sites."]
+    sents += [" ".join(random.choice(words) for _ in range(9)).capitalize() + "." for _ in range(60)]
+    assert not _head_is_chrome(" ".join(sents), _REL_HEAD_CHARS)
+
+
+def test_a_menu_head_buys_a_whole_claim_window_when_it_is_dropped():
+    """End to end, and measurably: the budget the menu was eating becomes coverage.
+
+    A single claim would survive either way — it gets a window wherever it sits — so this spreads
+    four of them. With the menu head kept, the allowance reaches two; without it, three. That is
+    the difference the head was costing on every commercial page in the evidence set."""
+    names = ["alpha", "bravo", "charlie", "delta"]
+    page = (_STOREFRONT * 3) + "".join(
+        f" CLAIMPOINT {n} is stated here. " + "Filler sentence. " * 120 for n in names)
+    g = B.__new__(B)
+    g._page_terms = ["claimpoint"]
+    out = g._render_evidence_blocks(
+        [{"label": "Thyseed", "url": "https://t.example/p", "text": page}], char_budget=2400)[0]
+    kept = [n for n in names if f"CLAIMPOINT {n}" in out]
+    assert len(kept) >= 3, f"the menu is still eating the budget: only {kept} survived"

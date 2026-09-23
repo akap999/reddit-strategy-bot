@@ -4888,6 +4888,7 @@ class BlogGenerator:
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
         # from a prior call on this instance can't leak in.
+        blocks = self._drop_commerce_sources(blocks)   # FU271b: a commission page is not evidence
         self._tag_study_levels(blocks)   # FU270: rank each paper by what it IS, before rendering
         self._evidence_blocks = list(blocks)
         self._sources_render = None   # FU213: a fresh evidence map invalidates the last render
@@ -10399,8 +10400,12 @@ ARTICLE (Markdown):
                 or not (rres.get("revised_body_markdown") or "").strip()):
             return None
 
-        for f in fresh:   # append in [S#] order; _rebuild_sources lists only the cited ones
-            self._evidence_blocks.append({"label": f["label"], "url": f["url"], "text": f["text"]})
+        # FU271b: the same rule on the sources this round added — a listing that arrives late is
+        # no more citable than one that arrived early.
+        for f in self._drop_commerce_sources(fresh):   # append in [S#] order
+            self._evidence_blocks.append({"label": f["label"], "url": f["url"], "text": f["text"],
+                                          "intent": f.get("intent", ""),
+                                          "design": f.get("design", ""), "year": f.get("year", "")})
         flagged = [f for f in (rres.get("flagged") or []) if isinstance(f, dict)]
         changed = sum(1 for f in flagged
                       if f.get("action") in ("filled", "corrected", "replaced", "removed"))
@@ -14018,6 +14023,34 @@ you MAY assume the description will carry: "{disc}".
         return {"label": label, "url": url, "text": body, "how": how,
                 "intent": _intent, "intent_why": _why, "picked_because": gloss[:300]}
 
+    def _drop_commerce_sources(self, blocks):
+        """FU271b — a page that earns a commission is not evidence. Returns the kept blocks.
+
+        Operator's decision, after seeing what the warning named. Detection alone left the article
+        still citing BestReviews, Mom Loves Best and Today's Parent for clinical claims; the point
+        of reading a page is to be able to act on what it says about itself.
+
+        A brand's own shop is NOT caught by this — the classifier requires an AFFILIATE marker, and
+        a brand selling its own product carries none. Prices keep their own rule: they come from the
+        brand's own site or a named retailer, neither of which this touches.
+
+        Honest risk, recorded here rather than discovered later: on a roundup-shaped article in a
+        non-YMYL vertical the legitimate sources may largely BE roundups, and this will thin the
+        evidence. That is what the "NO independent third-party sources" and YMYL-floor warnings are
+        for, and they fire on the result rather than being suppressed by it.
+        """
+        keep, dropped = [], []
+        for b in (blocks or []):
+            if isinstance(b, dict) and b.get("intent") == "commerce":
+                dropped.append(b)
+                continue
+            keep.append(b)
+        if dropped:
+            print(f"[blog_gen] source-quality: dropped {len(dropped)} monetised listing(s) — "
+                  + "; ".join((b.get("label") or b.get("url") or "")[:52] for b in dropped[:4]),
+                  flush=True)
+        return keep
+
     def _tag_study_levels(self, blocks):
         """FU270 — mark each NCBI paper with WHAT IT IS: its design and year, from NCBI itself.
 
@@ -14074,11 +14107,11 @@ you MAY assume the description will carry: "{disc}".
         read = int(getattr(self, "_read_sources", 0) or 0)
         commerce = list(getattr(self, "_commerce_sources", None) or [])
         if commerce:
-            bits.append("read as monetised listing(s), not references — "
+            bits.append("DROPPED as monetised listing(s), not references — "
                         + "; ".join(f"{lab[:40]} ({why})" for lab, _u, why in commerce[:3])
                         + (f"; +{len(commerce) - 3} more" if len(commerce) > 3 else "")
-                        + ". A page that earns a commission may support a price or availability "
-                          "and nothing else")
+                        + ". A page that earns a commission is not evidence; if one of these was "
+                          "the only source for a claim, that claim now has none")
         if unread:
             shown = "; ".join(f"{lab[:44]} ({why})" for lab, _u, why in unread[:4])
             bits.append(f"{len(unread)} of {read + len(unread)} source(s) could not be read and are "

@@ -130,3 +130,50 @@ def test_a_reference_page_is_marked_too():
     b = g._source_block("https://j.example/p", "official · A Paper")
     assert b["intent"] == "reference"
     assert "cites its own sources" in g._render_evidence_blocks([b])[0]
+
+
+# ── FU271b: dropped, not merely reported ─────────────────────────────────────────────────────────
+# Detection alone left the article still citing BestReviews, Mom Loves Best and Today's Parent for
+# clinical claims. The point of reading a page is to be able to act on what it says about itself.
+
+def test_a_monetised_listing_never_becomes_evidence():
+    g = _gen({})
+    blocks = [{"label": "official · AAFP", "url": "https://aafp.org/x", "intent": "reference"},
+              {"label": "reference · BestReviews", "url": "https://bestreviews.com/x",
+               "intent": "commerce"},
+              {"label": "Thyseed", "url": "https://thyseed.example/p", "intent": ""}]
+    kept = g._drop_commerce_sources(blocks)
+    assert [b["label"] for b in kept] == ["official · AAFP", "Thyseed"]
+
+
+def test_a_brands_own_shop_survives_the_drop():
+    """It is never classified commerce — the classifier requires an affiliate marker, and a brand
+    selling its own product carries none."""
+    g = _gen({"https://shop.example/p": (BRAND_SHOP, "direct")})
+    b = g._source_block("https://shop.example/p", "Thyseed")
+    assert b["intent"] == "" and g._drop_commerce_sources([b]) == [b]
+
+
+def test_the_note_says_they_were_dropped_not_merely_noticed():
+    g = _gen({"https://round.example/best": (LISTICLE, "direct")})
+    g._source_block("https://round.example/best", "third-party · Best Bottles 2026")
+    note = g._source_read_note([], "")
+    assert "DROPPED as monetised listing" in note
+    assert "that claim now has none" in note, "the consequence has to be stated"
+
+
+def test_the_drop_runs_on_sources_added_after_the_draft_too():
+    """A listing that arrives late is no more citable than one that arrived early."""
+    import inspect
+    src = inspect.getsource(B._reconcile_and_finish)
+    assert "_drop_commerce_sources(fresh)" in src
+
+
+def test_the_drop_runs_on_the_MAIN_gather_too():
+    """Testing the late path alone left the main one undefended — it is where most sources arrive."""
+    import inspect
+    src = inspect.getsource(B._gather_evidence)
+    assert "_drop_commerce_sources(blocks)" in src
+    i = src.index("_drop_commerce_sources(blocks)")
+    assert "self._evidence_blocks = list(blocks)" in src[i:i + 400], \
+        "it has to run BEFORE the blocks become the evidence set"

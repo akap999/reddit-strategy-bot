@@ -169,8 +169,12 @@ def test_the_section_prompt_protects_a_direct_opener():
     g._price_cadence_ok = lambda a, b: (True, [])
     _run(g, SECTION)
     p = seen[0]
-    assert "KEEP THAT OPENING WORD" in p
-    assert '"Not reliably."' in p, "the opener rule must name the actual shapes that were lost"
+    # FU275 replaced the bare rule with the REASON: the page exists to be quoted, and a direct
+    # answer's first word is what gets lifted. Assert the property and its motivation, not the
+    # sentence that carries it — rule #31 with no reason is exactly what the model ignored.
+    assert "FIRST WORD" in p and '"Not reliably."' in p, "the shape that was lost must be named"
+    assert "answer engines" in p, "the rule must arrive with the reason it exists"
+    assert "published BY" in p, "the rewriter must know whose page this is"
 
 
 def test_the_whole_article_prompt_protects_a_direct_opener():
@@ -235,3 +239,79 @@ def test_a_marker_the_original_already_used_is_not_charged_to_the_rewrite():
     assert _probe(orig, rew)["markers"] == {}, \
         "the count ROSE 1->3, but the word is the article's own — only words the rewriter " \
         "introduced from nothing are its doing"
+
+
+# ── FU275: the brief, rewritten ──────────────────────────────────────────────────────────────────
+# The operator's read, which the evidence bore out: the guard was heavy because the BRIEF was
+# contradictory, not only because the model was weak. What the section prompt said, verbatim:
+#
+#   "share NO run of MORE THAN 4 consecutive words with the original — the single most important rule"
+#   "PRESERVE EXACTLY: … every Markdown table (structure and cell values, VERBATIM); every heading
+#    line … CHARACTER-FOR-CHARACTER"
+#
+# A table row kept verbatim IS a run of more than four words. Rule #1 is impossible on factual prose
+# ("the Food and Drug Administration" is five words) and contradicted two lines down, with no
+# priority stated. That explains both measured failure modes at once: the model either
+# over-preserved (overlap 0.55) or broke a preserved item (the dropped facts that sent 31% of
+# sections back to Claude's text).
+
+def _section_prompt():
+    g, seen = _gen(["x"])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    _run(g, SECTION)
+    return seen[0]
+
+
+def test_the_impossible_absolute_is_gone():
+    """No rule may be both unobeyable and labelled the most important one — a model that finds rule
+    #1 cannot be taken literally has been taught that none of them are."""
+    p = _section_prompt()
+    assert "single most important rule" not in p
+    assert "NO run of MORE THAN 4 consecutive words" not in p
+
+
+def test_preserved_items_are_stated_exempt_not_competing():
+    """The contradiction's actual fix. Preserved items cost nothing against the rewording, so there
+    is no longer anything to trade off — and no excuse to barely reword."""
+    p = _section_prompt()
+    assert "EXEMPT" in p and "reword around them" in p
+    assert "NEVER TRADE MEANING FOR NOVELTY" in p
+
+
+def test_nothing_may_be_added_or_dropped():
+    """"Do not modify" left omission wide open — dropping is neither adding nor changing, which is
+    how "fastest" went 2 -> 0 in the California article while breaking no rule."""
+    p = _section_prompt()
+    assert "nothing left out" in p and "nothing added" in p
+    assert "Dropping a qualifier is as wrong as inventing one" in p
+    assert "word of praise" in p, "the invented competitor praise class"
+
+
+def test_the_output_must_read_as_english():
+    """Nothing previously asked for this, which is how "within less than three weeks" shipped."""
+    assert "natural, publishable English" in _section_prompt()
+
+
+def test_every_bold_span_is_preserved_wherever_it_sits():
+    """The operator's rule: bold is the control surface. Previously only a fully-bold LINE and a
+    bold lead-in LABEL were protected, so a bold phrase mid-sentence was ordinary prose."""
+    p = _section_prompt()
+    assert "EVERY BOLD SPAN, wherever it appears" in p
+    assert "middle of a sentence" in p
+
+
+def test_a_preserved_bold_subject_must_keep_its_verb():
+    """FU252 measured this exact damage: preserving a bold phrase and rewording around it strands a
+    bold SUBJECT without its verb. Making bold preservation uniform makes that risk uniform too."""
+    p = _section_prompt()
+    assert "SUBJECT of its sentence" in p
+    assert "without its verb is a broken sentence" in p
+
+
+def test_the_publisher_is_named_as_the_publisher():
+    """"a Jolly Search article" reads as an article ABOUT them. Nothing said it was BY them, which
+    is how "Jolly Search claims a 250.54% increase" was a reasonable edit."""
+    p = _section_prompt()
+    assert "published BY" in p
+    assert "as plainly as any competitor" in p, "the even-hand rule, derived rather than enumerated"

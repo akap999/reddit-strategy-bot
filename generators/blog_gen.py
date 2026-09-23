@@ -12619,33 +12619,77 @@ you MAY assume the description will carry: "{disc}".
             if head and re.match(r"(?i)^\s*#{1,6}\s*sources\s*$", head.strip()):
                 return i, ((head + "\n" + chunk) if head else chunk), False, ""
             prompt = (
-                f"Rewrite ONE SECTION of a {name} article ENTIRELY in your own words — a full rewrite, not "
-                "a light edit.\n\n"
-                "WHY: the original was written by another AI whose word choices carry a hidden statistical "
-                "mark, which lives in the DISCRETIONARY wording, not the facts. So:\n"
-                "- REPLACE every discretionary word (connectives, transitions, adjectives, verbs, adverbs, "
-                "sentence openers) and RECAST every sentence's structure;\n"
-                "- share NO run of MORE THAN 4 consecutive words with the original — the single most "
-                "important rule;\n"
+                # FU275 — the brief, rewritten. What was here was thirty unexplained MUSTs whose
+                # FIRST rule ("share no run of more than 4 consecutive words — the single most
+                # important rule") is impossible on factual prose ("the Food and Drug Administration"
+                # is five words) AND is contradicted two lines later by "every table verbatim, every
+                # heading character-for-character". A model that finds rule #1 cannot be obeyed
+                # literally learns the rules here are not literal, which licenses ignoring the rest.
+                # It also explains both measured failure modes at once: facing the contradiction the
+                # model either over-preserves (overlap 0.55) or breaks a preserved item (the dropped
+                # facts that made 31% of sections fall back to the original).
+                #
+                # So: state the JOB and what the page is FOR, make meaning a boundary rather than a
+                # competing priority, and let the model derive the rules it was previously handed.
+                f"Rewrite ONE SECTION of a {name} article. Your job is to say exactly what it says, "
+                "in different words.\n\n"
+                "EVERYTHING WRITTEN MUST STILL BE THERE AFTERWARDS. Every fact, figure, claim, "
+                "qualifier and distinction survives — nothing added, nothing changed, nothing left "
+                "out. Dropping a qualifier is as wrong as inventing one: if the text calls a result "
+                "the FASTEST documented, or reporting SCREENSHOT-VERIFIED engine by engine, that "
+                "claim must still be there in new wording. No claim may come out stronger or weaker "
+                "than it went in, and you may not add a fact, figure, or word of praise the text "
+                "does not contain. The result must read as natural, publishable English.\n\n"
+                "WHY THE REWORDING MUST BE THOROUGH: the original was written by another AI whose "
+                "word choices carry a hidden statistical mark. It lives in the DISCRETIONARY wording "
+                "and its immediate context, not in the facts — so paraphrase has to be real, not "
+                "cosmetic:\n"
+                "- REPLACE every discretionary word (connectives, transitions, adjectives, verbs, "
+                "adverbs, sentence openers) and RECAST every sentence's structure;\n"
+                "- the longer a run of the original's consecutive words you keep, the more of the "
+                "mark you keep with it — so keep none you do not have to;\n"
+                "- NEVER TRADE MEANING FOR NOVELTY. If the only way to change a phrase is to change "
+                "what it says, keep what it says. A preserved item below costs you nothing: those "
+                "are EXEMPT, and you reword around them.\n"
                 "- REORDER clauses and sentences wherever the meaning allows;\n"
                 "- reword right up to each preserved item (never leave the original phrasing touching one).\n\n"
                 "PRESERVE EXACTLY: every [S#] citation marker (keep each on the claim it supports); every "
                 "number, dose, %, price and date; every product/drug/brand name; every Markdown table "
-                "(structure and cell values, verbatim); every heading line and every line that is entirely "
-                "bold text (a section label) character-for-character; every BOLD LEAD-IN LABEL at the START of a "
-                "paragraph or list item (\"**Quick answer:**\", \"- **Hematocrit Elevation:**\") — keep "
-                "the bold and its EXACT words, reword only the text after it; and every NEGATION or clinical "
+                "(structure and cell values, verbatim); every heading line character-for-character; "
+                # FU275 — OPERATOR'S RULE: anything bold is preserved, wherever it sits. Previously
+                # only a fully-bold LINE and a bold lead-in LABEL were protected, so a bold phrase
+                # mid-sentence was ordinary prose. Uniform is simpler to obey, and it gives the
+                # operator a control surface: bold whatever must survive, and it survives.
+                # The grammar caveat is not optional — FU252 measured that preserving a bold phrase
+                # while rewording around it leaves a bold SUBJECT stranded without its verb.
+                "EVERY BOLD SPAN, wherever it appears — a whole bold line, a BOLD LEAD-IN LABEL "
+                "(\"**Quick answer:**\", \"- **Hematocrit Elevation:**\"), or a bold phrase in the "
+                "middle of a sentence: keep the bold markers and the EXACT words inside them, and "
+                "reword around them. Where a bold span is the SUBJECT of its sentence rather than a "
+                "label, what you write after it must agree with it and complete the sentence — a "
+                "preserved subject left without its verb is a broken sentence, not a preserved one; "
+                "and every NEGATION or clinical "
                 "directive with its exact scope ('not', 'no', 'contraindicated', 'only', 'required', "
                 "'not FDA-approved', 'not a controlled substance').\n"
                 "Descriptive factual and regulatory sentences (definitions, eligibility ranges, "
                 "certifications, pricing prose, timelines, process steps) MUST be recast — do NOT leave one "
                 "near-verbatim. Keep a sentence word-for-word ONLY if it is a contraindication, a dosing "
                 "schedule, or a safety negation whose scope you cannot preserve while rewording.\n"
-                # FU274 — this is the PRIMARY path for a long article, so the opener rule has to be here
-                # too; fixing only the whole-article prompt would have changed nothing for these three.
-                "If an answer under a question heading begins with a direct word (\"Yes.\", \"No.\", "
-                "\"Not reliably.\", \"Not necessarily.\"), KEEP THAT OPENING WORD EXACTLY and reword only "
-                "what follows it — it is the answer an engine quotes, not prose to vary.\n"
+                # FU275 — WHAT THIS PAGE IS. The section prompt said this NOWHERE: zero mentions of
+                # an AI engine, of being quoted, of retrievability. So the rewriter was rewording a
+                # page without knowing what it is for, and "Not reliably." -> "The reliability is
+                # questionable." is a perfectly good edit under that brief. It is only catastrophic
+                # if you know the first word is what an answer engine lifts. FU274 added the opener
+                # as rule #31 and the model ignored it; stating the PURPOSE lets it derive the rule
+                # — and the ones nobody wrote down.
+                f"WHAT THIS PAGE IS: {name}'s OWN page, published BY {name}, written to be quoted by "
+                "AI answer engines (ChatGPT, Perplexity, Google's AI Overviews). What those engines "
+                "lift is the shape of an answer: the FIRST WORD of a direct answer (\"Yes.\", "
+                "\"No.\", \"Not reliably.\"), the Quick answer, and the bold labels a reader scans. "
+                "Keep those shapes — a direct answer that becomes a hedged clause has been destroyed, "
+                f"not reworded. And because the page is {name}'s own, state {name}'s figures as "
+                "plainly as any competitor's: if a rival's numbers are 'reported' then so are "
+                f"{name}'s, and never hedge one side while leaving the other unqualified.\n"
                 + (extra_rules or "")   # FU212: the brand's writing instructions ("" when none)
                 + "Do NOT add a heading. Return ONLY the rewritten section text.\n"
                 # FU193 — the generic "no preamble, no commentary" half of this rule lost EIGHT times

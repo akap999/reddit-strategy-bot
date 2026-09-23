@@ -315,6 +315,73 @@ def _ncbi_api_text(url, max_chars=20000):
     return raw[:max_chars], "ncbi api"
 
 
+# ── FU270: rank a study by what it IS, not by the domain that served it ─────────────────────────
+# `_weak_study_design` reads a source's TITLE and spots only the weakest designs, and its own
+# docstring says why: "Nothing in the repo ranked study design; this is the minimum that makes the
+# weakest visible." Everything else about source quality is a domain allowlist.
+#
+# NCBI publishes the real thing. One batched call returns, per paper, its publication type and year:
+#
+#   41885859  2026  Journal Article, Randomized Controlled Trial   JAMA Network Open
+#   26655941  2016  Journal Article, Meta-Analysis, Systematic Review
+#   29537947  2018  Journal Article
+#
+# That is the standard evidence hierarchy, from the source itself. A 2016 systematic review and a
+# 2009 single study are not interchangeable, and until now nothing in the pipeline could tell them
+# apart — so the writer could not either.
+_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+# Ordered: the first pattern that matches wins, strongest first.
+_STUDY_LEVELS = (
+    (1, "systematic review", re.compile(r"meta[- ]analysis|systematic review", re.I)),
+    (2, "randomised trial", re.compile(r"randomized controlled trial|randomised controlled trial", re.I)),
+    (3, "clinical trial", re.compile(r"clinical trial|controlled trial", re.I)),
+    (4, "observational study", re.compile(r"observational|cohort|case[- ]control|cross[- ]sectional", re.I)),
+    (5, "practice guideline", re.compile(r"practice guideline|guideline", re.I)),
+    (8, "editorial or letter", re.compile(r"editorial|comment\b|letter|news|biography|interview", re.I)),
+    # A NARRATIVE review is closer to expert opinion than to a primary study — which is the same
+    # judgement `_WEAK_DESIGN_RE` already makes by title. It sits BELOW an ordinary paper, and an
+    # editorial below that. Getting this wrong is easy: the first version had the default at 8 and
+    # editorials at 7, which ranked an editorial ABOVE a research article.
+    (7, "review", re.compile(r"\breview\b", re.I)),
+)
+_STUDY_DEFAULT = (6, "journal article")
+
+
+def _study_level(pubtypes):
+    """(rank, plain name) for a paper's publication types. Lower rank is stronger evidence."""
+    blob = ", ".join(str(p) for p in (pubtypes or []))
+    for rank, name, rx in _STUDY_LEVELS:
+        if rx.search(blob):
+            return rank, name
+    return _STUDY_DEFAULT
+
+
+def ncbi_study_meta(pmids):
+    """{pmid: {"level", "design", "year", "journal"}} for up to 50 papers, in ONE call.
+
+    Batched on purpose: this is one HTTP request per article, not per source. Returns {} on any
+    trouble — a ranking we could not fetch must never stop a generation."""
+    ids = [str(p).strip() for p in (pmids or []) if str(p).strip().isdigit()][:50]
+    if not ids:
+        return {}
+    q = f"{_ESUMMARY}?db=pubmed&retmode=json&id={','.join(ids)}{_NCBI_TOOL}"
+    try:
+        req = _urlreq.Request(q, headers={"User-Agent": "Mozilla/5.0 (compatible; blog-sources/1.0)"})
+        with _urlreq.urlopen(req, timeout=25) as r:
+            res = json.loads(r.read().decode("utf-8", "replace")).get("result") or {}
+    except Exception as e:
+        print(f"[research] ncbi-meta: {len(ids)} id(s) failed ({type(e).__name__})", flush=True)
+        return {}
+    out = {}
+    for k in (res.get("uids") or []):
+        rec = res.get(k) or {}
+        rank, design = _study_level(rec.get("pubtype"))
+        out[str(k)] = {"level": rank, "design": design,
+                       "year": (str(rec.get("pubdate") or "")[:4] or ""),
+                       "journal": str(rec.get("fulljournalname") or "")[:60]}
+    return out
+
+
 def read_page(url, claude=None, cache=None, max_chars=20000):
     """Step B for one URL: our fetch first (direct → residential), Anthropic's web fetch when the
     page is walled or errored (never for a missing page). Returns (text, how) where how is

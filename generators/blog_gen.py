@@ -4887,6 +4887,7 @@ class BlogGenerator:
         # Stash the structured blocks (in [S#] order) so _rebuild_sources can rebuild the
         # article's ## Sources authoritatively. Always set (even when empty) so a stale value
         # from a prior call on this instance can't leak in.
+        self._tag_study_levels(blocks)   # FU270: rank each paper by what it IS, before rendering
         self._evidence_blocks = list(blocks)
         self._sources_render = None   # FU213: a fresh evidence map invalidates the last render
         if not blocks:
@@ -4914,6 +4915,8 @@ class BlogGenerator:
         for i, bl in enumerate(blocks, 1):
             src = f"{(bl.get('label') or '').strip()}" \
                 + (f" — {bl.get('url')}" if (bl.get("url") or "").strip() else "")
+            if bl.get("design"):      # FU270: what this source IS, so the writer can prefer it
+                src += f"  [{bl['design']}" + (f", {bl['year']}" if bl.get("year") else "") + "]"
             txt = (bl.get("text") or "").strip()
             cap = alw.get(i - 1, len(txt))
             if len(txt) > cap:
@@ -13946,6 +13949,45 @@ you MAY assume the description will carry: "{disc}".
             self._summary_sources.append((label, url, how))
         return {"label": label, "url": url, "text": body, "how": how,
                 "picked_because": gloss[:300]}
+
+    def _tag_study_levels(self, blocks):
+        """FU270 — mark each NCBI paper with WHAT IT IS: its design and year, from NCBI itself.
+
+        The writer could not previously tell a 2016 systematic review from a 2009 single study;
+        both arrived as "official · <title>". The evidence block says "earlier sources are more
+        authoritative", which is about gather order and says nothing about evidence level. One
+        batched call per article fills that in.
+
+        Written to a `design` field, never into the label: the label is a dedup key, and rewriting
+        it would break the title match that connects two routes to one paper."""
+        want = {}
+        for b in (blocks or []):
+            if not isinstance(b, dict) or b.get("design"):
+                continue
+            for k in _doc_ids_in_text(b.get("text")) + [_doc_identity(b.get("url"))]:
+                if str(k or "").startswith("pmid:"):
+                    want.setdefault(k.split(":", 1)[1], b)
+                    break
+        if not want:
+            return 0
+        try:
+            meta = _research.ncbi_study_meta(list(want))
+        except Exception:
+            return 0
+        n = 0
+        for pmid, b in want.items():
+            m = meta.get(pmid)
+            if not m:
+                continue
+            b["design"] = m["design"]
+            b["year"] = m["year"]
+            b["level"] = m["level"]
+            n += 1
+        if n:
+            print(f"[blog_gen] study-level: ranked {n} paper(s) — "
+                  + ", ".join(f"{(b.get('design') or '')} {(b.get('year') or '')}".strip()
+                              for b in list(want.values())[:4] if b.get("design")), flush=True)
+        return n
 
     def _source_read_note(self, blocks=None, ymyl=""):
         """FU267 (step 4) — what the operator needs to know about what was READ.

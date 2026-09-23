@@ -12625,6 +12625,37 @@ you MAY assume the description will carry: "{disc}".
         out = {m.group(1).strip() for m in re.finditer(r"\*\*([^*\n]{1,200}?)\*\*", body or "")}
         return sorted((x for x in out if x), key=len, reverse=True)
 
+    def _salvage_section(self, src, got):
+        """FU278 — keep the parts of a failed section that are FINE.
+
+        A section that failed its gate reverted WHOLE: one missing "a month" on a $6,000 threw away
+        ~230 words of good rewriting, and every reverted word is Claude's wording coming back, which
+        is the watermark this pass exists to remove. Measured on one article, 5 of 25 sections
+        reverted that way — roughly a quarter of the body, for two missing unit words.
+
+        The fallback unit should be the unit of FAILURE. Paragraphs are paired positionally and only
+        the ones that fail their OWN gate are taken from the input. The section-level revert is also
+        a coarser duplicate of what `rewrite_guard` already does per paragraph on the assembled
+        body, so this brings the two to the same granularity instead of the blunter one winning
+        first. When the shapes do not line up there is nothing safe to pair — a mis-pair would
+        splice unrelated text — so it reverts as before.
+
+        Returns (text, salvaged_any)."""
+        so = (src or "").split("\n\n")
+        sn = (got or "").split("\n\n")
+        if not got or len(so) != len(sn) or len(so) < 2:
+            return src, False
+        out, kept = [], 0
+        for o, n in zip(so, sn):
+            if not o.strip():
+                out.append(o)
+            elif self._section_gate(o, n):
+                out.append(o)                      # only THIS paragraph goes back
+            else:
+                out.append(n)
+                kept += 1
+        return ("\n\n".join(out), True) if kept else (src, False)
+
     def _section_gate(self, src, got):
         """FU274 — WHY this section's rewrite is unusable, or "" when it is fine.
 
@@ -12791,7 +12822,7 @@ you MAY assume the description will carry: "{disc}".
             # the FIRST miss shipped Claude's text verbatim for 31% of sections (23 of 74, measured),
             # and it did so SILENTLY: `writer_overlap` then reads as a weak rewrite when the truth is
             # that no rewrite happened there at all. Same shape as FU221's paragraph ladder.
-            got, why = "", ""
+            got, why, last = "", "", ""
             for _try in range(_SECTION_TRIES):
                 _p = prompt if not why else (
                     prompt + f"\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED because it {why}. Rewrite the "
@@ -12813,9 +12844,13 @@ you MAY assume the description will carry: "{disc}".
                 why = self._section_gate(src, got)
                 if not why:
                     break
+                last = got or last
                 got = ""
-            body_txt = got if got else chunk                 # safe degradation → keep the original section
-            return i, ((head + "\n" + body_txt) if head is not None else body_txt), bool(got), why
+            if got:
+                body_txt, _salv = got, True
+            else:   # FU278 — revert only the PARAGRAPH that failed, not the whole section
+                body_txt, _salv = self._salvage_section(src, last)
+            return i, ((head + "\n" + body_txt) if head is not None else body_txt), bool(got) or _salv, why
 
         # FU173: run the sections CONCURRENTLY. This was the dominant cost of a rewrite — 16 sections
         # issued one at a time (~20-25s each) is ~5-6 minutes of pure round-trip latency, while vLLM

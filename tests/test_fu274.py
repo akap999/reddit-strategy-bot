@@ -503,3 +503,82 @@ def test_a_bolded_direct_opener_still_counts_as_direct():
     orig = "## FAQ\n### Are AI summaries reducing clicks?\n**Yes.** Pew found 8% versus 15%.\n"
     rew = "## FAQ\n### Are AI summaries reducing clicks?\n**Yes.** Pew measured 8% against 15%.\n"
     assert _probe(orig, rew)["faq_direct"] == (1, 1)
+
+
+# ── FU278: the fallback unit is the unit of failure ──────────────────────────────────────────────
+# Operator: "reverting the entire section just because of one word/term does not make sense."
+# Measured on blog 253: 5 of 25 sections reverted WHOLE, and the ones that fail are the big ones —
+# "$25 million ... annual" sits in a 229-word section, "$6,000 a month" in a 155-word one. So two
+# missing unit words cost roughly a quarter of the article, and every reverted word is Claude's
+# wording coming back, which is the watermark this pass exists to remove.
+
+def _g():
+    g, _ = _gen([""])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    g._price_cadence_ok = lambda a, b: (True, [])
+    g._section_atoms = []
+    return g
+
+
+GOOD_O = "Victorious calls itself a 5x SEO Agency of the Year and lists many awards won."
+GOOD_N = "Describing itself as a 5x SEO Agency of the Year, the firm lists numerous awards."
+BAD_O = "It recommends a minimum of $6,000 a month for SEO with a 12-month commitment."
+BAD_N = "A floor of $6,000 is recommended for SEO work, on a 12-month commitment."
+
+
+def test_only_the_failing_paragraph_goes_back():
+    g = _g()
+    g._price_cadence_ok = lambda a, b: (("a month" in a) <= ("a month" in b), ["$6,000 MONTH"])
+    out, salvaged = g._salvage_section(f"{GOOD_O}\n\n{BAD_O}", f"{GOOD_N}\n\n{BAD_N}")
+    assert salvaged
+    assert GOOD_N in out, "the good paragraph keeps its rewrite"
+    assert BAD_O in out, "only the failing paragraph reverts"
+    assert BAD_N not in out
+
+
+def test_a_section_whose_every_paragraph_fails_still_reverts_whole():
+    g = _g()
+    g._price_cadence_ok = lambda a, b: (False, ["x"])
+    src = f"{GOOD_O}\n\n{BAD_O}"
+    out, salvaged = g._salvage_section(src, f"{GOOD_N}\n\n{BAD_N}")
+    assert out == src and not salvaged
+
+
+def test_mismatched_shapes_are_not_paired():
+    """Positional pairing across a different paragraph count would splice unrelated text into the
+    article — the FU176 mis-pair failure. There is nothing safe to salvage, so it reverts."""
+    g = _g()
+    src = f"{GOOD_O}\n\n{BAD_O}"
+    out, salvaged = g._salvage_section(src, f"{GOOD_N} {BAD_N}")   # merged into one paragraph
+    assert out == src and not salvaged
+
+
+def test_a_salvaged_section_counts_as_reworded():
+    """It IS partly rewritten, so reporting it as a pass-through would understate the strip and
+    send the operator chasing a problem that is no longer there."""
+    g = _g()
+    g._price_cadence_ok = lambda a, b: (("a month" in a) <= ("a month" in b), ["x"])
+    _out, salvaged = g._salvage_section(f"{GOOD_O}\n\n{BAD_O}", f"{GOOD_N}\n\n{BAD_N}")
+    assert salvaged is True
+
+
+def test_a_single_paragraph_section_has_nothing_to_salvage():
+    g = _g()
+    g._price_cadence_ok = lambda a, b: (False, ["x"])
+    out, salvaged = g._salvage_section(BAD_O, BAD_N)
+    assert out == BAD_O and not salvaged
+
+
+def test_a_failing_section_is_salvaged_rather_than_reverted_end_to_end():
+    """Through `_rewrite_sections`, not the helper — the whole-section revert lived at the CALL
+    SITE, so asserting on `_salvage_section` alone leaves it untouched."""
+    body = f"## Victorious\n{GOOD_O}\n\n{BAD_O}\n"
+    g, seen = _gen([f"{GOOD_N}\n\n{BAD_N}"])
+    g._facts_preserved = lambda a, b, *x: (True, [])
+    # the cadence gate fails wherever "a month" was dropped — i.e. only the second paragraph
+    g._price_cadence_ok = lambda a, b: (("a month" in a) <= ("a month" in b), ["$6,000 MONTH"])
+    out = g._rewrite_sections(body, "Victorious", timeout=5)
+    assert out, "a section with one salvageable paragraph must not come back empty"
+    assert GOOD_N in out, "the good paragraph keeps its rewrite instead of the section reverting"
+    assert BAD_O in out and BAD_N not in out, "only the failing paragraph goes back"
+    assert len(seen) == 2, "it still retried before salvaging"

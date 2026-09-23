@@ -494,3 +494,12 @@ def test_the_section_pass_is_actually_given_the_atoms():
     call = src[src.index("self._rewrite_sections("):][:400]
     assert "atoms=" in call, "the section pass must be handed the per-article fact list"
     assert "atoms=()" not in call, "and not an empty one"
+
+
+def test_a_bolded_direct_opener_still_counts_as_direct():
+    """The operator bolds "**Yes.**" precisely BECAUSE it is load-bearing. A probe that reads it as
+    "not a direct answer" reports the article as having none — which is what it did, returning
+    0 of 0 on the bolded version and hiding the only measurement that mattered."""
+    orig = "## FAQ\n### Are AI summaries reducing clicks?\n**Yes.** Pew found 8% versus 15%.\n"
+    rew = "## FAQ\n### Are AI summaries reducing clicks?\n**Yes.** Pew measured 8% against 15%.\n"
+    assert _probe(orig, rew)["faq_direct"] == (1, 1)

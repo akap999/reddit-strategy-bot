@@ -49,7 +49,11 @@ def _faq_answers(body):
 
 
 def _direct(ans):
-    return any(ans.split(".")[0].strip() == d or ans.startswith(d + ",") for d in DIRECT)
+    # Strip markdown emphasis first: the operator bolds a direct opener precisely BECAUSE it is
+    # load-bearing, and "**Yes.**" must not read as an opener that was lost. The first version of
+    # this probe reported 0 of 0 direct openers on a bolded article for exactly that reason.
+    a = re.sub(r"[*_`]", "", ans or "").strip()
+    return any(a.split(".")[0].strip() == d or a.startswith(d + ",") for d in DIRECT)
 
 
 def probe(orig, rew, brand=""):

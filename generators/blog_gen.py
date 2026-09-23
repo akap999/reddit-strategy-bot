@@ -14077,7 +14077,21 @@ you MAY assume the description will carry: "{disc}".
                 where[ref] = (li, ci, unit, claim)
         if not cands:
             return body, ""
-        cands = cands[:self._CITED_JUDGE_MAX]
+        # FU266c — the judge is the last line of defence and it stopped at claim 14 IN READING
+        # ORDER, with no signal that it had. That is the same shape as the defect this whole check
+        # exists to fix, one level up: the head of an article names the topic and the tail carries
+        # the assertions, so conclusions and FAQ answers — least sourced, most likely to be
+        # unsupported — fell off the end. Rank by how little of the claim the page carries, so the
+        # budget is spent on the least supported claims wherever they sit, and SAY when it bites.
+        _over = ""
+        if len(cands) > self._CITED_JUDGE_MAX:
+            def _need(c):
+                _t = " ".join(pages[u]["text"] for u in c["urls"])
+                _h, _k = self._claim_tokens_on_page(c["text"], _t, topic)
+                return (len(_h) / len(_k)) if _k else 1.0
+            cands = sorted(cands, key=_need)[:self._CITED_JUDGE_MAX]
+            _over = (f"; only the {self._CITED_JUDGE_MAX} least-supported were checked — "
+                     f"regenerate rather than publish if this matters")
         verdicts = self._vx_judge_pages(cands, pages)
         hits = []
         for ref, v in (verdicts or {}).items():
@@ -14094,7 +14108,7 @@ you MAY assume the description will carry: "{disc}".
         if len(hits) > self._FAB_MAX_DROP:
             return body, (f"cited-claim: {len(hits)} claim(s) are not supported by the page they "
                           f"cite ({shown}) — too many to remove safely, so nothing was changed; "
-                          f"regenerate rather than publish")
+                          f"regenerate rather than publish{_over}")
         lines = body.split("\n")
         out, applied, widened, refused = _apply_removals_without_damage(lines, hits)
         bits = [f"removed {applied}"] if applied else []
@@ -14105,7 +14119,7 @@ you MAY assume the description will carry: "{disc}".
         if not bits:
             return out, ""
         return out, (f"cited-claim: {len(hits)} claim(s) the cited page does not support "
-                     f"({shown}); " + ", ".join(bits))
+                     f"({shown}); " + ", ".join(bits) + _over)
 
     # ── FU266: a brand's own page outranks a marketplace listing ─────────────────────────────────
     # Operator's decision. The reported case: Dr. Brown's "breast-like nipple shape … eases the
@@ -14328,9 +14342,17 @@ you MAY assume the description will carry: "{disc}".
                     if v:
                         hits.append(("sent", li, sent, v))
         if len(hits) > self._FAB_MAX_DROP:
-            return body, ("source-check: %d claim(s) rest on a source that could not be read, or say "
-                          "something their source does not — too many to remove safely, so nothing "
-                          "was changed; regenerate rather than publish" % len(hits))
+            # FU266c — return the EDITED lines, not `body`. `_replace_walled_cite` mutates `lines`
+            # in place, so returning the pre-mutation string threw away every citation successfully
+            # re-pointed to a readable source — the repairs were reverted along with the removals
+            # that were declined, and the note never mentioned them. `_retail_claim_check` and
+            # `_uncited_study_check` both return their edited copy here; this was the odd one out.
+            _kept = ("; " + "re-pointed " + ", ".join(f'“{c}” → [S{n}]' for c, n in replaced[:3])
+                     + " to a source we did read") if replaced else ""
+            return "\n".join(lines), (
+                "source-check: %d claim(s) rest on a source that could not be read, or say "
+                "something their source does not — too many to remove safely, so those were left "
+                "alone; regenerate rather than publish%s" % (len(hits), _kept))
         # FU251: each removal is applied on its own and the result inspected — one that strands the
         # sentence after it, blanks a Source cell or leaves a fragment is widened or refused.
         out, applied, widened, refused = _apply_removals_without_damage(lines, hits)

@@ -35,12 +35,20 @@ import subprocess
 import modal
 
 # --- what to serve ---------------------------------------------------------------------------
-# Qwen2.5-72B-Instruct in 4-bit AWQ (~40GB) → fits a single 80GB A100. The strongest open writing
-# quality (closest to Claude). Pure instruct model — no "thinking mode" that would leak <think>
-# traces into the blog. To go cheaper: "Qwen/Qwen2.5-32B-Instruct-AWQ" on GPU "A100-40GB".
-MODEL_REPO = "Qwen/Qwen2.5-72B-Instruct-AWQ"   # what vLLM downloads + loads (4-bit, ~40GB)
-SERVED_NAME = "qwen-writer"                     # the "model" id clients send → set the app's Model to THIS
-GPU = "A100-80GB"                               # 80GB — fits 72B AWQ + KV cache on ONE GPU
+# Qwen3-32B at bf16 (~64GB) on a single 80GB H100 — FULL PRECISION, no quantization.
+# Replaces Qwen2.5-72B-Instruct-AWQ, which was a 72B squeezed to 4 bits (~40GB, about a 40B model's
+# memory). Quantization damages INSTRUCTION-FOLLOWING far more than fluency, and that was the
+# measured failure: the prose read fine, but the model could not hold ~30 constraints or act on a
+# correction — "ensure" survived a retry, a second retry AND a surgical "make the smallest possible
+# edit, change nothing else" pass, three times over, and "boasts"/"comprehensive" kept reappearing.
+# The bet is that a NEWER generation at FULL precision beats an older one at 4-bit; 32B is fewer
+# parameters than 72B, so it IS a bet. Ladder if it disappoints: Qwen2.5-72B at FP8 (isolates
+# quantization alone, but ~72GB is tight on an 80GB card), then Qwen3-235B-A22B on a larger box.
+# Qwen3 has a hybrid thinking mode — disabled below. Its leak would be a literal <think> tag, not
+# gpt-oss's unlabelled channel that is documented to merge into message.content (vLLM #32125).
+MODEL_REPO = "Qwen/Qwen3-32B"                   # what vLLM downloads + loads (bf16, ~64GB)
+SERVED_NAME = "qwen-writer"                     # UNCHANGED: keeps the app, DB and Settings untouched
+GPU = "H100"                                    # 80GB — 64GB of weights leaves real KV-cache headroom
 PORT = 8000
 MINUTES = 60
 
@@ -60,9 +68,10 @@ def _predownload_model():
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "vllm==0.8.5",            # supports Qwen2.5 AWQ; brings its own huggingface_hub (>=0.30)
-        "transformers==4.51.3",   # PIN to what vLLM 0.8.5 was built against — a newer transformers
-                                  # removed Qwen2Tokenizer.all_special_tokens_extended → load crash
+        "vllm>=0.10.1",           # Qwen3 support; 0.8.5 predates it
+        # The transformers==4.51.3 pin is GONE. It existed only because a newer transformers removed
+        # Qwen2Tokenizer.all_special_tokens_extended and crashed the Qwen2.5 load — it does not apply
+        # to Qwen3 and would hold vLLM back.
     )
     # Download the weights during BUILD (once) into the Volume. Runs on stable CPU build capacity,
     # not the request-driven GPU container, so it isn't interrupted by A100 preemption.
@@ -102,8 +111,14 @@ def serve():
         "--port", str(PORT),
         "--api-key", os.environ["WRITER_API_KEY"],
         "--served-model-name", SERVED_NAME,
-        "--max-model-len", "24576",     # prompt (rewrite feeds the full article) + up to ~9k output
-        "--enforce-eager",              # skip CUDA-graph capture → much faster startup (fine for our low volume)
-        # vLLM auto-detects AWQ 4-bit from the model config — no --quantization flag needed.
+        "--max-model-len", "32768",     # prompt (rewrite feeds the full article) + up to ~9k output
+        # Qwen3 ships a hybrid thinking mode. Off, server-side, so no application change is needed.
+        # If this vLLM build rejects the flag the container will not start and Settings ->
+        # "Test connection" reports `unreachable`; the fallback is to send
+        # "chat_template_kwargs": {"enable_thinking": False} from WriterClient.call_text instead.
+        "--chat-template-kwargs", '{"enable_thinking": false}',
+        # "--enforce-eager",            # was for a cold 72B AWQ load; try WITHOUT it on 32B bf16
+        #                               # and compare startup before adding it back.
+        # bf16 needs no --quantization flag.
     ]
     subprocess.Popen(" ".join(cmd), shell=True)

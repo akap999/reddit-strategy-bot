@@ -120,9 +120,13 @@ def serve():
         "--enforce-eager",              # NO CUDA-graph capture. It costs GPU memory AND startup
                                         # time; the original config had it for exactly this reason.
         "--gpu-memory-utilization", "0.95",   # 0.92 default; vLLM itself suggests ~0.95 here
-        "--kv-cache-dtype", "fp8",      # halves the KV cache. WEIGHTS stay bf16 — this is the
-                                        # cache only, and full-precision weights are the whole
-                                        # point of the move off 4-bit AWQ.
+        # NOT --kv-cache-dtype fp8. It was tried and the engine died with
+        #     RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda'
+        # because an fp8 KV cache JIT-compiles a kernel and this image (debian_slim + pip vllm)
+        # carries no CUDA toolkit. It is also unnecessary: at 0.95 utilisation the budget is
+        # 76 GiB usable - 61 GiB weights - ~3 GiB workspace = ~12 GiB for KV, and 24576 tokens
+        # need ~6 GiB (vLLM reported 8 GiB for 32768). The original 5.73 GiB shortfall was caused
+        # by CUDA-graph capture plus 0.92 utilisation, and both are already fixed above.
         # NOTE: `--chat-template-kwargs` is NOT a vllm serve flag in this build — it was tried and
         # the container refused to start ("unrecognized arguments"). Thinking is turned off PER
         # REQUEST in WriterClient.call_text instead. That also avoids this list's shell-quoting

@@ -936,7 +936,8 @@ def test_the_serve_command_keeps_its_memory_headroom():
     cmd = src.split("cmd = [")[1].split("\n    ]")[0]
     assert '"--enforce-eager"' in cmd, "CUDA-graph capture costs the memory that broke the deploy"
     assert '"24576"' in cmd, "the known-good context length"
-    assert '"--kv-cache-dtype", "fp8"' in cmd, "halves the KV cache; weights stay bf16"
+    assert '"--kv-cache-dtype"' not in cmd, \
+        "an fp8 KV cache JIT-compiles a kernel; this image has no CUDA toolkit and the engine dies"
     assert '"--gpu-memory-utilization"' in cmd
     assert 'MODEL_REPO = "Qwen/Qwen3-32B"' in src
     assert 'SERVED_NAME = "qwen-writer"' in src, "must stay, or the app needs changes"

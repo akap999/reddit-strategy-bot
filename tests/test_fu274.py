@@ -903,3 +903,25 @@ def test_no_vertical_is_named_in_the_new_examples():
     p = _extract_prompt().split("ALSO INCLUDE the words a CLAIM")[1][:700]
     for word in ("SEO", "agency", "Jolly", "tirzepatide", "bottle", "telehealth"):
         assert word.lower() not in p.lower(), f"{word!r} would hard-code a vertical"
+
+
+# ── FU285: thinking is turned off PER REQUEST ────────────────────────────────────────────────────
+# `--chat-template-kwargs` is not a `vllm serve` flag in the build we run. It was tried and the
+# container refused to start:
+#     vllm: error: unrecognized arguments: --chat-template-kwargs {enable_thinking: false}
+# (the shell join also stripped the JSON quoting, so it was wrong twice). Qwen3's hybrid thinking
+# would otherwise arrive as literal <think>...</think> inside the published prose.
+
+def test_the_writer_turns_thinking_off_on_every_call():
+    import inspect
+    from generators.base import WriterClient
+    src = inspect.getsource(WriterClient.call_text)
+    assert '"chat_template_kwargs": {"enable_thinking": False}' in src
+
+
+def test_the_rejected_serve_flag_is_not_back():
+    """It cost a failed deploy; a future edit must not reintroduce it."""
+    src = open("deploy.py", encoding="utf-8").read()
+    body = src.split("cmd = [")[1].split("]")[0]
+    assert "--chat-template-kwargs" not in body, \
+        "vllm serve rejects this flag — thinking is disabled per request instead"

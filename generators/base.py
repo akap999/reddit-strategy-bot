@@ -476,8 +476,14 @@ class WriterClient:
                 f"{self.endpoint_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}",
                          "Content-Type": "application/json"},
+                # FU285: Qwen3 ships a hybrid thinking mode, and its reasoning would otherwise
+                # arrive as literal <think>...</think> inside the published prose. vLLM has no
+                # serve-side flag for this in the build we run (`--chat-template-kwargs` is
+                # rejected at startup), so it is sent per request. Harmless to any model that does
+                # not use a chat template supporting it.
                 json={"model": self.model, "messages": messages,
-                      "max_tokens": max_tokens, "temperature": temperature},
+                      "max_tokens": max_tokens, "temperature": temperature,
+                      "chat_template_kwargs": {"enable_thinking": False}},
                 timeout=timeout,
             )
             if resp.status_code != 200:

@@ -112,11 +112,11 @@ def serve():
         "--api-key", os.environ["WRITER_API_KEY"],
         "--served-model-name", SERVED_NAME,
         "--max-model-len", "32768",     # prompt (rewrite feeds the full article) + up to ~9k output
-        # Qwen3 ships a hybrid thinking mode. Off, server-side, so no application change is needed.
-        # If this vLLM build rejects the flag the container will not start and Settings ->
-        # "Test connection" reports `unreachable`; the fallback is to send
-        # "chat_template_kwargs": {"enable_thinking": False} from WriterClient.call_text instead.
-        "--chat-template-kwargs", '{"enable_thinking": false}',
+        # NOTE: `--chat-template-kwargs` is NOT a vllm serve flag in this build — it was tried and
+        # the container refused to start ("unrecognized arguments"). Thinking is therefore turned
+        # off PER REQUEST, in WriterClient.call_text, which also avoids the shell-quoting problem
+        # this list has (the argv is joined and run through a shell, so embedded JSON loses its
+        # quotes).
         # "--enforce-eager",            # was for a cold 72B AWQ load; try WITHOUT it on 32B bf16
         #                               # and compare startup before adding it back.
         # bf16 needs no --quantization flag.

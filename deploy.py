@@ -65,8 +65,15 @@ def _predownload_model():
     snapshot_download(MODEL_REPO)
 
 
+# FU285f — a CUDA *devel* base, not debian_slim. vLLM 0.30 JIT-COMPILES kernels at startup
+# (`enable_jit_warmup=True`, `enable_flashinfer_autotune=True` in its KernelConfig), and every one
+# of those needs nvcc. On a pip-only slim image the engine dies with
+#     RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist
+# It was fixed twice one caller at a time — the fp8 KV cache, then FlashInfer's sampler — and a
+# third caller appeared each time. The class fix is to ship a compiler; `-devel` carries nvcc where
+# `-runtime` and debian_slim do not. Bigger image, slower first build, no more of these.
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.11")
     .pip_install(
         "vllm>=0.10.1",           # Qwen3 support; 0.8.5 predates it
         # The transformers==4.51.3 pin is GONE. It existed only because a newer transformers removed

@@ -939,7 +939,12 @@ def test_the_serve_command_keeps_its_memory_headroom():
     assert '"--kv-cache-dtype"' not in cmd, \
         "an fp8 KV cache JIT-compiles a kernel; this image has no CUDA toolkit and the engine dies"
     assert '"--gpu-memory-utilization"' in cmd
-    assert 'VLLM_USE_FLASHINFER_SAMPLER": "0"' in src, \
-        "FlashInfer's sampler JIT-compiles and needs nvcc, which this image has not got"
+    # Scoped to the image BLOCK with comment lines dropped — the prose explaining why we left
+    # debian_slim behind naturally contains the word, and matching that is matching nothing.
+    img = "\n".join(l for l in src.split("vllm_image = (")[1].split("\n)")[0].split("\n")
+                    if not l.strip().startswith("#"))
+    assert "nvidia/cuda" in img and "devel" in img, \
+        "vLLM 0.30 JIT-compiles kernels at startup; a -devel base is what carries nvcc"
+    assert "debian_slim" not in img, "a pip-only slim image has no compiler and the engine dies"
     assert 'MODEL_REPO = "Qwen/Qwen3-32B"' in src
     assert 'SERVED_NAME = "qwen-writer"' in src, "must stay, or the app needs changes"

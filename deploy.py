@@ -73,6 +73,14 @@ vllm_image = (
         # Qwen2Tokenizer.all_special_tokens_extended and crashed the Qwen2.5 load — it does not apply
         # to Qwen3 and would hold vLLM back.
     )
+    # FU285e — vLLM 0.30 picks FlashInfer for SAMPLING by default and JIT-COMPILES that kernel on
+    # first use, which needs nvcc. This image is debian_slim + pip vllm and carries no CUDA toolkit,
+    # so the engine died during its warmup profile:
+    #     flashinfer_sample -> gen_sampling_module().build_and_load() -> get_cuda_path()
+    #     RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist
+    # The native sampler needs no compiler and is fine at this volume. (Attention is unaffected —
+    # the log shows vLLM selecting FLASH_ATTN, not FlashInfer, for that.)
+    .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
     # Download the weights during BUILD (once) into the Volume. Runs on stable CPU build capacity,
     # not the request-driven GPU container, so it isn't interrupted by A100 preemption.
     .run_function(_predownload_model, volumes={HF_CACHE_PATH: hf_cache}, timeout=60 * MINUTES)

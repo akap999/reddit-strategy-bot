@@ -111,14 +111,22 @@ def serve():
         "--port", str(PORT),
         "--api-key", os.environ["WRITER_API_KEY"],
         "--served-model-name", SERVED_NAME,
-        "--max-model-len", "32768",     # prompt (rewrite feeds the full article) + up to ~9k output
+        # MEMORY, learned the hard way. Qwen3-32B in bf16 is 61 GiB of weights on an 80 GiB card,
+        # which leaves far less headroom than the 40 GiB AWQ build did. The first attempt raised
+        # max-model-len to 32768 AND dropped --enforce-eager, and the engine refused to start:
+        #     Available KV cache memory: 5.73 GiB  ->  _check_enough_kv_cache_memory ValueError
+        # Both changes spent memory that is no longer there. Three levers, all restored/added:
+        "--max-model-len", "24576",     # back to the known-good length: prompt + article + ~9k out
+        "--enforce-eager",              # NO CUDA-graph capture. It costs GPU memory AND startup
+                                        # time; the original config had it for exactly this reason.
+        "--gpu-memory-utilization", "0.95",   # 0.92 default; vLLM itself suggests ~0.95 here
+        "--kv-cache-dtype", "fp8",      # halves the KV cache. WEIGHTS stay bf16 — this is the
+                                        # cache only, and full-precision weights are the whole
+                                        # point of the move off 4-bit AWQ.
         # NOTE: `--chat-template-kwargs` is NOT a vllm serve flag in this build — it was tried and
-        # the container refused to start ("unrecognized arguments"). Thinking is therefore turned
-        # off PER REQUEST, in WriterClient.call_text, which also avoids the shell-quoting problem
-        # this list has (the argv is joined and run through a shell, so embedded JSON loses its
-        # quotes).
-        # "--enforce-eager",            # was for a cold 72B AWQ load; try WITHOUT it on 32B bf16
-        #                               # and compare startup before adding it back.
-        # bf16 needs no --quantization flag.
+        # the container refused to start ("unrecognized arguments"). Thinking is turned off PER
+        # REQUEST in WriterClient.call_text instead. That also avoids this list's shell-quoting
+        # problem: the argv is joined and run through a shell, so embedded JSON loses its quotes.
+        # bf16 weights need no --quantization flag.
     ]
     subprocess.Popen(" ".join(cmd), shell=True)

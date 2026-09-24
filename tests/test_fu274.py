@@ -925,3 +925,18 @@ def test_the_rejected_serve_flag_is_not_back():
     body = src.split("cmd = [")[1].split("]")[0]
     assert "--chat-template-kwargs" not in body, \
         "vllm serve rejects this flag — thinking is disabled per request instead"
+
+
+def test_the_serve_command_keeps_its_memory_headroom():
+    """Qwen3-32B in bf16 is 61 GiB of weights on an 80 GiB card — far less headroom than the 40 GiB
+    AWQ build. Raising max-model-len and dropping --enforce-eager together left 5.73 GiB for KV
+    cache and the engine refused to start. Each lever is pinned so a future edit cannot quietly
+    spend that memory again."""
+    src = open("deploy.py", encoding="utf-8").read()
+    cmd = src.split("cmd = [")[1].split("\n    ]")[0]
+    assert '"--enforce-eager"' in cmd, "CUDA-graph capture costs the memory that broke the deploy"
+    assert '"24576"' in cmd, "the known-good context length"
+    assert '"--kv-cache-dtype", "fp8"' in cmd, "halves the KV cache; weights stay bf16"
+    assert '"--gpu-memory-utilization"' in cmd
+    assert 'MODEL_REPO = "Qwen/Qwen3-32B"' in src
+    assert 'SERVED_NAME = "qwen-writer"' in src, "must stay, or the app needs changes"

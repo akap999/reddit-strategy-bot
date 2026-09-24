@@ -44,7 +44,7 @@ from config import (
 from db import Database
 from generators.base import ClaudeClient, WriterClient
 from generators.subreddit_gen import SubredditGenerator
-from generators.post_gen import PostGenerator
+from generators.post_gen import PostGenerator, body_names_target
 from generators.comment_gen import CommentGenerator
 from generators.blog_gen import scrub_markdown_formatting   # FU201
 
@@ -5803,7 +5803,13 @@ def api_regenerate_post_body(pid):
                 brands = [pb]
         if not brands:
             return jsonify({"error": "post has no linked brand to ground the body"}), 400
-        body = post_gen.regenerate_body(post, brands)
+        # FU286: nothing on the row records brand-mention mode, so read it off the body
+        # being replaced — a post generated WITH the brand keeps it after a regenerate.
+        # An explicit brand_mention in the request wins (lets the UI flip it either way).
+        _bm_req = (request.get_json(silent=True) or {}).get("brand_mention")
+        brand_mention = (bool(_bm_req) if _bm_req is not None
+                         else body_names_target(post.get("body"), brands))
+        body = post_gen.regenerate_body(post, brands, brand_mention=brand_mention)
         if not body:
             return jsonify({"error": "regeneration returned no body"}), 502
         db.update_post_body(pid, body)
@@ -10239,6 +10245,9 @@ def api_live_posts_generate():
     ai_search = bool(data.get("ai_search", False))
     general = bool(data.get("general", False))  # opt-in natural-human style (title + body)
     entropy = bool(data.get("entropy", False))  # FU101: opt-in anti-fingerprint texture overlay
+    # FU286: opt-in BRAND MENTION — the one mode where a post BODY names the target brand. Works
+    # across every intent, and bans all OTHER company names while it is on (comparison included).
+    brand_mention = bool(data.get("brand_mention", False))
     # Optional pasted REAL fan-out queries (captured from ChatGPT/Perplexity/Gemini)
     # — folded into the cluster with region-dedup before generation.
     observed_queries = [str(q).strip() for q in (data.get("observed_queries") or []) if str(q).strip()]
@@ -10348,7 +10357,8 @@ def api_live_posts_generate():
                 seed=seed, ai_search=ai_search, observed_queries=observed_queries,
                 target_rewrites=target_rewrites,
                 follow_persona=bool(data.get("follow_persona")),
-                persona=data.get("persona"), general=general, entropy=entropy)
+                persona=data.get("persona"), general=general, entropy=entropy,
+                brand_mention=brand_mention)
 
             # Live-Reddit dedup pass is now informational only — we no
             # longer split into kept/skipped because duplicate titles
@@ -10648,6 +10658,9 @@ def api_live_posts_custom():
     force = bool(data.get("force", False))
     general = bool(data.get("general", False))  # opt-in natural-human style — BODY only (title stays verbatim, FU101)
     entropy = bool(data.get("entropy", False))  # FU101: opt-in anti-fingerprint overlay — body only
+    # FU286: opt-in BRAND MENTION — names the target brand once in the BODY (never the title, which
+    # is the user's own text and is enforced verbatim) and bans every other company name.
+    brand_mention = bool(data.get("brand_mention", False))
     if not bid or not sub_name or not topic:
         return jsonify({"error": "brand_id, subreddit_name, and topic are required"}), 400
 
@@ -10687,7 +10700,8 @@ def api_live_posts_custom():
                 brand_full["name"], sub["id"]
             )
             draft = post_gen.generate_post_from_topic(sub, brand_full, topic, existing,
-                                                      general=general, entropy=entropy)
+                                                      general=general, entropy=entropy,
+                                                      brand_mention=brand_mention)
             if not draft:
                 # Bubble up the Claude client's last error so the
                 # task result (and the UI toast) says WHY instead of

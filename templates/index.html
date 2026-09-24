@@ -8333,6 +8333,10 @@ function renderLsubsGenerate(c) {
                     <input type="checkbox" id="lsubs-entropy">
                     🎲 Anti-fingerprint style <span class="text-gray-600">(max human variance — for Reddit's AI-content detection; opt-in, stacks with General mode)</span>
                 </label>
+                <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer" style="flex-basis:100%" title="Names your brand ONCE in the post BODY — the one mode that does; every other post type keeps the brand out and leaves it to a seeded comment. Placement and phrasing vary per post so the batch has no repeating shape. Titles never carry the brand. While this is on, NO other company, product or service may be named anywhere in the post — including in comparison posts, which normally invite competitor names.">
+                    <input type="checkbox" id="lsubs-brandmention">
+                    📣 Mention brand <span class="text-gray-600">(names your brand once in the BODY, varied placement — and no other company at all, comparison included)</span>
+                </label>
                 <label class="text-xs text-gray-400 block" style="flex-basis:100%">
                     Observed fan-out queries <span class="text-gray-600">(optional — paste the REAL fanned-out queries you captured from ChatGPT/Perplexity/Gemini, one per line; each is region-classified and added only if its region is new)</span>
                     <textarea id="lsubs-observed" rows="2" class="w-full text-xs mt-1"
@@ -8635,6 +8639,7 @@ async function lsubsGeneratePosts(force = false) {
     const aiSearch = !!document.getElementById('lsubs-ai-search')?.checked;
     const general = !!document.getElementById('lsubs-general')?.checked;
     const entropy = !!document.getElementById('lsubs-entropy')?.checked;   // FU101
+    const brandMention = !!document.getElementById('lsubs-brandmention')?.checked;   // FU286
     const observed = (document.getElementById('lsubs-observed')?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
     const reqBody = { brand_id: bid, intent_counts, force };
     if (hasSub) reqBody.subreddit_name = sub;
@@ -8642,6 +8647,7 @@ async function lsubsGeneratePosts(force = false) {
     if (aiSearch) reqBody.ai_search = true;
     if (general) reqBody.general = true;
     if (entropy) reqBody.entropy = true;   // FU101
+    if (brandMention) reqBody.brand_mention = true;   // FU286
     if (aiSearch && observed.length) reqBody.observed_queries = observed;
 
     document.getElementById('lsubs-fit-warn').style.display = 'none';
@@ -8804,6 +8810,10 @@ function lsubsShowCustomModal() {
             <input type="checkbox" id="lsubs-custom-entropy">
             🎲 Anti-fingerprint style <span class="text-gray-600">(body only — your title is used verbatim)</span>
         </label>
+        <label class="text-xs text-gray-400 flex items-center gap-1 cursor-pointer mt-1" title="Names your brand ONCE in the body, placed and phrased differently each time so it reads like a person mentioning it rather than a pitch. Your title is never changed and never carries the brand. While this is on, NO other company, product or service may be named anywhere in the post — competitors included.">
+            <input type="checkbox" id="lsubs-custom-brandmention">
+            📣 Mention brand <span class="text-gray-600">(names your brand once in the BODY — and no other company at all)</span>
+        </label>
         <div class="flex gap-2 mt-4 justify-end">
             <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="lsubsSubmitCustom(false)">Generate body</button>
@@ -8817,19 +8827,20 @@ async function lsubsSubmitCustom(force) {
     if (!topic) { toast('Enter a topic', 'error'); return; }
     const general = !!document.getElementById('lsubs-custom-general')?.checked;
     const entropy = !!document.getElementById('lsubs-custom-entropy')?.checked;   // FU101
+    const brand_mention = !!document.getElementById('lsubs-custom-brandmention')?.checked;   // FU286
 
     let res;
     try {
         res = await api('/api/live-posts/custom', {
             method: 'POST',
-            body: { brand_id: bid, subreddit_name: sub, topic, force, general, entropy }
+            body: { brand_id: bid, subreddit_name: sub, topic, force, general, entropy, brand_mention }
         });
     } catch (e) {
         try {
             const r = await fetch('/api/live-posts/custom', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force, general, entropy })
+                body: JSON.stringify({ brand_id: bid, subreddit_name: sub, topic, force, general, entropy, brand_mention })
             });
             if (r.status === 409) {
                 const d = await r.json();

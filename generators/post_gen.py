@@ -3,6 +3,7 @@
 import random
 import math
 import json
+import re
 import requests
 
 from generators.base import ClaudeClient, BANNED_PHRASES
@@ -59,7 +60,7 @@ def _is_meaningful_region(region):
 # in one sentence and spends the rest giving context. Retrieval coverage comes from
 # concrete detail (each key term appearing once), NOT from re-asking the question in
 # several phrasings (which reads spammy / AI-generated and hurts Reddit survival).
-_BODY_GUIDANCE = """  • BODY — 2-4 short first-person paragraphs that pay off the title. ASK THE QUESTION
+_BODY_GUIDANCE_CORE = """  • BODY — 2-4 short first-person paragraphs that pay off the title. ASK THE QUESTION
     EXACTLY ONCE: state the request in a single natural sentence, then spend the rest
     giving real context — the situation, constraints and specifics behind it. Do NOT
     re-ask or rephrase the same question multiple times; a real person asks once.
@@ -70,7 +71,18 @@ _BODY_GUIDANCE = """  • BODY — 2-4 short first-person paragraphs that pay of
   • Conversational imperfections: occasional typos, incomplete thoughts, run-on
     sentences. It should sound like a real person asking, not pitching.
   • Do NOT look AI-generated. No marketing language, no excessive formatting, no emoji,
-    no dashes. Never mention the target brand name in the body."""
+    no dashes."""
+
+# FU286: the target-brand ban is the ONE line of the shared body rules that brand-mention
+# mode inverts, so it lives on its own and that mode drops it. Left in, the brief would tell
+# the model to name the brand and never to name it, in the same breath.
+_BODY_GUIDANCE_NO_BRAND = " Never mention the target brand name in the body."
+_BODY_GUIDANCE = _BODY_GUIDANCE_CORE + _BODY_GUIDANCE_NO_BRAND
+
+
+def _body_guidance(brand_mention=False):
+    """The shared body rules — minus the target-brand ban when brand-mention mode is on."""
+    return _BODY_GUIDANCE_CORE if brand_mention else _BODY_GUIDANCE
 
 
 # General ("natural human") style overlay — injected only when the opt-in `general`
@@ -78,12 +90,11 @@ _BODY_GUIDANCE = """  • BODY — 2-4 short first-person paragraphs that pay of
 # question, target-prompt match, no target-brand) still fully applies. Deliberately
 # principles + negatives ONLY — NO example title/body strings, so the model can't
 # clone one shape.
-_GENERAL_STYLE_BLOCK = """
+_GENERAL_STYLE_BLOCK_TMPL = """
 GENERAL MODE — write like a REAL PERSON in a real thread, not a marketer. This is the
 #1 lever for passing Reddit's spam/shill filters while staying just as retrievable for
 the target query. It changes ONLY voice/phrasing; every rule above still applies (still
-a recommendation question, still strongly matches the target prompt, still never names
-the target brand).
+a recommendation question, still strongly matches the target prompt, still {brand_note}).
   • TITLE — obey the title rules above, but phrase it the messy way a person types in a
     hurry, NEVER like a marketer's headline. Avoid landing-page / SEO / H1 framing and
     flawless Title Case; lowercase run-ons, sentence fragments and mild imperfection read
@@ -114,11 +125,29 @@ the target brand).
     still contain ALL the relevant domain keywords / category nouns / use-case terms /
     concrete specifics (that is what makes it retrievable + citable by AI) — but woven
     into how the person explains their problem, NOT as a feature/spec list. In the post
-    itself do NOT: name a specific product/tool/brand, enumerate an idealized feature
+    itself do NOT: {brand_no_name}, enumerate an idealized feature
     bundle, or use overt buy-intent phrasing ("paid tier", "one subscription", "no
     watermark", "credit system"). End by genuinely asking what people use / recommend.
   • Do NOT reuse any fixed phrasing or structure; vary naturally across the batch.
 """
+
+# FU286: the general-style block states the no-target-brand rule twice (once as "every rule above
+# still applies", once in the body bullet). Both are rendered from the template so brand-mention
+# mode flips them together — one left standing would contradict the mode's own rule 1.
+_GENERAL_STYLE_BLOCK = (_GENERAL_STYLE_BLOCK_TMPL
+                        .replace("{brand_note}", "never names the target brand")
+                        .replace("{brand_no_name}", "name a specific product/tool/brand"))
+_GENERAL_STYLE_BLOCK_MENTION = (_GENERAL_STYLE_BLOCK_TMPL
+                                .replace("{brand_note}", "names the target brand exactly once, per "
+                                                         "BRAND MENTION MODE")
+                                .replace("{brand_no_name}", "name any product / tool / brand other "
+                                                            "than the one BRAND MENTION MODE names"))
+
+
+def _general_style_block(brand_mention=False):
+    """The general ("natural human") overlay, with its brand clauses pointed the right way."""
+    return _GENERAL_STYLE_BLOCK_MENTION if brand_mention else _GENERAL_STYLE_BLOCK
+
 
 # FU101 — OPT-IN anti-fingerprint overlay (Reddit's July-2026 LLM detection analyzes stylistic
 # patterns: "repeated phrasal structures, unnatural semantic coherence", posting cadence, account
@@ -162,6 +191,66 @@ WHEN GENERATING MULTIPLE POSTS in this batch, ALSO:
   • Alternate I vs we, and the register (pragmatic / irritated / matter-of-fact) across posts.
 """
 
+# FU286 — BRAND MENTION mode. Opt-in, off by default, so every existing path stays unchanged.
+#
+# Every other post type is built on "NEVER name the target brand" (enforced across ~10 prompt
+# sites); the brand normally arrives later, in a seeded comment. This mode inverts that for the
+# POST BODY only, so the brand sits in the retrievable text itself.
+#
+# Two deliberate choices, both the operator's:
+#   * WHERE and HOW the mention lands is the MODEL's call, varied per post. A fixed placement rule
+#     would produce the same sentence shape every time, which is the pattern a moderator learns to
+#     spot and the easiest thing to filter on.
+#   * NO OTHER COMPANY MAY BE NAMED, in ANY intent. That reverses the standing rule that comparison
+#     posts may name competitors, and the reversal is the point: a post naming our brand beside
+#     three rivals reads as an ad, and hands those rivals the same retrievable mention.
+# The TITLE rule is untouched — the brand is never named in a title.
+_BRAND_MENTION_BLOCK = """
+BRAND MENTION MODE (applies ON TOP of everything above — the title rules, the storyline, the
+intent and the voice all still hold; this changes only WHOSE NAME may appear in the body):
+  • Name {target} in the BODY, once. You choose where it sits and how it reads — something the
+    poster already uses, tried once, was recommended, is weighing up, saw mentioned, or is asking
+    about directly. VARY that choice across the batch; do not settle into one shape.
+  • It must read as a person naming a thing in passing. No feature list, no superlatives, no
+    "highly recommend", no pitch, no call to action, no link, no pricing. If the sentence would
+    look at home in an ad, rewrite it.
+  • NEVER name the brand in the TITLE — the title rules above are unchanged.
+  • NO OTHER COMPANY, PRODUCT, TOOL OR SERVICE MAY BE NAMED anywhere in the post. Not a
+    competitor, not an alternative, not an aside, not an example, not "I also looked at X" — and
+    this holds for the COMPARISON intent too, which normally invites competitor names. {target} is
+    the ONLY name in the post. Where the post needs to weigh options, describe them by KIND
+    ("the big all-in-one ones", "the cheaper single-purpose tools"), never by name.
+"""
+
+
+def body_names_target(body, brands):
+    """True when `body` already names one of `brands` by name.
+
+    FU286: nothing on the post records that it was WRITTEN in brand-mention mode, so the
+    body itself is the record. A regenerate reads it back through this and keeps the mode
+    it finds — otherwise rewriting a brand-mention post would quietly strip out the one
+    thing it was generated for.
+    """
+    text = body or ""
+    if not text:
+        return False
+    if isinstance(brands, dict):
+        brands = [brands]
+    for b in (brands or []):
+        name = ((b.get("name") if isinstance(b, dict) else b) or "")
+        name = str(name).strip()
+        if len(name) < 2:
+            continue
+        parts = name.split()
+        if not parts:
+            continue
+        pat = r"\s+".join(re.escape(part) for part in parts)
+        lead = r"\b" if name[0].isalnum() else ""
+        trail = r"\b" if name[-1].isalnum() else ""
+        if re.search(lead + pat + trail, text, re.IGNORECASE):
+            return True
+    return False
+
 
 class PostGenerator:
     def __init__(self, claude: ClaudeClient, db: Database):
@@ -172,8 +261,10 @@ class PostGenerator:
     def generate_posts(self, subreddit, brands, count=None, custom_topics=None,
                        intent_counts=None, context_only=False, seed=None,
                        ai_search=False, observed_queries=None, target_rewrites=None,
-                       follow_persona=False, persona=None, general=False, entropy=False):
-        """Generate GEO-style posts (posts NEVER mention target brands).
+                       follow_persona=False, persona=None, general=False, entropy=False,
+                       brand_mention=False):
+        """Generate GEO-style posts (posts never mention target brands — unless
+        `brand_mention` is on, which is the one mode that does; see _BRAND_MENTION_BLOCK).
 
         `ai_search` (optional, default False): the new AI-Search semantic-coverage
         MODE. When True, runs ONE query fan-out pass (`_fanout_rewrites`) to derive
@@ -462,7 +553,7 @@ class PostGenerator:
                         existing_titles, 2, context_only=context_only,
                         seed_focus=None, coverage_focus=single_focus, facet_targets=None,
                         follow_persona=follow_persona, persona_override=None, general=general,
-                        entropy=entropy)
+                        entropy=entropy, brand_mention=brand_mention)
                     if not cands:
                         print(f"[post_gen] AI-Search: no candidate for region «{gap_q[:60]}» — gap left open")
                         continue
@@ -517,6 +608,7 @@ class PostGenerator:
                 follow_persona=follow_persona, persona_override=persona_override,
                 general=general,
                 entropy=entropy,
+                brand_mention=brand_mention,
             )
             if not candidates:
                 print(f"[post_gen] WARNING: no candidates returned for intent={intent}")
@@ -747,7 +839,7 @@ strings, in the SAME order as above."""
         return posts
 
     def generate_post_from_topic(self, subreddit, brand, topic, existing_titles=None,
-                                 general=False, entropy=False):
+                                 general=False, entropy=False, brand_mention=False):
         """Live Subreddits — flesh out one full post from a user-supplied title.
 
         The user-supplied `topic` is the FINAL post title, used VERBATIM — ALWAYS
@@ -811,14 +903,35 @@ POST TITLE (FIXED — use exactly as given, do not modify):
         if general:
             title_directive += (
                 "\n\nGENERAL MODE — applies to the BODY ONLY (the title above stays exactly as "
-                "given; IGNORE the TITLE bullets in the block below):\n" + _GENERAL_STYLE_BLOCK)
+                "given; IGNORE the TITLE bullets in the block below):\n"
+                + _general_style_block(brand_mention))
         if entropy:
             title_directive += (
                 "\n\nANTI-FINGERPRINT MODE — applies to the BODY ONLY (the title above stays "
                 "exactly as given; IGNORE any title/batch bullets in the block below):\n"
                 + _ENTROPY_STYLE_BLOCK)
+        if brand_mention:
+            # FU286: the operator asked for this path specifically. The title is the user's own
+            # text and is code-enforced verbatim, so the mention can only ever land in the body —
+            # which is exactly what this mode is for.
+            title_directive += (
+                "\n\nBRAND MENTION MODE — applies to the BODY ONLY (the title above stays exactly "
+                "as given and is never changed to carry the brand):\n"
+                + _BRAND_MENTION_BLOCK.replace("{target}", target_names_str))
         title_json_field = ""
         json_note = " (note: NO \"title\" field — the title is fixed and we will use the user's input verbatim)"
+        # FU286: the two brand rules flip together. Rule 1 is the exact inverse of the default and
+        # the comparison intent loses its competitor licence, so both are built here rather than
+        # appended — a block bolted on the end would contradict the rule it sits under.
+        _ctx_brand_note = ("NAME the target brand once in the body, per BRAND MENTION MODE above"
+                           if brand_mention else "NEVER mention the target brand names")
+        _topic_rule_1 = (
+            f"  1. NAME the TARGET brand in the BODY exactly once: {target_names_str}, and name NO\n"
+            f"     other company, product or service anywhere in the post."
+            if brand_mention else
+            f"  1. NEVER mention any TARGET brand name: {target_names_str}")
+        _topic_comp_note = ("still NO competitor names in this mode — describe rival options by KIND"
+                            if brand_mention else f"competitor names allowed: {competitors_str}")
 
         prompt = f"""Write the BODY of a Reddit post for r/{subreddit['name']}.
 
@@ -826,7 +939,7 @@ POST TITLE (FIXED — use exactly as given, do not modify):
 
 SUBREDDIT DOMAIN: {subreddit['domain']}
 
-BRAND CONTEXT (for grounding the body — NEVER mention the target brand names):
+BRAND CONTEXT (for grounding the body — {_ctx_brand_note}):
 {brand_block}
 {existing_text}
 GOAL: write a body that fits the title above and is also retrievable by
@@ -835,11 +948,11 @@ ranks the BODY, so pack the brand's category / audience / pain-point /
 use-case keywords naturally as the user explains their situation.
 
 STRICT RULES:
-  1. NEVER mention any TARGET brand name: {target_names_str}
+{_topic_rule_1}
   2. Pick the best-fitting INTENT for this title from:
      commercial / comparison / informational.
      - commercial: ready to pick a tool/product/service.
-     - comparison: weighing 2+ options (competitor names allowed: {competitors_str}).
+     - comparison: weighing 2+ options ({_topic_comp_note}).
      - informational: wants to understand, not buy.
   3. Pick a STORYLINE from: {storylines_list} that fits the title.
   4. BODY: {body_target}
@@ -1906,7 +2019,7 @@ Return JSON only: {{"labels": ["label for query 1", "label for query 2", "..."]}
                   f"(cosine < {EMBED_THRESHOLD})")
         return keep
 
-    def regenerate_body(self, post, brands):
+    def regenerate_body(self, post, brands, brand_mention=False):
         """Rewrite ONLY the body for an existing post, keeping its title unchanged.
         Grounded in the brand block + the post's ai_search_meta (anchor / target_query /
         persona, when present) so an AI-Search post stays on its region, and governed by
@@ -1936,17 +2049,25 @@ Return JSON only: {{"labels": ["label for query 1", "label for query 2", "..."]}
         focus_block = ("\n" + "\n".join(focus) + "\n") if focus else ""
         storyline = post.get("storyline") or "question"
         banned_sample = ", ".join(random.sample(BANNED_PHRASES, min(8, len(BANNED_PHRASES))))
+        # FU286: a regenerate must not silently strip the brand back out of a post that was
+        # generated WITH the mention — the body would quietly lose the thing it was made for.
+        _regen_brand_note = (f"NAME the target brand once in the body: {target_names_str}"
+                             if brand_mention else
+                             f"NEVER name the target brand(s): {target_names_str}")
+        _regen_mode_block = (_BRAND_MENTION_BLOCK.replace("{target}", target_names_str)
+                             if brand_mention else "")
         prompt = f"""Write a NEW Reddit post BODY for this EXACT title. Do NOT change the title and do
 NOT paste it in as a heading. Produce a FRESH body (different angle / wording than before).
 
 TITLE (keep exactly as-is): "{title}"
 STORYLINE (shapes the body's voice/scenario only): {storyline}
 {focus_block}
-BRAND CONTEXT (ground the body here; NEVER name the target brand(s): {target_names_str}):
+BRAND CONTEXT (ground the body here; {_regen_brand_note}):
 {brand_block}
 
 BODY RULES:
-{_BODY_GUIDANCE}
+{_body_guidance(brand_mention)}
+{_regen_mode_block}
 
 NEVER USE THESE PHRASES: {banned_sample}
 
@@ -1962,7 +2083,8 @@ Return JSON only: {{"body": "the new post body"}}"""
                                         existing_titles, count, context_only=False,
                                         seed_focus=None, coverage_focus=None,
                                         facet_targets=None, follow_persona=False,
-                                        persona_override=None, general=False, entropy=False):
+                                        persona_override=None, general=False, entropy=False,
+                                        brand_mention=False):
         """Generate `count` candidate posts for a single intent
         (commercial | comparison | informational).
 
@@ -2251,10 +2373,47 @@ Return JSON only: {{"body": "the new post body"}}"""
             )
 
         # Shared header + intent-specific tail
-        general_block = _GENERAL_STYLE_BLOCK if general else ""
+        general_block = _general_style_block(brand_mention) if general else ""
+        # FU286: brand-mention mode REWRITES the brand rules rather than appending to them. Rule 1
+        # is the exact inverse of the default, rule 2 tightens where the default loosens, and the
+        # same ban is restated in the context header and all three intent tails. Every one of them
+        # flips here — one left standing would contradict the block it sits above.
+        brand_block_mode = (_BRAND_MENTION_BLOCK.replace("{target}", target_names_str)
+                            if brand_mention else "")
+        _ctx_note = ("NAME the target brand once in the BODY, per BRAND MENTION MODE below"
+                     if brand_mention else "NEVER mention the target brand names")
+        _brand_clause = ("name the target brand exactly once, per BRAND MENTION MODE"
+                         if brand_mention else "never name the target brand")
+        if brand_mention:
+            _rule_1_2 = (f"  1. NAME the TARGET brand in the BODY, exactly once: {target_names_str}\n"
+                         f"     (see BRAND MENTION MODE below for how — and never in the title).\n"
+                         f"  2. Name NO other company, product or service — competitors included,\n"
+                         f"     in EVERY intent, comparison among them.")
+            _cmp_names = (
+                "You must NOT name a competitor — or any other company, product or service —\n"
+                "in the title OR the body. BRAND MENTION MODE below overrides this intent's usual\n"
+                "competitor licence. Anchor the matchup by KIND instead (\"the big all-in-one ones\",\n"
+                f"\"the cheaper single-purpose ones\"). {target_names_str} is the only name in the post.")
+            _cmp_angles = (
+                "(switching away from whatever they use now, looking for an alternative for a\n"
+                "specific use-case, etc.) — vary the wording, don't settle into one shape. Refer to\n"
+                "rival options by attribute or kind, never by name.")
+        else:
+            _rule_1_2 = (f"  1. NEVER mention any of the TARGET brand names: {target_names_str}\n"
+                         f"  2. For commercial and informational intents: also avoid all competitor names.\n"
+                         f"     For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.")
+            _cmp_names = (
+                "You MAY (and should) name a competitor brand from this list to anchor it:\n"
+                f"  COMPETITORS: {competitors_str}\n"
+                f"You must still NEVER mention the TARGET brand name(s): {target_names_str}.")
+            _cmp_angles = (
+                "(switching from a\n"
+                "named competitor, looking for an alternative for a specific use-case, etc.) — vary\n"
+                "the wording, don't settle into one shape. If the COMPETITORS list is empty,\n"
+                "reference competitors by attribute instead of by name.")
         header = f"""{scope_line}{seed_block}{coverage_block}{facet_block}{persona_block}
 
-BRAND CONTEXT (for grounding the queries — NEVER mention the target brand names):
+BRAND CONTEXT (for grounding the queries — {_ctx_note}):
 {brand_block}
 
 {existing_text}
@@ -2277,12 +2436,11 @@ These two goals are NOT in conflict if you do it right: a human title, and a bod
 that asks once and otherwise reads like a real person giving context.
 
 STRICT RULES:
-  1. NEVER mention any of the TARGET brand names: {target_names_str}
-  2. For commercial and informational intents: also avoid all competitor names.
-     For comparison intent ONLY: competitor names from the list ARE allowed and encouraged.
+{_rule_1_2}
 {title_rules}
-{_BODY_GUIDANCE}
+{_body_guidance(brand_mention)}
 {general_block}
+{brand_block_mode}
   • Variety check: across this batch the {count} titles MUST use noticeably
     different shapes/openings. Don't reuse the same template twice.
 
@@ -2290,7 +2448,7 @@ NEVER USE THESE PHRASES: {banned_sample}
 """
 
         if intent == "commercial":
-            intent_tail = """
+            intent_tail = f"""
 INTENT: COMMERCIAL — the person is ready to CHOOSE. Per the TITLE rules above, the
 title is a question that asks for a recommendation of what to use/buy for their
 specific situation, narrowed (via the brand context) to the niche where this brand
@@ -2304,40 +2462,35 @@ tried, what they need next. Restate the title's question in natural sentences an
 weave in the brand's category / audience / pain-point / use-case terms as the
 person explains their situation (this is where GEO ranking comes from). Real,
 first-person voice — hesitation, specifics, incomplete sentences are fine; never
-pitch, never name the target brand.
+pitch, {_brand_clause}.
 """
         elif intent == "comparison":
             intent_tail = f"""
 INTENT: COMPARISON — the person is weighing options. Per the TITLE rules above, the
 title is a recommendation question framed around a switch / alternative / matchup.
-You MAY (and should) name a competitor brand from this list to anchor it:
-  COMPETITORS: {competitors_str}
-You must still NEVER mention the TARGET brand name(s): {target_names_str}.
+{_cmp_names}
 
 Frame the question so the natural answer is which option to pick for the person's
 SPECIFIC need — leaving room for "our kind of product/service" (the unnamed better
 fit, narrowed via the brand context to this brand's niche) to be the recommended
 answer. Across the batch, only one title at most should be a bare "X vs Y" matchup;
-the rest should come at the comparison from different angles (switching from a
-named competitor, looking for an alternative for a specific use-case, etc.) — vary
-the wording, don't settle into one shape. If the COMPETITORS list is empty,
-reference competitors by attribute instead of by name.
+the rest should come at the comparison from different angles {_cmp_angles}
 
 BODY: should sound genuinely undecided. Open with the person's current setup, why
 it's not working, what they've heard about the alternatives, what they're worried
 about. Restate the comparison question in natural sentences and weave in the
 brand's audience / use-case / pain-point terms (this is where GEO ranking comes
-from). Don't shill any option; never name the target brand.
+from). Don't shill any option; {_brand_clause}.
 """
         else:  # informational
-            intent_tail = """
+            intent_tail = f"""
 INTENT: INFORMATIONAL — the person wants to SOLVE A PROBLEM or reach an OUTCOME,
 not just understand theory. Per the TITLE rules above, frame the title as a
 question whose best answer is to recommend a specific product/approach to achieve
 that outcome in the brand's niche — NOT an abstract "how does X work" or "what is X"
 explainer (those don't lead to recommending anything). Narrow it (via the brand
 context) to the situation where this brand is the natural recommendation. Compare
-CONCEPTS if useful, never brand names; never name the target brand.
+CONCEPTS if useful, never a competitor's brand name; {_brand_clause}.
 
 BODY: 2-4 paragraphs of real situational context — who they are, what they're
 trying to achieve, what they've already tried, where they're stuck — that lead
@@ -2383,6 +2536,26 @@ still weaves in every relevant keyword naturally.
         result = self.claude.call(prompt, max_tokens=4000, temperature=0.9)
         if not result or "posts" not in result:
             return []
+        if brand_mention:
+            # FU286: the mode exists so the brand lands in the retrievable text, and its one hard
+            # rule is that nothing ELSE gets named. Both are prompt-enforced; this REPORTS what
+            # came back rather than rewriting it — a deterministic edit to someone else's prose is
+            # how bodies get damaged. The competitor list is a known set, so a hit there is certain.
+            for _c in result["posts"]:
+                if not isinstance(_c, dict):
+                    continue
+                _body = str(_c.get("body") or "")
+                _title = str(_c.get("title") or "")
+                _t = _title[:60]
+                if not body_names_target(_body, brands):
+                    print(f"[post_gen] brand-mention: body does NOT name {target_names_str} "
+                          f"— «{_t}»")
+                _named = [n for n in competitors
+                          if body_names_target(_body + "\n" + _title, [n])]
+                if _named:
+                    print(f"[post_gen] brand-mention: names other companies "
+                          f"{', '.join(_named)} — «{_t}»")
+
         return result["posts"]
 
     def _generate_candidates(self, subreddit, brands, storylines, existing_titles, count):

@@ -142,7 +142,7 @@ class Database:
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 post_id      INTEGER REFERENCES posts(id),
                 subreddit_id INTEGER NOT NULL REFERENCES subreddits(id),
-                reddit_url   TEXT NOT NULL UNIQUE,
+                reddit_url   TEXT NOT NULL,
                 added_at     TEXT DEFAULT (datetime('now'))
             );
 
@@ -199,6 +199,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
             CREATE INDEX IF NOT EXISTS idx_comments_status ON comments(status);
             CREATE INDEX IF NOT EXISTS idx_post_urls_sub ON post_urls(subreddit_id);
+            CREATE INDEX IF NOT EXISTS idx_post_urls_post ON post_urls(post_id);
+            CREATE INDEX IF NOT EXISTS idx_post_urls_added_at ON post_urls(added_at);
             CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
 
             CREATE TABLE IF NOT EXISTS post_brands (
@@ -438,12 +440,37 @@ class Database:
     # --- Post URLs ---
 
     def add_post_url(self, subreddit_id, reddit_url, post_id=None):
+        """Remember a Reddit thread URL for a subreddit. Idempotent by URL.
+
+        FU287 dropped UNIQUE(reddit_url), so `INSERT OR IGNORE` no longer dedupes.
+        This helper's callers (the CLI flows, the legacy external-post path) rely on
+        calling it repeatedly with the same URL, so the dedupe is done explicitly —
+        same semantics as before, keyed on the URL alone. Deliberate re-anchoring of
+        one thread to several posts goes through `link_url_to_post(allow_shared=True)`.
+        """
+        row = self.conn.execute(
+            "SELECT id FROM post_urls WHERE reddit_url = ? ORDER BY id LIMIT 1", (reddit_url,)
+        ).fetchone()
+        if row:
+            return row["id"]
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO post_urls (subreddit_id, reddit_url, post_id) VALUES (?, ?, ?)",
+            "INSERT INTO post_urls (subreddit_id, reddit_url, post_id) VALUES (?, ?, ?)",
             (subreddit_id, reddit_url, post_id)
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def count_posts_for_url(self, reddit_url):
+        """How many posts already anchor this Reddit thread (FU287).
+
+        Importing a thread again is allowed and never blocked; this only lets the UI
+        say "2nd import" so a stray double-click is visible rather than silent.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM post_urls pu JOIN posts p ON pu.post_id = p.id "
+            "WHERE pu.reddit_url = ?", (reddit_url,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     def get_post_urls(self, subreddit_id):
         rows = self.conn.execute(
@@ -458,7 +485,7 @@ class Database:
         ).fetchone()
         return row["reddit_url"] if row else None
 
-    def link_url_to_post(self, post_id, reddit_url, subreddit_id):
+    def link_url_to_post(self, post_id, reddit_url, subreddit_id, allow_shared=False):
         """Link a Reddit URL to a generated post (after manual publishing).
 
         Re-publishing a post with a NEW URL must replace the previous link,
@@ -477,8 +504,14 @@ class Database:
         )
         # If the same URL was previously linked to a DIFFERENT post, repoint
         # that row; otherwise insert a fresh one.
-        existing = self.conn.execute(
-            "SELECT id FROM post_urls WHERE reddit_url = ?", (reddit_url,)
+        #
+        # FU287: `allow_shared` skips the repoint. A third-party import may bring the
+        # SAME thread in more than once, and repointing would hand the new post the old
+        # one's anchor row — silently leaving the first post with no thread URL, so its
+        # +HQ/+Cmts would stop deploying under the thread. Sharing is only ever opted
+        # into; every deploy caller keeps the replace-existing behaviour.
+        existing = None if allow_shared else self.conn.execute(
+            "SELECT id FROM post_urls WHERE reddit_url = ? ORDER BY id LIMIT 1", (reddit_url,)
         ).fetchone()
         if existing:
             self.conn.execute(
@@ -2103,6 +2136,35 @@ class Database:
                 self.conn.execute("PRAGMA foreign_keys = ON")
                 break
 
+        # ----- post_urls: drop the UNIQUE on reddit_url (FU287) -----
+        # One Reddit thread may now anchor SEVERAL posts: a third-party import can
+        # bring the same thread in again, under another brand or for a second seeding
+        # wave. SQLite builds an implicit index for an inline column UNIQUE and will
+        # not let it be dropped, so the constraint only goes away with a table rebuild.
+        # Guarded on that index existing, so this runs once and is a no-op afterwards.
+        # Column origin 'u' = a UNIQUE constraint's own index.
+        if any(r[3] == "u" for r in self.conn.execute("PRAGMA index_list(post_urls)")):
+            self.conn.execute("PRAGMA foreign_keys = OFF")
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS post_urls_new (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    post_id      INTEGER REFERENCES posts(id),
+                    subreddit_id INTEGER NOT NULL REFERENCES subreddits(id),
+                    reddit_url   TEXT NOT NULL,
+                    added_at     TEXT DEFAULT (datetime('now'))
+                );
+                INSERT INTO post_urls_new (id, post_id, subreddit_id, reddit_url, added_at)
+                    SELECT id, post_id, subreddit_id, reddit_url, added_at FROM post_urls;
+                DROP TABLE post_urls;
+                ALTER TABLE post_urls_new RENAME TO post_urls;
+                CREATE INDEX IF NOT EXISTS idx_post_urls_sub ON post_urls(subreddit_id);
+                CREATE INDEX IF NOT EXISTS idx_post_urls_post ON post_urls(post_id);
+                CREATE INDEX IF NOT EXISTS idx_post_urls_added_at ON post_urls(added_at);
+            """)
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            self.conn.commit()
+            print("[db] post_urls rebuilt without UNIQUE(reddit_url) — FU287")
+
         # Search comments table (Live Search feature)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS search_comments (
@@ -2871,8 +2933,6 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_search_comments_paid_at ON search_comments(paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_status_deployed ON search_comments(status, deployed_at)",
             "CREATE INDEX IF NOT EXISTS idx_search_comments_status_paid ON search_comments(status, paid_at)",
-            "CREATE INDEX IF NOT EXISTS idx_post_urls_post ON post_urls(post_id)",
-            "CREATE INDEX IF NOT EXISTS idx_post_urls_added_at ON post_urls(added_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_paid_at ON posts(paid_at)",
             "CREATE INDEX IF NOT EXISTS idx_posts_owner_status ON posts(owner_account, status)",
             # Auto-assign context: composite indexes to avoid full-table scans

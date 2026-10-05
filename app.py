@@ -10769,6 +10769,10 @@ def api_live_posts_import_thirdparty():
     subreddit, and links the thread URL (post_urls) so +HQ/+Cmts anchor to it.
     The post is NEVER deployed (it's already live on Reddit) — only its comments
     are. After import it behaves like any Live Subs post.
+
+    FU287: the same thread may be imported any number of times — under different
+    brands, or twice under one. Each import is its own post with its own comments,
+    and each keeps its own anchor row in post_urls.
     """
     data = request.json or {}
     bid = data.get("brand_id")
@@ -10783,14 +10787,11 @@ def api_live_posts_import_thirdparty():
         brand = db_check.get_brand(bid)
         if not brand:
             return jsonify({"error": "Brand not found"}), 404
-        # Dedupe: if this exact thread is already a post, return it (no dup).
-        existing = db_check.find_post_by_url(url)
-        if existing and existing[0] == "post":
-            p = db_check.get_post(existing[1]["id"]) or existing[1]
-            return jsonify({
-                "duplicate": True, "post_id": existing[1]["id"],
-                "post_number": p.get("post_number"), "title": p.get("title"),
-            })
+        # FU287 (operator decision): importing the SAME thread again is allowed, with no
+        # guard — one thread is a seeding target for several brands, and sometimes for a
+        # second wave under one brand. The old dedupe returned the first import instead.
+        # The count is carried through only so the UI can SAY it is a repeat.
+        prior_imports = db_check.count_posts_for_url(url)
     finally:
         db_check.close()
 
@@ -10814,12 +10815,14 @@ def api_live_posts_import_thirdparty():
             )
             # Anchor the existing thread URL so HQ/comments deploy under it and
             # the post card links to the live thread.
-            db.link_url_to_post(post_id, url, sub["id"])
+            # allow_shared: never repoint an earlier import's anchor row onto this post
+            # (that would leave the earlier post with no thread URL at all).
+            db.link_url_to_post(post_id, url, sub["id"], allow_shared=True)
             saved = db.get_post(post_id) or {}
             return {
                 "post_id": post_id, "post_number": saved.get("post_number"),
                 "title": fetched["title"], "subreddit_id": sub["id"],
-                "subreddit_name": sub["name"],
+                "subreddit_name": sub["name"], "prior_imports": prior_imports,
             }
         finally:
             db.close()

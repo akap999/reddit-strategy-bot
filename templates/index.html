@@ -8897,7 +8897,7 @@ function lsubsShowThirdPartyModal() {
     if (!bid) { toast('Pick a brand first', 'error'); return; }
     showModal(`
         <h3 class="text-xl font-bold mb-3">Import a 3rd-party Reddit post</h3>
-        <p class="text-xs text-gray-400 mb-3">Paste the URL of an <strong>existing</strong> Reddit thread (not one of ours). We'll pull in its real title + body and add it to this brand's Live Subs posts, tagged <span class="badge badge-3rd-party">3rd party</span>. The thread stays as-is on Reddit — you then run <strong>+ HQ</strong> / <strong>+ Cmts</strong> to add comments under it.</p>
+        <p class="text-xs text-gray-400 mb-3">Paste the URL of an <strong>existing</strong> Reddit thread (not one of ours). We'll pull in its real title + body and add it to this brand's Live Subs posts, tagged <span class="badge badge-3rd-party">3rd party</span>. The thread stays as-is on Reddit — you then run <strong>+ HQ</strong> / <strong>+ Cmts</strong> to add comments under it. The same thread can be imported more than once — under another brand, or again under this one — and each import is its own post with its own comments.</p>
         <div>
             <label class="text-xs text-gray-400">Reddit thread URL</label>
             <input id="lsubs-tp-url" type="text" class="w-full" placeholder="https://www.reddit.com/r/Subreddit/comments/abc123/some_thread_title/" style="font-family:inherit">
@@ -8924,13 +8924,8 @@ async function lsubsSubmitThirdParty() {
         try { lsubsLoadTable(); } catch(_) {}
         try { if (document.getElementById('lsubs-posts-table')) lsubsLoadPosts(); } catch(_) {}
     };
-    // Dedupe response (already imported) comes back synchronously, no task_id.
-    if (res && res.duplicate) {
-        closeModal();
-        toast(`Already imported as post #${res.post_number || res.post_id}: "${(res.title || '').substring(0, 60)}"`, 'info');
-        _refresh();
-        return;
-    }
+    // FU287: importing the same thread again is allowed, so there is no longer a
+    // synchronous "already imported" response to handle — every import is a task.
     const tid = res.task_id;
     closeModal();
     toast('Importing the Reddit thread…', 'info');
@@ -8941,7 +8936,9 @@ async function lsubsSubmitThirdParty() {
             if (t.status === 'complete') {
                 clearInterval(poll); _removeBgTask(tid);
                 const r = t.result || {};
-                toast(`Imported 3rd-party post #${r.post_number || r.post_id}: "${(r.title || '').substring(0, 60)}" — now run + HQ / + Cmts.`, 'success');
+                const _again = (r.prior_imports || 0) > 0
+                    ? ` (import #${(r.prior_imports || 0) + 1} of this thread)` : '';
+                toast(`Imported 3rd-party post #${r.post_number || r.post_id}: "${(r.title || '').substring(0, 60)}"${_again} — now run + HQ / + Cmts.`, 'success');
                 _refresh();
             } else if (t.status === 'error') {
                 clearInterval(poll); _removeBgTask(tid);
@@ -10870,10 +10867,7 @@ async function lsImportResultThirdParty(idx) {
             method: 'POST', body: { brand_id: parseInt(brandId), reddit_url: r.url }
         });
     } catch (e) { toast(e.message || 'Import failed', 'error'); return; }
-    if (res && res.duplicate) {
-        toast(`Already in Live Subs as post #${res.post_number || res.post_id}: "${(res.title || '').substring(0, 60)}"`, 'info');
-        return;
-    }
+    // FU287: a repeat import is allowed now, so there is no "already in Live Subs" reply.
     const tid = res.task_id;
     toast('Importing into Live Subreddits…', 'info');
     _addBgTask(tid, '3rd-party import');
@@ -10883,7 +10877,9 @@ async function lsImportResultThirdParty(idx) {
             if (t.status === 'complete') {
                 clearInterval(poll); _removeBgTask(tid);
                 const rr = t.result || {};
-                toast(`✓ Added to Live Subs as 3rd-party post #${rr.post_number || rr.post_id} — ready for + HQ / + Cmts.`, 'success');
+                const _rep = (rr.prior_imports || 0) > 0
+                    ? ` (import #${(rr.prior_imports || 0) + 1} of this thread)` : '';
+                toast(`✓ Added to Live Subs as 3rd-party post #${rr.post_number || rr.post_id}${_rep} — ready for + HQ / + Cmts.`, 'success');
             } else if (t.status === 'error') {
                 clearInterval(poll); _removeBgTask(tid);
                 toast(`Import error: ${t.error || ''}`, 'error');
@@ -10904,7 +10900,7 @@ async function lsBulkImportThirdParty() {
         if (r && r.url && /\/comments\/[a-z0-9]+/i.test(r.url)) rows.push(r);
     });
     if (!rows.length) { toast('None of the checked rows are Reddit post threads', 'error'); return; }
-    let imported = 0, dupes = 0, failed = 0;
+    let imported = 0, repeats = 0, failed = 0;   // FU287: repeats are imported, not skipped
     // small concurrency cap so we don't hammer the import endpoint
     const queue = rows.slice();
     const worker = async () => {
@@ -10914,7 +10910,6 @@ async function lsBulkImportThirdParty() {
                 const res = await api('/api/live-posts/import-thirdparty', {
                     method: 'POST', body: { brand_id: parseInt(brandId), reddit_url: r.url }
                 });
-                if (res && res.duplicate) { dupes++; continue; }
                 const tid = res.task_id;
                 if (tid) {
                     _addBgTask(tid, '3rd-party import');
@@ -10923,7 +10918,11 @@ async function lsBulkImportThirdParty() {
                         const poll = setInterval(async () => {
                             try {
                                 const t = await api(`/api/tasks/${tid}`);
-                                if (t.status === 'complete') { clearInterval(poll); _removeBgTask(tid); imported++; resolve(); }
+                                if (t.status === 'complete') {
+                                    clearInterval(poll); _removeBgTask(tid); imported++;
+                                    if (((t.result || {}).prior_imports || 0) > 0) repeats++;
+                                    resolve();
+                                }
                                 else if (t.status === 'error') { clearInterval(poll); _removeBgTask(tid); failed++; resolve(); }
                             } catch(e) {}
                         }, 2000);
@@ -10934,7 +10933,7 @@ async function lsBulkImportThirdParty() {
     };
     toast(`Importing ${rows.length} post(s) into Live Subreddits…`, 'info');
     await Promise.all([worker(), worker(), worker()]);
-    toast(`Live Subs import done — ${imported} added${dupes ? `, ${dupes} already there` : ''}${failed ? `, ${failed} failed` : ''}.`, imported ? 'success' : (failed ? 'error' : 'info'));
+    toast(`Live Subs import done — ${imported} added${repeats ? `, ${repeats} already in Live Subs (imported again)` : ''}${failed ? `, ${failed} failed` : ''}.`, imported ? 'success' : (failed ? 'error' : 'info'));
 }
 
 function lsToggleAll(checked) {

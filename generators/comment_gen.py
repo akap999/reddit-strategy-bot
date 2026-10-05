@@ -4702,8 +4702,11 @@ Return JSON only:
 
         # Find or create the post in DB
         post_entry = None
+        # FU287: a thread may now anchor several posts, so pin this to the EARLIEST
+        # one rather than whichever row SQLite happens to return first.
         url_entry = self.db.conn.execute(
-            "SELECT post_id FROM post_urls WHERE reddit_url = ?", (reddit_url,)
+            "SELECT post_id FROM post_urls WHERE reddit_url = ? ORDER BY id LIMIT 1",
+            (reddit_url,)
         ).fetchone()
         if url_entry and url_entry["post_id"]:
             post_entry = self.db.get_post(url_entry["post_id"])

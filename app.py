@@ -544,8 +544,14 @@ def _reddit_rss_fetch(rel_path, params=None, timeout=15, resi_fallback=False):
                "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
                "X-Reddit-Nocache": "1"}
 
-    def _conclusive(r):
-        return r is not None and (r.status_code == 404 or
+    # FU288: a 404 is "gone" ONLY when Reddit itself said it. Reddit 404-walls Cloudflare's
+    # shared egress, so the worker answers 404 "Not Found" (9 bytes) for EVERY path — including
+    # ones that return 200 XML when asked directly from this box. Treating that as conclusive
+    # made a dead proxy indistinguishable from deleted content: the liveness read never reached
+    # the healthy direct leg, RSS could never return a verdict, and the stale archive became the
+    # only voice in the room. So a proxy 404 falls through; a DIRECT 404 still counts.
+    def _conclusive(r, allow_404=True):
+        return r is not None and ((allow_404 and r.status_code == 404) or
                                   (r.status_code == 200 and (r.text or "").lstrip().startswith("<?xml")))
 
     last = None
@@ -554,7 +560,7 @@ def _reddit_rss_fetch(rel_path, params=None, timeout=15, resi_fallback=False):
             r = _rq.get(f"{base}{rel_path}", params=params, headers=headers, timeout=timeout,
                         proxies={"http": None, "https": None})
             last = r
-            if _conclusive(r):
+            if _conclusive(r, allow_404=not proxy):
                 return r
         except Exception:
             pass
@@ -568,6 +574,23 @@ def _reddit_rss_fetch(rel_path, params=None, timeout=15, resi_fallback=False):
                 except (TypeError, ValueError):
                     pass
             _t.sleep(wait)
+
+    # FU288: the worker is blocked (or 404-walled) → ask Reddit from THIS box before giving up.
+    # Direct still answers 200 XML today, so this is the leg that keeps liveness working while
+    # Cloudflare's IPs are walled. Skipped when no proxy is set (we already came from here).
+    if proxy:
+        for attempt in range(2):
+            try:
+                dr = _rq.get(f"https://www.reddit.com{rel_path}", params=params, headers=headers,
+                             timeout=timeout, proxies={"http": None, "https": None})
+                last = dr
+                if _conclusive(dr):
+                    print("    ✓ liveness RSS direct (worker was walled)", flush=True)
+                    return dr
+            except Exception:
+                pass
+            if attempt < 1:
+                _t.sleep(2.0)
 
     # Blocked on the normal path → retry DIRECT at old.reddit.com through the residential proxy.
     hp = _reddit_http_proxies() if resi_fallback else None
@@ -7048,10 +7071,18 @@ def _check_live_batch(deployed, db, log_prefix="CHECK-LIVE", task_id=None, detec
             # caller passes _pmap=None (explicit) to force that; "__keep__" (default) = prefetch map.
             _pm = _arctic_pmap if _pmap == "__keep__" else _pmap
             pav = _post_liveness_via_arctic(parent, prefetched=_pm) if _arc["ok"] else None
-            if pav == "removed":
-                parent_removed = True
-            elif pav != "live":   # absent/None → legacy RSS fallback (harmless no-op when walled)
+            # FU288: ANY verdict other than archive-live now needs a LIVE source to confirm before
+            # it can orphan a comment. FU145 already refuses to RESURRECT a dead row on a stale
+            # archive-LIVE verdict; the identical staleness forbids KILLING a live comment on a
+            # stale archive-REMOVED one — and `removed_by_category` is most often Reddit's spam
+            # filter catching a post that a mod cleared minutes later, which the archive never
+            # re-crawls. Unconfirmed leaves the comment alone; `_post_liveness_via_rss` returns
+            # 'removed' only when it is genuinely confirmed, and None on any wall.
+            if pav != "live":
                 parent_removed = (_post_liveness_via_rss(parent) == "removed")
+                if pav == "removed" and not parent_removed:
+                    print(f"[{log_prefix}] #{item['id']} parent {parent} is archive-removed but a live "
+                          f"check does not confirm it — NOT orphaning the comment", flush=True)
         if parent_removed:
             print(f"[{log_prefix}] #{item['id']} ({src}) REMOVED (parent post gone; comment was {via}-live)", flush=True)
             if _mark_dead(item): dead += 1

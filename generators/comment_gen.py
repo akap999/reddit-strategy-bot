@@ -1670,7 +1670,16 @@ Return JSON only:
         experience-sharing).
         """
 
-        if not comments and not post_body:
+        # FU289: the guard is "there is nothing to react to" — and a TITLE is something to react
+        # to. Title-only posts are ordinary on Reddit (the question lives in the title, selftext is
+        # empty), and a third-party import brings the real post across verbatim, empty body and
+        # all. For an HQ root there is no thread yet either, so `comments` is [] as well, and both
+        # falsy meant an instant empty return: no API call, no exception, "0 comments generated"
+        # in 0.0s with nothing in the log to explain it.
+        # A body of only whitespace is no body: it must not satisfy the guard, and it must not
+        # emit an empty POST BODY block for the model to read as context.
+        _body = (post_body or "").strip()
+        if not comments and not _body and not (post_title or "").strip():
             return {"generated_comments": [], "strategies_used": [], "_personas": [], "_structures": []}
 
         comments_text = ""
@@ -1686,7 +1695,7 @@ Return JSON only:
                 for i, c in enumerate(comments[:15])
             ])
 
-        post_body_text = f'\nPOST BODY: """{post_body[:800]}"""' if post_body else ""
+        post_body_text = f'\nPOST BODY: """{_body[:800]}"""' if _body else ""
 
         selected_personas, selected_structures, per_comment_angles = \
             self._select_comment_config(tone_analysis, comment_stats, relevance, num_comments)

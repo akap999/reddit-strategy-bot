@@ -127,6 +127,27 @@ def test_casual_requires_something_that_actually_happened():
     assert "what you tried, what changed afterwards" in p
 
 
+def test_the_event_has_to_reach_the_brand():
+    """FU293: with the event untied from the brand, the model put the vivid detail on the
+    PREVIOUS vendor and left the brand a glancing clause — "Koru came up when we were vetting
+    options". That is retrievable but recommends nothing: the quotable sentence is a
+    cautionary tale about somebody else."""
+    p = _prompt("casual")
+    assert "and Koru has to be part of it" in p
+    assert "what happened when you actually used it" in p
+    # the three hedges that make a mention non-committal, named so they cannot come back
+    for hedge in ('"came up"', '"was on the list"', '"is worth a look"'):
+        assert hedge in p, f"the non-committal mention {hedge} is not banned"
+    assert "able to say what Koru did for you" in p
+
+
+def test_opening_on_the_prior_failure_is_still_allowed():
+    """The prior-vendor failure is a genuinely good way in — the fix is that the story has to
+    REACH the brand, not that it must start there."""
+    p = _prompt("casual")
+    assert "may OPEN on what went wrong before" in p
+
+
 def test_casual_names_the_near_misses_that_do_not_count():
     """Sample 2 satisfied "write as yourself" and still contained no experience. The phrasings
     that did that are listed so they cannot be reused."""

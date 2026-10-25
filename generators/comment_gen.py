@@ -2100,10 +2100,15 @@ TWO REQUIREMENTS. Both are checkable; everything else is a matter of degree.
    title: "{post_title}". Same meaning, different words, inside a normal sentence — never
    quoted, never as a heading, never word-for-word.
 
-2. Include ONE THING THAT ACTUALLY HAPPENED TO YOU. Not that you have opinions about the
-   topic, not that you have looked into it — one specific event: what you were doing, what
-   broke, what you tried, what changed afterwards. If a reader could not picture it
-   happening, it does not count.
+2. Include ONE THING THAT ACTUALLY HAPPENED TO YOU, and {brand_name} has to be part of it.
+   Not that you have opinions about the topic, not that you have looked into it — one
+   specific event: what you were doing, what broke, what you tried, what changed afterwards.
+   If a reader could not picture it happening, it does not count.
+   The story may OPEN on what went wrong before — that is often the best way in — but the
+   concrete bit has to reach {brand_name}: what happened when you actually used it. A
+   comment whose vivid detail is about someone ELSE, where {brand_name} only "came up",
+   "was on the list" or "is worth a look", recommends nothing. Whoever reads it should be
+   able to say what {brand_name} did for you.
    These are NOT a lived detail, and a comment built from them fails:
      "been dealing with this for a while now" · "it's just part of the job" · "I've tried
      a few along the way" · "we looked at several options" · "this comes up a lot"

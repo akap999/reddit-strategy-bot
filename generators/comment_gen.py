@@ -66,6 +66,17 @@ AI_CRAWL_REC_PERSONAS = {"helper", "comparer", "professional",
 AI_CRAWL_REC_STRUCTURES = {"direct_answer", "list_format",
                             "comparison", "short_punchy"}
 
+# FU291 — casual's own pool. The AI-crawl whitelist above is built for extractability and it
+# shows: "professional" and "data_nerd" are formal voices, and "list_format" is a listicle —
+# the exact shape the casual block bans. A whitelist is a concrete instruction and prose is
+# not, so the structure won every time and the comment came out formal however the block was
+# worded. These still ANSWER (direct_answer / short_punchy carry the recommendation, which is
+# what retrieval needs); they just answer the way a person does.
+CASUAL_REC_PERSONAS = {"helper", "veteran_terse", "parent",
+                       "budget_conscious", "long_timer", "dry_humor"}
+CASUAL_REC_STRUCTURES = {"direct_answer", "short_punchy",
+                         "question_plus_experience", "anecdote"}
+
 
 # ---------------------------------------------------------------------------
 # HQ reply shapes — short, dynamic, conversational replies.
@@ -1759,8 +1770,12 @@ Return JSON only:
         # AI-CRAWL + RECOMMENDATION-SEEKING POST: override the random persona /
         # structure pick with a curated whitelist of "direct answer" voices.
         if ai_crawl_eff and is_recommendation:
-            ac_personas = [p for p in PERSONAS if p["id"] in AI_CRAWL_REC_PERSONAS]
-            ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in AI_CRAWL_REC_STRUCTURES]
+            _rec_p = (CASUAL_REC_PERSONAS if _is_casual_crawl(ai_crawl_eff)
+                      else AI_CRAWL_REC_PERSONAS)
+            _rec_s = (CASUAL_REC_STRUCTURES if _is_casual_crawl(ai_crawl_eff)
+                      else AI_CRAWL_REC_STRUCTURES)
+            ac_personas = [p for p in PERSONAS if p["id"] in _rec_p]
+            ac_structures = [s for s in STRUCTURE_TEMPLATES if s["id"] in _rec_s]
             if ac_personas and ac_structures:
                 random.shuffle(ac_personas)
                 random.shuffle(ac_structures)
@@ -1848,7 +1863,13 @@ Return JSON only:
             # recommendation voice so the brand stays the clear takeaway.
             if should_mention:
                 if persona.get("id") in ("comparer", "switcher"):
-                    _rec_p = [p for p in PERSONAS if p["id"] in ("helper", "professional", "veteran_terse")]
+                    # FU291: the default replacement pool includes "professional". On a casual
+                    # comment that quietly reinstates the formal voice the mode exists to avoid,
+                    # on the one slot that matters most — the brand mention.
+                    _swap_ids = (("helper", "veteran_terse", "parent", "long_timer")
+                                 if _is_casual_crawl(ai_crawl_eff)
+                                 else ("helper", "professional", "veteran_terse"))
+                    _rec_p = [p for p in PERSONAS if p["id"] in _swap_ids]
                     if _rec_p:
                         persona = random.choice(_rec_p)
                         if idx < len(selected_personas):
@@ -3492,9 +3513,15 @@ Return JSON only:
             "emotional_tone": "generally supportive",
         }
 
-        # Longer avg for HQ depth
-        hq_stats = {"avg_chars": 500, "avg_words": 100, "median_chars": 400,
-                     "min_chars": 80, "max_chars": 800}
+        # Longer avg for HQ depth — but NOT in casual mode. FU291: "aim for ~100 words" is a
+        # number, "short is fine, one or two sentences" is prose, and the number wins. This was
+        # the loudest of the three instructions still pulling casual comments long.
+        if _is_casual_crawl(ai_crawl):
+            hq_stats = {"avg_chars": 230, "avg_words": 45, "median_chars": 180,
+                        "min_chars": 40, "max_chars": 420}
+        else:
+            hq_stats = {"avg_chars": 500, "avg_words": 100, "median_chars": 400,
+                        "min_chars": 80, "max_chars": 800}
         reply_stats = {"avg_chars": 300, "avg_words": 60, "median_chars": 250,
                        "min_chars": 50, "max_chars": 600}
 
@@ -3661,7 +3688,13 @@ Return JSON only:
                     # that, not hq_main). When ON, behavior is
                     # identical to before — the HQ-MAIN block layers
                     # on top of the AI-CRAWL block for the root.
-                    hq_main=is_main_local and ai_crawl,
+                    # FU291: HQ-MAIN is a brand-first "X is what handles this" framing in a
+                    # fixed 50-90 words. That is marketing voice, and it was overriding the
+                    # casual block on the one comment that matters most. Casual roots fall
+                    # through to the regular path, which the call site already documents as
+                    # producing a comment that STILL mentions the brand — `mention_flags`
+                    # drives the mention, not `hq_main`.
+                    hq_main=is_main_local and _is_full_crawl(ai_crawl),
                     # Replies use the slim prompt to skip ~1500 tokens of
                     # few-shot anti-pattern examples — meaningful speedup
                     # since each reply is its own API call.

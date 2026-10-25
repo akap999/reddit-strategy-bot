@@ -185,6 +185,21 @@ def _pick_reply_shape(rng=None):
     }
 
 
+# FU290 — retrieval strength is now three-valued, carried on the SAME `ai_crawl` argument:
+#   False      normal          no retrieval block at all
+#   "casual"   casual          the middle ground: findable, but written to read like a person
+#   True       full            the original dense block
+# "casual" is truthy on purpose, so every `if ai_crawl:` site in the codebase keeps working and
+# nothing else had to be rethreaded. Only the places that CHOOSE a prompt block, or that bias
+# the thread toward substance, need to tell the two apart — and they ask through these.
+def _is_casual_crawl(ai_crawl):
+    return isinstance(ai_crawl, str) and ai_crawl.strip().lower() == "casual"
+
+
+def _is_full_crawl(ai_crawl):
+    return bool(ai_crawl) and not _is_casual_crawl(ai_crawl)
+
+
 def _allocate_reply_shapes(n, rng=None, ai_crawl=False):
     """Pre-allocate a balanced mix of N reply shapes for one cluster.
 
@@ -205,7 +220,10 @@ def _allocate_reply_shapes(n, rng=None, ai_crawl=False):
     n = max(1, int(n))
     shapes = []
 
-    if ai_crawl:
+    # FU290: only FULL crawl forces the substance-heavy mix. A casual thread wants the default,
+    # one-liner-dominated shape — most replies in a real Reddit thread are short, and a cluster
+    # of four substantive paragraphs is itself a tell, however well each one is written.
+    if _is_full_crawl(ai_crawl):
         by_id = {s[0]: s for s in HQ_REPLY_SHAPES}
         if n >= 2:
             shapes.append(_shape_to_dict(by_id["followup_question"], rng))
@@ -1714,7 +1732,9 @@ Return JSON only:
         # persona override. ai_crawl_eff folds that rule in once so every
         # downstream gate stays in sync. No-op for non-HQ-reply callers
         # (is_hq_reply defaults False → ai_crawl_eff == ai_crawl).
-        ai_crawl_eff = ai_crawl and not is_hq_reply
+        # FU290: `and` would collapse "casual" to True here, silently promoting every casual
+        # comment to the dense block. Carry the VALUE, don't boolean it.
+        ai_crawl_eff = ai_crawl if not is_hq_reply else False
 
         # INTENT-DRIVEN LENGTH SCALING: scale comment_stats.avg_words to
         # the band's target BEFORE the per-comment LENGTH math runs.
@@ -2024,7 +2044,64 @@ NEVER USE THESE PHRASES: {banned_text}"""
         # for queries about the brand's domain. Used by Live Subreddits where
         # the post itself is meant to rank on ChatGPT / Perplexity / Claude.
         ai_crawl_section = ""
-        if ai_crawl_eff:
+        if _is_casual_crawl(ai_crawl_eff):
+            # FU290 — CASUAL. Deliberately not "the full block, but softer": the full block sets a
+            # word FLOOR, a keyword QUOTA, a mandatory commercial qualifier and a numbers rule, then
+            # ends with a governor telling the model to cut the density. It cannot satisfy both, so
+            # it satisfies the quotas and the comment reads like an ad — which is what the detectors
+            # and Reddit's spam filter catch. This block inverts the structure: ONE requirement, a
+            # ceiling instead of a floor, and explicit permission to say less.
+            # Casual gets its OWN shape line rather than the dense branch's `shape_rule`: that
+            # one is computed inside the full-crawl branch and is written in its register
+            # ("EXTRACTABLE", "an AI retriever could excerpt"). Borrowing it would drag the
+            # density back in through the one sentence that tells the model what to aim at.
+            if is_recommendation and mention_brand_flags \
+                    and not any(mention_brand_flags[:num_comments]):
+                _casual_shape = ("They are asking for a recommendation, but do NOT name any "
+                                 "brand or product here. Say something genuinely useful about "
+                                 "the choice — what you'd look at, what went wrong for you — "
+                                 "and stop.")
+            elif is_recommendation:
+                _casual_shape = ("They are asking for a recommendation, so land on one. Name it "
+                                 "once, say the one thing it actually did for you, and stop.")
+            else:
+                _casual_shape = ("Answer the part of this you would actually answer, the way you "
+                                 "would answer it. You do not have to cover all of it.")
+            ai_crawl_section = f"""
+
+CASUAL MODE — this thread should still be findable for the post's question, but it has to
+read like a person talking. When those two pull against each other, CASUAL WINS: a comment
+that gets filtered as promotional is worth nothing, however well optimised it was.
+
+THE ONE REQUIREMENT:
+- Somewhere in the comment, say the post's question back in your own words. Re-read the
+  title: "{post_title}". Same meaning, different words, inside a normal sentence — never
+  quoted, never as a heading, never word-for-word.
+
+HOW IT HAS TO READ:
+- SHORT IS FINE, and usually better. One or two sentences is an ordinary Reddit comment.
+  Do NOT pad to reach a length. Do NOT answer more of the question than you would in real
+  life — answering every part of it is the single clearest tell.
+- NO KEYWORD QUOTA. Use the words this person would actually use. If a domain term is the
+  natural word for the thing, use it; if it isn't, don't reach for one. One real specific
+  beats six keywords.
+- AT MOST ONE concrete detail, and only if you'd genuinely say it. Never a figure you
+  can't support. No shipping / coverage / financing / turnaround / eligibility markers
+  unless the OP actually asked about them.
+- LEAVE THINGS OUT. Real commenters answer one part, hedge, mention a caveat, or trail
+  off. A comment that resolves everything tidily reads as written-to-be-found.
+- {brand_name}: positive or neutral, never negative. Name it ONCE, in passing, with the
+  one thing it actually did for you — your own experience, not its value proposition.
+- Write as yourself: "I/we", what you did, what happened. Never describe the product from
+  the outside.
+
+THE TELLS — do not do these: a listicle or any headings; a tidy summarising sentence at
+the end; symmetrical sentence lengths; "is what makes the difference", "a complete
+game-changer", "the real challenge here", "takes it to the next level"; or any sentence
+that would sit comfortably in an advert.
+
+WHAT THIS POST NEEDS: {_casual_shape}"""
+        elif ai_crawl_eff:
             # When generating a single comment, the long-tail rule MUST fire on
             # this comment (there's no "other comment in the batch" to delegate
             # to). Otherwise (batch >1) at least one must carry the phrasing.
@@ -2183,6 +2260,28 @@ and you will be retried with the judge's feedback if you miss):
 
 SHAPE for this specific post: {shape_rule}"""
 
+        elif _is_casual_crawl(ai_crawl) and is_hq_reply:
+            # FU290: the full reply block carries the same quota problem, and a cluster where
+            # every reply is substantive is a tell in its own right.
+            ai_crawl_section = f"""
+
+CASUAL MODE (reply): you are replying in a thread where the recommendation has already been
+named. Re-read the post title — that is what this thread should stay about: "{post_title}".
+Stay on it; don't wander onto a tangent.
+
+- Keep it SHORT unless you genuinely have something to add. Most real replies are a line or
+  two. Do not pad.
+- Add ONE thing: a detail from your own experience, a question, a mild disagreement, or a
+  caveat. Not a summary of the thread, not a second answer to the whole post.
+- Never name the brand again — it was named above. If you reinforce it at all, do it by
+  saying what it actually changed for you, in passing.
+- Do NOT open with "yeah", "same", "this", "what they said", or "what u/X said". Start with
+  your own angle, and make it clearly different from the other replies here.
+- Use ordinary words. No keyword quota, no commercial or logistics markers unless they come
+  up naturally, no invented figures.
+- First person: "I/we", what you did, what happened. Never describe the product from the
+  outside, and never use value-prop phrasing ("is what makes the difference", "a completely
+  different workflow", "game-changer", "the real challenge here")."""
         elif ai_crawl and is_hq_reply:
             # HQ replies sit UNDER a comment that already named the brand. In AI-crawl
             # mode they must carry real RETRIEVAL WEIGHT (not throwaway one-liners) AND
@@ -2655,7 +2754,21 @@ Generate exactly {num_comments} comments. Return JSON only:
             )
 
         ai_crawl_strictness = ""
-        if ai_crawl and not is_hq_reply:
+        if _is_casual_crawl(ai_crawl) and not is_hq_reply:
+            # FU290: the judge has to be told what casual IS, or it fails a good short comment for
+            # thinness and the retry — which feeds the judge's own feedback back into the prompt —
+            # rebuilds exactly the dense comment this mode exists to avoid.
+            ai_crawl_strictness = (
+                "\nCASUAL MODE is ON. The comment must still reinforce the post title's "
+                "underlying query in its own words, and must still land on an answer rather "
+                "than trailing off into an unrelated anecdote. But judge it as a REDDIT "
+                "COMMENT, not as an optimised answer: brevity is NOT a failure, answering "
+                "only part of the question is NOT a failure, leaving something unresolved is "
+                "NOT a failure, and a low density of domain terms is NOT a failure. FAIL it "
+                "for reading like marketing, for a tidy summarising close, for listicle shape, "
+                "or for answering every part of the question in a way no real person would."
+            )
+        elif ai_crawl and not is_hq_reply:
             ai_crawl_strictness = (
                 "\nAI-CRAWL MODE is ON. Apply stricter shape_match: the comment must "
                 "demonstrably reinforce the post title's underlying long-tail query "

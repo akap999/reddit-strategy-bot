@@ -8620,6 +8620,20 @@ function lsubsUpdateSubLink() {
     link.innerHTML = `<a href="https://www.reddit.com/r/${sub}" target="_blank" rel="noopener" style="color:#FF8b60" class="hover:underline">Open r/${sub} ↗</a>`;
 }
 
+// FU290 — retrieval strength is three-valued now: "casual" | true (full) | false (off).
+// It rides the SAME `ai_crawl` field the API already accepted, because "casual" is truthy
+// server-side; nothing else in the request shape changed. Default stays FULL so existing
+// behaviour is untouched for anyone who doesn't change the dropdown.
+function _aiCrawlValue(id) {
+    const el = document.getElementById(id);
+    if (!el) return true;
+    if (el.type === 'checkbox') return !!el.checked;   // any control not yet converted
+    const v = (el.value || '').toLowerCase();
+    if (v === 'casual') return 'casual';
+    if (v === 'off') return false;
+    return true;
+}
+
 async function lsubsGeneratePosts(force = false) {
     const { bid, sub } = lsubsContext();
     if (!bid) { toast('Pick a brand first', 'error'); return; }
@@ -9332,9 +9346,13 @@ function lsubsGenCommentsForPost(pid) {
                 </label>
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-cmts-aicrawl" checked>
-                <span>AI-crawl optimized
-                    <span class="text-xs text-gray-500 block ml-6">Each comment is substantive, packed with the brand's domain vocabulary, and includes natural-language phrasings of the long-tail GEO query the post is meant to rank for. Recommended for Live Subreddits.</span>
+                <select id="lsubs-cmts-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength
+                    <span class="text-xs text-gray-500 block ml-6">Each comment is substantive, packed with the brand's domain vocabulary, and includes natural-language phrasings of the long-tail GEO query the post is meant to rank for. That description is <em>Full</em>; <em>Casual</em> keeps the same query targeting but writes it short and partial, the way a person would.</span>
                 </span>
             </label>
         </div>
@@ -9347,7 +9365,7 @@ function lsubsGenCommentsForPost(pid) {
 
 async function _lsubsRunGenComments(pid) {
     const count = parseInt(document.getElementById('lsubs-cmts-count')?.value) || 5;
-    const aiCrawl = !!document.getElementById('lsubs-cmts-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-cmts-aicrawl');
     const bmode = document.querySelector('input[name="lsubs-cmts-bmode"]:checked')?.value || 'default';
     closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
@@ -9400,8 +9418,12 @@ function lsubsGenReplyToComment(cid, pid) {
                 </label>
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-reply-aicrawl" checked>
-                <span>AI-crawl optimized
+                <select id="lsubs-reply-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength
                     <span class="text-xs text-gray-500 block ml-6">Substantive, domain-vocabulary-rich phrasing tuned for AI-search retrieval.</span>
                 </span>
             </label>
@@ -9415,7 +9437,7 @@ function lsubsGenReplyToComment(cid, pid) {
 
 async function _lsubsRunGenReply(cid, pid) {
     const num = parseInt(document.getElementById('lsubs-reply-count')?.value) || 1;
-    const aiCrawl = !!document.getElementById('lsubs-reply-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-reply-aicrawl');
     const bmode = document.querySelector('input[name="lsubs-reply-bmode"]:checked')?.value || 'none';
     closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
@@ -9446,9 +9468,13 @@ function lsubsGenHqForPost(pid) {
                 <input type="number" id="lsubs-hq-replies" value="5" min="0" max="15" class="w-full">
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-hq-aicrawl" checked>
-                <span>AI-crawl optimized
-                    <span class="text-xs text-gray-500 block ml-6">Substance + brand domain vocabulary + long-tail query phrasing. Recommended for Live Subreddits.</span>
+                <select id="lsubs-hq-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength
+                    <span class="text-xs text-gray-500 block ml-6">Substance + brand domain vocabulary + long-tail query phrasing. That description is <em>Full</em>; <em>Casual</em> keeps the same query targeting but writes it short and partial, the way a person would.</span>
                 </span>
             </label>
         </div>
@@ -9462,7 +9488,7 @@ function lsubsGenHqForPost(pid) {
 async function _lsubsRunGenHq(pid) {
     const _hqR = parseInt(document.getElementById('lsubs-hq-replies')?.value, 10);
     const replies = (Number.isFinite(_hqR) && _hqR >= 0) ? _hqR : 5;  // allow 0 = main comment only
-    const aiCrawl = !!document.getElementById('lsubs-hq-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-hq-aicrawl');
     closeModal();
     const bid = await _lsubsLookupPostBrand(pid);
     if (!bid) { toast('Post has no brand assigned', 'error'); return; }
@@ -9499,8 +9525,12 @@ async function lsubsGenHqForKept() {
                 <input type="number" id="lsubs-hq-batch-replies" value="5" min="0" max="15" class="w-full">
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-hq-batch-aicrawl" checked>
-                <span>AI-crawl optimized
+                <select id="lsubs-hq-batch-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength
                     <span class="text-xs text-gray-500 block ml-6">Substance + brand domain vocabulary + long-tail query phrasing.</span>
                 </span>
             </label>
@@ -9516,7 +9546,7 @@ async function _lsubsRunGenHqForKept() {
     const kept = (_lsubsLastResult && _lsubsLastResult.kept) || [];
     const _bhqR = parseInt(document.getElementById('lsubs-hq-batch-replies')?.value, 10);
     const replies = (Number.isFinite(_bhqR) && _bhqR >= 0) ? _bhqR : 5;  // allow 0 = main comment only
-    const aiCrawl = !!document.getElementById('lsubs-hq-batch-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-hq-batch-aicrawl');
     closeModal();
     let started = 0;
     for (const p of kept) {
@@ -9565,8 +9595,12 @@ async function lsubsBatchGenerate(mode) {
                 </label>
             </div>` : ''}
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-batch-aicrawl" checked>
-                <span>AI-crawl optimized</span>
+                <select id="lsubs-batch-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength <span class="text-xs text-gray-500 block">Casual keeps the thread findable for the post's question but writes it the way a person would — short, partial, one specific. Full packs in the brand's domain vocabulary; it reads denser and is what AI-detection bots pick up on.</span></span>
             </label>
         </div>
         <div class="flex justify-end gap-2 mt-4">
@@ -9579,7 +9613,7 @@ async function lsubsBatchGenerate(mode) {
 async function _lsubsRunBatchGenerate(mode) {
     const ids = lsubsGetSelectedPostIds();
     const num = parseInt(document.getElementById('lsubs-batch-num')?.value) || 5;
-    const aiCrawl = !!document.getElementById('lsubs-batch-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-batch-aicrawl');
     const bmode = document.querySelector('input[name="lsubs-batch-bmode"]:checked')?.value || 'default';
     closeModal();
     // Aggregate pull-failure across all batch tasks so the final
@@ -9686,8 +9720,12 @@ function lsubsAddRepliesToCluster(rootId) {
                 <input type="number" id="lsubs-cluster-replies-num" value="3" min="1" max="10" class="w-full">
             </div>
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" id="lsubs-cluster-replies-aicrawl" checked>
-                <span>AI-crawl optimized</span>
+                <select id="lsubs-cluster-replies-aicrawl" class="text-xs" style="min-width:230px">
+                    <option value="casual">Casual — reads human (recommended)</option>
+                    <option value="full" selected>Full AI-crawl — max density</option>
+                    <option value="off">Off — plain comment</option>
+                </select>
+                <span>Retrieval strength <span class="text-xs text-gray-500 block">Casual keeps the thread findable for the post's question but writes it the way a person would — short, partial, one specific. Full packs in the brand's domain vocabulary; it reads denser and is what AI-detection bots pick up on.</span></span>
             </label>
         </div>
         <div class="flex justify-end gap-2 mt-4">
@@ -9699,7 +9737,7 @@ function lsubsAddRepliesToCluster(rootId) {
 
 async function _lsubsRunAddReplies(rootId) {
     const num = parseInt(document.getElementById('lsubs-cluster-replies-num')?.value) || 3;
-    const aiCrawl = !!document.getElementById('lsubs-cluster-replies-aicrawl')?.checked;
+    const aiCrawl = _aiCrawlValue('lsubs-cluster-replies-aicrawl');
     closeModal();
     try {
         const { task_id } = await api(`/api/comments/${rootId}/hq/add-replies`, {

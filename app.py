@@ -45,6 +45,27 @@ from db import Database
 from generators.base import ClaudeClient, WriterClient
 from generators.subreddit_gen import SubredditGenerator
 from generators.post_gen import PostGenerator, body_names_target
+
+
+def _ai_crawl_arg(data, default):
+    """FU290: read the three-valued retrieval strength off a request body.
+
+    False → normal · "casual" → the casual middle ground · True → the original dense block.
+    `bool(...)` was collapsing "casual" to True, which silently promoted every casual request
+    to full density. Anything unrecognised falls back to the endpoint's own default rather
+    than guessing, so a typo can never quietly change what gets written.
+    """
+    v = (data or {}).get("ai_crawl", default)
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t == "casual":
+            return "casual"
+        if t in ("full", "true", "1", "on", "yes"):
+            return True
+        if t in ("", "none", "off", "false", "0", "no", "normal"):
+            return False
+        return default
+    return bool(v)
 from generators.comment_gen import CommentGenerator
 from generators.blog_gen import scrub_markdown_formatting   # FU201
 
@@ -6311,7 +6332,7 @@ def api_regenerate_comment(cid):
     from generators.comment_gen import CommentGenerator
     from generators.base import ClaudeClient
     data = request.json or {}
-    ai_crawl = bool(data.get("ai_crawl", True))
+    ai_crawl = _ai_crawl_arg(data, True)
 
     db = get_db()
     try:
@@ -6414,7 +6435,7 @@ def api_regenerate_search_comment(cid):
     from generators.base import ClaudeClient
     data = request.json or {}
     # Pre-consolidation parity: default ai_crawl off for Live Search.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
 
     db = get_db()
     try:
@@ -10868,7 +10889,7 @@ def api_gen_comments():
     # produce AI-search-engine-retrievable comments: substantive, packed
     # with the brand's domain vocabulary, with long-tail query phrasings
     # woven in. Default False so the regular Posts page is unchanged.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
@@ -10929,7 +10950,7 @@ def api_gen_hq_comment():
     # is `checked` by default. The toggle gates both the per-comment
     # AI-CRAWL prompt block AND the HQ-MAIN OVERRIDE on the root —
     # OFF produces a Live-Search-style root comment.
-    ai_crawl = bool(data.get("ai_crawl", True))
+    ai_crawl = _ai_crawl_arg(data, True)
     num_replies = int(data.get("num_replies", 5))
 
     def task():
@@ -10970,7 +10991,7 @@ def api_hq_add_replies(cid):
     """
     data = request.json or {}
     num_replies = int(data.get("num_replies", 3))
-    ai_crawl = bool(data.get("ai_crawl", True))  # default on for HQ
+    ai_crawl = _ai_crawl_arg(data, True)  # default on for HQ
 
     def task():
         db, claude, _, _, comment_gen = make_generators()
@@ -11002,7 +11023,7 @@ def api_hq_op_reply(cid):
         outcome (for refreshing a live thread).
     """
     data = request.json or {}
-    ai_crawl = bool(data.get("ai_crawl", True))
+    ai_crawl = _ai_crawl_arg(data, True)
     affirm_brand = bool(data.get("affirm_brand", False))
 
     def task():
@@ -11145,7 +11166,7 @@ def api_gen_reply_to_comment():
         comment_gen = CommentGenerator(ClaudeClient(ANTHROPIC_API_KEY), db)
         new_id, body = _gen_one_reply_to_comment(
             db, comment_gen, comment, post, subreddit, brand,
-            ai_crawl=bool(data.get("ai_crawl", False)), mention_brand=mention_brand)
+            ai_crawl=_ai_crawl_arg(data, False), mention_brand=mention_brand)
         if not new_id:
             return jsonify({"error": "Failed to generate reply"})
         return jsonify({"ok": True, "comment_id": new_id, "body": body[:200],
@@ -11160,7 +11181,7 @@ def api_gen_nested_reply(cid):
     The Live Subs '↳ Reply' button hits this. Body: {num_replies(1-5), ai_crawl, mention_brand, brand_id?}."""
     data = request.json or {}
     num_replies = max(1, min(5, int(data.get("num_replies", 1) or 1)))
-    ai_crawl = bool(data.get("ai_crawl", True))
+    ai_crawl = _ai_crawl_arg(data, True)
     mention_brand = bool(data.get("mention_brand", False))
     brand_id = data.get("brand_id")
 
@@ -13072,7 +13093,7 @@ def api_generate_search_comments(pid):
     # Pre-consolidation parity: Live Search did not have an ai_crawl mode.
     # Default to False so behaviour matches the legacy bot. Callers can
     # still opt in by passing ai_crawl=True explicitly.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -13342,7 +13363,7 @@ def api_generate_search_hq(pid):
     brand_keywords = json.loads(brand.get("keywords", "[]")) if brand.get("keywords") else []
     threshold = data.get("relevance_threshold", 6)
     # Pre-consolidation parity for Live Search HQ — default ai_crawl off.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
 
     def task():
         proxy = REDDIT_PROXY_URL or os.environ.get("REDDIT_PROXY_URL", "")
@@ -13377,7 +13398,7 @@ def api_generate_search_hq_batch():
     post_ids = data.get("post_ids", [])
     threshold = data.get("relevance_threshold", 6)
     # Pre-consolidation parity for Live Search HQ batch — default ai_crawl off.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
     dedup = bool(data.get("dedup", False))
     exclude_subs = {(s or "").strip().lower() for s in (data.get("exclude_subs") or [])}
 
@@ -13471,7 +13492,7 @@ def api_generate_search_comments_batch():
     post_ids = data.get("post_ids", [])
     num_comments = data.get("num_comments", 2)
     # Pre-consolidation parity for Live Search batch — default ai_crawl off.
-    ai_crawl = bool(data.get("ai_crawl", False))
+    ai_crawl = _ai_crawl_arg(data, False)
     # Server-side dedup/exclude so the client doesn't pull the whole posts+comments
     # tables to filter (that froze "Save & Generate All" on large datasets).
     dedup = bool(data.get("dedup", False))

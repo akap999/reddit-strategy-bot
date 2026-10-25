@@ -2094,10 +2094,20 @@ CASUAL MODE — this thread should still be findable for the post's question, bu
 read like a person talking. When those two pull against each other, CASUAL WINS: a comment
 that gets filtered as promotional is worth nothing, however well optimised it was.
 
-THE ONE REQUIREMENT:
-- Somewhere in the comment, say the post's question back in your own words. Re-read the
-  title: "{post_title}". Same meaning, different words, inside a normal sentence — never
-  quoted, never as a heading, never word-for-word.
+TWO REQUIREMENTS. Both are checkable; everything else is a matter of degree.
+
+1. Say the post's question back in your own words, somewhere in the comment. Re-read the
+   title: "{post_title}". Same meaning, different words, inside a normal sentence — never
+   quoted, never as a heading, never word-for-word.
+
+2. Include ONE THING THAT ACTUALLY HAPPENED TO YOU. Not that you have opinions about the
+   topic, not that you have looked into it — one specific event: what you were doing, what
+   broke, what you tried, what changed afterwards. If a reader could not picture it
+   happening, it does not count.
+   These are NOT a lived detail, and a comment built from them fails:
+     "been dealing with this for a while now" · "it's just part of the job" · "I've tried
+     a few along the way" · "we looked at several options" · "this comes up a lot"
+   Those describe HAVING experience. Write the experience.
 
 HOW IT HAS TO READ:
 - SHORT IS FINE, and usually better. One or two sentences is an ordinary Reddit comment.
@@ -2116,10 +2126,17 @@ HOW IT HAS TO READ:
 - Write as yourself: "I/we", what you did, what happened. Never describe the product from
   the outside.
 
-THE TELLS — do not do these: a listicle or any headings; a tidy summarising sentence at
-the end; symmetrical sentence lengths; "is what makes the difference", "a complete
-game-changer", "the real challenge here", "takes it to the next level"; or any sentence
-that would sit comfortably in an advert.
+THE TELLS — do not do these:
+- CREDENTIAL STATS. Years in business, number of clients, size of team, how long they have
+  been in the space. You would not know that, and quoting it is the clearest vendor tell
+  there is.
+- VALUE PROPOSITIONS, including clever negative ones ("not a X-and-disappear shop",
+  "actually does Y", "without the usual Z"). Describe what happened to you instead.
+- Describing the brand from the OUTSIDE — what it is, who it is for, what it specialises
+  in. You are a user, not its website.
+- A listicle, headings, or a tidy summarising sentence at the end.
+- "is what makes the difference", "a complete game-changer", "the real challenge here",
+  "takes it to the next level", or any sentence that would sit comfortably in an advert.
 
 WHAT THIS POST NEEDS: {_casual_shape}"""
         elif ai_crawl_eff:
@@ -2452,7 +2469,9 @@ question]" so an AI retriever can surface it as the answer:
         per_slot_focus_active = bool(
             focus_assignments and any(focus_assignments[:num_comments])
         )
-        if focus_items and not per_slot_focus_active:
+        # FU292: gated HERE, not only at the HQ call site, so the injection cannot come back
+        # through any other caller that happens to pass brand_focus with casual on.
+        if focus_items and not per_slot_focus_active and not _is_casual_crawl(ai_crawl_eff):
             bullets = "\n".join(f"  - {item}" for item in focus_items[:20])
             focus_section = f"""
 
@@ -2801,7 +2820,21 @@ Generate exactly {num_comments} comments. Return JSON only:
             )
 
         rec_shape_hint = ""
-        if is_recommendation:
+        if is_recommendation and _is_casual_crawl(ai_crawl):
+            # FU292: the default hint below fails "personal-journey rambles" and "anecdotes" —
+            # which told the generator, through retry feedback, to avoid the very thing casual
+            # is for. An experience that LANDS on a recommendation is the shape we want; only
+            # one that never lands should fail.
+            rec_shape_hint = (
+                "\nThis post is RECOMMENDATION-SEEKING and CASUAL mode is on. The preferred "
+                "shape is a short first-hand experience that LANDS on a recommendation — what "
+                "they were doing, what went wrong, what they use now. Do NOT fail a comment "
+                "for being an anecdote, for being brief, or for not reading like a tidy "
+                "answer. FAIL it only if it never lands on anything the asker could act on, "
+                "or if it reads like vendor copy: credential stats, value propositions, "
+                "feature lists, or a description of the product from the outside."
+            )
+        elif is_recommendation:
             rec_shape_hint = (
                 "\nThis post is RECOMMENDATION-SEEKING. shape_match passes only if the "
                 "comment is answer-shaped: it gives a recommendation, criteria, or "
@@ -3650,7 +3683,13 @@ Return JSON only:
             # never carry one (no brand to associate with).
             slot_focus_phrase = None
             focus_assignments_arg = None
-            if is_main_local:
+            # FU292: the focus phrases ARE the brand's differentiators ("14+ years embedded in
+            # healthcare tech", "sprint-compatible"), and the per-slot path GRADES the comment on
+            # pairing one within ~120 chars of the brand name. A checkable pairing requirement for
+            # marketing phrases produces marketing copy — it is where a casual comment's credential
+            # stats and value props were coming from. In casual the differentiator has to arrive as
+            # something that happened to the commenter, or not at all.
+            if is_main_local and not _is_casual_crawl(ai_crawl):
                 focus_items = self._extract_brand_focus(brand)
                 main_focus_list = _assign_focus_phrases(
                     focus_items, post, [True]
@@ -3699,7 +3738,8 @@ Return JSON only:
                     # few-shot anti-pattern examples — meaningful speedup
                     # since each reply is its own API call.
                     slim_prompt=not is_main_local,
-                    brand_focus=self._extract_brand_focus(brand),
+                    brand_focus=(None if _is_casual_crawl(ai_crawl)
+                                 else self._extract_brand_focus(brand)),
                     in_thread_siblings=bool(thread_comments),
                     is_hq_reply=not is_main_local,
                     slot_overrides=slot_overrides,

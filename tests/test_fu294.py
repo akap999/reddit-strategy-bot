@@ -247,9 +247,13 @@ def test_the_backoff_base_fits_a_40s_budget():
 
 
 # ── the burst that provokes it ─────────────────────────────────────────────────────────────────
-def test_arctic_concurrency_is_backed_off():
-    """4-wide against ~40 sub×term queries is what triggered the throttle in production."""
-    assert RedditSearchBot._arctic_sem._value <= 2
+def test_arctic_concurrency_is_bounded():
+    """FU294 dropped this to 2, because a throttle then meant a 300s leg-wide blackout and
+    provoking one was catastrophic. FU302 raised it back to 4 once that stopped being true —
+    a throttle now costs a short, budget-clipped backoff, and concurrency had become the
+    binding constraint on results. What still matters here is that it stays BOUNDED: the
+    point of FU294 was never the number 2, it was not hammering a service that throttles."""
+    assert 1 <= RedditSearchBot._arctic_sem._value <= 6
 
 
 def test_the_old_blanket_cooldown_is_gone():

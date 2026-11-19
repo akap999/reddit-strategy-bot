@@ -1750,7 +1750,9 @@ class RedditSearchBot:
                     batch = []
                     if pairs:
                         per_pair = max(needed_raw // max(len(pairs), 1), 25)
-                        with ThreadPoolExecutor(max_workers=min(len(pairs), 4)) as ex:
+                        with ThreadPoolExecutor(
+                                max_workers=min(len(pairs),
+                                                RedditSearchBot._ARCTIC_CONCURRENCY)) as ex:
                             futures = [
                                 ex.submit(self._search_arctic, term, sub, max_days_old,
                                           per_pair, leg_deadline)
@@ -2171,9 +2173,15 @@ class RedditSearchBot:
     # limit → a 429-storm that returns almost nothing. These semaphores bound
     # total concurrent requests per host so a big keyword×sub fan-out queues into
     # safe waves instead of storming.
-    # FU294: Arctic now carries the whole search alone; 4-wide was what provoked the
-    # throttle under a 40 sub×term fan-out.
-    _arctic_sem = threading.Semaphore(2)
+    # FU302: back to 4. FU294 dropped this to 2 because a throttle then meant a 300-SECOND
+    # leg-wide blackout, so provoking one was catastrophic. That is no longer true — a throttle
+    # now backs off (0.75/1.5/3s, clipped to the remaining budget) and only a sustained one
+    # trips the breaker. Meanwhile concurrency became the binding constraint: the measured runs
+    # show every 180-pair search cut by the deadline at 11-37 raw, while the single run that
+    # fit inside the budget (135 pairs) returned 156. Throughput, not coverage, is what is
+    # missing, and the cost of being throttled is now a few seconds rather than the feature.
+    _ARCTIC_CONCURRENCY = 4
+    _arctic_sem = threading.Semaphore(_ARCTIC_CONCURRENCY)
     _pullpush_sem = threading.Semaphore(6)
     _rss_sem = threading.Semaphore(6)  # RSS is the primary leg for combined-OR; Worker serves-stale on 429
 

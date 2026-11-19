@@ -647,6 +647,25 @@ class RedditSearchBot:
                       f"for {cls._RSS_GONE_SECS}s so the budget goes to Arctic", flush=True)
 
     @classmethod
+    def _subsearch_note_404(cls, term):
+        key = (term or "").strip().lower()
+        with cls._class_lock:
+            cls._subsearch_gone_terms.add(key)
+            if (len(cls._subsearch_gone_terms) >= cls._RSS_GONE_STREAK
+                    and time.time() >= cls._subsearch_gone_until):
+                cls._subsearch_gone_until = time.time() + cls._RSS_GONE_SECS
+                print(f"    🚫 /subreddits/search.json 404'd for "
+                      f"{len(cls._subsearch_gone_terms)} different terms — skipping subreddit "
+                      f"discovery for {cls._RSS_GONE_SECS}s so the budget goes to Arctic",
+                      flush=True)
+
+    @classmethod
+    def _subsearch_note_ok(cls):
+        with cls._class_lock:
+            cls._subsearch_gone_terms.clear()
+            cls._subsearch_gone_until = 0.0
+
+    @classmethod
     def _rss_note_ok(cls):
         with cls._class_lock:
             cls._rss_gone_subs.clear()
@@ -1182,6 +1201,8 @@ class RedditSearchBot:
         listing = []
         path = "/subreddits/search.json"
         params = {"q": term, "limit": 25}
+        if time.time() < RedditSearchBot._subsearch_gone_until:
+            return []
         try:
             resp = None
             # Residential-FIRST (the FU94 pattern): the clean distinct-IP proxy is the
@@ -1208,6 +1229,7 @@ class RedditSearchBot:
                              "Accept": "application/json"},
                     timeout=10)
             if resp is not None and resp.status_code == 200:
+                RedditSearchBot._subsearch_note_ok()
                 data = resp.json()
                 for child in ((data.get("data") or {}).get("children") or []):
                     d = child.get("data") or {}
@@ -1217,6 +1239,8 @@ class RedditSearchBot:
                                         "over18": bool(d.get("over18"))})
             elif resp is not None:
                 print(f"    ⚠ sub-search '{term}' got {resp.status_code}", flush=True)
+                if resp.status_code == 404:
+                    RedditSearchBot._subsearch_note_404(term)
         except Exception as e:
             print(f"    ⚠ sub-search '{term}' failed: {e}", flush=True)
         if listing:
@@ -2059,6 +2083,12 @@ class RedditSearchBot:
     _class_lock = threading.Lock()
     _rss_gone_subs = set()
     _rss_gone_until = 0.0
+    # FU297: /subreddits/search.json — the DISCOVERY endpoint behind the reddit-wide top-up
+    # leg — is dead the same way. It 404s for every term, finds nothing, and the leg still
+    # spends its slice of the budget before reporting 0. Same shape of latch, separate counter
+    # because it is a different endpoint and may come back independently.
+    _subsearch_gone_terms = set()
+    _subsearch_gone_until = 0.0
     _RSS_GONE_STREAK = 3         # distinct subs that must 404 before we believe it
     _RSS_GONE_SECS = 900         # then skip the leg for 15 min and spend the budget on Arctic
 

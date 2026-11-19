@@ -172,3 +172,87 @@ def test_a_404_is_not_treated_as_a_hard_block_or_a_throttle():
                             "search", "reddit_bot.py"), encoding="utf-8").read()
     assert "if resp.status_code == 403:" in src
     assert "elif resp.status_code == 429:" in src
+
+
+# ── FU297: the discovery endpoint is dead the same way ─────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _clean_subsearch():
+    RedditSearchBot._subsearch_gone_terms = set()
+    RedditSearchBot._subsearch_gone_until = 0.0
+    yield
+    RedditSearchBot._subsearch_gone_terms = set()
+    RedditSearchBot._subsearch_gone_until = 0.0
+
+
+def test_discovery_latches_after_several_distinct_terms():
+    """/subreddits/search.json 404s for every term, finds nothing, and the reddit-wide leg
+    still spends its slice of the budget before reporting 0."""
+    for term in ("NDIS", "home care"):
+        RedditSearchBot._subsearch_note_404(term)
+    assert RedditSearchBot._subsearch_gone_until == 0.0
+    RedditSearchBot._subsearch_note_404("aged care")
+    assert RedditSearchBot._subsearch_gone_until > time.time()
+
+
+def test_discovery_latch_is_separate_from_the_rss_one():
+    """Different endpoints; either may come back without the other."""
+    for term in ("a", "b", "c"):
+        RedditSearchBot._subsearch_note_404(term)
+    assert RedditSearchBot._subsearch_gone_until > time.time()
+    assert RedditSearchBot._rss_gone_until == 0.0
+
+
+def test_latched_discovery_makes_no_requests(monkeypatch):
+    """COUNT the calls rather than raising: `_sub_search` wraps everything in try/except, so a
+    raised assertion is swallowed and the test passes while the request still goes out."""
+    bot = RedditSearchBot()
+    calls = {"n": 0}
+    import search.reddit_bot as RB
+
+    def _count(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("network")
+
+    monkeypatch.setattr(RB.requests, "get", _count)
+    RedditSearchBot._subsearch_gone_until = time.time() + 600
+    assert bot._sub_search("NDIS") == []
+    assert calls["n"] == 0, "discovery made a request while latched off"
+
+
+def test_a_real_discovery_404_feeds_the_counter(monkeypatch):
+    """Asserting on _subsearch_note_404 directly does not prove the 404 path CALLS it."""
+    bot = RedditSearchBot()
+
+    class _R:
+        status_code = 404
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {}
+
+    import search.reddit_bot as RB
+    monkeypatch.setattr(RB.requests, "get", lambda *a, **k: _R())
+    for term in ("NDIS", "home care", "aged care"):
+        bot._sub_search(term)
+    assert RedditSearchBot._subsearch_gone_until > time.time(), \
+        "three distinct terms 404'd and the leg was not latched off"
+
+
+def test_a_discovery_success_clears_its_latch(monkeypatch):
+    bot = RedditSearchBot()
+    RedditSearchBot._subsearch_gone_terms = {"a", "b"}
+
+    class _R:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"data": {"children": [
+                {"data": {"display_name": "NDIS", "subscribers": 100, "over18": False}}]}}
+
+    import search.reddit_bot as RB
+    monkeypatch.setattr(RB.requests, "get", lambda *a, **k: _R())
+    out = bot._sub_search("NDIS")
+    assert out and out[0]["name"] == "NDIS"
+    assert RedditSearchBot._subsearch_gone_terms == set()

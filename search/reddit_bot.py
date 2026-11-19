@@ -926,16 +926,17 @@ class RedditSearchBot:
 
         return results
 
-    def _search_arctic(self, keyword, subreddit, max_days_old, limit):
+    def _search_arctic(self, keyword, subreddit, max_days_old, limit, deadline=None):
         """Concurrency-gated entry for Arctic — bounds total concurrent Arctic
         requests across all threads (see `_arctic_sem`) so a big keyword×sub
         fan-out queues into safe waves instead of 429-storming."""
         if not subreddit:
             return []
         with RedditSearchBot._arctic_sem:
-            return self._search_arctic_impl(keyword, subreddit, max_days_old, limit)
+            return self._search_arctic_impl(keyword, subreddit, max_days_old, limit,
+                                            deadline=deadline)
 
-    def _search_arctic_impl(self, keyword, subreddit, max_days_old, limit):
+    def _search_arctic_impl(self, keyword, subreddit, max_days_old, limit, deadline=None):
         """Arctic-Shift API with timestamp-based pagination.
 
         NOTE: Arctic-Shift requires a subreddit filter when using text search.
@@ -954,6 +955,8 @@ class RedditSearchBot:
         pages = 0
 
         while len(results) < limit and pages < RedditSearchBot._MAX_PAGES:
+            if deadline and time.time() > deadline:
+                break
             pages += 1
             batch_size = min(100, limit - len(results))
             params = {"query": keyword, "subreddit": subreddit, "limit": batch_size}
@@ -990,8 +993,16 @@ class RedditSearchBot:
                         time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
                     data = None
                     break
-                if _try < RedditSearchBot._ARCTIC_PAGE_TRIES - 1:
-                    _wait = RedditSearchBot._ARCTIC_BACKOFF_BASE * (2 ** _try) + random.uniform(0, 1.0)
+                _left = (deadline - time.time()) if deadline else None
+                if _try < RedditSearchBot._ARCTIC_PAGE_TRIES - 1 and (
+                        _left is None or _left > RedditSearchBot._ARCTIC_MIN_RETRY_LEFT):
+                    # The leg budget is ~24s shared across up to 40 sub×term pairs — roughly a
+                    # second each. An unbounded 2/4/8s backoff would spend the whole budget on
+                    # three throttled pairs and still return nothing, which is the same blackout
+                    # by a slower route. Sleep only what is actually left to spend.
+                    _wait = RedditSearchBot._ARCTIC_BACKOFF_BASE * (2 ** _try) + random.uniform(0, 0.4)
+                    if _left is not None:
+                        _wait = min(_wait, max(0.0, _left - RedditSearchBot._ARCTIC_MIN_RETRY_LEFT))
                     print(f"    Arctic {('rate-limited' if kind == 'ratelimit' else 'error')}"
                           f" ({str(_err)[:50]}) — backing off {_wait:.1f}s")
                     time.sleep(_wait)
@@ -1010,6 +1021,10 @@ class RedditSearchBot:
                             time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
                         RedditSearchBot._arctic_rl_strikes = 0
                 data = None
+                break          # out of tries OR out of budget — either way, stop retrying.
+                               # Without this, a deadline-skipped backoff fell through and
+                               # fired the remaining tries back-to-back with no spacing at
+                               # all, which is the worst thing to do to a rate limiter.
             if data is None:
                 break
             RedditSearchBot._arctic_rl_strikes = 0      # a clean page clears the strike count
@@ -1664,7 +1679,8 @@ class RedditSearchBot:
                         per_pair = max(needed_raw // max(len(pairs), 1), 25)
                         with ThreadPoolExecutor(max_workers=min(len(pairs), 4)) as ex:
                             futures = [
-                                ex.submit(self._search_arctic, term, sub, max_days_old, per_pair)
+                                ex.submit(self._search_arctic, term, sub, max_days_old,
+                                          per_pair, leg_deadline)
                                 for (sub, term) in pairs
                             ]
                             for f in as_completed(futures):
@@ -2003,7 +2019,8 @@ class RedditSearchBot:
     # FU294: consecutive whole-page rate-limit give-ups before the leg itself is cooled down.
     _arctic_rl_strikes = 0
     _ARCTIC_PAGE_TRIES = 4           # per page, with exponential backoff between tries
-    _ARCTIC_BACKOFF_BASE = 2.0       # seconds: 2, 4, 8 (+ jitter)
+    _ARCTIC_BACKOFF_BASE = 0.75      # seconds: 0.75, 1.5, 3 (+ jitter) — must fit the leg budget
+    _ARCTIC_MIN_RETRY_LEFT = 2.0     # don't start a retry with less than this much budget left
     _ARCTIC_RL_STRIKES_MAX = 6       # only a sustained throttle is treated as an outage
 
     @staticmethod

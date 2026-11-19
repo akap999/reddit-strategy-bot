@@ -174,6 +174,78 @@ def test_an_http_exception_is_retried_too(monkeypatch):
     assert RedditSearchBot._arctic_cooldown_until <= time.time()
 
 
+# ── the backoff has to fit the budget it lives in ──────────────────────────────────────────────
+def test_backoff_never_outlives_the_leg_deadline(monkeypatch):
+    """The leg budget is ~24s shared across up to 40 sub×term pairs. An unbounded 2/4/8s
+    backoff spends it on three throttled pairs and still returns nothing — the same blackout
+    by a slower route. Sleeps must be clipped to what is actually left."""
+    slept = []
+    bot, _ = _bot(monkeypatch, [{"error": "Too many requests"}])
+    import search.reddit_bot as RB
+    monkeypatch.setattr(RB.time, "sleep", lambda s: slept.append(s))
+    deadline = time.time() + 3.0
+    bot._search_arctic("mattress", "Mattress", 365, 5, deadline)
+    assert sum(slept) <= 3.0, f"slept {sum(slept):.1f}s against a 3s deadline: {slept}"
+
+
+def test_no_retry_is_started_with_almost_no_budget_left(monkeypatch):
+    slept = []
+    bot, calls = _bot(monkeypatch, [{"error": "Too many requests"}])
+    import search.reddit_bot as RB
+    monkeypatch.setattr(RB.time, "sleep", lambda s: slept.append(s))
+    bot._search_arctic("mattress", "Mattress", 365, 5, time.time() + 0.1)
+    assert slept == [], "backed off with no budget left"
+    assert calls["n"] == 1, "kept retrying past the deadline"
+
+
+def test_no_deadline_still_backs_off(monkeypatch):
+    """Callers that pass no deadline (and the tests above) must keep the retry behaviour."""
+    slept = []
+    bot, calls = _bot(monkeypatch, [{"error": "Too many requests"}])
+    import search.reddit_bot as RB
+    monkeypatch.setattr(RB.time, "sleep", lambda s: slept.append(s))
+    bot._search_arctic("mattress", "Mattress", 365, 5)
+    assert calls["n"] == RedditSearchBot._ARCTIC_PAGE_TRIES
+    assert len(slept) == RedditSearchBot._ARCTIC_PAGE_TRIES - 1
+
+
+def test_no_page_is_started_after_the_deadline(monkeypatch):
+    """The per-page check matters on a MULTI-page query: pages 2 and 3 must not start once
+    the budget is gone, even though page 1 came back clean."""
+    full = {"data": [{"id": f"p{i}", "title": "t", "created_utc": time.time(),
+                      "subreddit": "Mattress", "permalink": f"/r/x/{i}", "num_comments": 3,
+                      "score": 5, "selftext": "", "author": "u"} for i in range(100)]}
+    bot, calls = _bot(monkeypatch, [full])
+    bot._search_arctic("mattress", "Mattress", 365, 500, time.time() - 1)
+    assert calls["n"] == 0, "started a page with the deadline already past"
+
+
+def test_a_live_deadline_still_allows_paging(monkeypatch):
+    """...and the check must not stop a query that still has budget."""
+    full = {"data": [{"id": f"p{i}", "title": "t", "created_utc": time.time(),
+                      "subreddit": "Mattress", "permalink": f"/r/x/{i}", "num_comments": 3,
+                      "score": 5, "selftext": "", "author": "u"} for i in range(100)]}
+    bot, calls = _bot(monkeypatch, [full])
+    bot._search_arctic("mattress", "Mattress", 365, 500, time.time() + 60)
+    assert calls["n"] >= 1, "a live deadline blocked the first page"
+
+
+def test_the_fan_out_passes_its_deadline_down():
+    """Threading it through the ThreadPoolExecutor submit is the whole point — without it the
+    pairs each back off blind and the budget check between futures comes far too late."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "search", "reddit_bot.py"), encoding="utf-8").read()
+    assert "per_pair, leg_deadline)" in src
+    assert "def _search_arctic(self, keyword, subreddit, max_days_old, limit, deadline=None):" in src
+
+
+def test_the_backoff_base_fits_a_40s_budget():
+    """0.75/1.5/3 ≈ 5s worst case per pair. At 2/4/8 ≈ 14s, three pairs exhaust the budget."""
+    worst = sum(RedditSearchBot._ARCTIC_BACKOFF_BASE * (2 ** i)
+                for i in range(RedditSearchBot._ARCTIC_PAGE_TRIES - 1))
+    assert worst <= 6.0, f"worst-case backoff per pair is {worst:.1f}s"
+
+
 # ── the burst that provokes it ─────────────────────────────────────────────────────────────────
 def test_arctic_concurrency_is_backed_off():
     """4-wide against ~40 sub×term queries is what triggered the throttle in production."""

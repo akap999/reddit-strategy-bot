@@ -1433,7 +1433,17 @@ class RedditSearchBot:
         search_deadline = _deadline or (time.time() + _budget)
         leg_deadline = search_deadline
         if (_deadline is None and reddit_wide and subreddit_path and api == "auto"):
-            leg_deadline = time.time() + _budget * 0.6
+            # FU299: that reserve is only worth holding if the top-up can actually spend it.
+            # Its subreddit discovery (/subreddits/search.json) is latched off while the
+            # endpoint 404s (FU297), and a global Arctic search needs a subreddit, so the
+            # top-up returns 0 whatever window it gets. Reserving 40% then does nothing except
+            # cut short the one leg that works — which the log shows being truncated mid-yield
+            # at a 100% filter pass rate. Give it the whole budget until discovery is back.
+            if time.time() < RedditSearchBot._subsearch_gone_until:
+                print("    ↳ subreddit discovery is down — giving the named-sub leg the FULL "
+                      "budget instead of reserving 40% for a top-up that cannot run", flush=True)
+            else:
+                leg_deadline = time.time() + _budget * 0.6
 
         # FU109 — Reddit-wide two-stage: a GLOBAL search (no subs given) first DISCOVERS
         # the relevant subreddits (Reddit's own subreddit-search + optional LLM leg), then

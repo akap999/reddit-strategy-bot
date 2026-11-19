@@ -1725,7 +1725,16 @@ class RedditSearchBot:
                         # _arctic_sem(4) regardless, so a bigger budget only costs
                         # latency in the throttled case (RSS underfilled) -- a healthy
                         # RSS fills the limit first and the early-stop skips Arctic.
-                        _ARCTIC_BUDGET = min(len(arctic_subs) * len(arctic_terms), 40)
+                        # FU300: the flat 40 was set when Arctic was one of four legs sharing
+                        # a 40s budget. It is now the ONLY leg, the budget is configurable, and
+                        # the cap binds on EVERY search — with 10 keywords it buys 4 subreddits
+                        # of coverage no matter how many the operator adds, so subs are accepted
+                        # by the UI and then never queried. Scale with the time actually
+                        # available; the leg deadline still truncates mid-flight, so this raises
+                        # the ceiling without removing the guard against a runaway grid.
+                        _pair_cap = max(40, int(_budget * 1.5))
+                        _ARCTIC_BUDGET = min(len(arctic_subs) * len(arctic_terms),
+                                             _pair_cap, 300)
                         pairs, _seen_pairs = [], set()
                         for _pass in range(len(arctic_terms)):
                             for _i, sub in enumerate(arctic_subs):

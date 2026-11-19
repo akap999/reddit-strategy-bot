@@ -963,41 +963,56 @@ class RedditSearchBot:
             if before_ts:
                 params["before"] = str(int(before_ts))
 
-            def _cool_if_down(err):
-                # Trip the Arctic circuit-breaker on a maintenance / rate-limit signal so the rest of
-                # the fan-out (and the next search) skips Arctic instead of burning the budget.
-                if any(s in (err or "").lower()
-                       for s in ("maintenance", "too many", "slow down", "rate")):
-                    RedditSearchBot._arctic_cooldown_until = (
-                        time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
-            try:
-                response = self._make_request(self.apis["arctic"], params)
-                data = response.json()
-                # Arctic-Shift returns errors in the response body
-                if data.get("error"):
-                    print(f"(Arctic-Shift error: {data['error'][:50]})")
-                    _cool_if_down(data["error"])
-                    break
-            except Exception as e:
-                # One extra page-level retry before giving up (see pullpush
-                # rationale): a transient blip shouldn't truncate the leg and
-                # shrink the result pool. Keep whatever we already collected.
-                print(f"({e.__class__.__name__}: {str(e)[:50]} — retrying page)")
-                time.sleep(1.5 + random.uniform(0, 1.0))
+            # FU294 — "slow down" is not "stop". Arctic is the ONLY leg still returning
+            # anything (search.rss 404s, Reddit JSON is 403-walled, PullPush is 521), and it
+            # throttles readily: it answers "Too many requests" or HTTP 422
+            # {"error":"Timeout. Maybe slow down a bit"} under a 40-query fan-out. The old code
+            # treated BOTH of those as an outage and cooled the leg for 300s — so one throttled
+            # page out of forty blacked out the whole search, and because every search re-tripped
+            # it, permanently in practice. A rate limit means back off and come back; only a real
+            # maintenance signal means stop.
+            data = None
+            for _try in range(RedditSearchBot._ARCTIC_PAGE_TRIES):
+                _err = None
                 try:
                     response = self._make_request(self.apis["arctic"], params)
                     data = response.json()
-                    if data.get("error"):
-                        print(f"(Arctic-Shift error: {data['error'][:50]})")
-                        _cool_if_down(data["error"])
-                        break
-                except Exception as e2:
-                    print(f"    arctic page retry failed ({e2.__class__.__name__}); keeping {len(results)}")
-                    # A page that fails even after _make_request's own retries = Arctic-Shift is
-                    # down/rate-limiting → cool it down so the rest of the fan-out skips it.
+                    _err = data.get("error")       # Arctic reports errors in the body too
+                except Exception as e:
+                    _err = f"{e.__class__.__name__}: {e}"
+                    data = None
+                if not _err:
+                    break
+                kind = RedditSearchBot._arctic_err_kind(_err)
+                if kind == "outage":
+                    print(f"    Arctic-Shift down ({str(_err)[:60]}) — cooling down")
                     RedditSearchBot._arctic_cooldown_until = (
                         time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
+                    data = None
                     break
+                if _try < RedditSearchBot._ARCTIC_PAGE_TRIES - 1:
+                    _wait = RedditSearchBot._ARCTIC_BACKOFF_BASE * (2 ** _try) + random.uniform(0, 1.0)
+                    print(f"    Arctic {('rate-limited' if kind == 'ratelimit' else 'error')}"
+                          f" ({str(_err)[:50]}) — backing off {_wait:.1f}s")
+                    time.sleep(_wait)
+                    data = None
+                    continue
+                # Out of tries. Give this PAGE up and keep what we have; only escalate to a
+                # leg-wide cooldown once the whole leg has been throttled repeatedly, so one
+                # unlucky sub×term cannot take the other thirty-nine down with it.
+                print(f"    Arctic page gave up after {RedditSearchBot._ARCTIC_PAGE_TRIES} tries "
+                      f"({str(_err)[:50]}); keeping {len(results)}")
+                if kind == "ratelimit":
+                    RedditSearchBot._arctic_rl_strikes += 1
+                    if RedditSearchBot._arctic_rl_strikes >= RedditSearchBot._ARCTIC_RL_STRIKES_MAX:
+                        print("    Arctic rate-limited repeatedly — cooling the leg down")
+                        RedditSearchBot._arctic_cooldown_until = (
+                            time.time() + RedditSearchBot._ARCTIC_COOLDOWN_SECS)
+                        RedditSearchBot._arctic_rl_strikes = 0
+                data = None
+            if data is None:
+                break
+            RedditSearchBot._arctic_rl_strikes = 0      # a clean page clears the strike count
 
             posts = data.get("data", [])
             if not posts:
@@ -1985,6 +2000,28 @@ class RedditSearchBot:
     # results. Set on the first such error; the leg + queued fan-out queries skip
     # until it expires (auto-recovers).
     _arctic_cooldown_until = 0.0
+    # FU294: consecutive whole-page rate-limit give-ups before the leg itself is cooled down.
+    _arctic_rl_strikes = 0
+    _ARCTIC_PAGE_TRIES = 4           # per page, with exponential backoff between tries
+    _ARCTIC_BACKOFF_BASE = 2.0       # seconds: 2, 4, 8 (+ jitter)
+    _ARCTIC_RL_STRIKES_MAX = 6       # only a sustained throttle is treated as an outage
+
+    @staticmethod
+    def _arctic_err_kind(err):
+        """Classify an Arctic failure: 'outage' (stop), 'ratelimit' (back off), else 'other'.
+
+        Arctic says "Too many requests", and answers HTTP 422 with
+        {"error": "Timeout. Maybe slow down a bit"} — both mean slow down, not stop. Only an
+        explicit maintenance signal is an outage. Getting this wrong is what turned a throttle
+        into a total blackout of the one leg still working.
+        """
+        e = (err or "").lower()
+        if "maintenance" in e:
+            return "outage"
+        if any(m in e for m in ("too many", "slow down", "rate limit", "ratelimit",
+                                "429", "422", "timeout")):
+            return "ratelimit"
+        return "other"
     _ARCTIC_COOLDOWN_SECS = 300
 
     # Same idea for Pullpush: it frequently 429s / returns nothing for niche subs
@@ -2010,7 +2047,9 @@ class RedditSearchBot:
     # limit → a 429-storm that returns almost nothing. These semaphores bound
     # total concurrent requests per host so a big keyword×sub fan-out queues into
     # safe waves instead of storming.
-    _arctic_sem = threading.Semaphore(4)
+    # FU294: Arctic now carries the whole search alone; 4-wide was what provoked the
+    # throttle under a 40 sub×term fan-out.
+    _arctic_sem = threading.Semaphore(2)
     _pullpush_sem = threading.Semaphore(6)
     _rss_sem = threading.Semaphore(6)  # RSS is the primary leg for combined-OR; Worker serves-stale on 429
 

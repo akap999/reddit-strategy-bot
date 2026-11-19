@@ -1987,8 +1987,19 @@ class RedditSearchBot:
         # keep their priority/order; globals only fill the remaining tail. Opt-in via
         # `reddit_wide` (the Live Search endpoint turns it on). No recursion loop: the
         # inner call passes subreddits=None, so its own guard is False.
+        # FU301: with subreddit discovery down the top-up cannot reach any sub we have not
+        # already searched — a global Arctic query needs a subreddit, so it falls back to the
+        # subs discovered from `filtered`, re-runs the same grid and returns only duplicates.
+        # The log shows exactly that: "(arctic 60 sub×term queries) No new results (0 raw)".
+        # FU299 stopped it RESERVING budget; it was still spending it. Skip it outright and
+        # leave the whole window to the leg that produces.
+        _topup_possible = time.time() >= RedditSearchBot._subsearch_gone_until
         if (reddit_wide and subreddit_path and api == "auto" and len(result) < limit
-                and time.time() < search_deadline):
+                and not _topup_possible):
+            print("    ↳ skipping the Reddit-wide top-up: subreddit discovery is down, so it "
+                  "can only re-query the subs already searched", flush=True)
+        if (reddit_wide and subreddit_path and api == "auto" and len(result) < limit
+                and _topup_possible and time.time() < search_deadline):
             seen_ids = {p.get("id") for p in result if p.get("id")}
             needed = limit - len(result)
             # FU77: enforce max_per_sub across the WHOLE result — seed per-sub counts from the

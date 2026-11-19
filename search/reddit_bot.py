@@ -632,6 +632,26 @@ class RedditSearchBot:
         with RedditSearchBot._rss_sem:
             return self._search_reddit_rss_impl(keyword, subreddit_path, sort, time_filter, limit)
 
+    @classmethod
+    def _rss_note_404(cls, subreddit_path):
+        """Record a search.rss 404 for one sub; latch the leg off once several distinct subs
+        have 404'd, which means the endpoint is gone rather than the sub."""
+        key = (subreddit_path or "(global)").lower()
+        with cls._class_lock:
+            cls._rss_gone_subs.add(key)
+            if (len(cls._rss_gone_subs) >= cls._RSS_GONE_STREAK
+                    and time.time() >= cls._rss_gone_until):
+                cls._rss_gone_until = time.time() + cls._RSS_GONE_SECS
+                print(f"    🚫 search.rss 404'd for {len(cls._rss_gone_subs)} different "
+                      f"subreddits — treating the endpoint as gone and skipping the RSS leg "
+                      f"for {cls._RSS_GONE_SECS}s so the budget goes to Arctic", flush=True)
+
+    @classmethod
+    def _rss_note_ok(cls):
+        with cls._class_lock:
+            cls._rss_gone_subs.clear()
+            cls._rss_gone_until = 0.0
+
     def _search_reddit_rss_impl(self, keyword, subreddit_path, sort, time_filter, limit):
         """Reddit RSS search — the bypass for the IP/UA bot wall on
         the JSON endpoints. Hits /r/<sub>/search.rss when a sub is
@@ -643,6 +663,10 @@ class RedditSearchBot:
         which is set by REDDIT_RSS_DISABLED or a real RSS 403, NOT by
         the REDDIT_API_DISABLED (JSON-leg) opt-out.
         """
+        # FU296: endpoint-level, so NOT subject to the _resi_active() bypass below — the
+        # residential proxy 404s on a removed endpoint exactly like the worker does.
+        if time.time() < RedditSearchBot._rss_gone_until:
+            return []
         if self._reddit_rss_dead and not self._resi_active():
             return []   # FU94: the dead latch reflects the WORKER's 403 — residential bypasses it
         # Three URL shapes:
@@ -736,6 +760,9 @@ class RedditSearchBot:
                     else:
                         print(f"\n    ⚠ RSS residential primary got {presp.status_code} — "
                               f"falling back to the worker", flush=True)
+                        if presp.status_code == 404:
+                            # Endpoint-level, not IP-level: the worker will 404 too.
+                            RedditSearchBot._rss_note_404(subreddit_path)
                 except Exception as _pe:
                     print(f"\n    ⚠ RSS residential primary failed: {_pe} — "
                           f"falling back to the worker", flush=True)
@@ -771,12 +798,15 @@ class RedditSearchBot:
                             self._reddit_rss_dead = True
                             self._reddit_rss_dead_reason = "RSS returned 403 (hard block)"
                             print(f"    🚫 Marking Reddit RSS leg dead: {self._reddit_rss_dead_reason}", flush=True)
+                elif resp.status_code == 404:
+                    RedditSearchBot._rss_note_404(subreddit_path)
                 elif resp.status_code == 429:
                     RedditSearchBot._reddit_rss_cooldown_until = (
                         time.time() + RedditSearchBot._RSS_COOLDOWN_SECS)
                     print(f"    ⏸ RSS throttled (429) — cooling down the RSS leg for "
                           f"{RedditSearchBot._RSS_COOLDOWN_SECS}s", flush=True)
                 return []
+            RedditSearchBot._rss_note_ok()      # FU296: a 200 means the endpoint is back
             # Parse Atom XML into `results` (dedup by id).
             def _parse_rss_into(text, out):
                 try:
@@ -2015,6 +2045,23 @@ class RedditSearchBot:
     # its per-query 503/429 backoff-retries burn the whole search time budget for 0
     # results. Set on the first such error; the leg + queued fan-out queries skip
     # until it expires (auto-recovers).
+    # FU296 — `search.rss` now 404s for EVERY subreddit (Reddit appears to have removed the
+    # endpoint). The existing latches do not catch that: only a 403 marks the RSS leg dead and
+    # only a 429 cools it down, so a 404 is read as "this one sub does not exist" and the next
+    # sub is tried. With ~20 subs × (residential + worker) that is ~40 doomed requests which
+    # consume the whole 24s leg budget, and Arctic — the only leg still returning anything —
+    # never runs at all. That is why search returned 0 for everything.
+    #
+    # A 404 across SEVERAL DIFFERENT subs is not a per-sub fact, it is the endpoint being gone.
+    # Latched at class level and checked unconditionally: `_resi_active()` deliberately bypasses
+    # the worker-health latches because residential does not share the worker's IP block, but a
+    # missing endpoint is not an IP problem — residential 404s too, as the logs show.
+    _class_lock = threading.Lock()
+    _rss_gone_subs = set()
+    _rss_gone_until = 0.0
+    _RSS_GONE_STREAK = 3         # distinct subs that must 404 before we believe it
+    _RSS_GONE_SECS = 900         # then skip the leg for 15 min and spend the budget on Arctic
+
     _arctic_cooldown_until = 0.0
     # FU294: consecutive whole-page rate-limit give-ups before the leg itself is cooled down.
     _arctic_rl_strikes = 0
